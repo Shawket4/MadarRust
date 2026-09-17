@@ -14,6 +14,9 @@ use crate::reports::handlers::{
     ItemSales, LowStockRow, OrgComparisonReport, PeakHourPoint, ShiftSummary, ShrinkageRow,
     StockRow, TellerStats, TimeseriesPoint, WaiterStatsReport, WasteReportRow,
 };
+use crate::reports::handlers::{
+    ChannelBreakdownRow, MaterialCostTrendRow, PeakDayPoint, PoLeadTimeReport, SupplierSpendRow,
+};
 use crate::reports::routes;
 
 fn get_secret() -> JwtSecret {
@@ -334,7 +337,28 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
 
     grant_permission(&pool, "org_admin", "orders", "read").await;
 
-    seed_order(&pool, branch_id, user_id, shift_id).await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    let item_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO order_items (id, order_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, 'Burger', 2, 200, 400)")
+        .bind(item_id)
+        .bind(order_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let addon_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Extra Cheese', 'ingredient', 50)")
+        .bind(addon_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, quantity, unit_price, line_total) VALUES ($1, $2, 'Extra Cheese', 3, 50, 150)")
+        .bind(item_id)
+        .bind(addon_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let req = test::TestRequest::get()
         .uri(&format!(
@@ -350,6 +374,8 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
     assert_eq!(ts.len(), 1);
     assert_eq!(ts[0].orders, 1);
     assert_eq!(ts[0].revenue, 570);
+    assert_eq!(ts[0].line_items, 2, "SUM(order_items.quantity)");
+    assert_eq!(ts[0].addons, 3, "SUM(order_item_addons.quantity)");
 }
 
 #[sqlx::test]
@@ -2305,4 +2331,533 @@ async fn org_tax_and_audits_are_scoped_to_the_callers_branches(pool: PgPool) {
         ))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 403);
+}
+
+#[sqlx::test]
+async fn test_channel_breakdown(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let shift_id_2 = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+
+    // One dine_in (the seeded default) and one moved to delivery — separate
+    // shifts since `seed_order` always numbers the order 1 for its shift.
+    seed_order(&pool, branch_id, user_id, shift_id).await;
+    let delivery_order = seed_order(&pool, branch_id, user_id, shift_id_2).await;
+    sqlx::query("UPDATE orders SET order_type = 'delivery' WHERE id = $1")
+        .bind(delivery_order)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/reports/branches/{}/channel-breakdown",
+            branch_id
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let rows: Vec<ChannelBreakdownRow> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 2);
+    let dine_in = rows.iter().find(|r| r.channel == "dine_in").unwrap();
+    assert_eq!(dine_in.orders, 1);
+    assert_eq!(dine_in.revenue, 570);
+    assert_eq!(dine_in.avg_order_value, 570);
+    let delivery = rows.iter().find(|r| r.channel == "delivery").unwrap();
+    assert_eq!(delivery.orders, 1);
+    assert_eq!(delivery.revenue, 570);
+}
+
+#[sqlx::test]
+async fn test_branch_sales_peak_days(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+
+    seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/branches/{}/sales/peak-days", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let rows: Vec<PeakDayPoint> = test::read_body_json(resp).await;
+
+    // Always returns exactly 7 rows (one per day of week), even if some are empty.
+    assert_eq!(rows.len(), 7, "peak days must return exactly 7 buckets");
+
+    // Days are 0–6 (Sunday–Saturday) in order.
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(
+            row.day_of_week, i as i32,
+            "day_of_week at index {i} must equal {i}"
+        );
+    }
+
+    // The seeded order (revenue=570) must appear in exactly one bucket.
+    let nonempty: Vec<&PeakDayPoint> = rows.iter().filter(|r| r.orders > 0).collect();
+    assert_eq!(
+        nonempty.len(),
+        1,
+        "exactly one weekday bucket should have orders"
+    );
+    let hot = nonempty[0];
+    assert_eq!(hot.orders, 1);
+    assert_eq!(hot.revenue, 570);
+
+    // The order fell on this weekday exactly once in range → avg equals total.
+    assert_eq!(
+        hot.avg_revenue_per_day, 570,
+        "avg_revenue_per_day = total when the weekday occurred once"
+    );
+    assert!(
+        (hot.avg_orders_per_day - 1.0).abs() < 0.001,
+        "avg_orders_per_day should be 1.0"
+    );
+
+    assert!(
+        (hot.revenue_pct - 100.0).abs() < 0.1,
+        "revenue_pct should be 100.0"
+    );
+    assert!(
+        (hot.orders_pct - 100.0).abs() < 0.1,
+        "orders_pct should be 100.0"
+    );
+
+    // All empty-day buckets should have zero averages.
+    let empty_nonzero_avg = rows
+        .iter()
+        .filter(|r| r.orders == 0 && r.avg_revenue_per_day != 0)
+        .count();
+    assert_eq!(
+        empty_nonzero_avg, 0,
+        "empty weekday buckets must not carry non-zero averages"
+    );
+}
+
+async fn seed_supplier(pool: &PgPool, org_id: Uuid, name: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO suppliers (id, org_id, name) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(org_id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_received_po(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    supplier_id: Option<Uuid>,
+    created_by: Uuid,
+    ing_id: Uuid,
+    quantity_received: f64,
+    unit_cost: i64,
+    created_at: chrono::DateTime<Utc>,
+    received_at: chrono::DateTime<Utc>,
+) -> Uuid {
+    let po_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO purchase_orders \
+            (id, org_id, branch_id, supplier_id, status, created_by, created_at, received_at) \
+         VALUES ($1, $2, $3, $4, 'received', $5, $6, $7)",
+    )
+    .bind(po_id)
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(supplier_id)
+    .bind(created_by)
+    .bind(created_at)
+    .bind(received_at)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let line_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO purchase_order_lines \
+            (purchase_order_id, org_ingredient_id, purchase_unit, quantity_ordered, quantity_received, unit_cost) \
+         VALUES ($1, $2, 'unit', $3, $3, $4) RETURNING id",
+    )
+    .bind(po_id)
+    .bind(ing_id)
+    .bind(quantity_received)
+    .bind(unit_cost)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    // The delivery itself, as `purchasing::receive` records it.
+    seed_receipt_line(
+        pool, org_id, branch_id, Some(po_id), Some(line_id), supplier_id, created_by, ing_id,
+        quantity_received, unit_cost, received_at, false,
+    )
+    .await;
+
+    po_id
+}
+
+/// One goods receipt with one line (`quantity` negative for a return).
+#[allow(clippy::too_many_arguments)]
+async fn seed_receipt_line(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    po_id: Option<Uuid>,
+    po_line_id: Option<Uuid>,
+    supplier_id: Option<Uuid>,
+    by: Uuid,
+    ing_id: Uuid,
+    quantity: f64,
+    unit_cost: i64,
+    received_at: chrono::DateTime<Utc>,
+    is_return: bool,
+) {
+    let gr: Uuid = sqlx::query_scalar(
+        "INSERT INTO goods_receipts (org_id, branch_id, purchase_order_id, supplier_id, is_return, received_by, received_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(po_id)
+    .bind(supplier_id)
+    .bind(is_return)
+    .bind(by)
+    .bind(received_at)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO goods_receipt_lines (goods_receipt_id, purchase_order_line_id, org_ingredient_id, quantity, unit_cost) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(gr)
+    .bind(po_line_id)
+    .bind(ing_id)
+    .bind(quantity)
+    .bind(unit_cost)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn test_supplier_spend_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Flour", "g").await;
+    let supplier_id = seed_supplier(&pool, org_id, "Acme Supplies").await;
+
+    let now = Utc::now();
+    // 10 units at 200 piastres = 2000 spend.
+    seed_received_po(
+        &pool,
+        org_id,
+        branch_id,
+        Some(supplier_id),
+        user_id,
+        ing,
+        10.0,
+        200,
+        now - chrono::Duration::days(2),
+        now - chrono::Duration::days(1),
+    )
+    .await;
+    // Unknown-supplier PO must still show up, bucketed separately.
+    seed_received_po(
+        &pool,
+        org_id,
+        branch_id,
+        None,
+        user_id,
+        ing,
+        5.0,
+        100,
+        now - chrono::Duration::days(2),
+        now - chrono::Duration::days(1),
+    )
+    .await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [
+        format!("/reports/branches/{branch_id}/supplier-spend"),
+        format!("/reports/orgs/{org_id}/supplier-spend"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<SupplierSpendRow> = test::read_body_json(resp).await;
+        assert_eq!(rows.len(), 2);
+        let named = rows
+            .iter()
+            .find(|r| r.supplier_id == Some(supplier_id))
+            .unwrap();
+        assert_eq!(named.supplier_name, "Acme Supplies");
+        assert_eq!(named.orders, 1);
+        assert_eq!(named.total_spend, 2000);
+        let unknown = rows.iter().find(|r| r.supplier_id.is_none()).unwrap();
+        assert_eq!(unknown.supplier_name, "Unknown supplier");
+        assert_eq!(unknown.total_spend, 500);
+    }
+}
+
+#[sqlx::test]
+async fn test_po_lead_time_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+    let ing = seed_ingredient(&pool, org_id, "Sugar", "g").await;
+    let supplier_id = seed_supplier(&pool, org_id, "Acme Supplies").await;
+
+    let now = Utc::now();
+    // Exactly 4 days lead time.
+    seed_received_po(
+        &pool,
+        org_id,
+        branch_id,
+        Some(supplier_id),
+        user_id,
+        ing,
+        1.0,
+        100,
+        now - chrono::Duration::days(10),
+        now - chrono::Duration::days(6),
+    )
+    .await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [
+        format!("/reports/branches/{branch_id}/po-lead-time"),
+        format!("/reports/orgs/{org_id}/po-lead-time"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let report: PoLeadTimeReport = test::read_body_json(resp).await;
+        assert!((report.overall_avg_days - 4.0).abs() < 0.01);
+        assert_eq!(report.by_supplier.len(), 1);
+        let row = &report.by_supplier[0];
+        assert_eq!(row.orders_received, 1);
+        assert!((row.avg_lead_time_days - 4.0).abs() < 0.01);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_goods_receipt(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    supplier_id: Uuid,
+    received_by: Uuid,
+    ing_id: Uuid,
+    unit_cost: i64,
+    received_at: chrono::DateTime<Utc>,
+) -> Uuid {
+    let gr_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO goods_receipts (id, org_id, branch_id, supplier_id, is_return, received_by, received_at) \
+         VALUES ($1, $2, $3, $4, false, $5, $6)",
+    )
+    .bind(gr_id)
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(supplier_id)
+    .bind(received_by)
+    .bind(received_at)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO goods_receipt_lines (goods_receipt_id, org_ingredient_id, quantity, unit_cost) \
+         VALUES ($1, $2, 10, $3)",
+    )
+    .bind(gr_id)
+    .bind(ing_id)
+    .bind(unit_cost)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    gr_id
+}
+
+#[sqlx::test]
+async fn test_material_cost_trend_branch_and_org(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "inventory", "read").await;
+
+    let acme = seed_supplier(&pool, org_id, "Acme Supplies").await;
+    let cheap_co = seed_supplier(&pool, org_id, "Cheap Co").await;
+    let now = Utc::now();
+
+    // Beans: 4 receipts from Acme, each pricier than the last → a streak of 3
+    // rises (100 -> 110 -> 120 -> 130). Cheap Co has since sold the same
+    // ingredient for less, so it should surface as the switch candidate.
+    let beans = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        100,
+        now - chrono::Duration::days(40),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        110,
+        now - chrono::Duration::days(30),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        120,
+        now - chrono::Duration::days(20),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        beans,
+        130,
+        now - chrono::Duration::days(10),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        cheap_co,
+        user_id,
+        beans,
+        90,
+        now - chrono::Duration::days(25),
+    )
+    .await;
+
+    // Milk: only 2 receipts, both rising — below the 3-rise threshold, must
+    // not appear in the report at all.
+    let milk = seed_ingredient(&pool, org_id, "Milk", "ml").await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        milk,
+        50,
+        now - chrono::Duration::days(20),
+    )
+    .await;
+    seed_goods_receipt(
+        &pool,
+        org_id,
+        branch_id,
+        acme,
+        user_id,
+        milk,
+        60,
+        now - chrono::Duration::days(10),
+    )
+    .await;
+
+    let token = generate_org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    for url in [
+        format!("/reports/branches/{branch_id}/material-cost-trend"),
+        format!("/reports/orgs/{org_id}/material-cost-trend"),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&url)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let rows: Vec<MaterialCostTrendRow> = test::read_body_json(resp).await;
+
+        assert_eq!(rows.len(), 1, "only Beans crosses the 3-rise threshold");
+        let row = &rows[0];
+        assert_eq!(row.org_ingredient_id, beans);
+        assert_eq!(row.current_supplier_id, Some(acme));
+        assert_eq!(row.current_cost, 130);
+        assert_eq!(row.streak_length, 3);
+        assert_eq!(row.base_cost, 100);
+        assert!((row.pct_increase - 30.0).abs() < 0.01);
+        assert_eq!(row.cheaper_supplier_id, Some(cheap_co));
+        assert_eq!(row.cheaper_cost, Some(90));
+    }
 }

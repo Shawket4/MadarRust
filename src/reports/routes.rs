@@ -43,6 +43,10 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
                 web::get().to(handlers::branch_sales_peak_hours),
             )
             .route(
+                "/branches/{branch_id}/sales/peak-days",
+                web::get().to(handlers::branch_sales_peak_days),
+            )
+            .route(
                 "/branches/{branch_id}/tellers",
                 web::get().to(handlers::branch_teller_stats),
             )
@@ -91,6 +95,22 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
                 web::get().to(handlers::branch_delivery_sales),
             )
             .route(
+                "/branches/{branch_id}/channel-breakdown",
+                web::get().to(handlers::branch_channel_breakdown),
+            )
+            .route(
+                "/branches/{branch_id}/supplier-spend",
+                web::get().to(handlers::branch_supplier_spend),
+            )
+            .route(
+                "/branches/{branch_id}/po-lead-time",
+                web::get().to(handlers::branch_po_lead_time),
+            )
+            .route(
+                "/branches/{branch_id}/material-cost-trend",
+                web::get().to(handlers::branch_material_cost_trend),
+            )
+            .route(
                 "/orgs/{org_id}/comparison",
                 web::get().to(handlers::org_branch_comparison),
             )
@@ -119,6 +139,22 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
                 web::get().to(legal::price_overrides),
             )
             .route(
+                "/orgs/{org_id}/manual-deductions-audit",
+                web::get().to(legal::manual_deductions_audit),
+            )
+            .route(
+                "/orgs/{org_id}/deduction-overrides-audit",
+                web::get().to(legal::deduction_overrides_audit),
+            )
+            .route(
+                "/orgs/{org_id}/loyalty-adjustments-audit",
+                web::get().to(legal::loyalty_adjustments_audit),
+            )
+            .route(
+                "/orgs/{org_id}/attendance-corrections-audit",
+                web::get().to(legal::attendance_corrections_audit),
+            )
+            .route(
                 "/orgs/{org_id}/inventory-valuation",
                 web::get().to(handlers::org_inventory_valuation),
             )
@@ -137,6 +173,18 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
             .route(
                 "/orgs/{org_id}/shrinkage",
                 web::get().to(handlers::org_shrinkage),
+            )
+            .route(
+                "/orgs/{org_id}/supplier-spend",
+                web::get().to(handlers::org_supplier_spend),
+            )
+            .route(
+                "/orgs/{org_id}/po-lead-time",
+                web::get().to(handlers::org_po_lead_time),
+            )
+            .route(
+                "/orgs/{org_id}/material-cost-trend",
+                web::get().to(handlers::org_material_cost_trend),
             ),
     );
 }

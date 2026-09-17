@@ -1117,3 +1117,198 @@ pub async fn behavior(
         new_member_share: safe_ratio(new_members_active, active_members),
     }))
 }
+
+// ── Campaign effectiveness (win-back + birthday) ──────────────────────────────
+
+/// One outreach campaign's return-on-nudge: did the member earn again within
+/// 30 days of the message.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignEffectivenessRow {
+    /// `"winback"` or `"birthday"`.
+    pub campaign: String,
+    pub sent: i64,
+    pub returned_within_30d: i64,
+    /// `returned_within_30d / sent`. `0.0` when nothing was sent.
+    pub return_rate: f64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignEffectiveness {
+    pub from: chrono::DateTime<chrono::Utc>,
+    pub to: chrono::DateTime<chrono::Utc>,
+    pub campaigns: Vec<CampaignEffectivenessRow>,
+}
+
+#[utoipa::path(get, path = "/loyalty/campaign-effectiveness", tag = "loyalty",
+    operation_id = "get_loyalty_campaign_effectiveness", params(AnalyticsQuery),
+    responses((status = 200, body = CampaignEffectiveness), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn campaign_effectiveness(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<AnalyticsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let (org_id, claims) =
+        super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
+    // Sits with the member list and the behaviour report (architecture E: a
+    // capability, never a role name). The branch, when named, must be one the
+    // caller may read.
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersList,
+        query.branch_id,
+    )
+    .await?;
+    crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, query.branch_id)
+        .await?;
+    let to = query.to.unwrap_or_else(chrono::Utc::now);
+    let from = query.from.unwrap_or(to - chrono::Duration::days(30));
+    if from >= to {
+        return Err(AppError::BadRequest("`from` must be before `to`".into()));
+    }
+    let pool = pool.get_ref();
+
+    // Loyalty is org-wide (a balance can be spent at any branch), so these two
+    // nudge tables are not filtered by `branch_id` even when one is supplied —
+    // same note `PointsLiability` makes.
+    let (winback_sent, winback_returned): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint, \
+                COUNT(*) FILTER (WHERE EXISTS ( \
+                    SELECT 1 FROM loyalty_transactions lt \
+                    WHERE lt.customer_id = w.customer_id AND lt.kind = 'earn' \
+                      AND lt.created_at > w.sent_at \
+                      AND lt.created_at <= w.sent_at + interval '30 days' \
+                ))::bigint \
+           FROM loyalty_winbacks w \
+          WHERE w.org_id = $1 AND w.sent_at >= $2 AND w.sent_at < $3",
+    )
+    .bind(org_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+
+    let (birthday_sent, birthday_returned): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint, \
+                COUNT(*) FILTER (WHERE EXISTS ( \
+                    SELECT 1 FROM loyalty_transactions lt \
+                    WHERE lt.customer_id = g.customer_id AND lt.kind = 'earn' \
+                      AND lt.created_at > g.sent_at \
+                      AND lt.created_at <= g.sent_at + interval '30 days' \
+                ))::bigint \
+           FROM loyalty_birthday_greetings g \
+          WHERE g.org_id = $1 AND g.sent_at >= $2 AND g.sent_at < $3",
+    )
+    .bind(org_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(HttpResponse::Ok().json(CampaignEffectiveness {
+        from,
+        to,
+        campaigns: vec![
+            CampaignEffectivenessRow {
+                campaign: "winback".into(),
+                sent: winback_sent,
+                returned_within_30d: winback_returned,
+                return_rate: safe_ratio(winback_returned, winback_sent),
+            },
+            CampaignEffectivenessRow {
+                campaign: "birthday".into(),
+                sent: birthday_sent,
+                returned_within_30d: birthday_returned,
+                return_rate: safe_ratio(birthday_returned, birthday_sent),
+            },
+        ],
+    }))
+}
+
+// ── Points-liability trend ──────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+pub struct LiabilityTrendPoint {
+    pub week: chrono::DateTime<chrono::Utc>,
+    /// Net points/visits change in that week (earn − redeem, reversals
+    /// netted in) — not a running balance. See [`LiabilityTrend`].
+    pub outstanding: i64,
+}
+
+/// A weekly trend of the programme's liability, in the org's live currency
+/// (points or visits — never both; see [`PointsLiability`]).
+///
+/// `loyalty_customers.points_balance`/`visits_balance` are CURRENT balances
+/// with no history table, so this is not a snapshot of the outstanding
+/// balance at each week — it is each week's *net change* (earned minus
+/// redeemed, reversals netted in), read straight off the ledger. Summing
+/// `outstanding` across every week since the programme started would
+/// reconstruct the current balance; a single week says whether that week
+/// grew or shrank the liability.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LiabilityTrend {
+    pub from: chrono::DateTime<chrono::Utc>,
+    pub to: chrono::DateTime<chrono::Utc>,
+    pub currency: String,
+    pub points: Vec<LiabilityTrendPoint>,
+}
+
+#[utoipa::path(get, path = "/loyalty/liability-trend", tag = "loyalty",
+    operation_id = "get_loyalty_liability_trend", params(AnalyticsQuery),
+    responses((status = 200, body = LiabilityTrend), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn liability_trend(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<AnalyticsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let (org_id, claims) =
+        super::settings::scope_org(pool.get_ref(), &req, query.branch_id).await?;
+    // Sits with the member list and the behaviour report (architecture E: a
+    // capability, never a role name). The branch, when named, must be one the
+    // caller may read.
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::LoyaltyMembersList,
+        query.branch_id,
+    )
+    .await?;
+    crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, query.branch_id)
+        .await?;
+    let to = query.to.unwrap_or_else(chrono::Utc::now);
+    let from = query.from.unwrap_or(to - chrono::Duration::days(30));
+    if from >= to {
+        return Err(AppError::BadRequest("`from` must be before `to`".into()));
+    }
+    let pool = pool.get_ref();
+
+    let settings = load_effective(pool, org_id, query.branch_id.unwrap_or(Uuid::nil())).await?;
+    let currency = settings.mode().as_str().to_string();
+
+    let points: Vec<LiabilityTrendPoint> = sqlx::query_as(
+        "SELECT date_trunc('week', t.created_at) AS week, \
+                (COALESCE(SUM(t.points) FILTER (WHERE t.kind IN ('earn','reverse_earn')), 0) \
+                 - COALESCE(-SUM(t.points) FILTER (WHERE t.kind IN ('redeem','reverse_redeem')), 0) \
+                )::bigint AS outstanding \
+           FROM loyalty_transactions t \
+          WHERE t.org_id = $1 AND t.currency = $2 \
+            AND t.created_at >= $3 AND t.created_at < $4 \
+          GROUP BY week \
+          ORDER BY week",
+    )
+    .bind(org_id)
+    .bind(&currency)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(HttpResponse::Ok().json(LiabilityTrend {
+        from,
+        to,
+        currency,
+        points,
+    }))
+}

@@ -23,14 +23,14 @@ use crate::{
 
 use super::handlers::DateRangeQuery;
 
-#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, sqlx::FromRow, ToSchema)]
 pub struct AuditBreakdownEntry {
     pub label: String,
     pub count: i64,
     pub amount_minor: i64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, serde::Deserialize, ToSchema)]
 pub struct AuditReport {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
@@ -499,6 +499,328 @@ pub async fn price_overrides(
         to: query.to,
         total_count,
         total_amount_minor,
+        by_reason,
+        by_issuer,
+    }))
+}
+
+// ── Payroll and attendance corrections ──────────────────────
+//
+// Payroll deductions carry no branch of their own. A caller scoped to some
+// branches sees the deductions of people assigned to one of them, and these
+// two reports also need `hr.payroll.read` on top of `reports.legal`: they
+// show pay, which a manager may hold `reports.legal` without seeing.
+
+async fn guard_with(
+    req: &HttpRequest,
+    pool: &PgPool,
+    org_id: Uuid,
+    also: crate::authz::Cap,
+) -> Result<Option<Vec<Uuid>>, AppError> {
+    let scope = guard(req, pool, org_id).await?;
+    let claims = extract_claims(req)?;
+    crate::authz::require::require(pool, &claims, also, None).await?;
+    Ok(scope)
+}
+
+/// `pd` belongs to someone who works at one of the scoped branches.
+const DEDUCTION_IN_SCOPE: &str = "($4::uuid[] IS NULL OR EXISTS (
+    SELECT 1 FROM user_branch_assignments uba
+    WHERE uba.user_id = pd.user_id AND uba.branch_id = ANY($4)))";
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/manual-deductions-audit",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Operator-entered payroll deductions (fixed amounts; percentage deductions count but add no amount), by reason and by who entered them", body = AuditReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn manual_deductions_audit(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let org_id = org_id.into_inner();
+    let scope = guard_with(&req, pool.get_ref(), org_id, crate::authz::Cap::HrPayrollRead).await?;
+    let filter = format!(
+        "pd.org_id = $1 AND pd.source = 'manual' AND {DEDUCTION_IN_SCOPE}
+          AND ($2::timestamptz IS NULL OR pd.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR pd.created_at <= $3)"
+    );
+
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+        "SELECT COUNT(*)::bigint, COALESCE(SUM(pd.amount_piastres), 0)::bigint
+         FROM payroll_deductions pd WHERE {filter}"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT pd.reason AS label, COUNT(*)::bigint AS count,
+                COALESCE(SUM(pd.amount_piastres), 0)::bigint AS amount_minor
+         FROM payroll_deductions pd WHERE {filter}
+         GROUP BY pd.reason ORDER BY count DESC LIMIT 10"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT u.name AS label, COUNT(*)::bigint AS count,
+                COALESCE(SUM(pd.amount_piastres), 0)::bigint AS amount_minor
+         FROM payroll_deductions pd JOIN users u ON u.id = pd.created_by
+         WHERE {filter}
+         GROUP BY u.id, u.name ORDER BY count DESC LIMIT 10"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(AuditReport {
+        from: query.from,
+        to: query.to,
+        total_count,
+        total_amount_minor,
+        by_reason,
+        by_issuer,
+    }))
+}
+
+/// What an override or a waiver forgave: the whole original charge (waived) or
+/// the drop from the original to the new amount (overridden).
+const FORGIVEN: &str = "CASE
+    WHEN pd.waived_at IS NOT NULL THEN COALESCE(pd.original_amount_piastres, pd.amount_piastres, 0)
+    ELSE GREATEST(COALESCE(pd.original_amount_piastres, pd.amount_piastres, 0) - COALESCE(pd.amount_piastres, 0), 0)
+END";
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/deduction-overrides-audit",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Automatic payroll deductions a manager overrode or waived, by type and by issuer", body = AuditReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn deduction_overrides_audit(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let org_id = org_id.into_inner();
+    let scope = guard_with(&req, pool.get_ref(), org_id, crate::authz::Cap::HrPayrollRead).await?;
+    let filter = format!(
+        "pd.org_id = $1 AND (pd.overridden_at IS NOT NULL OR pd.waived_at IS NOT NULL)
+          AND {DEDUCTION_IN_SCOPE}
+          AND ($2::timestamptz IS NULL OR COALESCE(pd.waived_at, pd.overridden_at) >= $2)
+          AND ($3::timestamptz IS NULL OR COALESCE(pd.waived_at, pd.overridden_at) <= $3)"
+    );
+
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+        "SELECT COUNT(*)::bigint, COALESCE(SUM({FORGIVEN}), 0)::bigint
+         FROM payroll_deductions pd WHERE {filter}"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT (CASE WHEN pd.waived_at IS NOT NULL THEN 'waived' ELSE 'overridden' END) AS label,
+                COUNT(*)::bigint AS count, COALESCE(SUM({FORGIVEN}), 0)::bigint AS amount_minor
+         FROM payroll_deductions pd WHERE {filter}
+         GROUP BY (pd.waived_at IS NOT NULL) ORDER BY count DESC"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT u.name AS label, COUNT(*)::bigint AS count,
+                COALESCE(SUM({FORGIVEN}), 0)::bigint AS amount_minor
+         FROM payroll_deductions pd
+         JOIN users u ON u.id = COALESCE(pd.waived_by, pd.overridden_by)
+         WHERE {filter}
+         GROUP BY u.id, u.name ORDER BY count DESC LIMIT 10"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(AuditReport {
+        from: query.from,
+        to: query.to,
+        total_count,
+        total_amount_minor,
+        by_reason,
+        by_issuer,
+    }))
+}
+
+// ── Loyalty manual adjustments ───────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/loyalty-adjustments-audit",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Manual loyalty balance adjustments (not birthday or win-back rewards), by branch and by who made them. `amount_minor` here is POINTS or VISITS moved, in either direction, not money.", body = AuditReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn loyalty_adjustments_audit(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let org_id = org_id.into_inner();
+    let scope = guard(&req, pool.get_ref(), org_id).await?;
+    // `adjust` also carries the automatic birthday and win-back rewards; only a
+    // person's hand (`source = 'manual'`, including undoing one) is audited.
+    let filter = "t.org_id = $1 AND t.kind IN ('adjust', 'reverse_adjust') AND t.source = 'manual'
+          AND ($4::uuid[] IS NULL OR t.branch_id = ANY($4))
+          AND ($2::timestamptz IS NULL OR t.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR t.created_at <= $3)";
+
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+        "SELECT COUNT(*)::bigint, COALESCE(SUM(ABS(t.points)), 0)::bigint
+         FROM loyalty_transactions t WHERE {filter}"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT COALESCE(b.name, 'unspecified') AS label, COUNT(*)::bigint AS count,
+                COALESCE(SUM(ABS(t.points)), 0)::bigint AS amount_minor
+         FROM loyalty_transactions t LEFT JOIN branches b ON b.id = t.branch_id
+         WHERE {filter}
+         GROUP BY b.id, b.name ORDER BY count DESC"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT u.name AS label, COUNT(*)::bigint AS count,
+                COALESCE(SUM(ABS(t.points)), 0)::bigint AS amount_minor
+         FROM loyalty_transactions t JOIN users u ON u.id = t.created_by
+         WHERE {filter}
+         GROUP BY u.id, u.name ORDER BY count DESC LIMIT 10"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(AuditReport {
+        from: query.from,
+        to: query.to,
+        total_count,
+        total_amount_minor,
+        by_reason,
+        by_issuer,
+    }))
+}
+
+// ── Attendance corrections ───────────────────────────────────
+
+#[utoipa::path(
+    get,
+    path = "/reports/orgs/{org_id}/attendance-corrections-audit",
+    tag = "reports",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    params(DateRangeQuery),
+    responses((status = 200, description = "Attendance records a manager edited after the fact, by reason and by editor", body = AuditReport), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn attendance_corrections_audit(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<DateRangeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let org_id = org_id.into_inner();
+    let scope =
+        guard_with(&req, pool.get_ref(), org_id, crate::authz::Cap::HrAttendanceRead).await?;
+    // No money on a correction: the amount axis stays 0, the count matters.
+    let filter = "a.org_id = $1 AND a.edited_by IS NOT NULL
+          AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4))
+          AND ($2::timestamptz IS NULL OR a.updated_at >= $2)
+          AND ($3::timestamptz IS NULL OR a.updated_at <= $3)";
+
+    let total_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*)::bigint FROM attendance_records a WHERE {filter}"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT COALESCE(a.edit_reason, 'unspecified') AS label, COUNT(*)::bigint AS count,
+                0::bigint AS amount_minor
+         FROM attendance_records a WHERE {filter}
+         GROUP BY a.edit_reason ORDER BY count DESC LIMIT 10"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+        "SELECT u.name AS label, COUNT(*)::bigint AS count, 0::bigint AS amount_minor
+         FROM attendance_records a JOIN users u ON u.id = a.edited_by
+         WHERE {filter}
+         GROUP BY u.id, u.name ORDER BY count DESC LIMIT 10"
+    ))
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(AuditReport {
+        from: query.from,
+        to: query.to,
+        total_count,
+        total_amount_minor: 0,
         by_reason,
         by_issuer,
     }))
