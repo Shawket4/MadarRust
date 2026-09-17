@@ -1496,6 +1496,91 @@ pub async fn review_flag(
     Ok(HttpResponse::Ok().json(serde_json::json!({ "reviewed": true })))
 }
 
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct BulkReviewRequest {
+    /// Every open flag to resolve at once — a till, a day, or a hand-picked
+    /// selection. Order does not matter; each id is its own transaction.
+    pub flag_ids: Vec<i64>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct BulkReviewResult {
+    /// Ids that are now reviewed (already reviewed counts as resolved too —
+    /// resubmitting the same batch never fails or double-records).
+    pub resolved: Vec<i64>,
+    /// An id this call could not resolve, and why. Never silently dropped.
+    pub pending: Vec<BulkReviewPending>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct BulkReviewPending {
+    pub id: i64,
+    pub reason: String,
+}
+
+/// Resolve many flags at once — "select many" or "everything for this till or
+/// day" from the dashboard's review queue (owner, 2026-09-17). Extends
+/// [`review_flag`] rather than duplicating it: same capability, same
+/// semantics (an acknowledgement, not an approval), now with an optional note
+/// and one id at a time so a bad id among many never loses the rest.
+#[utoipa::path(post, path = "/authz/flags/bulk-review", tag = "authz",
+    request_body = BulkReviewRequest,
+    responses((status = 200, description = "Per-id result", body = BulkReviewResult), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn bulk_review_flags(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    body: web::Json<BulkReviewRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_of(&req)?;
+    let org = org_of(&req, &claims)?;
+    // Permission FIRST, before the id list is even looked at.
+    super::require::require(pool.get_ref(), &claims, Cap::ApprovalsReview, None).await?;
+    let me = claims.user_id();
+    let mut resolved = Vec::new();
+    let mut pending = Vec::new();
+    for id in body.flag_ids.iter().copied() {
+        // Idempotent per item: an already-reviewed flag is a no-op success,
+        // never a second row and never an error on resubmit.
+        let already: Option<bool> = sqlx::query_scalar(
+            "SELECT true FROM authz_replay_flags WHERE id = $1 AND org_id = $2 AND reviewed_at IS NOT NULL",
+        )
+        .bind(id)
+        .bind(org)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        if already.is_some() {
+            resolved.push(id);
+            continue;
+        }
+        let updated = sqlx::query(
+            "UPDATE authz_replay_flags
+                SET reviewed_at = now(), reviewed_by = $3, review_note = $4
+              WHERE id = $1 AND org_id = $2 AND reviewed_at IS NULL",
+        )
+        .bind(id)
+        .bind(org)
+        .bind(me)
+        .bind(body.note.as_deref())
+        .execute(pool.get_ref())
+        .await;
+        match updated {
+            Ok(r) if r.rows_affected() > 0 => resolved.push(id),
+            Ok(_) => pending.push(BulkReviewPending {
+                id,
+                reason: "no such open flag in this org".into(),
+            }),
+            Err(e) => pending.push(BulkReviewPending {
+                id,
+                reason: e.to_string(),
+            }),
+        }
+    }
+    Ok(HttpResponse::Ok().json(BulkReviewResult { resolved, pending }))
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     use crate::auth::middleware::JwtMiddleware;
     cfg.service(
@@ -1514,6 +1599,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/policy", web::get().to(get_policy))
             .route("/policy", web::put().to(set_policy))
             .route("/flags", web::get().to(list_flags))
-            .route("/flags/{id}/review", web::post().to(review_flag)),
+            .route("/flags/{id}/review", web::post().to(review_flag))
+            .route("/flags/bulk-review", web::post().to(bulk_review_flags)),
     );
 }
