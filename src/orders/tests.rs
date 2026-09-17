@@ -1085,11 +1085,12 @@ async fn test_void_order(pool: PgPool) {
     assert_eq!(new_stock, 1000.0); // Restored 20
 }
 
-/// Voiding WITHOUT restock logs the made-but-discarded food as WASTE (not as an
-/// orphan sale): the sale is reversed (void_restock +) and re-deducted as waste
-/// (−), so net stock stays consumed but the ledger is self-describing.
+/// A VOID ALWAYS RESTORES STOCK: even a till that still sends
+/// `restore_inventory: false` (clients <= 0.7.8) gets the sale's deductions put
+/// back, and no waste is logged — a voided sale was never made or handed over.
+/// Live, then replayed (the `/sync/replay` VoidOrder path), both restock.
 #[sqlx::test]
-async fn test_void_no_restock_logs_waste(pool: PgPool) {
+async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -1170,35 +1171,80 @@ async fn test_void_no_restock_logs_waste(pool: PgPool) {
     .await;
     assert!(resp.status().is_success());
 
-    // Net stock stays consumed (980 = sale −20, void_restock +20, waste −20).
-    let stock: f64 =
-        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
-            .bind(ing_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(stock, 980.0);
-
-    // The discard is logged as WASTE with the dedicated `order_cancelled` reason
-    // (not `overproduction`, which is a kitchen-forecasting signal).
-    let waste: i64 = sqlx::query_scalar("SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste' AND reason='order_cancelled'")
-        .bind(order_id).fetch_one(&pool).await.unwrap();
+    let stock = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, f64>(
+            "SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1",
+        )
+        .bind(ing_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
     assert_eq!(
-        waste, 1,
-        "discarded food logged as waste with reason order_cancelled"
+        stock(pool.clone()).await,
+        1000.0,
+        "the void put the 20 back"
     );
-    let restock: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='void_restock'",
+    let waste: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'",
     )
     .bind(order_id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(restock, 1, "sale reversed via void_restock");
-    // Ledger reconciles with live stock for this ingredient (sale + restock + waste = −20).
-    let ledger: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(quantity),0)::float8 FROM inventory_movements WHERE branch_id=$1 AND org_ingredient_id=$2")
-        .bind(branch_id).bind(ing_id).fetch_one(&pool).await.unwrap();
-    assert_eq!(ledger, -20.0, "ledger nets to the real consumption");
+    assert_eq!(waste, 0, "a void logs no waste");
+
+    // Replayed: a second sale voided through the replay core with the old
+    // flag also restocks.
+    let second: OrderFull = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(&CreateOrderRequest {
+                    idempotency_key: Some(Uuid::new_v4()),
+                    ..req_body
+                })
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(stock(pool.clone()).await, 980.0);
+    let actor = crate::sync::ActingContext {
+        teller_id: user_id,
+        org_id,
+        role: UserRole::OrgAdmin,
+        replay: true,
+        own_till_only: false,
+    };
+    let body = || {
+        web::Json(VoidOrderRequest {
+            reason: "customer_request".into(),
+            note: None,
+            voided_at: None,
+            restore_inventory: Some(false),
+        })
+    };
+    let pool_data = crate::db::Db::bypass(&pool);
+    crate::orders::handlers::void_order_inner(
+        pool_data.clone(),
+        second.order.id,
+        body(),
+        actor.clone(),
+    )
+    .await
+    .unwrap();
+    // A re-flushed queue voids once.
+    crate::orders::handlers::void_order_inner(pool_data, second.order.id, body(), actor)
+        .await
+        .unwrap();
+    assert_eq!(
+        stock(pool.clone()).await,
+        1000.0,
+        "the replayed void put it back, once"
+    );
 }
 
 #[sqlx::test]

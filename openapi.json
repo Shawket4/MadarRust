@@ -77565,7 +77565,21 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When it happened on the device (a queued waste lands later)."
+            "description": "When the waste HAPPENED: the device's time for a till waste, the\nrefund's `issued_at`, the void's `voided_at`, else the post time. The\nlog is ordered by it."
+          },
+          "order_display_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A refund's or void's waste: the sale."
           },
           "org_ingredient_id": {
             "type": "string",
@@ -77581,6 +77595,22 @@
               "string",
               "null"
             ]
+          },
+          "received_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the server received it (= `created_at`). Differs from\n`occurred_at` when a till queued the waste offline."
+          },
+          "refund_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A refund's waste: the refund it came from."
           },
           "source_id": {
             "type": [
@@ -77632,7 +77662,7 @@
               "string",
               "null"
             ],
-            "description": "`pos` | `dashboard` | `order` (a voided made order)."
+            "description": "`pos` | `dashboard` | `refund` (a refunded sale's stock) | `order` (a\nmade order voided before voids always restocked)."
           },
           "waste_subject_kind": {
             "type": [
@@ -82050,7 +82080,8 @@
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Ignored: a void always puts the sale's stock back. Kept so older tills\nthat still send it are read, not refused."
           },
           "voided_at": {
             "type": [

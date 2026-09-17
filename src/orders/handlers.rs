@@ -687,6 +687,8 @@ pub struct VoidOrderRequest {
     /// Free-text explanation. Required when `reason` is "other".
     pub note: Option<String>,
     pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Ignored: a void always puts the sale's stock back. Kept so older tills
+    /// that still send it are read, not refused.
     pub restore_inventory: Option<bool>,
 }
 
@@ -3393,10 +3395,12 @@ pub(crate) async fn void_order_inner(
     // Offline voids carry their real time; reject only a future device clock.
     crate::clock::reject_if_future(voided_at, "voided_at")?;
 
-    // restock=true → items go back to stock; restock=false → they were made and
-    // discarded (logged as waste). Either way the void touches the ledger, so
-    // fetch the lines now.
-    let restock = body.restore_inventory.unwrap_or(false);
+    // A VOID ALWAYS RESTORES STOCK (owner ruling, 2026-09): a void says the
+    // sale never happened, so the item was never made or handed over and every
+    // deduction it took is put back. `restore_inventory` is ignored — an older
+    // till that still sends `false` gets the same restock. Food that was made
+    // and handed over is a REFUND, which keeps the deduction and logs it as
+    // waste (`refunds::handlers::post_refund_waste`).
     let items = fetch_order_items_full(pool.get_ref(), order_id).await?;
 
     let mut tx = pool.begin().await?;
@@ -3446,12 +3450,7 @@ pub(crate) async fn void_order_inner(
         return Ok(HttpResponse::Ok().json(current));
     };
 
-    // A void always REVERSES the original sale deduction (void_restock +). When
-    // the food was NOT put back (restock=false) it was made and discarded, so we
-    // then re-deduct it as WASTE (−). Net stock for a discard is unchanged, but
-    // the ledger now reads "sale reversed → logged as waste" — self-describing and
-    // consistent with how a delivery cancel logs a made-but-not-restocked order,
-    // instead of leaving an orphan `sale` deduction on a voided order.
+    // Reverse every sale deduction through the ledger (void_restock +).
     for item in items {
         let Some(deductions) = item.item.deductions_snapshot.as_array() else {
             continue;
@@ -3488,26 +3487,6 @@ pub(crate) async fn void_order_inner(
                 },
             )
             .await?;
-
-            if !restock {
-                // Made & discarded → re-deduct, logged as waste.
-                crate::inventory::movements::record_movement(
-                    &mut *tx,
-                    crate::inventory::movements::MovementParams {
-                        branch_id: order.branch_id,
-                        org_ingredient_id: ing_id,
-                        movement_type: "waste",
-                        quantity: -qty,
-                        unit_cost,
-                        reason: Some("order_cancelled"),
-                        source_type: Some("order"),
-                        source_id: Some(order.id),
-                        note: Some("Order voided — made, not restocked"),
-                        created_by: Some(actor.teller_id),
-                    },
-                )
-                .await?;
-            }
         }
     }
 
