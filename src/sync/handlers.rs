@@ -540,7 +540,8 @@ pub async fn replay(
         Some(a) => verify_approval(pool.get_ref(), a, teller_id, token_org).await,
         None => Err("none".into()),
     };
-    let mut flags: Vec<(&'static str, &'static str)> = Vec::new();
+    // `resource:action` cells, or a capability key with no cell.
+    let mut flags: Vec<String> = Vec::new();
     for &(resource, action) in op.required_permissions() {
         match crate::permissions::checker::check_permission_for(
             pool.get_ref(),
@@ -558,7 +559,9 @@ pub async fn replay(
                 if approved
                     .as_ref()
                     .is_ok_and(|cap| cap.meta().legacy == Some((resource, action))) => {}
-            Err(AppError::Forbidden(_)) if op.money_moved() => flags.push((resource, action)),
+            Err(AppError::Forbidden(_)) if op.money_moved() => {
+                flags.push(format!("{resource}:{action}"))
+            }
             Err(e) => return Err(e),
         }
     }
@@ -569,6 +572,23 @@ pub async fn replay(
             .can(cap);
         if !held && !approved.as_ref().is_ok_and(|c| *c == cap) {
             return Err(crate::authz::require::denied(cap));
+        }
+    }
+
+    // A sale of a held order someone else started (the POS queue, deferred
+    // feature 5) asks the ringer for `orders.held.resume_others`, or a
+    // manager's approval for it. The sale already happened, so a miss is
+    // accepted and flagged, never refused.
+    if let ReplayOp::CreateOrder { request, .. } = &op
+        && let Some(by) = request.started_by
+        && by != teller_id
+    {
+        let cap = crate::authz::Cap::OrdersHeldResumeOthers;
+        let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
+            .await?
+            .can(cap);
+        if !held && !approved.as_ref().is_ok_and(|c| *c == cap) {
+            flags.push(cap.key().to_string());
         }
     }
 
@@ -735,7 +755,7 @@ async fn record_replay_flags(
     branch_id: Option<Uuid>,
     op: &'static str,
     author_id: Uuid,
-    flags: &[(&'static str, &'static str)],
+    flags: &[String],
     occurred_at: chrono::DateTime<chrono::Utc>,
 ) {
     // Was this a revocation the device had not heard about yet? If anything
@@ -760,8 +780,7 @@ async fn record_replay_flags(
         "unauthorized_offline"
     };
 
-    for (resource, action) in flags {
-        let cap = format!("{resource}:{action}");
+    for cap in flags {
         if let Err(e) = sqlx::query(
             "INSERT INTO authz_replay_flags
                  (org_id, branch_id, op, author_id, capability, reason, occurred_at)
@@ -771,7 +790,7 @@ async fn record_replay_flags(
         .bind(branch_id)
         .bind(op)
         .bind(author_id)
-        .bind(&cap)
+        .bind(cap)
         .bind(reason)
         .bind(occurred_at)
         .execute(pool)

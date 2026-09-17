@@ -970,7 +970,7 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
         v
     };
 
-    let approval = serde_json::json!({ "id": Uuid::new_v4(), "capability": "orders.create", "approver_id": manager });
+    let approval = serde_json::json!({ "id": Uuid::new_v4(), "capability": "orders.held.resume_others", "approver_id": manager });
     let r = replay(&app, &bearer, &sale(ali, Some(approval))).await;
     assert!(r.status().is_success(), "{}", r.status());
     let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
@@ -1003,7 +1003,12 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(verified, "the manager holds orders.create");
+    assert!(verified, "the manager holds orders.held.resume_others");
+    assert_eq!(
+        flags_of(&pool, badr).await,
+        0,
+        "an approved resume is clean"
+    );
     assert_eq!(approver, manager);
 
     // A name from another org is dropped, the sale still lands.
@@ -1021,4 +1026,46 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
     assert!(r.status().is_success());
     let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(order.order.started_by, None);
+
+    // Ali's order settled by Badr with no approval: accepted and flagged.
+    let r = replay(&app, &bearer, &sale(ali, None)).await;
+    assert!(r.status().is_success(), "accept and flag: {}", r.status());
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(
+        order.order.started_by,
+        Some(ali),
+        "the sale still names both"
+    );
+    let (cap, reason): (String, String) =
+        sqlx::query_as("SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1")
+            .bind(badr)
+            .fetch_one(&pool)
+            .await
+            .expect("one flag for the owner");
+    assert_eq!(cap, "orders.held.resume_others");
+    assert_eq!(reason, "unauthorized_offline");
+
+    // A manager who holds the capability settles Ali's order: clean.
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mbearer = token(manager, org, UserRole::BranchManager);
+    let mshift = open_shift_row(&pool, branch, manager).await;
+    let mut msale = sale(ali, None);
+    msale["teller_id"] = serde_json::json!(manager);
+    msale["request"]["till_id"] = serde_json::json!(mshift);
+    let r = replay(&app, &mbearer, &msale).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    assert_eq!(flags_of(&pool, manager).await, 0, "the manager holds it");
+}
+
+async fn flags_of(pool: &PgPool, author: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM authz_replay_flags WHERE author_id = $1")
+        .bind(author)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
