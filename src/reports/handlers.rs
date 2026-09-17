@@ -668,7 +668,9 @@ pub async fn branch_sales(
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY COALESCE(oi.menu_item_id, oi.bundle_id), oi.item_name
-        ORDER BY revenue DESC
+        -- One ranking everywhere (the POS metrics and the POS core too):
+        -- quantity, then revenue, then name.
+        ORDER BY quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
         LIMIT $4
         "#,
     )
@@ -716,7 +718,7 @@ pub async fn branch_sales(
             COALESCE(c.name, CASE WHEN oi.bundle_id IS NOT NULL THEN 'Bundles' ELSE 'Uncategorized' END),
             COALESCE(oi.menu_item_id, oi.bundle_id),
             oi.item_name
-        ORDER BY category_name NULLS LAST, revenue DESC
+        ORDER BY category_name NULLS LAST, quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
         "#,
     )
     .bind(&branch_ids).bind(query.from).bind(query.to)
@@ -1567,7 +1569,7 @@ pub async fn branch_addon_sales(
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY oia.addon_item_id, oia.addon_name, ai.type
-        ORDER BY quantity_sold DESC
+        ORDER BY quantity_sold DESC, revenue DESC, oia.addon_name COLLATE "C"
         "#,
     )
     .bind(&branch_ids)
@@ -3009,7 +3011,7 @@ pub async fn branch_bundle_sales(
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY oi.bundle_id, oi.item_name
-        ORDER BY quantity_sold DESC
+        ORDER BY quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
         "#,
     )
     .bind(&branch_ids)
@@ -3089,7 +3091,7 @@ pub async fn branch_combined_item_sales(
             (COALESCE(s.qty, 0) + COALESCE(b.qty, 0))::bigint AS total_qty
         FROM standalone_sales s
         FULL OUTER JOIN bundle_component_sales b ON b.item_id = s.item_id
-        ORDER BY total_qty DESC
+        ORDER BY total_qty DESC, COALESCE(s.item_name, b.item_name) COLLATE "C"
         "#,
     )
     .bind(&branch_ids)

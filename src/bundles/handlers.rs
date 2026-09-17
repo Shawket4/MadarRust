@@ -1387,7 +1387,7 @@ pub async fn bundle_performance(
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY olbc.item_id, mi.name
-        ORDER BY quantity_sold DESC
+        ORDER BY quantity_sold DESC, mi.name COLLATE "C"
         "#
     )
     .bind(id)

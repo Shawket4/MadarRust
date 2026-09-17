@@ -198,8 +198,8 @@ impl PeriodPreset {
     fn local_bounds(self, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
         use PeriodPreset::*;
         let yesterday = today - Duration::days(1);
-        // Monday-based week start.
-        let week_start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+        // Saturday-based week start — the one shared rule (`tz::WEEK_START`).
+        let week_start = crate::tz::week_start(today);
         let month_start = today.with_day(1).expect("day 1 is always valid");
         Some(match self {
             Today => (today, today),
@@ -503,6 +503,24 @@ mod tests {
     fn all_time_is_unbounded() {
         let p = Period::preset(PeriodPreset::AllTime).resolve(cairo(), Utc::now());
         assert!(p.from.is_none() && p.to.is_none() && !p.is_bounded());
+    }
+
+    /// Weeks start SATURDAY (`tz::WEEK_START`) on the merchant's clock: at
+    /// 23:30 Friday in Cairo "this week" began last Saturday; at 00:30 Saturday
+    /// it began that midnight (both instants are Friday in UTC).
+    #[test]
+    fn week_presets_start_saturday_in_the_merchant_zone() {
+        // Cairo is UTC+3 in September 2026; 18 Sep is a Friday.
+        let friday_2330 = at("2026-09-18T20:30:00Z");
+        let saturday_0030 = at("2026-09-18T21:30:00Z");
+        let this_week = |now| Period::preset(PeriodPreset::ThisWeek).resolve(cairo(), now);
+        let last_week = |now| Period::preset(PeriodPreset::LastWeek).resolve(cairo(), now);
+        assert_eq!(this_week(friday_2330).from, Some(at("2026-09-11T21:00:00Z")));
+        assert_eq!(this_week(saturday_0030).from, Some(at("2026-09-18T21:00:00Z")));
+        let lw = last_week(saturday_0030);
+        assert_eq!(lw.from, Some(at("2026-09-11T21:00:00Z")));
+        assert!(lw.to.unwrap() < at("2026-09-18T21:00:00Z"));
+        assert!(lw.to.unwrap() > at("2026-09-18T20:59:00Z"));
     }
 
     #[test]

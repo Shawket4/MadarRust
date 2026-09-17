@@ -4178,9 +4178,10 @@ async fn liability_trend_buckets_net_change_by_week(pool: PgPool) {
 }
 
 /// Weeks are cut on the scope's wall clock: the org's zone org-wide, the
-/// branch's zone for a branch-scoped request. 22:30 UTC on Sunday 7 Jan 2024 is
-/// 00:30 Monday in Cairo, so it opens Cairo's next week, while in London it is
-/// still Sunday.
+/// branch's zone for a branch-scoped request, and weeks start SATURDAY
+/// (`tz::WEEK_START`). 21:30 UTC on Friday 5 Jan 2024 is 23:30 Friday in Cairo
+/// (the previous week); 22:30 UTC is 00:30 Saturday in Cairo, so it opens
+/// Cairo's next week, while in London both are still Friday.
 #[sqlx::test]
 async fn liability_trend_cuts_weeks_in_the_scope_timezone(pool: PgPool) {
     perms(&pool).await;
@@ -4200,9 +4201,9 @@ async fn liability_trend_cuts_weeks_in_the_scope_timezone(pool: PgPool) {
     let member = seed_member(&pool, org, "+201000000031", "tok-liability-tz").await;
     enable_program(&pool, org, 1000, 100, false).await;
 
-    let sunday_afternoon = chrono::Utc.with_ymd_and_hms(2024, 1, 7, 12, 0, 0).unwrap();
-    let cairo_monday_0030 = chrono::Utc.with_ymd_and_hms(2024, 1, 7, 22, 30, 0).unwrap();
-    for (i, (at, pts)) in [(sunday_afternoon, 100), (cairo_monday_0030, 40)]
+    let cairo_friday_2330 = chrono::Utc.with_ymd_and_hms(2024, 1, 5, 21, 30, 0).unwrap();
+    let cairo_saturday_0030 = chrono::Utc.with_ymd_and_hms(2024, 1, 5, 22, 30, 0).unwrap();
+    for (i, (at, pts)) in [(cairo_friday_2330, 100), (cairo_saturday_0030, 40)]
         .into_iter()
         .enumerate()
     {
@@ -4239,7 +4240,7 @@ async fn liability_trend_cuts_weeks_in_the_scope_timezone(pool: PgPool) {
     };
     let range = "from=2024-01-01T00:00:00Z&to=2024-01-31T00:00:00Z";
 
-    // Org-wide: Cairo. Two weeks, each starting at local Monday 00:00 (UTC+2).
+    // Org-wide: Cairo. Two weeks, each starting at local Saturday 00:00 (UTC+2).
     let body: Value =
         test::call_and_read_body_json(&app, get(format!("/loyalty/liability-trend?{range}"))).await;
     let weeks: Vec<(String, i64)> = body["points"]
@@ -4256,12 +4257,12 @@ async fn liability_trend_cuts_weeks_in_the_scope_timezone(pool: PgPool) {
     assert_eq!(
         weeks,
         vec![
-            ("2023-12-31T22:00:00Z".to_string(), 100),
-            ("2024-01-07T22:00:00Z".to_string(), 40),
+            ("2023-12-29T22:00:00Z".to_string(), 100),
+            ("2024-01-05T22:00:00Z".to_string(), 40),
         ]
     );
 
-    // Branch-scoped: London (UTC in January). Both land in one Sunday-ending week.
+    // Branch-scoped: London (UTC in January). Both land in one Friday-ending week.
     let body: Value = test::call_and_read_body_json(
         &app,
         get(format!(
@@ -4280,7 +4281,7 @@ async fn liability_trend_cuts_weeks_in_the_scope_timezone(pool: PgPool) {
             )
         })
         .collect();
-    assert_eq!(weeks, vec![("2024-01-01T00:00:00Z".to_string(), 140)]);
+    assert_eq!(weeks, vec![("2023-12-30T00:00:00Z".to_string(), 140)]);
 }
 
 /// The weekly net change is every signed ledger row (adjustments included), so

@@ -199,8 +199,8 @@ pub const PRESETS: &[Preset] = &[
     // ── Products ─────────────────────────────────────────────────────────────
     preset!("top_products", "Top products", "Products", "reports", "order_items",
         dims: ["product"], measures: ["units_sold", "item_revenue"], filters: [],
-        sort: Some(("item_revenue", Dir::Desc)), limit: 10, viz: Viz::Bar, period: PeriodPreset::Last30Days, share: false,
-        "Best-selling products by revenue, with units sold."),
+        sort: Some(("units_sold", Dir::Desc)), limit: 10, viz: Viz::Bar, period: PeriodPreset::Last30Days, share: false,
+        "Best-selling products by units sold, with revenue — the ranking the POS metrics use."),
     preset!("worst_products", "Slowest products", "Products", "reports", "order_items",
         dims: ["product"], measures: ["units_sold", "item_revenue"], filters: [],
         sort: Some(("units_sold", Dir::Asc)), limit: 10, viz: Viz::Row, period: PeriodPreset::Last30Days, share: false,
