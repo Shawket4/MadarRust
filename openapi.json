@@ -17271,6 +17271,112 @@
         ]
       }
     },
+    "/inventory/waste": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "POST /inventory/waste — record waste at a branch (ingredient or menu item).",
+        "operationId": "record_waste",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordWasteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "This id was already recorded; nothing new was posted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasteRecorded"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Waste recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasteRecorded"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/kitchen/items/{item_id}/bump": {
       "post": {
         "tags": [
@@ -74270,6 +74376,89 @@
           }
         }
       },
+      "RecordWasteRequest": {
+        "type": "object",
+        "description": "One waste as a till (or the API) records it.",
+        "required": [
+          "id",
+          "branch_id",
+          "subject_kind",
+          "subject_id",
+          "quantity",
+          "reason"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-minted; the idempotency key."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurred_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it happened on the device. Default: now."
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "In `unit`. Whole units for a menu item."
+          },
+          "reason": {
+            "type": "string",
+            "description": "expired | spoiled | damaged | overproduction | theft | other"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Menu items only: the size whose recipe is wasted (default: the first size)."
+          },
+          "subject_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "An org ingredient id, or a menu item id."
+          },
+          "subject_kind": {
+            "type": "string",
+            "description": "`ingredient` | `menu_item`"
+          },
+          "till_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`g` | `kg` | `ml` | `l` | `pcs`. Default: the ingredient's own unit; a\nmenu item is always `pcs`."
+          }
+        }
+      },
       "Refund": {
         "type": "object",
         "required": [
@@ -76801,6 +76990,13 @@
           "created_at"
         ],
         "properties": {
+          "approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The manager who approved it on the till."
+          },
           "balance_after": {
             "type": "number",
             "format": "double"
@@ -76843,6 +77039,19 @@
               "null"
             ]
           },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "device_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -76859,6 +77068,14 @@
               "string",
               "null"
             ]
+          },
+          "occurred_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it happened on the device (a queued waste lands later)."
           },
           "org_ingredient_id": {
             "type": "string",
@@ -76888,6 +77105,13 @@
               "null"
             ]
           },
+          "till_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "unit": {
             "type": "string"
           },
@@ -76898,6 +77122,55 @@
             ],
             "format": "int64",
             "description": "Piastres per unit at movement time; `null` ⟺ unknown."
+          },
+          "waste_quantity": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The quantity as the person typed it, in `waste_unit`."
+          },
+          "waste_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waste_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`pos` | `dashboard` | `order` (a voided made order)."
+          },
+          "waste_subject_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ingredient` | `menu_item`, when the waste was recorded with a header."
+          },
+          "waste_subject_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the person picked (the menu item for an exploded item waste)."
+          },
+          "waste_unit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waste_value_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The whole waste's value (all its lines), piastres."
           }
         }
       },
@@ -81473,6 +81746,145 @@
           "step": {
             "type": "string",
             "description": "What was attempted, in words: \"insert the class\", \"update the object\"."
+          }
+        }
+      },
+      "WasteLine": {
+        "type": "object",
+        "description": "One ingredient line of a recorded waste.",
+        "required": [
+          "movement_id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "quantity",
+          "balance_after",
+          "below_zero"
+        ],
+        "properties": {
+          "balance_after": {
+            "type": "number",
+            "format": "double"
+          },
+          "below_zero": {
+            "type": "boolean"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "movement_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "Signed ledger delta (negative), in the ingredient's unit."
+          },
+          "unit": {
+            "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per unit; `null` = unknown."
+          }
+        }
+      },
+      "WasteRecorded": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "source",
+          "subject_kind",
+          "subject_name",
+          "quantity",
+          "unit",
+          "reason",
+          "value_partial",
+          "occurred_at",
+          "created",
+          "lines"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created": {
+            "type": "boolean",
+            "description": "`false` when this id had already been recorded (nothing new was posted)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WasteLine"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "recorded_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "subject_kind": {
+            "type": "string"
+          },
+          "subject_name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "value_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres at the branch's unit costs; `null` when no line had a cost."
+          },
+          "value_partial": {
+            "type": "boolean"
           }
         }
       },
