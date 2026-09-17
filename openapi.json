@@ -38094,6 +38094,123 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/pos-metrics": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_pos_metrics",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First branch-local day, `YYYY-MM-DD` (inclusive).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last branch-local day, `YYYY-MM-DD` (inclusive).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The till's metrics for branch-local days",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PosMetricsReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/sales": {
       "get": {
         "tags": [
@@ -71443,6 +71560,198 @@
           },
           "capability": {
             "type": "string"
+          }
+        }
+      },
+      "PosMetricsHour": {
+        "type": "object",
+        "required": [
+          "hour",
+          "order_count",
+          "net_sales"
+        ],
+        "properties": {
+          "hour": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Branch-local hour of day, 0–23."
+          },
+          "net_sales": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "PosMetricsItem": {
+        "type": "object",
+        "required": [
+          "item_name",
+          "quantity",
+          "revenue"
+        ],
+        "properties": {
+          "item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The menu item or bundle; null for a line with neither."
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Σ line totals (before refunds), as `branch_sales.top_items.revenue`."
+          }
+        }
+      },
+      "PosMetricsReport": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "timezone",
+          "from",
+          "to",
+          "window_from",
+          "window_to",
+          "net_sales",
+          "gross_sales",
+          "refunded_amount",
+          "order_count",
+          "average_ticket",
+          "tenders",
+          "voided_count",
+          "voided_amount",
+          "refunded_orders_count",
+          "refunds_issued_count",
+          "refunds_issued_amount",
+          "top_items",
+          "hourly"
+        ],
+        "properties": {
+          "average_ticket": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`net_sales / order_count`, rounded half up; 0 with no sales."
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "gross_sales": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "hourly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PosMetricsHour"
+            },
+            "description": "Always 24 rows, hour 0 first."
+          },
+          "net_sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sold sales net of refunds against them (`branch_sales.total_revenue`)."
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sold sales (`branch_sales.total_orders`)."
+          },
+          "refunded_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunded_orders_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sales refunded in full (out of every sold figure above)."
+          },
+          "refunds_issued_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Refunds ISSUED inside the window at this branch, whichever sale they refund."
+          },
+          "tenders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PosMetricsTender"
+            },
+            "description": "By amount, largest first."
+          },
+          "timezone": {
+            "type": "string",
+            "description": "The IANA zone the days were cut in."
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "top_items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PosMetricsItem"
+            },
+            "description": "Top [`TOP_ITEMS`] by quantity (then revenue, then name)."
+          },
+          "voided_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voided_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "window_from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "`[window_from, window_to)`: local midnight of `from` to local midnight after `to`."
+          },
+          "window_to": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PosMetricsTender": {
+        "type": "object",
+        "required": [
+          "method",
+          "amount",
+          "order_count"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "method": {
+            "type": "string"
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sold sales with at least one leg in this method."
           }
         }
       },
