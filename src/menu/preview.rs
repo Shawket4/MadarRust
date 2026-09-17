@@ -205,8 +205,24 @@ pub async fn preview(
         })
         .collect();
 
+    // Resolve the size ONCE, before pricing: with no size given, the price, the
+    // deductions and the reported `size_label` must all describe the same size
+    // (the item's first size as listed). Pricing with `None` used the item's
+    // base price while the resolver deducted the first size's recipe.
+    let size_label: Option<String> = match &body.size_label {
+        Some(s) => Some(s.clone()),
+        None => {
+            sqlx::query_scalar(
+                "SELECT label FROM menu_item_sizes WHERE menu_item_id = $1 \
+             ORDER BY is_active IS NOT TRUE, sort NULLS LAST, label LIMIT 1",
+            )
+            .bind(item_id)
+            .fetch_optional(pool)
+            .await?
+        }
+    };
     let (_, _, base, _) =
-        catalog_unit_price(pool, item_id, body.size_label.as_deref(), branch_id).await?;
+        catalog_unit_price(pool, item_id, size_label.as_deref(), branch_id).await?;
     let MenuItemResolution {
         deductions,
         addons: resolved_addons,
@@ -217,7 +233,7 @@ pub async fn preview(
     } = resolve_menu_item_configuration(
         pool,
         item_id,
-        body.size_label.clone(),
+        size_label.clone(),
         body.quantity,
         &addons,
         &optional_field_ids,
@@ -312,19 +328,7 @@ pub async fn preview(
     let margin_pct =
         (!cost_missing && total > 0).then(|| (total as i64 - cost_total) as f64 / total as f64);
 
-    // ── resolved size, defaults, lint ──
-    let size_label: Option<String> = match &body.size_label {
-        Some(s) => Some(s.clone()),
-        None => {
-            sqlx::query_scalar(
-                "SELECT label FROM menu_item_sizes WHERE menu_item_id = $1 \
-             ORDER BY is_active IS NOT TRUE, sort NULLS LAST, label LIMIT 1",
-            )
-            .bind(item_id)
-            .fetch_optional(pool)
-            .await?
-        }
-    };
+    // ── defaults, lint ──
     let defaults = swap_defaults(pool, item_id, size_label.as_deref()).await?;
 
     let chosen: HashSet<Uuid> = body.option_ids.iter().copied().collect();

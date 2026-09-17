@@ -483,3 +483,30 @@ async fn preview_is_refused_without_menu_read_and_served_to_a_teller(pool: PgPoo
         assert_eq!(resp.status().as_u16(), want, "{who}");
     }
 }
+
+/// With no size in the request (the Studio's first render), the price, the
+/// deductions and the reported size all describe the item's first size as listed.
+/// Before the fix the price came from `base_price` (100) while `size_label` said
+/// the first size, so the panel showed one size's name with another's price.
+#[sqlx::test]
+async fn preview_without_a_size_prices_and_deducts_the_reported_size(pool: PgPool) {
+    let fx = fixture(&pool).await;
+    let mut body = req(vec![], "takeaway");
+    body.size_label = None;
+    let r = preview(&pool, fx.org, fx.item, &body).await.unwrap();
+
+    // Cup is sort 0, so it is the first size as listed.
+    assert_eq!(r.size_label.as_deref(), Some("Cup"));
+    assert_eq!(r.price.base, 150);
+    // The fixture's recipe lines are Can-only: nothing of Can's may be deducted.
+    assert!(!r.deductions.iter().any(|d| d.ingredient_id == Some(fx.can)));
+
+    // An explicit size is unchanged.
+    let can = preview(&pool, fx.org, fx.item, &req(vec![], "takeaway"))
+        .await
+        .unwrap();
+    assert_eq!(
+        (can.size_label.as_deref(), can.price.base),
+        (Some("Can"), 170)
+    );
+}
