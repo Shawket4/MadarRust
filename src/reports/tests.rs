@@ -385,7 +385,28 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
 
     grant_permission(&pool, "org_admin", "orders", "read").await;
 
-    seed_order(&pool, branch_id, user_id, shift_id).await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+
+    let item_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO order_items (id, order_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, 'Burger', 2, 200, 400)")
+        .bind(item_id)
+        .bind(order_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let addon_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Extra Cheese', 'ingredient', 50)")
+        .bind(addon_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, quantity, unit_price, line_total) VALUES ($1, $2, 'Extra Cheese', 3, 50, 150)")
+        .bind(item_id)
+        .bind(addon_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let req = test::TestRequest::get()
         .uri(&format!(
@@ -401,6 +422,8 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
     assert_eq!(ts.len(), 1);
     assert_eq!(ts[0].orders, 1);
     assert_eq!(ts[0].revenue, 570);
+    assert_eq!(ts[0].line_items, 2, "SUM(order_items.quantity)");
+    assert_eq!(ts[0].addons, 3, "SUM(order_item_addons.quantity)");
 }
 
 #[sqlx::test]

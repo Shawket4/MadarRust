@@ -247,6 +247,10 @@ pub struct TimeseriesPoint {
     pub discount: i64,
     pub tax: i64,
     pub revenue_by_method: serde_json::Value,
+    /// SUM(order_items.quantity) across non-voided orders in this period.
+    pub line_items: i64,
+    /// SUM(order_item_addons.quantity) across non-voided orders in this period.
+    pub addons: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -992,6 +996,33 @@ pub async fn branch_sales_timeseries(
             SELECT period_val, json_object_agg(method, rev) AS revenue_by_method
             FROM methods
             GROUP BY period_val
+        ),
+        -- order_items/order_item_addons fan out orders, so they're summed in
+        -- their own bucketed CTEs rather than joined into `periods` above.
+        line_item_totals AS (
+            SELECT
+                date_trunc('{trunc}', o3.created_at AT TIME ZONE $4) AS period_val,
+                COALESCE(SUM(oi3.quantity), 0)::bigint AS line_items
+            FROM order_items oi3
+            JOIN orders o3 ON o3.id = oi3.order_id
+            WHERE o3.branch_id = ANY($1)
+              AND o3.status NOT IN ('voided', 'refunded')
+              AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
+            GROUP BY 1
+        ),
+        addon_totals AS (
+            SELECT
+                date_trunc('{trunc}', o4.created_at AT TIME ZONE $4) AS period_val,
+                COALESCE(SUM(oia4.quantity), 0)::bigint AS addons
+            FROM order_item_addons oia4
+            JOIN order_items oi4 ON oi4.id = oia4.order_item_id
+            JOIN orders o4 ON o4.id = oi4.order_id
+            WHERE o4.branch_id = ANY($1)
+              AND o4.status NOT IN ('voided', 'refunded')
+              AND ($2::timestamptz IS NULL OR o4.created_at >= $2)
+              AND ($3::timestamptz IS NULL OR o4.created_at <= $3)
+            GROUP BY 1
         )
         SELECT
             p.period_str AS period,
@@ -1001,9 +1032,13 @@ pub async fn branch_sales_timeseries(
             p.voided,
             p.discount,
             p.tax,
-            COALESCE(m.revenue_by_method, '{{}}'::json) AS revenue_by_method
+            COALESCE(m.revenue_by_method, '{{}}'::json) AS revenue_by_method,
+            COALESCE(li.line_items, 0)::bigint AS line_items,
+            COALESCE(ad.addons, 0)::bigint AS addons
         FROM periods p
         LEFT JOIN methods_by_period m ON m.period_val = p.period_val
+        LEFT JOIN line_item_totals li ON li.period_val = p.period_val
+        LEFT JOIN addon_totals ad ON ad.period_val = p.period_val
         ORDER BY p.period_val ASC
         "#,
         trunc = trunc,

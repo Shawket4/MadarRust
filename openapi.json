@@ -71761,12 +71761,24 @@
           "voided",
           "discount",
           "tax",
-          "revenue_by_method"
+          "revenue_by_method",
+          "line_items",
+          "addons"
         ],
         "properties": {
+          "addons": {
+            "type": "integer",
+            "format": "int64",
+            "description": "SUM(order_item_addons.quantity) across non-voided orders in this period."
+          },
           "discount": {
             "type": "integer",
             "format": "int64"
+          },
+          "line_items": {
+            "type": "integer",
+            "format": "int64",
+            "description": "SUM(order_items.quantity) across non-voided orders in this period."
           },
           "orders": {
             "type": "integer",
