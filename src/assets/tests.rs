@@ -109,6 +109,23 @@ fn token(org: Option<Uuid>, role: UserRole) -> String {
     create_token(&secret(), Uuid::new_v4(), org, role, None, 1).unwrap()
 }
 
+/// A token for a REAL owner of `org`. The POS asset feed and the job route
+/// refuse a person who works nowhere, which a made-up user id is.
+async fn owner_token(pool: &PgPool, org: Uuid) -> String {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash)
+         VALUES ($1, $2, 'Owner', 'org_admin'::user_role, $3, 'h')",
+    )
+    .bind(id)
+    .bind(org)
+    .bind(format!("{id}@assets.test"))
+    .execute(pool)
+    .await
+    .unwrap();
+    create_token(&secret(), id, Some(org), UserRole::OrgAdmin, None, 1).unwrap()
+}
+
 async fn ing(
     pool: &PgPool,
     store: &AssetStore,
@@ -811,7 +828,7 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
         .uri(&format!("/assets/jobs/{job}"))
         .insert_header((
             "Authorization",
-            format!("Bearer {}", token(Some(org), UserRole::OrgAdmin)),
+            format!("Bearer {}", owner_token(&pool, org).await),
         ))
         .to_request();
     let app2 = test::init_service(
@@ -828,7 +845,7 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
         .uri(&format!("/assets/jobs/{job}"))
         .insert_header((
             "Authorization",
-            format!("Bearer {}", token(Some(Uuid::new_v4()), UserRole::OrgAdmin)),
+            format!("Bearer {}", owner_token(&pool, seed_org(&pool).await).await),
         ))
         .to_request();
     assert_eq!(
@@ -1228,7 +1245,7 @@ async fn bundle_route_range_resume_and_topup(pool: PgPool) {
         .unwrap()
         .unwrap();
     let app = asset_app(&pool, &store).await;
-    let auth = format!("Bearer {}", token(Some(org), UserRole::OrgAdmin));
+    let auth = format!("Bearer {}", owner_token(&pool, org).await);
     let uri = format!("/sync/asset-bundles/{org}/assets-{branch}-{}.tar", b.seq);
     let full = test::call_and_read_body(
         &app,
@@ -1278,7 +1295,7 @@ async fn bundle_route_range_resume_and_topup(pool: PgPool) {
             .uri(&uri)
             .insert_header((
                 "Authorization",
-                format!("Bearer {}", token(Some(other), UserRole::OrgAdmin)),
+                format!("Bearer {}", owner_token(&pool, other).await),
             ))
             .to_request(),
     )

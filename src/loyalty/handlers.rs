@@ -1289,11 +1289,18 @@ pub async fn liability_trend(
     let settings = load_effective(pool, org_id, query.branch_id.unwrap_or(Uuid::nil())).await?;
     let currency = settings.mode().as_str().to_string();
 
+    // Weeks are cut on the scope's wall clock (owner rule): the branch's zone
+    // for a branch-scoped request, the org's for an org-wide one. A redemption
+    // at 00:30 Monday in Cairo belongs to that Monday's week, not the UTC
+    // Sunday before. `week` is the instant that local week starts.
+    let tz = crate::tz::scope_tz_name(pool, query.branch_id.unwrap_or(Uuid::nil()), org_id).await?;
+
     let points: Vec<LiabilityTrendPoint> = sqlx::query_as(
         // Every signed ledger row moves the balance: earns, redemptions, manual
         // and birthday/win-back adjustments, and all their reversals. Leaving the
         // adjustments out would make the weeks no longer sum to the balance.
-        "SELECT date_trunc('week', t.created_at) AS week, \
+        // `$5` (the zone) is bound, never interpolated: it is free text on the branch.
+        "SELECT date_trunc('week', t.created_at AT TIME ZONE $5) AT TIME ZONE $5 AS week, \
                 COALESCE(SUM(t.points), 0)::bigint AS outstanding \
            FROM loyalty_transactions t \
            JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
@@ -1306,6 +1313,7 @@ pub async fn liability_trend(
     .bind(&currency)
     .bind(from)
     .bind(to)
+    .bind(&tz)
     .fetch_all(pool)
     .await?;
 

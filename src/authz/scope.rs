@@ -46,6 +46,22 @@ pub async fn works_at(pool: &PgPool, user_id: Uuid, branch: Uuid) -> Result<bool
     Ok(eff.owner || eff.kinds.0 != 0)
 }
 
+/// 403 unless the caller works somewhere in their org: a platform admin, an
+/// owner, or anyone with a live role assignment. For reads that carry no
+/// capability of their own but must never reach a person who holds nothing
+/// (the POS asset feed), and must refuse before anything is looked up.
+pub async fn require_member(pool: &PgPool, claims: &Claims) -> Result<(), AppError> {
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(());
+    }
+    let eff = super::require::effective(pool, claims.user_id(), None).await?;
+    if eff.owner || eff.kinds.0 != 0 {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("Not assigned to any branch".into()))
+    }
+}
+
 /// The caller's branch scope, straight from their live role assignments.
 pub async fn branch_scope(pool: &PgPool, claims: &Claims) -> Result<BranchScope, AppError> {
     if claims.role == UserRole::SuperAdmin {
@@ -178,7 +194,9 @@ pub async fn org_read_branches(
         .fetch_one(pool)
         .await?;
         if !in_org {
-            return Err(AppError::Forbidden("Branch belongs to a different org".into()));
+            return Err(AppError::Forbidden(
+                "Branch belongs to a different org".into(),
+            ));
         }
         return Ok(Some(vec![b]));
     }
