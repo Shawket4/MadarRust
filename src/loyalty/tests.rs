@@ -4177,6 +4177,112 @@ async fn liability_trend_buckets_net_change_by_week(pool: PgPool) {
     assert_eq!(points[1]["outstanding"], -30);
 }
 
+/// Weeks are cut on the scope's wall clock: the org's zone org-wide, the
+/// branch's zone for a branch-scoped request. 22:30 UTC on Sunday 7 Jan 2024 is
+/// 00:30 Monday in Cairo, so it opens Cairo's next week, while in London it is
+/// still Sunday.
+#[sqlx::test]
+async fn liability_trend_cuts_weeks_in_the_scope_timezone(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Zamalek").await;
+    sqlx::query("UPDATE organizations SET timezone = 'Africa/Cairo' WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE branches SET timezone = 'Europe/London' WHERE id = $1")
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let member = seed_member(&pool, org, "+201000000031", "tok-liability-tz").await;
+    enable_program(&pool, org, 1000, 100, false).await;
+
+    let sunday_afternoon = chrono::Utc.with_ymd_and_hms(2024, 1, 7, 12, 0, 0).unwrap();
+    let cairo_monday_0030 = chrono::Utc.with_ymd_and_hms(2024, 1, 7, 22, 30, 0).unwrap();
+    for (i, (at, pts)) in [(sunday_afternoon, 100), (cairo_monday_0030, 40)]
+        .into_iter()
+        .enumerate()
+    {
+        let order = seed_order(&pool, branch, admin, 10 + i as i32).await;
+        sqlx::query(
+            "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, created_at) \
+             VALUES ($1, $2, $3, 'earn', 'points', $4, $5, $6)",
+        )
+        .bind(org)
+        .bind(member)
+        .bind(branch)
+        .bind(pts)
+        .bind(order)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(admin, org, UserRole::OrgAdmin, None);
+    let get = |uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .to_request()
+    };
+    let range = "from=2024-01-01T00:00:00Z&to=2024-01-31T00:00:00Z";
+
+    // Org-wide: Cairo. Two weeks, each starting at local Monday 00:00 (UTC+2).
+    let body: Value =
+        test::call_and_read_body_json(&app, get(format!("/loyalty/liability-trend?{range}"))).await;
+    let weeks: Vec<(String, i64)> = body["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["week"].as_str().unwrap().to_string(),
+                p["outstanding"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        weeks,
+        vec![
+            ("2023-12-31T22:00:00Z".to_string(), 100),
+            ("2024-01-07T22:00:00Z".to_string(), 40),
+        ]
+    );
+
+    // Branch-scoped: London (UTC in January). Both land in one Sunday-ending week.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        get(format!(
+            "/loyalty/liability-trend?{range}&branch_id={branch}"
+        )),
+    )
+    .await;
+    let weeks: Vec<(String, i64)> = body["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["week"].as_str().unwrap().to_string(),
+                p["outstanding"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(weeks, vec![("2024-01-01T00:00:00Z".to_string(), 140)]);
+}
+
 /// The weekly net change is every signed ledger row (adjustments included), so
 /// the weeks sum to the live balance; an erased member's rows drop out. Both new
 /// reports are `loyalty.members.list` at a branch the caller may read.
