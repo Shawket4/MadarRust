@@ -914,3 +914,111 @@ async fn a_manager_approval_carries_a_void_the_teller_does_not_hold(pool: PgPool
     assert!(verified);
     assert_eq!(approver, manager);
 }
+
+/// Deferred feature 5: teller A started a cart, parked it, and teller B
+/// resumed it after a teller switch and settled it. The replayed sale is B's
+/// (drawer, reports) and records A as the person who started it, with the
+/// manager's approval kept when one rode along. A `started_by` naming nobody
+/// of the org is dropped, never a refusal: the sale happened.
+#[sqlx::test]
+async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
+    let ali = seed_user(&pool, org, "teller").await;
+    let badr = seed_user(&pool, org, "teller").await;
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    let other_org = seed_org(&pool).await;
+    let stranger = seed_user(&pool, other_org, "teller").await;
+    let shift = open_shift_row(&pool, branch, badr).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for role in ["teller", "branch_manager"] {
+        for (r, a) in [
+            ("orders", "create"),
+            ("orders", "read"),
+            ("order_items", "create"),
+            ("payments", "create"),
+        ] {
+            grant(&pool, role, r, a).await;
+        }
+    }
+    let bearer = token(badr, org, UserRole::Teller);
+    let sale = |started_by: Uuid, approval: Option<serde_json::Value>| {
+        let mut v = serde_json::json!({
+            "op": "create_order",
+            "teller_id": badr,
+            "request": {
+                "branch_id": branch,
+                "till_id": shift,
+                "payment_method": "cash",
+                "items": [{ "menu_item_id": item, "quantity": 1 }],
+                "idempotency_key": Uuid::new_v4(),
+                "started_by": started_by
+            }
+        });
+        if let Some(a) = approval {
+            v["approval"] = a;
+        }
+        v
+    };
+
+    let approval = serde_json::json!({ "id": Uuid::new_v4(), "capability": "orders.create", "approver_id": manager });
+    let r = replay(&app, &bearer, &sale(ali, Some(approval))).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(order.order.teller_id, badr, "settled by Badr: his drawer");
+    assert_eq!(order.order.started_by, Some(ali), "started by Ali");
+    assert!(order.order.started_by_name.is_some());
+
+    // The order read back shows both people.
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders/{}", order.order.id))
+        .insert_header(("Authorization", format!("Bearer {bearer}")))
+        .to_request();
+    let r = test::call_service(&app, req).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let read: serde_json::Value = test::read_body_json(r).await;
+    assert_eq!(read["teller_id"], serde_json::json!(badr));
+    assert_eq!(read["started_by"], serde_json::json!(ali));
+    assert!(read["started_by_name"].is_string());
+    let (teller, by): (Uuid, Option<Uuid>) =
+        sqlx::query_as("SELECT teller_id, started_by FROM orders WHERE id = $1")
+            .bind(order.order.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((teller, by), (badr, Some(ali)));
+    let (verified, approver): (bool, Uuid) = sqlx::query_as(
+        "SELECT verified, approver_user_id FROM approvals WHERE subject_user_id = $1 AND op = 'CreateOrder'",
+    )
+    .bind(badr)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(verified, "the manager holds orders.create");
+    assert_eq!(approver, manager);
+
+    // A name from another org is dropped, the sale still lands.
+    let r = replay(&app, &bearer, &sale(stranger, None)).await;
+    assert!(
+        r.status().is_success(),
+        "accept, never reject: {}",
+        r.status()
+    );
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(order.order.started_by, None);
+
+    // Naming yourself records nothing extra.
+    let r = replay(&app, &bearer, &sale(badr, None)).await;
+    assert!(r.status().is_success());
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(order.order.started_by, None);
+}

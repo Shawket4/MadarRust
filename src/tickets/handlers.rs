@@ -1351,6 +1351,8 @@ pub(crate) async fn settle_open_ticket_inner(
         idempotency_key: Some(*id),
         order_number: None,
         order_ref: None,
+        // A settle's second person is the waiter, derived from the ticket.
+        started_by: None,
     };
 
     // hub = None → don't re-fire the kitchen (the items already fired at order

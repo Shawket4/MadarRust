@@ -44,8 +44,10 @@ const ORDER_SELECT: &str =
      o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification,
      o.tax_inclusive, o.tax_rate_applied, o.service_charge_rate_applied, o.service_charge_taxable_applied,
      o.service_charge_waived_by, sw.name AS service_charge_waived_by_name,
-     o.service_charge_waived_at, o.service_charge_waived_amount
+     o.service_charge_waived_at, o.service_charge_waived_amount,
+     o.started_by, sb.name AS started_by_name
      FROM orders o JOIN users u ON u.id = o.teller_id
+     LEFT JOIN users sb ON sb.id = o.started_by
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN users sw ON sw.id = o.service_charge_waived_by
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
@@ -312,6 +314,15 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub service_charge_waived_amount: Option<i32>,
+    /// Who started this sale's cart when it is not the person who rang it: a
+    /// held order resumed after a teller switch on the till. `null` otherwise.
+    /// Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub started_by: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub started_by_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -594,6 +605,12 @@ pub struct CreateOrderRequest {
     /// nothing never names a member here.
     #[serde(default)]
     pub loyalty_customer_id: Option<Uuid>,
+    /// The person who started this sale's cart, when the till says it was not
+    /// the person ringing it (a held order resumed after a teller switch).
+    /// Recorded when it names someone of the same org; anything else is
+    /// dropped with a warning, never refused. Additive; older tills omit it.
+    #[serde(default)]
+    pub started_by: Option<Uuid>,
     /// Where the drink is going: `"takeaway"` (default) or `"dine_in"`. NOT
     /// `order_type`: that is derived from whether a waiter's ticket was settled
     /// and decides the service charge. This says only whether the customer is
@@ -1648,6 +1665,28 @@ pub(crate) async fn create_order_inner(
         _ => None,
     };
 
+    // Who started the cart, when the till says it was someone else (a held
+    // order resumed after a teller switch). Accept and record: a name outside
+    // the org, or the ringer themself, is dropped with a warning, never refused
+    // — the sale happened either way.
+    let started_by = match body.started_by {
+        Some(by) if by != actor.teller_id => {
+            let in_org: Option<bool> =
+                sqlx::query_scalar("SELECT true FROM users WHERE id = $1 AND org_id = $2")
+                    .bind(by)
+                    .bind(actor.org_id)
+                    .fetch_optional(pool.get_ref())
+                    .await?;
+            if in_org.is_some() {
+                Some(by)
+            } else {
+                tracing::warn!(started_by = %by, "order started_by is not a person of this org; not recorded");
+                None
+            }
+        }
+        _ => None,
+    };
+
     // The order must attach to a shift at this branch — and, for a LIVE teller
     // action, an OPEN one that belongs to them. A REPLAY drops the teller filter
     // (recorded history) AND the open requirement: a sale queued offline is
@@ -2255,11 +2294,11 @@ pub(crate) async fn create_order_inner(
              tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id,
              device_id, device_code, verification,
              service_charge_waived_by, service_charge_waived_at, service_charge_waived_amount,
-             service_mode)
+             service_mode, started_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36,
-                $37, $38, $39, $40)
+                $37, $38, $39, $40, $41)
         RETURNING
             id, branch_id, till_id, till_id AS shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -2281,7 +2320,8 @@ pub(crate) async fn create_order_inner(
             device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification,
             tax_inclusive, tax_rate_applied, service_charge_rate_applied, service_charge_taxable_applied,
             service_charge_waived_by, (SELECT name FROM users WHERE id = service_charge_waived_by) AS service_charge_waived_by_name,
-            service_charge_waived_at, service_charge_waived_amount
+            service_charge_waived_at, service_charge_waived_amount,
+            started_by, (SELECT name FROM users WHERE id = $41) AS started_by_name
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
@@ -2347,6 +2387,7 @@ pub(crate) async fn create_order_inner(
     .bind(service_waiver.map(|(_, at)| at.unwrap_or(created_at)))
     .bind(service_charge_waived_amount)
     .bind(body.service_mode.as_deref().unwrap_or("takeaway"))
+    .bind(started_by)
     .fetch_one(&mut *tx)
     .await
     {
