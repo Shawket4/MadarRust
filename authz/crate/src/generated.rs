@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "f0c8443a2a703d99";
+pub const SPEC_HASH: &str = "eba43e906e9a05e5";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -242,7 +242,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::InventoryCountsEdit, key: "inventory.counts.edit", legacy: Some(("stocktakes", "update")), group: "inventory", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Count and finalize stock counts", ar: "إدخال الجرد واعتماده", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::LegacyStocktakesDelete, key: "legacy.stocktakes.delete", legacy: Some(("stocktakes", "delete")), group: "inventory", tier: Tier::Legacy, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Stock counts: delete (legacy)", ar: "الجرد: حذف (قديم)", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::InventoryWasteRecord, key: "inventory.waste.record", legacy: Some(("inventory_waste", "create")), group: "inventory", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: true, limits: &[LimitKey::MaxValue], pos: true, protected: false, en: "Record waste", ar: "تسجيل التالف", hint_en: Some("Off for tellers by default. Turn it on to let the till record waste."), hint_ar: Some("مغلق للكاشير في الأصل. فع\u{651}له عشان الكاشير يسجل التالف من نقطة البيع.") },
-    CapMeta { cap: Cap::InventoryWasteRead, key: "inventory.waste.read", legacy: Some(("inventory_waste", "read")), group: "inventory", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See waste records", ar: "عرض سجلات الهالك", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::InventoryWasteRead, key: "inventory.waste.read", legacy: Some(("inventory_waste", "read")), group: "inventory", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See waste records", ar: "عرض سجلات التالف", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::LegacyInventoryWasteUpdate, key: "legacy.inventory_waste.update", legacy: Some(("inventory_waste", "update")), group: "inventory", tier: Tier::Legacy, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Waste: update (legacy)", ar: "الهالك: تعديل (قديم)", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::LegacyInventoryWasteDelete, key: "legacy.inventory_waste.delete", legacy: Some(("inventory_waste", "delete")), group: "inventory", tier: Tier::Legacy, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Waste: delete (legacy)", ar: "الهالك: حذف (قديم)", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::PurchasingSuppliersCreate, key: "purchasing.suppliers.create", legacy: Some(("suppliers", "create")), group: "purchasing", tier: Tier::Advanced, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Add suppliers", ar: "إضافة موردين", hint_en: None, hint_ar: None },
