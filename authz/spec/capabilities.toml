@@ -636,7 +636,7 @@ tier = "configurable"
 risk = "normal"
 defaults = "om"
 en = "See waste records"
-ar = "عرض سجلات الهالك"
+ar = "عرض سجلات التالف"
 
 [[cap]]
 id = 51
