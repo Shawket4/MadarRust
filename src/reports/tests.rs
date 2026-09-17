@@ -287,6 +287,61 @@ async fn test_branch_sales(pool: PgPool) {
     assert_eq!(excluded.top_items.len(), 1, "top items must be untouched");
 }
 
+/// Top items rank by quantity, then revenue, then name — the same order as
+/// the POS metrics endpoint and the POS core, so the till and the dashboard
+/// never list the same window differently.
+#[sqlx::test]
+async fn branch_sales_top_items_rank_by_quantity_then_revenue_then_name(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+
+    // (name, quantity, revenue): the big-ticket single sells least; the two
+    // 3 × 900 lines tie on both and fall back to the name.
+    for (name, qty, revenue) in [
+        ("Cake", 1, 5000),
+        ("Tea", 3, 300),
+        ("Latte", 3, 900),
+        ("Espresso", 3, 900),
+    ] {
+        let item: Uuid = sqlx::query_scalar(
+            "INSERT INTO menu_items (org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 100, true) RETURNING id",
+        )
+        .bind(org_id)
+        .bind(cat_id)
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO order_items (order_id, menu_item_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, $3, $4, $5, $6)")
+            .bind(order_id).bind(item).bind(name).bind(qty).bind(revenue / qty).bind(revenue)
+            .execute(&pool).await.unwrap();
+    }
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/branches/{}/sales", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let sales: BranchSalesReport = test::call_and_read_body_json(&app, req).await;
+    let names = |items: &[ItemSales]| items.iter().map(|i| i.item_name.clone()).collect::<Vec<_>>();
+    let expected = vec!["Espresso", "Latte", "Tea", "Cake"];
+    assert_eq!(names(&sales.top_items), expected);
+    assert_eq!(sales.by_category.len(), 1);
+    assert_eq!(names(&sales.by_category[0].items), expected);
+}
+
 #[sqlx::test]
 async fn test_branch_stock(pool: PgPool) {
     let app = test::init_service(
