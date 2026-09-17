@@ -545,6 +545,7 @@ paths(
         crate::reports::handlers::till_deductions,
         crate::reports::handlers::shift_deductions,
         crate::reports::handlers::branch_sales,
+        crate::reports::pos_metrics::branch_pos_metrics,
         crate::reports::handlers::branch_stock,
         crate::reports::handlers::branch_sales_timeseries,
         crate::reports::handlers::branch_sales_peak_hours,

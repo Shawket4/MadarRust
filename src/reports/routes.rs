@@ -1,6 +1,6 @@
 use crate::{
     auth::middleware::JwtMiddleware,
-    reports::{handlers, legal},
+    reports::{handlers, legal, pos_metrics},
 };
 use actix_web::web;
 use sqlx::PgPool;
@@ -33,6 +33,10 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
             .route(
                 "/branches/{branch_id}/sales",
                 web::get().to(handlers::branch_sales),
+            )
+            .route(
+                "/branches/{branch_id}/pos-metrics",
+                web::get().to(pos_metrics::branch_pos_metrics),
             )
             .route(
                 "/branches/{branch_id}/sales/timeseries",
