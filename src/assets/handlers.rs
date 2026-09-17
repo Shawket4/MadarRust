@@ -285,6 +285,7 @@ pub struct AssetJobView {
 pub async fn get_job(req: HttpRequest, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
     let c = claims(&req)?;
     let pool = base_pool(&req)?;
+    crate::authz::scope::require_member(&pool, &c).await?;
     let row = sqlx::query(
         "SELECT id, org_id, status, last_error, result_group_id FROM asset_jobs WHERE id = $1",
     )
@@ -372,12 +373,14 @@ pub async fn get_bundle(
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let c = claims(&req)?;
+    let pool = base_pool(&req)?;
+    crate::authz::scope::require_member(&pool, &c).await?;
     let (org_id, name) = path.into_inner();
     let (branch_id, seq) = parse_bundle_name(&name).ok_or_else(not_found)?;
     if !branch_allowed(&c, org_id, branch_id) {
         return Err(not_found());
     }
-    let pool = base_pool(&req)?;
+    crate::authz::scope::require_branch_access(&pool, &c, branch_id).await?;
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT b.file_key, b.sha256 FROM asset_bundles b JOIN branches br ON br.id = b.branch_id \
          WHERE b.branch_id = $1 AND b.seq = $2 AND b.org_id = $3 AND br.org_id = $3",
@@ -413,6 +416,9 @@ pub async fn top_up(
     body: web::Json<TopUpRequest>,
 ) -> Result<HttpResponse, AppError> {
     let c = claims(&req)?;
+    let pool = base_pool(&req)?;
+    // Someone who works nowhere gets nothing, before any lookup (route guard).
+    crate::authz::scope::require_member(&pool, &c).await?;
     if body.hashes.len() > MAX_TOPUP_HASHES {
         return Ok(HttpResponse::BadRequest().json(ErrorBody {
             error: format!("At most {MAX_TOPUP_HASHES} hashes per request"),
@@ -421,7 +427,6 @@ pub async fn top_up(
             retry_after_seconds: None,
         }));
     }
-    let pool = base_pool(&req)?;
     let org_id: Uuid = sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
         .bind(body.branch_id)
         .fetch_optional(&pool)
@@ -430,6 +435,7 @@ pub async fn top_up(
     if !branch_allowed(&c, org_id, body.branch_id) {
         return Err(not_found());
     }
+    crate::authz::scope::require_branch_access(&pool, &c, body.branch_id).await?;
     let mut wanted: Vec<String> = body
         .hashes
         .iter()
