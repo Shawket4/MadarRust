@@ -1196,3 +1196,26 @@ async fn the_live_order_route_refuses_a_discount_over_the_cap_or_without_the_cap
     let r = test::call_service(&app, post(body(100))).await;
     assert_eq!(r.status(), 403, "no orders.discount.manual_amount");
 }
+
+/// An allow override's limits replace the role's: the cap a till reads for a
+/// hand-typed discount comes from the person's override.
+#[sqlx::test]
+async fn an_allow_override_caps_a_discount_for_one_person(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, limits, reason)
+         VALUES ($1, $2, 205, 'allow', '{\"max_amount\": 500}'::jsonb, 'test')",
+    )
+    .bind(org)
+    .bind(teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let eff = crate::authz::require::effective(&pool, teller, Some(branch)).await.unwrap();
+    assert_eq!(
+        eff.limits_of(crate::authz::Cap::OrdersDiscountManualAmount).max_amount,
+        Some(500)
+    );
+}
