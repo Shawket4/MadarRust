@@ -536,11 +536,22 @@ pub async fn replay(
     // the customer paid and left while the shop was offline. Dropping the op
     // does not un-take the money, it only loses the record and leaves the
     // drawer short at close.
+    // A sale's discount is its own act with its own caps (phase 6). Asked
+    // before the approval is verified, so an approval for it is checked
+    // against the sale's REAL figures, not the ones the approval names.
+    let discount = match &op {
+        ReplayOp::CreateOrder { request, .. } => {
+            crate::orders::discount_authz::discount_ask(pool.get_ref(), token_org, request).await?
+        }
+        _ => None,
+    };
     let approved = match &approval {
-        Some(a) => verify_approval(pool.get_ref(), a, teller_id, token_org).await,
+        Some(a) => {
+            verify_approval(pool.get_ref(), a, teller_id, token_org, discount.as_ref()).await
+        }
         None => Err("none".into()),
     };
-    let mut flags: Vec<(&'static str, &'static str)> = Vec::new();
+    let mut flags: Vec<String> = Vec::new();
     for &(resource, action) in op.required_permissions() {
         match crate::permissions::checker::check_permission_for(
             pool.get_ref(),
@@ -558,7 +569,9 @@ pub async fn replay(
                 if approved
                     .as_ref()
                     .is_ok_and(|cap| cap.meta().legacy == Some((resource, action))) => {}
-            Err(AppError::Forbidden(_)) if op.money_moved() => flags.push((resource, action)),
+            Err(AppError::Forbidden(_)) if op.money_moved() => {
+                flags.push(format!("{resource}:{action}"))
+            }
             Err(e) => return Err(e),
         }
     }
@@ -571,6 +584,39 @@ pub async fn replay(
             return Err(crate::authz::require::denied(cap));
         }
     }
+
+    // ACCEPT AND FLAG the discount: the sale happened with it. Clean when the
+    // author's own caps allow it, or a manager who holds it approved it.
+    let mut discount_approval: Option<Uuid> = None;
+    if let Some(ask) = &discount {
+        let branch = match &op {
+            ReplayOp::CreateOrder { request, .. } => Some(request.branch_id),
+            _ => None,
+        };
+        let eff = crate::authz::require::effective(pool.get_ref(), teller_id, branch).await?;
+        let covered = approved.as_ref().is_ok_and(|c| *c == ask.cap);
+        if covered {
+            discount_approval = approval.as_ref().map(|a| a.id);
+        }
+        if ask.decide(&eff) != crate::authz::Decision::Allow && !covered {
+            flags.push(ask.cap.key().to_string());
+        }
+    }
+    let mut op = op;
+    let order_key = match &mut op {
+        ReplayOp::CreateOrder { request, .. } => {
+            if discount.is_some() {
+                // Recorded as the core sent it; an unverified approval is not
+                // recorded as having let the discount through.
+                request.discount_approval_id = discount_approval;
+                if request.discount_applied_by.is_none() {
+                    request.discount_applied_by = Some(teller_id);
+                }
+            }
+            request.idempotency_key
+        }
+        _ => None,
+    };
 
     // The target must belong to the bearer's org — block any cross-org replay.
     let op_branch = op_branch_must_be_in_org(pool.get_ref(), &op, token_org).await?;
@@ -604,6 +650,17 @@ pub async fn replay(
     // Only once the op has really committed: a flag for an op that never
     // applied would send the owner looking for money that never moved.
     if result.is_ok() && !flags.is_empty() {
+        let subject = match order_key {
+            Some(key) => sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM orders WHERE idempotency_key = $1",
+            )
+            .bind(key)
+            .fetch_optional(pool.get_ref())
+            .await
+            .ok()
+            .flatten(),
+            None => None,
+        };
         record_replay_flags(
             pool.get_ref(),
             token_org,
@@ -612,6 +669,7 @@ pub async fn replay(
             teller_id,
             &flags,
             occurred_at,
+            subject,
         )
         .await;
     }
@@ -627,6 +685,9 @@ pub struct ReplayApproval {
     pub approver_id: Uuid,
     #[serde(default)]
     pub amount_minor: Option<i64>,
+    /// Basis points, for an act capped by `max_percent` (a discount). Additive.
+    #[serde(default)]
+    pub percent_bps: Option<i64>,
 }
 
 /// The approver is an active person of the org, not the author, and holds the
@@ -636,6 +697,7 @@ async fn verify_approval(
     a: &ReplayApproval,
     author: Uuid,
     org: Uuid,
+    discount: Option<&crate::orders::discount_authz::DiscountAsk>,
 ) -> Result<crate::authz::Cap, String> {
     let cap = crate::authz::Cap::from_key(&a.capability).ok_or("unknown capability")?;
     if a.approver_id == author {
@@ -655,8 +717,16 @@ async fn verify_approval(
     let eff = crate::authz::require::effective(pool, a.approver_id, None)
         .await
         .map_err(|e| e.to_string())?;
-    let mut req = madar_authz::Request::of(cap);
-    req.amount = a.amount_minor;
+    let req = match discount.filter(|d| d.cap == cap) {
+        // The sale's own figures: an approval minted for less does not stretch.
+        Some(d) => d.request(),
+        None => {
+            let mut req = madar_authz::Request::of(cap);
+            req.amount = a.amount_minor;
+            req.percent = a.percent_bps;
+            req
+        }
+    };
     match madar_authz::decide(&eff, &req) {
         madar_authz::Decision::Allow => Ok(cap),
         _ => Err("the approver does not hold this act".into()),
@@ -677,8 +747,9 @@ async fn record_approval(
 ) {
     if let Err(e) = sqlx::query(
         "INSERT INTO approvals (id, org_id, branch_id, device_id, capability, subject_user_id,
-                                approver_user_id, amount_minor, op, occurred_at, verified, verification_error)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                approver_user_id, amount_minor, op, occurred_at, verified, verification_error,
+                                percent_bps)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(a.id)
@@ -693,6 +764,7 @@ async fn record_approval(
     .bind(occurred_at)
     .bind(verified.is_ok())
     .bind(verified.as_ref().err())
+    .bind(a.percent_bps)
     .execute(pool)
     .await
     {
@@ -735,8 +807,9 @@ async fn record_replay_flags(
     branch_id: Option<Uuid>,
     op: &'static str,
     author_id: Uuid,
-    flags: &[(&'static str, &'static str)],
+    flags: &[String],
     occurred_at: chrono::DateTime<chrono::Utc>,
+    subject_id: Option<Uuid>,
 ) {
     // Was this a revocation the device had not heard about yet? If anything
     // touching this person's grants was written AFTER the act, the device was
@@ -760,12 +833,11 @@ async fn record_replay_flags(
         "unauthorized_offline"
     };
 
-    for (resource, action) in flags {
-        let cap = format!("{resource}:{action}");
+    for cap in flags {
         if let Err(e) = sqlx::query(
             "INSERT INTO authz_replay_flags
-                 (org_id, branch_id, op, author_id, capability, reason, occurred_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                 (org_id, branch_id, op, author_id, capability, reason, occurred_at, subject_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(org_id)
         .bind(branch_id)
@@ -774,6 +846,7 @@ async fn record_replay_flags(
         .bind(&cap)
         .bind(reason)
         .bind(occurred_at)
+        .bind(subject_id)
         .execute(pool)
         .await
         {
