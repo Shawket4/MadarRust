@@ -602,13 +602,14 @@ pub async fn delete_settings(
     pool: web::Data<PgPool>,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
+    // Permission first (route guard), then what the request is missing.
+    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
     let branch_id = query.branch_id.ok_or_else(|| {
         // Deleting the org default would leave every branch on the built-in
         // defaults with the program silently off — almost never what was meant.
         AppError::BadRequest("branch_id is required: only a branch override may be removed".into())
     })?;
-    let (org_id, claims) = scope_org(pool.get_ref(), &req, Some(branch_id)).await?;
-    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
     sqlx::query("DELETE FROM loyalty_settings WHERE org_id = $1 AND branch_id = $2")
         .bind(org_id)
