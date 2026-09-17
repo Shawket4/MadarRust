@@ -125,7 +125,9 @@ pub async fn system_totals_by_method(
         FROM used u
         WHERE u.method IS NOT NULL AND btrim(u.method) <> ''
         GROUP BY u.method
-        ORDER BY u.method
+        -- "C" collation: byte order, so case-varying method names (e.g. "Cash"
+        -- vs "cash") sort the same regardless of the server's default locale.
+        ORDER BY u.method COLLATE "C"
         "#,
         tendered = crate::orders::TENDERED
     );

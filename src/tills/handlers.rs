@@ -1113,7 +1113,12 @@ pub(crate) async fn report_figures(
                   COUNT(DISTINCT op.order_id)::bigint AS order_count
            FROM order_payments op JOIN orders o ON o.id = op.order_id
            WHERE o.till_id = $1 AND o.status NOT IN ('voided', 'refunded')
-           GROUP BY op.method ORDER BY op.method"#,
+           GROUP BY op.method
+           -- "C" collation: byte order, so "Cash" vs "cash" sorts the same on
+           -- every server regardless of its default locale (case-varying
+           -- payment method names exist — e.g. seeded test data — and the
+           -- till-report test vectors pin this exact order).
+           ORDER BY op.method COLLATE "C""#,
     )
     .bind(till_id)
     .fetch_all(pool)
