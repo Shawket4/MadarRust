@@ -1181,6 +1181,7 @@ pub async fn campaign_effectiveness(
                       AND lt.created_at <= w.sent_at + interval '30 days' \
                 ))::bigint \
            FROM loyalty_winbacks w \
+           JOIN loyalty_customers c ON c.id = w.customer_id AND c.deleted_at IS NULL \
           WHERE w.org_id = $1 AND w.sent_at >= $2 AND w.sent_at < $3",
     )
     .bind(org_id)
@@ -1198,6 +1199,7 @@ pub async fn campaign_effectiveness(
                       AND lt.created_at <= g.sent_at + interval '30 days' \
                 ))::bigint \
            FROM loyalty_birthday_greetings g \
+           JOIN loyalty_customers c ON c.id = g.customer_id AND c.deleted_at IS NULL \
           WHERE g.org_id = $1 AND g.sent_at >= $2 AND g.sent_at < $3",
     )
     .bind(org_id)
@@ -1288,11 +1290,13 @@ pub async fn liability_trend(
     let currency = settings.mode().as_str().to_string();
 
     let points: Vec<LiabilityTrendPoint> = sqlx::query_as(
+        // Every signed ledger row moves the balance: earns, redemptions, manual
+        // and birthday/win-back adjustments, and all their reversals. Leaving the
+        // adjustments out would make the weeks no longer sum to the balance.
         "SELECT date_trunc('week', t.created_at) AS week, \
-                (COALESCE(SUM(t.points) FILTER (WHERE t.kind IN ('earn','reverse_earn')), 0) \
-                 - COALESCE(-SUM(t.points) FILTER (WHERE t.kind IN ('redeem','reverse_redeem')), 0) \
-                )::bigint AS outstanding \
+                COALESCE(SUM(t.points), 0)::bigint AS outstanding \
            FROM loyalty_transactions t \
+           JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
           WHERE t.org_id = $1 AND t.currency = $2 \
             AND t.created_at >= $3 AND t.created_at < $4 \
           GROUP BY week \

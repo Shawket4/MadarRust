@@ -544,7 +544,13 @@ pub async fn manual_deductions_audit(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    let scope = guard_with(&req, pool.get_ref(), org_id, crate::authz::Cap::HrPayrollRead).await?;
+    let scope = guard_with(
+        &req,
+        pool.get_ref(),
+        org_id,
+        crate::authz::Cap::HrPayrollRead,
+    )
+    .await?;
     let filter = format!(
         "pd.org_id = $1 AND pd.source = 'manual' AND {DEDUCTION_IN_SCOPE}
           AND ($2::timestamptz IS NULL OR pd.created_at >= $2)
@@ -622,7 +628,13 @@ pub async fn deduction_overrides_audit(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    let scope = guard_with(&req, pool.get_ref(), org_id, crate::authz::Cap::HrPayrollRead).await?;
+    let scope = guard_with(
+        &req,
+        pool.get_ref(),
+        org_id,
+        crate::authz::Cap::HrPayrollRead,
+    )
+    .await?;
     let filter = format!(
         "pd.org_id = $1 AND (pd.overridden_at IS NOT NULL OR pd.waived_at IS NOT NULL)
           AND {DEDUCTION_IN_SCOPE}
@@ -772,8 +784,13 @@ pub async fn attendance_corrections_audit(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = org_id.into_inner();
-    let scope =
-        guard_with(&req, pool.get_ref(), org_id, crate::authz::Cap::HrAttendanceRead).await?;
+    let scope = guard_with(
+        &req,
+        pool.get_ref(),
+        org_id,
+        crate::authz::Cap::HrAttendanceRead,
+    )
+    .await?;
     // No money on a correction: the amount axis stays 0, the count matters.
     let filter = "a.org_id = $1 AND a.edited_by IS NOT NULL
           AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4))

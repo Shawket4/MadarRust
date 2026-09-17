@@ -810,21 +810,25 @@ pub async fn branch_channel_breakdown(
     let (branch_ids, _org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
-    let rows = sqlx::query_as::<_, ChannelBreakdownRow>(
+    let rows = sqlx::query_as::<_, ChannelBreakdownRow>(&format!(
         r#"
         SELECT o.order_type AS channel,
                COUNT(*)::bigint AS orders,
-               COALESCE(SUM(o.total_amount), 0)::bigint AS revenue,
-               COALESCE(SUM(o.total_amount) / COUNT(*), 0)::bigint AS avg_order_value
+               -- Net of partial refunds, so the channels add up to
+               -- branch_sales.total_revenue (one refund-totals row per order).
+               COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)), 0)::bigint AS revenue,
+               COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)) / COUNT(*), 0)::bigint AS avg_order_value
         FROM orders o
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE o.branch_id = ANY($1)
-          AND o.status NOT IN ('voided', 'refunded')
+          AND o.{sold}
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY o.order_type
         ORDER BY revenue DESC
         "#,
-    )
+        sold = crate::orders::SOLD,
+    ))
     .bind(&branch_ids)
     .bind(query.from)
     .bind(query.to)
@@ -2406,13 +2410,20 @@ pub struct SupplierSpendRow {
     pub total_spend: i64,
 }
 
+/// Spend is read off the goods receipts, which is what the stock ledger's
+/// `purchase_in` / `purchase_return` movements carry: every delivery (a
+/// partial one included) at the cost actually invoiced on receipt, dated when
+/// it arrived, with returns to the supplier (negative lines) netted out. The
+/// PO line's `unit_cost` is only the ORDERED price and a PO's `received_at`
+/// is restamped on each partial, so neither is used. `orders` counts the
+/// distinct purchase orders delivered against (a direct return has none).
 const SUPPLIER_SPEND_SELECT: &str = r#"
-    SELECT po.supplier_id, COALESCE(s.name, 'Unknown supplier') AS supplier_name,
-           COUNT(DISTINCT po.id)::bigint AS orders,
-           COALESCE(SUM(pol.quantity_received * pol.unit_cost), 0)::bigint AS total_spend
-    FROM purchase_orders po
-    JOIN purchase_order_lines pol ON pol.purchase_order_id = po.id
-    LEFT JOIN suppliers s ON s.id = po.supplier_id
+    SELECT gr.supplier_id, COALESCE(s.name, 'Unknown supplier') AS supplier_name,
+           COUNT(DISTINCT gr.purchase_order_id)::bigint AS orders,
+           COALESCE(ROUND(SUM(grl.quantity * COALESCE(grl.unit_cost, 0))), 0)::bigint AS total_spend
+    FROM goods_receipts gr
+    JOIN goods_receipt_lines grl ON grl.goods_receipt_id = gr.id
+    LEFT JOIN suppliers s ON s.id = gr.supplier_id
 "#;
 
 #[utoipa::path(
@@ -2430,17 +2441,17 @@ pub async fn branch_supplier_spend(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_purchasing_read(pool.get_ref(), &claims, *branch_id).await?;
     let (branch_ids, _org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
     let rows = sqlx::query_as::<_, SupplierSpendRow>(&format!(
         r#"
         {SUPPLIER_SPEND_SELECT}
-        WHERE po.branch_id = ANY($1) AND po.status = 'received'
-          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
-          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
-        GROUP BY po.supplier_id, s.name
+        WHERE gr.branch_id = ANY($1)
+          AND ($2::timestamptz IS NULL OR gr.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR gr.received_at <= $3)
+        GROUP BY gr.supplier_id, s.name
         ORDER BY total_spend DESC
         "#
     ))
@@ -2468,22 +2479,25 @@ pub async fn org_supplier_spend(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_org(&claims, *org_id)?;
+    require_purchasing_read(pool.get_ref(), &claims, Uuid::nil()).await?;
+    // The org's branches THIS caller may see: `None` = all of them.
+    let scope =
+        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, *org_id, None).await?;
 
     let rows = sqlx::query_as::<_, SupplierSpendRow>(&format!(
         r#"
         {SUPPLIER_SPEND_SELECT}
-        WHERE po.org_id = $1 AND po.status = 'received'
-          AND ($2::timestamptz IS NULL OR po.received_at >= $2)
-          AND ($3::timestamptz IS NULL OR po.received_at <= $3)
-        GROUP BY po.supplier_id, s.name
+        WHERE gr.org_id = $1 AND ($4::uuid[] IS NULL OR gr.branch_id = ANY($4))
+          AND ($2::timestamptz IS NULL OR gr.received_at >= $2)
+          AND ($3::timestamptz IS NULL OR gr.received_at <= $3)
+        GROUP BY gr.supplier_id, s.name
         ORDER BY total_spend DESC
         "#
     ))
     .bind(*org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -2531,7 +2545,7 @@ pub async fn branch_po_lead_time(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_purchasing_read(pool.get_ref(), &claims, *branch_id).await?;
     let (branch_ids, _org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
@@ -2589,13 +2603,16 @@ pub async fn org_po_lead_time(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_org(&claims, *org_id)?;
+    require_purchasing_read(pool.get_ref(), &claims, Uuid::nil()).await?;
+    // The org's branches THIS caller may see: `None` = all of them.
+    let scope =
+        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, *org_id, None).await?;
 
     let by_supplier = sqlx::query_as::<_, PoLeadTimeRow>(&format!(
         r#"
         {PO_LEAD_TIME_BY_SUPPLIER_SELECT}
         WHERE po.org_id = $1 AND po.status = 'received' AND po.received_at IS NOT NULL
+          AND ($4::uuid[] IS NULL OR po.branch_id = ANY($4))
           AND ($2::timestamptz IS NULL OR po.received_at >= $2)
           AND ($3::timestamptz IS NULL OR po.received_at <= $3)
         GROUP BY po.supplier_id, s.name
@@ -2605,6 +2622,7 @@ pub async fn org_po_lead_time(
     .bind(*org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -2613,6 +2631,7 @@ pub async fn org_po_lead_time(
         SELECT AVG(EXTRACT(EPOCH FROM (po.received_at - po.created_at)) / 86400.0)::float8
         FROM purchase_orders po
         WHERE po.org_id = $1 AND po.status = 'received' AND po.received_at IS NOT NULL
+          AND ($4::uuid[] IS NULL OR po.branch_id = ANY($4))
           AND ($2::timestamptz IS NULL OR po.received_at >= $2)
           AND ($3::timestamptz IS NULL OR po.received_at <= $3)
         "#,
@@ -2620,6 +2639,7 @@ pub async fn org_po_lead_time(
     .bind(*org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -2751,7 +2771,7 @@ pub async fn branch_material_cost_trend(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    require_purchasing_read(pool.get_ref(), &claims, *branch_id).await?;
     let (branch_ids, _org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
@@ -2785,11 +2805,16 @@ pub async fn org_material_cost_trend(
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
-    require_org(&claims, *org_id)?;
+    require_purchasing_read(pool.get_ref(), &claims, Uuid::nil()).await?;
+    // The org's branches THIS caller may see: `None` = all of them.
+    let scope =
+        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, *org_id, None).await?;
 
     let ctes = MATERIAL_COST_TREND_CTES
-        .replace("{scope}", "gr.org_id = $1")
+        .replace(
+            "{scope}",
+            "gr.org_id = $1 AND ($4::uuid[] IS NULL OR gr.branch_id = ANY($4))",
+        )
         .replace("{min_streak}", &MATERIAL_COST_TREND_MIN_STREAK.to_string());
     let rows = sqlx::query_as::<_, MaterialCostTrendRow>(&format!(
         "WITH {ctes} {MATERIAL_COST_TREND_SELECT}"
@@ -2797,6 +2822,7 @@ pub async fn org_material_cost_trend(
     .bind(*org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(&scope)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -2817,6 +2843,23 @@ fn summarize_valuation(items: Vec<ValuationRow>) -> InventoryValuationReport {
         unknown_cost_count,
         items,
     }
+}
+
+/// Supplier spend, PO lead time and material cost trend show what the business
+/// pays its suppliers: `purchasing.orders.read`, at the branch asked for (nil =
+/// anywhere the caller works; the branches are then narrowed by the caller).
+async fn require_purchasing_read(
+    pool: &PgPool,
+    claims: &Claims,
+    branch_id: Uuid,
+) -> Result<(), AppError> {
+    crate::authz::require::require(
+        pool,
+        claims,
+        crate::authz::Cap::PurchasingOrdersRead,
+        (!branch_id.is_nil()).then_some(branch_id),
+    )
+    .await
 }
 
 fn require_org(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {

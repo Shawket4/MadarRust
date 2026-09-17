@@ -3986,23 +3986,55 @@ async fn loyalty_behavior_is_scoped_to_the_callers_branches(pool: PgPool) {
             .to_request()
     };
 
-    let resp = test::call_service(&app, get(token(owner, org, UserRole::OrgAdmin, None), "/loyalty/behavior".into())).await;
+    let resp = test::call_service(
+        &app,
+        get(
+            token(owner, org, UserRole::OrgAdmin, None),
+            "/loyalty/behavior".into(),
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["active_members"], 2, "the owner sees every branch: {body}");
+    assert_eq!(
+        body["active_members"], 2,
+        "the owner sees every branch: {body}"
+    );
 
     let mgr = token(manager, org, UserRole::BranchManager, None);
     let resp = test::call_service(&app, get(mgr.clone(), "/loyalty/behavior".into())).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["active_members"], 1, "a manager counts only their branch: {body}");
+    assert_eq!(
+        body["active_members"], 1,
+        "a manager counts only their branch: {body}"
+    );
     assert_eq!(body["total_members"], 2, "membership is programme-wide");
 
-    let resp = test::call_service(&app, get(mgr, format!("/loyalty/behavior?branch_id={other}"))).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "a branch the manager does not work at");
+    let resp = test::call_service(
+        &app,
+        get(mgr, format!("/loyalty/behavior?branch_id={other}")),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a branch the manager does not work at"
+    );
 
-    let resp = test::call_service(&app, get(token(teller, org, UserRole::Teller, None), "/loyalty/behavior".into())).await;
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN, "a teller holds no loyalty.members.list");
+    let resp = test::call_service(
+        &app,
+        get(
+            token(teller, org, UserRole::Teller, None),
+            "/loyalty/behavior".into(),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a teller holds no loyalty.members.list"
+    );
 }
 
 // ── Campaign effectiveness ────────────────────────────────────────────────────
@@ -4143,4 +4175,126 @@ async fn liability_trend_buckets_net_change_by_week(pool: PgPool) {
     assert_eq!(points.len(), 2);
     assert_eq!(points[0]["outstanding"], 100);
     assert_eq!(points[1]["outstanding"], -30);
+}
+
+/// The weekly net change is every signed ledger row (adjustments included), so
+/// the weeks sum to the live balance; an erased member's rows drop out. Both new
+/// reports are `loyalty.members.list` at a branch the caller may read.
+#[sqlx::test]
+async fn liability_trend_sums_to_balances_and_new_reports_are_gated(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let other = seed_branch(&pool, org, "Zamalek").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    enable_program(&pool, org, 1000, 100, false).await;
+    let kept = seed_member(&pool, org, "+201000000031", "tok-kept").await;
+    let erased = seed_member(&pool, org, "+201000000032", "tok-erased").await;
+    let at = chrono::Utc.with_ymd_and_hms(2024, 1, 3, 12, 0, 0).unwrap();
+    let order = seed_order(&pool, branch, admin, 1).await;
+    let order2 = seed_order(&pool, branch, admin, 2).await;
+    for (member, kind, pts, source, order_id) in [
+        (kept, "earn", 100, "sale", Some(order)),
+        (kept, "redeem", -30, "redemption", Some(order)),
+        (kept, "adjust", 25, "manual", None),
+        (kept, "adjust", 50, "birthday", None),
+        (erased, "earn", 70, "sale", Some(order2)),
+    ] {
+        sqlx::query(
+            "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, created_by, source, created_at) \
+             VALUES ($1, $2, $3, $4::loyalty_txn_kind, 'points', $5, $6, $7, $8, $9)",
+        )
+        .bind(org)
+        .bind(member)
+        .bind(branch)
+        .bind(kind)
+        .bind(pts)
+        .bind(order_id)
+        .bind(admin)
+        .bind(source)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE loyalty_customers SET deleted_at = now() WHERE id = $1")
+        .bind(erased)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let get = |jwt: String, uri: String| {
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .to_request()
+    };
+    let range = "from=2024-01-01T00:00:00Z&to=2024-01-31T00:00:00Z";
+    let resp = test::call_service(
+        &app,
+        get(
+            token(admin, org, UserRole::OrgAdmin, None),
+            format!("/loyalty/liability-trend?{range}"),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = test::read_body_json(resp).await;
+    let net: i64 = body["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["outstanding"].as_i64().unwrap())
+        .sum();
+    let balance: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(points), 0)::bigint FROM loyalty_transactions WHERE customer_id = $1",
+    )
+    .bind(kept)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        net, 145,
+        "100 - 30 + 25 + 50, the erased member left out: {body}"
+    );
+    assert_eq!(net, balance);
+
+    let mgr = token(manager, org, UserRole::BranchManager, None);
+    let tel = token(teller, org, UserRole::Teller, None);
+    for path in ["liability-trend", "campaign-effectiveness"] {
+        let resp = test::call_service(&app, get(mgr.clone(), format!("/loyalty/{path}"))).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path}: manager");
+        let resp = test::call_service(
+            &app,
+            get(mgr.clone(), format!("/loyalty/{path}?branch_id={other}")),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{path}: a branch the manager does not work at"
+        );
+        let resp = test::call_service(&app, get(tel.clone(), format!("/loyalty/{path}"))).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "{path}: a teller holds no loyalty.members.list"
+        );
+    }
 }

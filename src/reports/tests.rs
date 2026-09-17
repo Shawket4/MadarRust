@@ -2519,8 +2519,18 @@ async fn seed_received_po(
     .unwrap();
     // The delivery itself, as `purchasing::receive` records it.
     seed_receipt_line(
-        pool, org_id, branch_id, Some(po_id), Some(line_id), supplier_id, created_by, ing_id,
-        quantity_received, unit_cost, received_at, false,
+        pool,
+        org_id,
+        branch_id,
+        Some(po_id),
+        Some(line_id),
+        supplier_id,
+        created_by,
+        ing_id,
+        quantity_received,
+        unit_cost,
+        received_at,
+        false,
     )
     .await;
 
@@ -2860,4 +2870,592 @@ async fn test_material_cost_trend_branch_and_org(pool: PgPool) {
         assert_eq!(row.cheaper_supplier_id, Some(cheap_co));
         assert_eq!(row.cheaper_cost, Some(90));
     }
+}
+
+// ── PR #6 update: money figures, scoping and 403s ────────────
+
+async fn status_of(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    uri: &str,
+    token: &str,
+) -> u16 {
+    let req = test::TestRequest::get()
+        .uri(uri)
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    test::call_service(app, req).await.status().as_u16()
+}
+
+/// Channels add up to branch_sales: partial refunds netted, a full refund and a
+/// void dropped, a split-tender sale counted once.
+#[sqlx::test]
+async fn channel_breakdown_adds_up_to_branch_sales(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(admin, org_id);
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let till = seed_shift(&pool, branch_id, admin).await;
+
+    // Dine-in 1140, 570 refunded.
+    let a = seed_money_order(&pool, branch_id, admin, till, 1, 1000, 0, 140, 1140).await;
+    seed_refund(&pool, a, till, admin, 570, "cash").await;
+    // Takeaway 2280 paid half cash, half card.
+    let b = seed_money_order(&pool, branch_id, admin, till, 2, 2000, 0, 280, 2280).await;
+    sqlx::query("UPDATE orders SET order_type = 'takeaway' WHERE id = $1")
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM order_payments WHERE order_id = $1")
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO order_payments (order_id, method, amount) VALUES ($1, 'cash', 1140), ($1, 'card', 1140)",
+    )
+    .bind(b)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Takeaway refunded in full, and a voided dine-in: neither is revenue.
+    let c = seed_money_order(&pool, branch_id, admin, till, 3, 500, 0, 70, 570).await;
+    sqlx::query("UPDATE orders SET order_type = 'takeaway' WHERE id = $1")
+        .bind(c)
+        .execute(&pool)
+        .await
+        .unwrap();
+    seed_refund(&pool, c, till, admin, 570, "cash").await;
+    let d = seed_money_order(&pool, branch_id, admin, till, 4, 500, 0, 70, 570).await;
+    sqlx::query("UPDATE orders SET status = 'voided', voided_at = now(), voided_by = $2, void_reason = 'wrong_order' WHERE id = $1")
+        .bind(d)
+        .bind(admin)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let rows = get_json(
+        &app,
+        &format!("/reports/branches/{branch_id}/channel-breakdown"),
+        &token,
+    )
+    .await;
+    let rows = rows.as_array().unwrap();
+    let find = |ch: &str| rows.iter().find(|r| r["channel"] == ch).unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(find("dine_in")["orders"], 1);
+    assert_eq!(find("dine_in")["revenue"], 570);
+    assert_eq!(find("takeaway")["orders"], 1);
+    assert_eq!(find("takeaway")["revenue"], 2280);
+    assert_eq!(find("takeaway")["avg_order_value"], 2280);
+
+    let sales = get_json(
+        &app,
+        &format!("/reports/branches/{branch_id}/sales"),
+        &token,
+    )
+    .await;
+    let sum: i64 = rows.iter().map(|r| r["revenue"].as_i64().unwrap()).sum();
+    let orders: i64 = rows.iter().map(|r| r["orders"].as_i64().unwrap()).sum();
+    assert_eq!(sum, sales["total_revenue"].as_i64().unwrap());
+    assert_eq!(orders, sales["total_orders"].as_i64().unwrap());
+}
+
+/// Supplier spend is what was delivered, at the invoiced cost, returns netted,
+/// in the window it arrived. A branch manager sees only their branch on the org
+/// report; a teller and a manager denied purchasing.orders.read get 403.
+#[sqlx::test]
+async fn supplier_spend_follows_receipts_and_is_scoped(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let mine = seed_branch(&pool, org_id).await;
+    rename_branch(&pool, mine, "Mine").await;
+    let other = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let manager = seed_user(&pool, org_id, "branch_manager").await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, manager, mine).await;
+    assign_user_to_branch(&pool, teller, mine).await;
+    let ing = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    let acme = seed_supplier(&pool, org_id, "Acme").await;
+    let now = Utc::now();
+
+    // A PO for 10 at 200 ordered, delivered 6 @ 210 then 4 @ 190 (invoice
+    // prices), then 2 returned @ 210. Spend = 1260 + 760 - 420 = 1600.
+    let po = seed_received_po(
+        &pool,
+        org_id,
+        mine,
+        Some(acme),
+        admin,
+        ing,
+        6.0,
+        210,
+        now - chrono::Duration::days(5),
+        now - chrono::Duration::days(3),
+    )
+    .await;
+    let line: Uuid =
+        sqlx::query_scalar("SELECT id FROM purchase_order_lines WHERE purchase_order_id = $1")
+            .bind(po)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    seed_receipt_line(
+        &pool,
+        org_id,
+        mine,
+        Some(po),
+        Some(line),
+        Some(acme),
+        admin,
+        ing,
+        4.0,
+        190,
+        now - chrono::Duration::days(2),
+        false,
+    )
+    .await;
+    seed_receipt_line(
+        &pool,
+        org_id,
+        mine,
+        None,
+        None,
+        Some(acme),
+        admin,
+        ing,
+        -2.0,
+        210,
+        now - chrono::Duration::days(1),
+        true,
+    )
+    .await;
+    // Delivered last month: outside the window.
+    seed_receipt_line(
+        &pool,
+        org_id,
+        mine,
+        None,
+        None,
+        Some(acme),
+        admin,
+        ing,
+        100.0,
+        999,
+        now - chrono::Duration::days(40),
+        false,
+    )
+    .await;
+    // The other branch spends 500.
+    seed_received_po(
+        &pool,
+        org_id,
+        other,
+        Some(acme),
+        admin,
+        ing,
+        5.0,
+        100,
+        now - chrono::Duration::days(5),
+        now - chrono::Duration::days(3),
+    )
+    .await;
+
+    let from = (now - chrono::Duration::days(10)).format("%Y-%m-%dT%H:%M:%SZ");
+    let to = now.format("%Y-%m-%dT%H:%M:%SZ");
+    let q = format!("from={from}&to={to}");
+    let admin_t = generate_org_admin_token(admin, org_id);
+    let rows = get_json(
+        &app,
+        &format!("/reports/branches/{mine}/supplier-spend?{q}"),
+        &admin_t,
+    )
+    .await;
+    assert_eq!(rows[0]["total_spend"], 1600, "{rows}");
+    assert_eq!(rows[0]["orders"], 1);
+    let rows = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/supplier-spend?{q}"),
+        &admin_t,
+    )
+    .await;
+    assert_eq!(
+        rows[0]["total_spend"], 2100,
+        "the owner sees both branches: {rows}"
+    );
+
+    let mgr_t = generate_token(manager, Some(org_id), UserRole::BranchManager);
+    for path in ["supplier-spend", "po-lead-time", "material-cost-trend"] {
+        assert_eq!(
+            status_of(&app, &format!("/reports/orgs/{org_id}/{path}"), &mgr_t).await,
+            200,
+            "{path}"
+        );
+    }
+    let rows = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/supplier-spend?{q}"),
+        &mgr_t,
+    )
+    .await;
+    assert_eq!(
+        rows[0]["total_spend"], 1600,
+        "a manager rolls up only their branch: {rows}"
+    );
+    let lead = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/po-lead-time?{q}"),
+        &mgr_t,
+    )
+    .await;
+    assert_eq!(lead["by_supplier"][0]["orders_received"], 1, "{lead}");
+    assert_eq!(
+        status_of(
+            &app,
+            &format!("/reports/branches/{other}/supplier-spend"),
+            &mgr_t
+        )
+        .await,
+        403
+    );
+
+    let teller_t = generate_token(teller, Some(org_id), UserRole::Teller);
+    for path in ["supplier-spend", "po-lead-time", "material-cost-trend"] {
+        assert_eq!(
+            status_of(&app, &format!("/reports/orgs/{org_id}/{path}"), &teller_t).await,
+            403,
+            "org {path}"
+        );
+        assert_eq!(
+            status_of(&app, &format!("/reports/branches/{mine}/{path}"), &teller_t).await,
+            403,
+            "branch {path}"
+        );
+    }
+    // purchasing.orders.read (58) denied to the manager.
+    sqlx::query("INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason) VALUES ($1, $2, 58, 'deny', 'test')")
+        .bind(org_id)
+        .bind(manager)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        status_of(
+            &app,
+            &format!("/reports/orgs/{org_id}/supplier-spend"),
+            &mgr_t
+        )
+        .await,
+        403
+    );
+    assert_eq!(
+        status_of(
+            &app,
+            &format!("/reports/branches/{mine}/material-cost-trend"),
+            &mgr_t
+        )
+        .await,
+        403
+    );
+
+    let stranger_org = seed_org(&pool).await;
+    let stranger = seed_user(&pool, stranger_org, "org_admin").await;
+    assert_eq!(
+        status_of(
+            &app,
+            &format!("/reports/orgs/{org_id}/supplier-spend"),
+            &generate_org_admin_token(stranger, stranger_org)
+        )
+        .await,
+        403
+    );
+}
+
+/// The four newer legal audits: figures, the caller's branches, reports.legal
+/// and the extra HR capability.
+#[sqlx::test]
+async fn new_legal_audits_add_up_and_are_scoped(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let mine = seed_branch(&pool, org_id).await;
+    rename_branch(&pool, mine, "Mine").await;
+    let other = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let manager = seed_user(&pool, org_id, "branch_manager").await;
+    let staff_mine = seed_user(&pool, org_id, "teller").await;
+    let staff_other = seed_user(&pool, org_id, "kitchen").await;
+    // The template grants as a fresh org gets them (the legacy cells feed the
+    // role templates in tests).
+    for role in ["org_admin", "branch_manager"] {
+        grant_permission(&pool, role, "attendance", "read").await;
+    }
+    assign_user_to_branch(&pool, manager, mine).await;
+    assign_user_to_branch(&pool, staff_mine, mine).await;
+    assign_user_to_branch(&pool, staff_other, other).await;
+
+    // Manual deductions: 500 fixed (mine), a 10% one (no amount), 700 (other).
+    for (who, amount, pct) in [
+        (staff_mine, Some(500i64), None::<f64>),
+        (staff_mine, None, Some(10.0)),
+        (staff_other, Some(700), None),
+    ] {
+        sqlx::query(
+            "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, percent_of_base, reason, effective_date, source, created_by)
+             VALUES ($1, $2, $3, $4::numeric, 'uniform', CURRENT_DATE, 'manual', $5)",
+        )
+        .bind(org_id).bind(who).bind(amount).bind(pct).bind(admin)
+        .execute(&pool).await.unwrap();
+    }
+    // Late penalty 300 waived (forgives 300); absence 400 overridden to 100 (forgives 300).
+    sqlx::query(
+        "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, original_amount_piastres, reason, effective_date, source, waived_at, waived_by, waive_reason)
+         VALUES ($1, $2, 300, 300, 'late', CURRENT_DATE, 'late_penalty', now(), $3, 'traffic')",
+    )
+    .bind(org_id).bind(staff_mine).bind(admin).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, original_amount_piastres, reason, effective_date, source, overridden_at, overridden_by, override_reason)
+         VALUES ($1, $2, 100, 400, 'absent', CURRENT_DATE, 'absence', now(), $3, 'sick note')",
+    )
+    .bind(org_id).bind(staff_other).bind(admin).execute(&pool).await.unwrap();
+
+    // Loyalty: a manual +40 at mine, a manual -15 at other, a birthday reward (not audited).
+    let member: Uuid = sqlx::query_scalar(
+        "INSERT INTO loyalty_customers (org_id, phone, name, member_token) VALUES ($1, '0100', 'M', 'tok-legal') RETURNING id",
+    )
+    .bind(org_id).fetch_one(&pool).await.unwrap();
+    for (branch, pts, source) in [
+        (mine, 40, "manual"),
+        (other, -15, "manual"),
+        (mine, 100, "birthday"),
+    ] {
+        sqlx::query(
+            "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, points, created_by, source)
+             VALUES ($1, $2, $3, 'adjust', $4, $5, $6)",
+        )
+        .bind(org_id).bind(member).bind(branch).bind(pts).bind(admin).bind(source)
+        .execute(&pool).await.unwrap();
+    }
+    // Attendance: one correction at each branch, one untouched record.
+    for (branch, who, edited) in [
+        (mine, staff_mine, true),
+        (other, staff_other, true),
+        (mine, staff_mine, false),
+    ] {
+        sqlx::query(
+            "INSERT INTO attendance_records (org_id, user_id, branch_id, business_date, edited_by, edit_reason)
+             VALUES ($1, $2, $3, CURRENT_DATE - (random() * 100)::int, $4, $5)",
+        )
+        .bind(org_id).bind(who).bind(branch)
+        .bind(edited.then_some(admin)).bind(edited.then_some("forgot to check out"))
+        .execute(&pool).await.unwrap();
+    }
+
+    let admin_t = generate_org_admin_token(admin, org_id);
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/manual-deductions-audit"),
+        &admin_t,
+    )
+    .await;
+    assert_eq!(
+        (r["total_count"].as_i64(), r["total_amount_minor"].as_i64()),
+        (Some(3), Some(1200)),
+        "{r}"
+    );
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/deduction-overrides-audit"),
+        &admin_t,
+    )
+    .await;
+    assert_eq!(
+        (r["total_count"].as_i64(), r["total_amount_minor"].as_i64()),
+        (Some(2), Some(600)),
+        "{r}"
+    );
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/loyalty-adjustments-audit"),
+        &admin_t,
+    )
+    .await;
+    assert_eq!(
+        (r["total_count"].as_i64(), r["total_amount_minor"].as_i64()),
+        (Some(2), Some(55)),
+        "{r}"
+    );
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/attendance-corrections-audit"),
+        &admin_t,
+    )
+    .await;
+    assert_eq!(r["total_count"], 2, "{r}");
+    assert_eq!(r["by_reason"][0]["label"], "forgot to check out");
+
+    // The manager: reports.legal + hr.attendance.read by default, NOT hr.payroll.read.
+    let mgr_t = generate_token(manager, Some(org_id), UserRole::BranchManager);
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/loyalty-adjustments-audit"),
+        &mgr_t,
+    )
+    .await;
+    assert_eq!(
+        (r["total_count"].as_i64(), r["total_amount_minor"].as_i64()),
+        (Some(1), Some(40)),
+        "{r}"
+    );
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/attendance-corrections-audit"),
+        &mgr_t,
+    )
+    .await;
+    assert_eq!(r["total_count"], 1, "{r}");
+    for path in ["manual-deductions-audit", "deduction-overrides-audit"] {
+        assert_eq!(
+            status_of(&app, &format!("/reports/orgs/{org_id}/{path}"), &mgr_t).await,
+            403,
+            "{path}: no hr.payroll.read"
+        );
+    }
+    // Given hr.payroll.read (154), the manager sees only their branch's people.
+    sqlx::query("INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason) VALUES ($1, $2, 154, 'allow', 'test')")
+        .bind(org_id).bind(manager).execute(&pool).await.unwrap();
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/manual-deductions-audit"),
+        &mgr_t,
+    )
+    .await;
+    assert_eq!(
+        (r["total_count"].as_i64(), r["total_amount_minor"].as_i64()),
+        (Some(2), Some(500)),
+        "{r}"
+    );
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/deduction-overrides-audit"),
+        &mgr_t,
+    )
+    .await;
+    assert_eq!(
+        (r["total_count"].as_i64(), r["total_amount_minor"].as_i64()),
+        (Some(1), Some(300)),
+        "{r}"
+    );
+
+    let teller_t = generate_token(staff_mine, Some(org_id), UserRole::Teller);
+    let stranger_org = seed_org(&pool).await;
+    let stranger = seed_user(&pool, stranger_org, "org_admin").await;
+    let stranger_t = generate_org_admin_token(stranger, stranger_org);
+    for path in [
+        "manual-deductions-audit",
+        "deduction-overrides-audit",
+        "loyalty-adjustments-audit",
+        "attendance-corrections-audit",
+    ] {
+        let uri = format!("/reports/orgs/{org_id}/{path}");
+        assert_eq!(
+            status_of(&app, &uri, &teller_t).await,
+            403,
+            "{path}: teller"
+        );
+        assert_eq!(
+            status_of(&app, &uri, &stranger_t).await,
+            403,
+            "{path}: another org"
+        );
+    }
+    // reports.legal (220) denied: everything closes, even with hr.payroll.read.
+    sqlx::query("INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason) VALUES ($1, $2, 220, 'deny', 'test')")
+        .bind(org_id).bind(manager).execute(&pool).await.unwrap();
+    for path in [
+        "manual-deductions-audit",
+        "loyalty-adjustments-audit",
+        "attendance-corrections-audit",
+    ] {
+        assert_eq!(
+            status_of(&app, &format!("/reports/orgs/{org_id}/{path}"), &mgr_t).await,
+            403,
+            "{path}"
+        );
+    }
+}
+
+/// Peak days and the timeseries count a voided sale's items nowhere, and the
+/// new sales analytics refuse a manager at a branch they don't work at.
+#[sqlx::test]
+async fn sales_analytics_items_skip_voids_and_are_scoped(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let mine = seed_branch(&pool, org_id).await;
+    rename_branch(&pool, mine, "Mine").await;
+    let other = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let manager = seed_user(&pool, org_id, "branch_manager").await;
+    assign_user_to_branch(&pool, manager, mine).await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let till = seed_shift(&pool, mine, admin).await;
+    let sold = seed_money_order(&pool, mine, admin, till, 1, 1000, 0, 0, 1000).await;
+    let voided = seed_money_order(&pool, mine, admin, till, 2, 1000, 0, 0, 1000).await;
+    sqlx::query("UPDATE orders SET status = 'voided', voided_at = now(), voided_by = $2, void_reason = 'wrong_order' WHERE id = $1")
+        .bind(voided).bind(admin).execute(&pool).await.unwrap();
+    for o in [sold, voided] {
+        sqlx::query("INSERT INTO order_items (order_id, item_name, quantity, unit_price, line_total) VALUES ($1, 'Latte', 2, 500, 1000)")
+            .bind(o).execute(&pool).await.unwrap();
+    }
+    let token = generate_org_admin_token(admin, org_id);
+    let days = get_json(
+        &app,
+        &format!("/reports/branches/{mine}/sales/peak-days"),
+        &token,
+    )
+    .await;
+    let items: i64 = days
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["line_items"].as_i64().unwrap())
+        .sum();
+    let revenue: i64 = days
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["revenue"].as_i64().unwrap())
+        .sum();
+    assert_eq!((items, revenue), (2, 1000));
+    let ts = get_json(
+        &app,
+        &format!("/reports/branches/{mine}/sales/timeseries"),
+        &token,
+    )
+    .await;
+    assert_eq!(ts[0]["line_items"], 2, "{ts}");
+
+    let mgr_t = generate_token(manager, Some(org_id), UserRole::BranchManager);
+    for path in ["sales/peak-days", "channel-breakdown"] {
+        assert_eq!(
+            status_of(&app, &format!("/reports/branches/{other}/{path}"), &mgr_t).await,
+            403,
+            "{path}"
+        );
+    }
+}
+
+async fn rename_branch(pool: &PgPool, branch: Uuid, name: &str) {
+    sqlx::query("UPDATE branches SET name = $2 WHERE id = $1")
+        .bind(branch)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
 }
