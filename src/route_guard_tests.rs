@@ -393,12 +393,11 @@ fn leaf_patterns(dump: &str) -> Vec<String> {
             }
         } else if t.starts_with("patterns: List(") {
             panic!("route guard: a multi-pattern resource needs handling: {t}");
-        } else if t == "nodes: None," {
-            if let Some((d, _)) = stack.last()
-                && ind == d + 4
-            {
-                out.push(stack.iter().map(|(_, p)| p.as_str()).collect::<String>());
-            }
+        } else if t == "nodes: None,"
+            && let Some((d, _)) = stack.last()
+            && ind == d + 4
+        {
+            out.push(stack.iter().map(|(_, p)| p.as_str()).collect::<String>());
         }
         i += 1;
     }

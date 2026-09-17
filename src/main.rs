@@ -15,10 +15,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, analytics, auth, bookings, branches, bundles, costing, customers, delivery, demo, devices,
-    discounts, insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs,
-    payment_methods, permissions, purchasing, qr_card, realtime, recipes, refunds, reports,
-    reservations, staff, stocktakes, sync, tickets, tills, uploads, users,
+    ai, auth, bookings, demo, loyalty, menu, permissions, qr_card, realtime, recipes, staff,
 };
 
 use utoipa::OpenApi;
