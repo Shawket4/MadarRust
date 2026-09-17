@@ -3541,7 +3541,8 @@ mod it {
         let (st, body) = send(
             &app,
             test::TestRequest::get().uri(&format!(
-                "/public/delivery-orders/history?phone={PHONE}&org_id={org}"
+                "/public/delivery-orders/history?phone={PHONE}&org_id={org}&device_token={}",
+                device_token(PHONE)
             )),
         )
         .await;
@@ -3573,7 +3574,8 @@ mod it {
         let (st, body) = send(
             &app,
             test::TestRequest::get().uri(&format!(
-                "/public/delivery-orders/history?phone=01099999999&org_id={org}"
+                "/public/delivery-orders/history?phone=01099999999&org_id={org}&device_token={}",
+                device_token("01099999999")
             )),
         )
         .await;
@@ -3619,7 +3621,8 @@ mod it {
         let (st, body) = send(
             &app,
             test::TestRequest::get().uri(&format!(
-                "/public/delivery-orders/past-locations?phone={PHONE}&org_id={org}"
+                "/public/delivery-orders/past-locations?phone={PHONE}&org_id={org}&device_token={}",
+                device_token(PHONE)
             )),
         )
         .await;
@@ -3630,6 +3633,62 @@ mod it {
             1,
             "two orders to the same location must deduplicate to one past-location entry"
         );
+    }
+
+    /// Owner decision: history and past-locations REQUIRE the device token.
+    /// With real orders on file, a missing, empty, wrong-phone or garbage
+    /// token returns 401 and no data; the correct token returns the data.
+    #[sqlx::test]
+    async fn guest_reads_require_device_token(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_settings(&pool, branch, true, false, 300).await;
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 10.0, 1000.0).await;
+        // Ordering still works (OTP token flow unchanged).
+        place_in_mall_order(&pool, branch, item, 1).await;
+
+        let app = app!(&pool);
+        let other_phone_token = device_token("01099999999");
+        for path in ["history", "past-locations"] {
+            let base = format!("/public/delivery-orders/{path}?phone={PHONE}&org_id={org}");
+            for bad in [
+                String::new(),
+                "&device_token=".to_string(),
+                "&device_token=garbage".to_string(),
+                format!("&device_token={other_phone_token}"),
+            ] {
+                let (st, body) =
+                    send(&app, test::TestRequest::get().uri(&format!("{base}{bad}"))).await;
+                assert_eq!(st, StatusCode::UNAUTHORIZED, "{path}{bad}: {body}");
+                assert!(!body.to_string().contains("in_mall"), "leaked data: {body}");
+            }
+            let (st, body) = send(
+                &app,
+                test::TestRequest::get()
+                    .uri(&format!("{base}&device_token={}", device_token(PHONE))),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{path}: {body}");
+            assert_eq!(body.as_array().unwrap().len(), 1, "{path}: {body}");
+        }
+    }
+
+    /// Past locations with no token → 401 even without orders.
+    #[sqlx::test]
+    async fn guest_past_locations_missing_device_token_rejected(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let app = app!(&pool);
+        let (st, _) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/delivery-orders/past-locations?phone={PHONE}&org_id={org}"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
     }
 
     // ── Outside delivery ──────────────────────────────────────────────────────

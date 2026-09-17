@@ -1671,6 +1671,23 @@ pub async fn create_delivery_order(
 
 // ── Guest history: past orders by phone + org ─────────────────
 
+/// Guest read endpoints (history, past locations) return NO data unless the
+/// caller proves phone ownership with a device token from `/public/otp/verify`.
+/// Missing, empty or wrong token → 401 (the public web client treats any
+/// failure as "no history").
+fn require_guest_device_token(
+    secret: &str,
+    phone: &str,
+    token: Option<&str>,
+) -> Result<(), AppError> {
+    match token {
+        Some(t) if !t.is_empty() && whatsapp::verify_device_token(secret, phone, t) => Ok(()),
+        _ => Err(AppError::Unauthorized(
+            "Phone not verified on this device.".into(),
+        )),
+    }
+}
+
 #[derive(Deserialize, IntoParams)]
 pub struct GuestHistoryQuery {
     pub phone: String,
@@ -1747,14 +1764,10 @@ pub async fn guest_order_history(
 ) -> Result<HttpResponse, AppError> {
     let phone = normalize_phone(&query.phone)?;
 
-    // If a device_token is supplied, it must be valid for this phone.
-    // For branches without OTP (otp_required = false), no token is expected —
-    // we accept phone-only reads (addresses are non-sensitive).
-    if let Some(token) = &query.device_token {
-        if !token.is_empty() && !whatsapp::verify_device_token(&secret.0, &phone, token) {
-            return Err(AppError::Unauthorized("Invalid device token.".into()));
-        }
-    }
+    // Owner decision: the device token (issued by /public/otp/verify) is
+    // REQUIRED. Names, addresses, GPS points and orders are personal data; a
+    // phone number + org id alone must never unlock them.
+    require_guest_device_token(&secret.0, &phone, query.device_token.as_deref())?;
 
     let rows: Vec<OrderHistoryRow> = sqlx::query_as(
         "SELECT d.id, d.delivery_ref, d.status::text AS status, d.channel::text AS channel,
@@ -1857,11 +1870,8 @@ pub async fn guest_past_locations(
 ) -> Result<HttpResponse, AppError> {
     let phone = normalize_phone(&query.phone)?;
 
-    if let Some(token) = &query.device_token {
-        if !token.is_empty() && !whatsapp::verify_device_token(&secret.0, &phone, token) {
-            return Err(AppError::Unauthorized("Invalid device token.".into()));
-        }
-    }
+    // Device token REQUIRED (see guest_order_history).
+    require_guest_device_token(&secret.0, &phone, query.device_token.as_deref())?;
 
     // DISTINCT ON (branch_id, channel, coalesced address key) ordered by most recent.
     // Derived from order history — no separate table needed.

@@ -17271,6 +17271,112 @@
         ]
       }
     },
+    "/inventory/waste": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "POST /inventory/waste — record waste at a branch (ingredient or menu item).",
+        "operationId": "record_waste",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordWasteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "This id was already recorded; nothing new was posted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasteRecorded"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Waste recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WasteRecorded"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/kitchen/items/{item_id}/bump": {
       "post": {
         "tags": [
@@ -38094,6 +38200,123 @@
         ]
       }
     },
+    "/reports/branches/{branch_id}/pos-metrics": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "branch_pos_metrics",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "First branch-local day, `YYYY-MM-DD` (inclusive).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Last branch-local day, `YYYY-MM-DD` (inclusive).",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The till's metrics for branch-local days",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PosMetricsReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/branches/{branch_id}/sales": {
       "get": {
         "tags": [
@@ -52321,6 +52544,221 @@
         ]
       }
     },
+    "/tills/{till_id}/spot-views": {
+      "get": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "list_spot_views",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Who viewed / printed the till's spot report, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TillSpotView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tills"
+        ],
+        "operationId": "create_spot_view",
+        "parameters": [
+          {
+            "name": "till_id",
+            "in": "path",
+            "description": "Till ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpotViewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Already recorded (same id); a print marks it printed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillSpotView"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Spot report view recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TillSpotView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/timezones": {
       "get": {
         "tags": [
@@ -55581,11 +56019,31 @@
               "$ref": "#/components/schemas/AuditBreakdownEntry"
             }
           },
+          "by_kind": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AuditBreakdownEntry"
+            },
+            "description": "Discounts audit only: by act (`preset` / `manual_amount` /\n`manual_percent`; `unattributed` for sales from before). Additive."
+          },
           "by_reason": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AuditBreakdownEntry"
             }
+          },
+          "entries": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/DiscountAuditEntry"
+            },
+            "description": "Discounts audit only: the most recent discounted sales, newest first\n(at most 200). Additive."
           },
           "from": {
             "type": [
@@ -60452,12 +60910,43 @@
             ],
             "format": "int32"
           },
+          "discount_applied_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who put the discount on the sale (the signed-in till person). Read on\nreplay only; live, it is the caller. Additive."
+          },
+          "discount_approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The manager approval (`approval.id` on the replay envelope) that let\nthe discount past the person's cap. Additive."
+          },
           "discount_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "discount_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which discount act this is: `preset` | `manual_amount` | `manual_percent`.\nAbsent (older clients): a `discount_id` means preset, an ad-hoc discount\nis manual of its type. Additive."
+          },
+          "discount_percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The percentage asked for, in basis points (1250 = 12.5%). Additive."
           },
           "discount_type": {
             "type": [
@@ -63133,6 +63622,92 @@
             "type": "number",
             "format": "double",
             "description": "The stored value: a FRACTION for `percentage` (0.14 = 14%, like every\nother rate in this schema), or minor units for `fixed`. The same\ncolumn as [`Discount::value`], spelled the way the engine holds it."
+          }
+        }
+      },
+      "DiscountAuditEntry": {
+        "type": "object",
+        "description": "One discounted sale in the discounts audit.",
+        "required": [
+          "order_id",
+          "branch_name",
+          "created_at",
+          "amount_minor",
+          "flagged"
+        ],
+        "properties": {
+          "amount_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "applied_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who applied it (the till operator for older sales)."
+          },
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "flagged": {
+            "type": "boolean",
+            "description": "The sale was replayed with a discount its author was not allowed and\nno valid manager approval (`authz_replay_flags`)."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`preset` | `manual_amount` | `manual_percent`, or `null` before attribution."
+          },
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "order_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Basis points, for a percentage."
+          },
+          "preset_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "preset_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -68284,12 +68859,56 @@
             "type": "integer",
             "format": "int32"
           },
+          "discount_applied_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who applied the discount. Additive."
+          },
+          "discount_applied_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "discount_approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The manager approval that let the discount past the person's cap. Additive."
+          },
+          "discount_approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The approving manager's name, when the approval was recorded. Additive."
+          },
           "discount_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid"
+          },
+          "discount_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`preset` | `manual_amount` | `manual_percent`; `null` without a\ndiscount or on sales from before discounts were attributed. Additive."
+          },
+          "discount_percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The percentage asked for, in basis points. Additive."
           },
           "discount_rate": {
             "type": "number",
@@ -71483,6 +72102,198 @@
           }
         }
       },
+      "PosMetricsHour": {
+        "type": "object",
+        "required": [
+          "hour",
+          "order_count",
+          "net_sales"
+        ],
+        "properties": {
+          "hour": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Branch-local hour of day, 0–23."
+          },
+          "net_sales": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "PosMetricsItem": {
+        "type": "object",
+        "required": [
+          "item_name",
+          "quantity",
+          "revenue"
+        ],
+        "properties": {
+          "item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The menu item or bundle; null for a line with neither."
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Σ line totals (before refunds), as `branch_sales.top_items.revenue`."
+          }
+        }
+      },
+      "PosMetricsReport": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "timezone",
+          "from",
+          "to",
+          "window_from",
+          "window_to",
+          "net_sales",
+          "gross_sales",
+          "refunded_amount",
+          "order_count",
+          "average_ticket",
+          "tenders",
+          "voided_count",
+          "voided_amount",
+          "refunded_orders_count",
+          "refunds_issued_count",
+          "refunds_issued_amount",
+          "top_items",
+          "hourly"
+        ],
+        "properties": {
+          "average_ticket": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`net_sales / order_count`, rounded half up; 0 with no sales."
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "gross_sales": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "hourly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PosMetricsHour"
+            },
+            "description": "Always 24 rows, hour 0 first."
+          },
+          "net_sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sold sales net of refunds against them (`branch_sales.total_revenue`)."
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sold sales (`branch_sales.total_orders`)."
+          },
+          "refunded_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunded_orders_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sales refunded in full (out of every sold figure above)."
+          },
+          "refunds_issued_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "refunds_issued_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Refunds ISSUED inside the window at this branch, whichever sale they refund."
+          },
+          "tenders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PosMetricsTender"
+            },
+            "description": "By amount, largest first."
+          },
+          "timezone": {
+            "type": "string",
+            "description": "The IANA zone the days were cut in."
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "top_items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PosMetricsItem"
+            },
+            "description": "Top [`TOP_ITEMS`] by quantity (then revenue, then name)."
+          },
+          "voided_amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "voided_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "window_from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "`[window_from, window_to)`: local midnight of `from` to local midnight after `to`."
+          },
+          "window_to": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PosMetricsTender": {
+        "type": "object",
+        "required": [
+          "method",
+          "amount",
+          "order_count"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "method": {
+            "type": "string"
+          },
+          "order_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sold sales with at least one leg in this method."
+          }
+        }
+      },
       "PrepTimeInput": {
         "type": "object",
         "required": [
@@ -74307,6 +75118,89 @@
           }
         }
       },
+      "RecordWasteRequest": {
+        "type": "object",
+        "description": "One waste as a till (or the API) records it.",
+        "required": [
+          "id",
+          "branch_id",
+          "subject_kind",
+          "subject_id",
+          "quantity",
+          "reason"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-minted; the idempotency key."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurred_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it happened on the device. Default: now."
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "In `unit`. Whole units for a menu item."
+          },
+          "reason": {
+            "type": "string",
+            "description": "expired | spoiled | damaged | overproduction | theft | other"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Menu items only: the size whose recipe is wasted (default: the first size)."
+          },
+          "subject_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "An org ingredient id, or a menu item id."
+          },
+          "subject_kind": {
+            "type": "string",
+            "description": "`ingredient` | `menu_item`"
+          },
+          "till_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`g` | `kg` | `ml` | `l` | `pcs`. Default: the ingredient's own unit; a\nmenu item is always `pcs`."
+          }
+        }
+      },
       "Refund": {
         "type": "object",
         "required": [
@@ -76591,6 +77485,94 @@
         },
         "additionalProperties": false
       },
+      "SpotViewApproval": {
+        "type": "object",
+        "description": "A one-time unlock minted on the till: someone holding\n`till.cash_spot_check` typed their PIN.",
+        "required": [
+          "id",
+          "capability",
+          "approver_id"
+        ],
+        "properties": {
+          "approver_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capability": {
+            "type": "string",
+            "description": "Always `till.cash_spot_check`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "SpotViewRequest": {
+        "type": "object",
+        "properties": {
+          "approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SpotViewApproval",
+                "description": "Live route: the one-time unlock, when the caller does not hold\n`till.cash_spot_check`. (Replay carries it on the envelope.)"
+              }
+            ]
+          },
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Set by replay from a verified envelope approval (ignored live)."
+          },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Set by replay from a verified envelope approval (ignored live)."
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Client-minted id; a retry, a replay or the print of the same view is one row."
+          },
+          "printed": {
+            "type": "boolean",
+            "description": "The spot report was printed."
+          },
+          "printed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "viewed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "StaffDocument": {
         "type": "object",
         "required": [
@@ -76838,6 +77820,13 @@
           "created_at"
         ],
         "properties": {
+          "approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The manager who approved it on the till."
+          },
           "balance_after": {
             "type": "number",
             "format": "double"
@@ -76880,6 +77869,19 @@
               "null"
             ]
           },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "device_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -76897,6 +77899,28 @@
               "null"
             ]
           },
+          "occurred_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the waste HAPPENED: the device's time for a till waste, the\nrefund's `issued_at`, the void's `voided_at`, else the post time. The\nlog is ordered by it."
+          },
+          "order_display_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A refund's or void's waste: the sale."
+          },
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
@@ -76912,6 +77936,22 @@
               "null"
             ]
           },
+          "received_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the server received it (= `created_at`). Differs from\n`occurred_at` when a till queued the waste offline."
+          },
+          "refund_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A refund's waste: the refund it came from."
+          },
           "source_id": {
             "type": [
               "string",
@@ -76925,6 +77965,13 @@
               "null"
             ]
           },
+          "till_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "unit": {
             "type": "string"
           },
@@ -76935,6 +77982,55 @@
             ],
             "format": "int64",
             "description": "Piastres per unit at movement time; `null` ⟺ unknown."
+          },
+          "waste_quantity": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The quantity as the person typed it, in `waste_unit`."
+          },
+          "waste_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waste_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`pos` | `dashboard` | `refund` (a refunded sale's stock) | `order` (a\nmade order voided before voids always restocked)."
+          },
+          "waste_subject_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ingredient` | `menu_item`, when the waste was recorded with a header."
+          },
+          "waste_subject_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the person picked (the menu item for an exploded item waste)."
+          },
+          "waste_unit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waste_value_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The whole waste's value (all its lines), piastres."
           }
         }
       },
@@ -78914,6 +80010,13 @@
             "format": "int64",
             "description": "Table bills whose service charge was removed (`orders:waive_service`),\nand what those charges came to. Not part of any total."
           },
+          "spot_views": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TillSpotView"
+            },
+            "description": "Who viewed (and printed) the cash spot report of this till, oldest first. Additive."
+          },
           "standard_float": {
             "type": [
               "integer",
@@ -79021,6 +80124,85 @@
             }
           }
         ]
+      },
+      "TillSpotView": {
+        "type": "object",
+        "required": [
+          "id",
+          "till_id",
+          "branch_id",
+          "viewed_by",
+          "viewed_by_name",
+          "printed",
+          "viewed_at",
+          "created_at"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "approved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "printed": {
+            "type": "boolean"
+          },
+          "printed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "till_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "viewed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "viewed_by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "viewed_by_name": {
+            "type": "string"
+          }
+        }
       },
       "TillStatus": {
         "type": "string",
@@ -81354,7 +82536,8 @@
             "type": [
               "boolean",
               "null"
-            ]
+            ],
+            "description": "Ignored: a void always puts the sale's stock back. Kept so older tills\nthat still send it are read, not refused."
           },
           "voided_at": {
             "type": [
@@ -81540,6 +82723,145 @@
           "step": {
             "type": "string",
             "description": "What was attempted, in words: \"insert the class\", \"update the object\"."
+          }
+        }
+      },
+      "WasteLine": {
+        "type": "object",
+        "description": "One ingredient line of a recorded waste.",
+        "required": [
+          "movement_id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "quantity",
+          "balance_after",
+          "below_zero"
+        ],
+        "properties": {
+          "balance_after": {
+            "type": "number",
+            "format": "double"
+          },
+          "below_zero": {
+            "type": "boolean"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "movement_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "Signed ledger delta (negative), in the ingredient's unit."
+          },
+          "unit": {
+            "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per unit; `null` = unknown."
+          }
+        }
+      },
+      "WasteRecorded": {
+        "type": "object",
+        "required": [
+          "id",
+          "branch_id",
+          "source",
+          "subject_kind",
+          "subject_name",
+          "quantity",
+          "unit",
+          "reason",
+          "value_partial",
+          "occurred_at",
+          "created",
+          "lines"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created": {
+            "type": "boolean",
+            "description": "`false` when this id had already been recorded (nothing new was posted)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WasteLine"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "recorded_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "subject_kind": {
+            "type": "string"
+          },
+          "subject_name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "value_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres at the branch's unit costs; `null` when no line had a cost."
+          },
+          "value_partial": {
+            "type": "boolean"
           }
         }
       },
