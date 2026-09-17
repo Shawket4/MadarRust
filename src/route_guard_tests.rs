@@ -172,12 +172,12 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
     (
         "GET",
         "/public/delivery-orders/history",
-        "guest's own history by phone (+ device token when OTP is on); see owner note",
+        "guest's own history; device token (OTP-verified phone) REQUIRED, 401 without",
     ),
     (
         "GET",
         "/public/delivery-orders/past-locations",
-        "guest's saved addresses by phone (+ device token when OTP is on); see owner note",
+        "guest's saved addresses; device token (OTP-verified phone) REQUIRED, 401 without",
     ),
     (
         "POST",
