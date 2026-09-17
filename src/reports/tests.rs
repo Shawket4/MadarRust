@@ -2382,6 +2382,86 @@ async fn test_channel_breakdown(pool: PgPool) {
     assert_eq!(delivery.revenue, 570);
 }
 
+/// Weekdays and hours are read on the scope's wall clock: a branch that inherits its
+/// org's Cairo zone counts 22:30 UTC on a Sunday as 00:30 Monday, and so does
+/// the org-wide ("all branches") view.
+#[sqlx::test]
+async fn peak_days_and_hours_read_the_scope_timezone(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    sqlx::query("UPDATE organizations SET timezone = 'Africa/Cairo' WHERE id = $1")
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE branches SET timezone = NULL WHERE id = $1")
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let order = seed_order(&pool, branch_id, user_id, shift_id).await;
+    // Sunday 7 Jan 2024 22:30 UTC = Monday 00:30 in Cairo.
+    sqlx::query("UPDATE orders SET created_at = '2024-01-07T22:30:00Z' WHERE id = $1")
+        .bind(order)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    for scope in [branch_id, Uuid::nil()] {
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/reports/branches/{scope}/sales/peak-days?from=2024-01-01T00:00:00Z&to=2024-01-31T00:00:00Z"
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success(), "{scope}: {}", resp.status());
+        let rows: Vec<PeakDayPoint> = test::read_body_json(resp).await;
+        let busy: Vec<i32> = rows
+            .iter()
+            .filter(|r| r.orders > 0)
+            .map(|r| r.day_of_week)
+            .collect();
+        assert_eq!(
+            busy,
+            vec![1],
+            "{scope}: the order is a Monday order locally"
+        );
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/reports/branches/{scope}/sales/peak-hours?from=2024-01-01T00:00:00Z&to=2024-01-31T00:00:00Z"
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success(), "{scope}: {}", resp.status());
+        let rows: Vec<PeakHourPoint> = test::read_body_json(resp).await;
+        let busy: Vec<i32> = rows
+            .iter()
+            .filter(|r| r.orders > 0)
+            .map(|r| r.hour)
+            .collect();
+        assert_eq!(
+            busy,
+            vec![0],
+            "{scope}: 22:30 UTC is the 00:00 hour in Cairo"
+        );
+    }
+}
+
 #[sqlx::test]
 async fn test_branch_sales_peak_days(pool: PgPool) {
     let app = test::init_service(
