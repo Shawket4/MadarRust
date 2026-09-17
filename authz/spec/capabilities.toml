@@ -2142,6 +2142,20 @@ en = "Re-apply packaging rules to every menu item"
 # AR draft (2026-09-16), pending owner review.
 ar = "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة"
 
+[[cap]]
+id = 222
+key = "orders.held.resume_others"
+group = "selling"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+approval = true
+pos = true
+en = "Resume an order someone else started"
+ar = "استئناف طلب بدأه شخص آخر"
+hint_en = "A held order another person parked on this till. Without it, a manager enters their PIN."
+hint_ar = "طلب معلّق تركه شخص آخر على هذا الجهاز. بدونها يُدخل المدير رمزه."
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.

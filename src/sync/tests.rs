@@ -915,6 +915,247 @@ async fn a_manager_approval_carries_a_void_the_teller_does_not_hold(pool: PgPool
     assert_eq!(approver, manager);
 }
 
+/// Deferred feature 5: teller A started a cart, parked it, and teller B
+/// resumed it after a teller switch and settled it. The replayed sale is B's
+/// (drawer, reports) and records A as the person who started it, with the
+/// manager's approval kept when one rode along. A `started_by` naming nobody
+/// of the org is dropped, never a refusal: the sale happened.
+#[sqlx::test]
+async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: PgPool) {
+    let app = app_with_orders!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
+    let ali = seed_user(&pool, org, "teller").await;
+    let badr = seed_user(&pool, org, "teller").await;
+    let manager = seed_user(&pool, org, "branch_manager").await;
+    let other_org = seed_org(&pool).await;
+    let stranger = seed_user(&pool, other_org, "teller").await;
+    let shift = open_shift_row(&pool, branch, badr).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for role in ["teller", "branch_manager"] {
+        for (r, a) in [
+            ("orders", "create"),
+            ("orders", "read"),
+            ("order_items", "create"),
+            ("payments", "create"),
+        ] {
+            grant(&pool, role, r, a).await;
+        }
+    }
+    let bearer = token(badr, org, UserRole::Teller);
+    let sale = |started_by: Uuid, approval: Option<serde_json::Value>| {
+        let mut v = serde_json::json!({
+            "op": "create_order",
+            "teller_id": badr,
+            "request": {
+                "branch_id": branch,
+                "till_id": shift,
+                "payment_method": "cash",
+                "items": [{ "menu_item_id": item, "quantity": 1 }],
+                "idempotency_key": Uuid::new_v4(),
+                "started_by": started_by
+            }
+        });
+        if let Some(a) = approval {
+            v["approval"] = a;
+        }
+        v
+    };
+
+    let approval = serde_json::json!({ "id": Uuid::new_v4(), "capability": "orders.held.resume_others", "approver_id": manager });
+    let r = replay(&app, &bearer, &sale(ali, Some(approval))).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(order.order.teller_id, badr, "settled by Badr: his drawer");
+    assert_eq!(order.order.started_by, Some(ali), "started by Ali");
+    assert!(order.order.started_by_name.is_some());
+
+    // The order read back shows both people.
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders/{}", order.order.id))
+        .insert_header(("Authorization", format!("Bearer {bearer}")))
+        .to_request();
+    let r = test::call_service(&app, req).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let read: serde_json::Value = test::read_body_json(r).await;
+    assert_eq!(read["teller_id"], serde_json::json!(badr));
+    assert_eq!(read["started_by"], serde_json::json!(ali));
+    assert!(read["started_by_name"].is_string());
+    let (teller, by): (Uuid, Option<Uuid>) =
+        sqlx::query_as("SELECT teller_id, started_by FROM orders WHERE id = $1")
+            .bind(order.order.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((teller, by), (badr, Some(ali)));
+    let (verified, approver): (bool, Uuid) = sqlx::query_as(
+        "SELECT verified, approver_user_id FROM approvals WHERE subject_user_id = $1 AND op = 'CreateOrder'",
+    )
+    .bind(badr)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(verified, "the manager holds orders.held.resume_others");
+    assert_eq!(
+        flags_of(&pool, badr).await,
+        0,
+        "an approved resume is clean"
+    );
+    assert_eq!(approver, manager);
+
+    // A name from another org is dropped, the sale still lands.
+    let r = replay(&app, &bearer, &sale(stranger, None)).await;
+    assert!(
+        r.status().is_success(),
+        "accept, never reject: {}",
+        r.status()
+    );
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(order.order.started_by, None);
+
+    // Naming yourself records nothing extra.
+    let r = replay(&app, &bearer, &sale(badr, None)).await;
+    assert!(r.status().is_success());
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(order.order.started_by, None);
+
+    // Ali's order settled by Badr with no approval: accepted and flagged.
+    let r = replay(&app, &bearer, &sale(ali, None)).await;
+    assert!(r.status().is_success(), "accept and flag: {}", r.status());
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(
+        order.order.started_by,
+        Some(ali),
+        "the sale still names both"
+    );
+    let (cap, reason): (String, String) =
+        sqlx::query_as("SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1")
+            .bind(badr)
+            .fetch_one(&pool)
+            .await
+            .expect("one flag for the owner");
+    assert_eq!(cap, "orders.held.resume_others");
+    assert_eq!(reason, "unauthorized_offline");
+
+    // A manager who holds the capability settles Ali's order: clean.
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(manager)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mbearer = token(manager, org, UserRole::BranchManager);
+    let mshift = open_shift_row(&pool, branch, manager).await;
+    let mut msale = sale(ali, None);
+    msale["teller_id"] = serde_json::json!(manager);
+    msale["request"]["till_id"] = serde_json::json!(mshift);
+    let r = replay(&app, &mbearer, &msale).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    assert_eq!(flags_of(&pool, manager).await, 0, "the manager holds it");
+}
+
+async fn flags_of(pool: &PgPool, author: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM authz_replay_flags WHERE author_id = $1")
+        .bind(author)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Deferred feature 5: a till closed with held orders still parked records
+/// how many were left open (and their total), through the live close route and
+/// through a replayed close alike, and the Z report carries it. A close that
+/// says nothing (an older till) stores nothing.
+#[sqlx::test]
+async fn a_close_records_the_held_orders_left_open(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(BranchEventHub::new()))
+            .configure(crate::tills::routes::configure)
+            .configure(crate::sync::routes::configure),
+    )
+    .await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    for (r, a) in [("tills", "read"), ("tills", "update"), ("tills", "create")] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let bearer = token(teller, org, UserRole::Teller);
+    let report = |till: Uuid| {
+        test::TestRequest::get()
+            .uri(&format!("/tills/{till}/report"))
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .to_request()
+    };
+
+    // Live close, two held orders worth 12.50 left.
+    let live = open_shift_row(&pool, branch, teller).await;
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/tills/{live}/close"))
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(serde_json::json!({
+                "closing_cash_declared": 0,
+                "held_orders_left_open": 2,
+                "held_orders_left_open_total": 1250
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let rep: serde_json::Value =
+        test::read_body_json(test::call_service(&app, report(live)).await).await;
+    assert_eq!(rep["held_orders_left_open"], 2, "{rep}");
+    assert_eq!(rep["held_orders_left_open_total"], 1250);
+    assert_eq!(rep["till"]["held_orders_left_open"], 2);
+
+    // Replayed close, one left.
+    let queued = open_shift_row(&pool, branch, teller).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({
+            "op": "close_till", "teller_id": teller, "till_id": queued,
+            "request": { "closing_cash_declared": 0, "held_orders_left_open": 1, "held_orders_left_open_total": 500 }
+        }),
+    )
+    .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let rep: serde_json::Value =
+        test::read_body_json(test::call_service(&app, report(queued)).await).await;
+    assert_eq!(rep["held_orders_left_open"], 1, "{rep}");
+
+    // An older till's close says nothing: nothing is stored.
+    let old = open_shift_row(&pool, branch, teller).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({ "op": "close_till", "teller_id": teller, "till_id": old,
+            "request": { "closing_cash_declared": 0 } }),
+    )
+    .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let stored: Option<i32> =
+        sqlx::query_scalar("SELECT held_orders_left_open FROM tills WHERE id = $1")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, None);
+}
+
 // ── Discounts (phase 6): per-person caps, accept-and-flag, manager approval ──
 
 /// Cap a role's discount grant, as the dashboard's limits editor would.

@@ -667,6 +667,23 @@ pub async fn replay(
         }
     }
 
+    // A sale of a held order someone else started (the POS queue, deferred
+    // feature 5) asks the ringer for `orders.held.resume_others`, or a
+    // manager's approval for it. The sale already happened, so a miss is
+    // accepted and flagged, never refused.
+    if let ReplayOp::CreateOrder { request, .. } = &op
+        && let Some(by) = request.started_by
+        && by != teller_id
+    {
+        let cap = crate::authz::Cap::OrdersHeldResumeOthers;
+        let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
+            .await?
+            .can(cap);
+        if !held && !approved.as_ref().is_ok_and(|c| *c == cap) {
+            flags.push(cap.key().to_string());
+        }
+    }
+
     for &cap in op.flagged_caps() {
         let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
             .await?
@@ -960,7 +977,7 @@ async fn record_replay_flags(
         .bind(branch_id)
         .bind(op)
         .bind(author_id)
-        .bind(&cap)
+        .bind(cap)
         .bind(reason)
         .bind(occurred_at)
         .bind(subject_id)

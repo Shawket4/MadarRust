@@ -59212,6 +59212,21 @@
             ],
             "format": "uuid"
           },
+          "held_orders_left_open": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Held orders (and open counter carts) still parked on the device when\nthe teller chose to close anyway, and their total. Additive; older\ntills omit them."
+          },
+          "held_orders_left_open_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "reconciliation": {
             "type": [
               "array",
@@ -61013,6 +61028,14 @@
               "null"
             ],
             "description": "Where the drink is going: `\"takeaway\"` (default) or `\"dine_in\"`. NOT\n`order_type`: that is derived from whether a waiter's ticket was settled\nand decides the service charge. This says only whether the customer is\ndrinking in — so a counter shop with no floor can say it — and its only\neffect is that packaging (cups, lids, straws) is not deducted from\nstock. Absent ⇒ takeaway, which is what every client before this did."
+          },
+          "started_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The person who started this sale's cart, when the till says it was not\nthe person ringing it (a held order resumed after a teller switch).\nRecorded when it names someone of the same org; anything else is\ndropped with a warning, never refused. Additive; older tills omit it."
           },
           "subtotal": {
             "type": [
@@ -69041,6 +69064,20 @@
             "type": "string",
             "format": "uuid",
             "description": "DEPRECATED: same value as `till_id` (required by POS v0.5.1/v0.6.0)."
+          },
+          "started_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who started this sale's cart when it is not the person who rang it: a\nheld order resumed after a teller switch on the till. `null` otherwise.\nAdditive."
+          },
+          "started_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "status": {
             "type": "string"
@@ -79545,6 +79582,21 @@
             ],
             "format": "uuid"
           },
+          "held_orders_left_open": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Held (parked) orders the closing teller was warned about and left open\nfor the next till, and their total in minor units. `null` when the\nclose did not say (older clients, forced closes). Additive."
+          },
+          "held_orders_left_open_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -80027,6 +80079,21 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "The branch changefeed horizon read BEFORE the figures (OFFLINE_B_DESIGN\n§7): every change with `seq <= as_of_seq` is in this report. A device\nwhose cursor has reached it, with nothing of the till still on its way,\ncan take these figures as the authority. `0` when no horizon was\navailable (then it is never newer than any cursor). Additive."
+              },
+              "held_orders_left_open": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "\"N held orders left open\" at this close (see [`Till`]). Additive."
+              },
+              "held_orders_left_open_total": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32"
               },
               "old_bills_at_close": {
                 "type": [
