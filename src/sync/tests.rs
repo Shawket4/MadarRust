@@ -1069,3 +1069,89 @@ async fn flags_of(pool: &PgPool, author: Uuid) -> i64 {
         .await
         .unwrap()
 }
+
+/// Deferred feature 5: a till closed with held orders still parked records
+/// how many were left open (and their total), through the live close route and
+/// through a replayed close alike, and the Z report carries it. A close that
+/// says nothing (an older till) stores nothing.
+#[sqlx::test]
+async fn a_close_records_the_held_orders_left_open(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(BranchEventHub::new()))
+            .configure(crate::tills::routes::configure)
+            .configure(crate::sync::routes::configure),
+    )
+    .await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    for (r, a) in [("tills", "read"), ("tills", "update"), ("tills", "create")] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let bearer = token(teller, org, UserRole::Teller);
+    let report = |till: Uuid| {
+        test::TestRequest::get()
+            .uri(&format!("/tills/{till}/report"))
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .to_request()
+    };
+
+    // Live close, two held orders worth 12.50 left.
+    let live = open_shift_row(&pool, branch, teller).await;
+    let r = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/tills/{live}/close"))
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(serde_json::json!({
+                "closing_cash_declared": 0,
+                "held_orders_left_open": 2,
+                "held_orders_left_open_total": 1250
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let rep: serde_json::Value =
+        test::read_body_json(test::call_service(&app, report(live)).await).await;
+    assert_eq!(rep["held_orders_left_open"], 2, "{rep}");
+    assert_eq!(rep["held_orders_left_open_total"], 1250);
+    assert_eq!(rep["till"]["held_orders_left_open"], 2);
+
+    // Replayed close, one left.
+    let queued = open_shift_row(&pool, branch, teller).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({
+            "op": "close_till", "teller_id": teller, "till_id": queued,
+            "request": { "closing_cash_declared": 0, "held_orders_left_open": 1, "held_orders_left_open_total": 500 }
+        }),
+    )
+    .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let rep: serde_json::Value =
+        test::read_body_json(test::call_service(&app, report(queued)).await).await;
+    assert_eq!(rep["held_orders_left_open"], 1, "{rep}");
+
+    // An older till's close says nothing: nothing is stored.
+    let old = open_shift_row(&pool, branch, teller).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({ "op": "close_till", "teller_id": teller, "till_id": old,
+            "request": { "closing_cash_declared": 0 } }),
+    )
+    .await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let stored: Option<i32> =
+        sqlx::query_scalar("SELECT held_orders_left_open FROM tills WHERE id = $1")
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, None);
+}

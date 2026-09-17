@@ -58754,6 +58754,21 @@
             ],
             "format": "uuid"
           },
+          "held_orders_left_open": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Held orders (and open counter carts) still parked on the device when\nthe teller chose to close anyway, and their total. Additive; older\ntills omit them."
+          },
+          "held_orders_left_open_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "reconciliation": {
             "type": [
               "array",
@@ -78471,6 +78486,21 @@
             ],
             "format": "uuid"
           },
+          "held_orders_left_open": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Held (parked) orders the closing teller was warned about and left open\nfor the next till, and their total in minor units. `null` when the\nclose did not say (older clients, forced closes). Additive."
+          },
+          "held_orders_left_open_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -78946,6 +78976,21 @@
                 "type": "integer",
                 "format": "int64",
                 "description": "The branch changefeed horizon read BEFORE the figures (OFFLINE_B_DESIGN\n§7): every change with `seq <= as_of_seq` is in this report. A device\nwhose cursor has reached it, with nothing of the till still on its way,\ncan take these figures as the authority. `0` when no horizon was\navailable (then it is never newer than any cursor). Additive."
+              },
+              "held_orders_left_open": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "description": "\"N held orders left open\" at this close (see [`Till`]). Additive."
+              },
+              "held_orders_left_open_total": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32"
               },
               "old_bills_at_close": {
                 "type": [
