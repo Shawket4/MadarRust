@@ -1328,6 +1328,10 @@ pub(crate) async fn settle_open_ticket_inner(
         discount_type,
         discount_value,
         discount_id,
+        discount_kind: None,
+        discount_percent_bps: None,
+        discount_applied_by: None,
+        discount_approval_id: None,
         amount_tendered: body.amount_tendered,
         tip_amount: body.tip_amount,
         tip_payment_method: body.tip_payment_method.clone(),
@@ -1351,6 +1355,8 @@ pub(crate) async fn settle_open_ticket_inner(
         idempotency_key: Some(*id),
         order_number: None,
         order_ref: None,
+        // A settle's second person is the waiter, derived from the ticket.
+        started_by: None,
     };
 
     // hub = None → don't re-fire the kitchen (the items already fired at order

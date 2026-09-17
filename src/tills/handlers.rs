@@ -96,6 +96,15 @@ pub struct Till {
     pub disagreement_count: i64,
     pub open_bills_at_close: Option<i32>,
     pub old_bills_at_close: Option<i32>,
+    /// Held (parked) orders the closing teller was warned about and left open
+    /// for the next till, and their total in minor units. `null` when the
+    /// close did not say (older clients, forced closes). Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub held_orders_left_open: Option<i32>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub held_orders_left_open_total: Option<i32>,
 }
 
 /// Every column of [`Till`], from `tills s` joined to `users u`, `branches b`.
@@ -110,7 +119,8 @@ pub(crate) const TILL_COLUMNS: &str = r#"
     s.device_id, s.device_code, s.device_label, s.verification,
     s.opened_while_another_open, s.other_till_id, s.flagged_at, s.reconciliation_status,
     (SELECT COUNT(*) FROM till_reconciliations r WHERE r.till_id = s.id AND r.status = 'disagreed') AS disagreement_count,
-    s.open_bills_at_close, s.old_bills_at_close
+    s.open_bills_at_close, s.old_bills_at_close,
+    s.held_orders_left_open, s.held_orders_left_open_total
 "#;
 pub(crate) const TILL_FROM: &str =
     "FROM tills s JOIN users u ON u.id = s.teller_id JOIN branches b ON b.id = s.branch_id";
@@ -327,6 +337,9 @@ pub struct TillReportFigures {
     pub standard_float: Option<i64>,
     pub suggested_safe_drop: Option<i64>,
     pub expected_cash: i64,
+    /// Who viewed (and printed) the cash spot report of this till, oldest first. Additive.
+    #[serde(default)]
+    pub spot_views: Vec<crate::tills::spot_views::TillSpotView>,
     pub printed_at: DateTime<Utc>,
     #[serde(default)]
     pub timezone: Option<String>,
@@ -347,6 +360,11 @@ pub struct TillReportResponse {
     pub reconciliation: Vec<TillReconciliationLine>,
     pub old_bills_at_close: Option<i32>,
     pub open_bills_at_close: Option<i32>,
+    /// "N held orders left open" at this close (see [`Till`]). Additive.
+    #[serde(default)]
+    pub held_orders_left_open: Option<i32>,
+    #[serde(default)]
+    pub held_orders_left_open_total: Option<i32>,
     pub order_number_range: OrderNumberRange,
     /// The branch changefeed horizon read BEFORE the figures (OFFLINE_B_DESIGN
     /// §7): every change with `seq <= as_of_seq` is in this report. A device
@@ -441,6 +459,13 @@ pub struct CloseTillRequest {
     /// Absent (old clients) → every used method is stored `unreviewed`.
     #[serde(default)]
     pub reconciliation: Option<Vec<ReconciliationInput>>,
+    /// Held orders (and open counter carts) still parked on the device when
+    /// the teller chose to close anyway, and their total. Additive; older
+    /// tills omit them.
+    #[serde(default)]
+    pub held_orders_left_open: Option<i32>,
+    #[serde(default)]
+    pub held_orders_left_open_total: Option<i32>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -1122,6 +1147,8 @@ pub async fn get_till_report(
     Ok(HttpResponse::Ok().json(TillReportResponse {
         old_bills_at_close: till.old_bills_at_close,
         open_bills_at_close: till.open_bills_at_close,
+        held_orders_left_open: till.held_orders_left_open,
+        held_orders_left_open_total: till.held_orders_left_open_total,
         order_number_range: OrderNumberRange {
             device_code: device_code.or(till.device_code.clone()),
             first,
@@ -1243,7 +1270,9 @@ pub(crate) async fn report_figures(
         ("open", Some(float)) => Some((expected_cash - float).max(0)),
         _ => None,
     };
+    let spot_views = crate::tills::spot_views::spot_views_for_till(pool, till_id).await?;
     Ok(TillReportFigures {
+        spot_views,
         payment_summary,
         total_payments,
         voided_amount,
@@ -1647,7 +1676,8 @@ pub(crate) async fn close_till_inner(
     sqlx::query(
         "UPDATE tills SET status = 'closed', closing_cash_declared = $2, closing_cash_system = $3, \
             closed_at = $4, closed_by = $5, notes = COALESCE($6, notes), closed_device_id = $7, \
-            open_bills_at_close = $8, old_bills_at_close = $9 WHERE id = $1",
+            open_bills_at_close = $8, old_bills_at_close = $9, \
+            held_orders_left_open = $10, held_orders_left_open_total = $11 WHERE id = $1",
     )
     .bind(till_id)
     .bind(body.closing_cash_declared)
@@ -1658,6 +1688,8 @@ pub(crate) async fn close_till_inner(
     .bind(device_id)
     .bind(notice.open_bills_count as i32)
     .bind(notice.old_bills_count as i32)
+    .bind(body.held_orders_left_open.map(|n| n.max(0)))
+    .bind(body.held_orders_left_open_total.map(|n| n.max(0)))
     .execute(&mut *tx)
     .await?;
     let (reconciliation, rollup) = reconcile::write_close_reconciliation(

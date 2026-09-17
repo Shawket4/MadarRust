@@ -286,7 +286,8 @@ pub async fn project(
         "ingredient" => {
             by_sql(
                 conn,
-                "SELECT i.id, json_build_object('id', i.id, 'name', i.name, 'unit', i.unit::text, 'is_active', i.is_active) \
+                "SELECT i.id, json_build_object('id', i.id, 'name', i.name, 'unit', i.unit::text, 'is_active', i.is_active, \
+                        'cost_per_unit', i.cost_per_unit::float8) \
                    FROM org_ingredients i WHERE i.id = ANY($1) AND i.deleted_at IS NULL",
                 ids,
             )
@@ -470,8 +471,14 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
             );
             // The per-method close reconciliation, for the Z report the device prints.
             let mut lines = crate::tills::reconcile::stored_lines_by_till(&mut *conn, ids).await?;
+            // Who viewed / printed the spot report, for the Z report and the ledger rows.
+            let mut checks = crate::tills::spot_views::spot_views_by_till(&mut *conn, ids).await?;
             for (id, v) in out.iter_mut() {
                 if let Value::Object(m) = v {
+                    m.insert(
+                        "spot_views".into(),
+                        serde_json::to_value(checks.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([])),
+                    );
                     m.insert(
                         "reconciliation".into(),
                         serde_json::to_value(lines.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([])),
@@ -543,7 +550,9 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'service_charge_waived_by', o.service_charge_waived_by, \
                         'service_charge_waived_by_name', sw.name, \
                         'service_charge_waived_at', o.service_charge_waived_at, \
-                        'service_charge_waived_amount', o.service_charge_waived_amount) \
+                        'service_charge_waived_amount', o.service_charge_waived_amount, \
+                        'discount_kind', o.discount_kind, 'discount_percent_bps', o.discount_percent_bps, \
+                        'discount_applied_by', o.discount_applied_by, 'discount_approval_id', o.discount_approval_id) \
                    FROM orders o LEFT JOIN users sw ON sw.id = o.service_charge_waived_by \
                   WHERE o.id = ANY($1)",
             )

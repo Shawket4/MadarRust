@@ -44,8 +44,15 @@ const ORDER_SELECT: &str =
      o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification,
      o.tax_inclusive, o.tax_rate_applied, o.service_charge_rate_applied, o.service_charge_taxable_applied,
      o.service_charge_waived_by, sw.name AS service_charge_waived_by_name,
-     o.service_charge_waived_at, o.service_charge_waived_amount
+     o.service_charge_waived_at, o.service_charge_waived_amount,
+     o.started_by, sb.name AS started_by_name,
+     o.discount_kind, o.discount_percent_bps, o.discount_applied_by,
+     (SELECT name FROM users WHERE id = o.discount_applied_by) AS discount_applied_by_name,
+     o.discount_approval_id,
+     (SELECT au.name FROM approvals ap JOIN users au ON au.id = ap.approver_user_id
+       WHERE ap.id = o.discount_approval_id) AS discount_approved_by_name
      FROM orders o JOIN users u ON u.id = o.teller_id
+     LEFT JOIN users sb ON sb.id = o.started_by
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN users sw ON sw.id = o.service_charge_waived_by
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
@@ -312,6 +319,39 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub service_charge_waived_amount: Option<i32>,
+    /// Who started this sale's cart when it is not the person who rang it: a
+    /// held order resumed after a teller switch on the till. `null` otherwise.
+    /// Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub started_by: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub started_by_name: Option<String>,
+    /// `preset` | `manual_amount` | `manual_percent`; `null` without a
+    /// discount or on sales from before discounts were attributed. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub discount_kind: Option<String>,
+    /// The percentage asked for, in basis points. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub discount_percent_bps: Option<i32>,
+    /// Who applied the discount. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub discount_applied_by: Option<Uuid>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub discount_applied_by_name: Option<String>,
+    /// The manager approval that let the discount past the person's cap. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub discount_approval_id: Option<Uuid>,
+    /// The approving manager's name, when the approval was recorded. Additive.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub discount_approved_by_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -545,6 +585,22 @@ pub struct CreateOrderRequest {
     pub discount_type: Option<String>,
     pub discount_value: Option<Decimal>,
     pub discount_id: Option<Uuid>,
+    /// Which discount act this is: `preset` | `manual_amount` | `manual_percent`.
+    /// Absent (older clients): a `discount_id` means preset, an ad-hoc discount
+    /// is manual of its type. Additive.
+    #[serde(default)]
+    pub discount_kind: Option<String>,
+    /// The percentage asked for, in basis points (1250 = 12.5%). Additive.
+    #[serde(default)]
+    pub discount_percent_bps: Option<i32>,
+    /// Who put the discount on the sale (the signed-in till person). Read on
+    /// replay only; live, it is the caller. Additive.
+    #[serde(default)]
+    pub discount_applied_by: Option<Uuid>,
+    /// The manager approval (`approval.id` on the replay envelope) that let
+    /// the discount past the person's cap. Additive.
+    #[serde(default)]
+    pub discount_approval_id: Option<Uuid>,
     pub amount_tendered: Option<i32>,
     pub tip_amount: Option<i32>,
     pub tip_payment_method: Option<String>,
@@ -594,6 +650,12 @@ pub struct CreateOrderRequest {
     /// nothing never names a member here.
     #[serde(default)]
     pub loyalty_customer_id: Option<Uuid>,
+    /// The person who started this sale's cart, when the till says it was not
+    /// the person ringing it (a held order resumed after a teller switch).
+    /// Recorded when it names someone of the same org; anything else is
+    /// dropped with a warning, never refused. Additive; older tills omit it.
+    #[serde(default)]
+    pub started_by: Option<Uuid>,
     /// Where the drink is going: `"takeaway"` (default) or `"dine_in"`. NOT
     /// `order_type`: that is derived from whether a waiter's ticket was settled
     /// and decides the service charge. This says only whether the customer is
@@ -642,6 +704,8 @@ pub struct VoidOrderRequest {
     /// Free-text explanation. Required when `reason` is "other".
     pub note: Option<String>,
     pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Ignored: a void always puts the sale's stock back. Kept so older tills
+    /// that still send it are read, not refused.
     pub restore_inventory: Option<bool>,
 }
 
@@ -1464,6 +1528,26 @@ pub async fn create_order(
     check_permission(pool.get_ref(), &claims, "orders", "create").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
 
+    // A discount is its own act with its own caps. Live, there is no manager
+    // on hand to approve: anything `decide` does not allow outright is refused.
+    let mut body = body;
+    if let Some(org) = claims.org_id()
+        && let Some(ask) =
+            super::discount_authz::discount_ask(pool.get_ref(), org, &body).await?
+    {
+        let eff = crate::authz::require::effective_for_claims(
+            pool.get_ref(),
+            &claims,
+            Some(body.branch_id),
+        )
+        .await?;
+        if ask.decide(&eff) != crate::authz::Decision::Allow {
+            return Err(crate::authz::require::denied(ask.cap));
+        }
+        body.discount_applied_by = Some(claims.user_id());
+        body.discount_approval_id = None;
+    }
+
     // "Every dine-in sale belongs to a table", where a shop has asked for it.
     //
     // This is the till's DIRECT path — ring it up, take the money, done. A
@@ -1481,7 +1565,6 @@ pub async fn create_order(
     // fall back to the legacy `Idempotency-Key` header for older clients. Resolve
     // it HERE (the only place with the request headers) so the inner core — which
     // the replay path also calls, and which has no headers — works off `body`.
-    let mut body = body;
     if body.idempotency_key.is_none() {
         body.idempotency_key = req
             .headers()
@@ -1644,6 +1727,28 @@ pub(crate) async fn create_order_inner(
             .can(crate::authz::Cap::CustomersAttach) =>
         {
             Some(c)
+        }
+        _ => None,
+    };
+
+    // Who started the cart, when the till says it was someone else (a held
+    // order resumed after a teller switch). Accept and record: a name outside
+    // the org, or the ringer themself, is dropped with a warning, never refused
+    // — the sale happened either way.
+    let started_by = match body.started_by {
+        Some(by) if by != actor.teller_id => {
+            let in_org: Option<bool> =
+                sqlx::query_scalar("SELECT true FROM users WHERE id = $1 AND org_id = $2")
+                    .bind(by)
+                    .bind(actor.org_id)
+                    .fetch_optional(pool.get_ref())
+                    .await?;
+            if in_org.is_some() {
+                Some(by)
+            } else {
+                tracing::warn!(started_by = %by, "order started_by is not a person of this org; not recorded");
+                None
+            }
         }
         _ => None,
     };
@@ -2255,11 +2360,11 @@ pub(crate) async fn create_order_inner(
              tax_inclusive, service_charge_taxable_applied, order_type, open_ticket_id,
              device_id, device_code, verification,
              service_charge_waived_by, service_charge_waived_at, service_charge_waived_amount,
-             service_mode)
+             service_mode, started_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
                 $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36,
-                $37, $38, $39, $40)
+                $37, $38, $39, $40, $41)
         RETURNING
             id, branch_id, till_id, till_id AS shift_id, teller_id,
             (SELECT name FROM users WHERE id = $3) AS teller_name,
@@ -2281,7 +2386,8 @@ pub(crate) async fn create_order_inner(
             device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification,
             tax_inclusive, tax_rate_applied, service_charge_rate_applied, service_charge_taxable_applied,
             service_charge_waived_by, (SELECT name FROM users WHERE id = service_charge_waived_by) AS service_charge_waived_by_name,
-            service_charge_waived_at, service_charge_waived_amount
+            service_charge_waived_at, service_charge_waived_amount,
+            started_by, (SELECT name FROM users WHERE id = $41) AS started_by_name
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
@@ -2347,6 +2453,7 @@ pub(crate) async fn create_order_inner(
     .bind(service_waiver.map(|(_, at)| at.unwrap_or(created_at)))
     .bind(service_charge_waived_amount)
     .bind(body.service_mode.as_deref().unwrap_or("takeaway"))
+    .bind(started_by)
     .fetch_one(&mut *tx)
     .await
     {
@@ -2381,6 +2488,41 @@ pub(crate) async fn create_order_inner(
         }
         Err(e) => return Err(e.into()),
     };
+
+    // Who applied the discount and under which approval, beside the money
+    // columns the insert wrote. Only on a sale that carries a discount.
+    let mut order = order;
+    if let Some(ask) = super::discount_authz::ask_from(
+        &body,
+        resolved_discount_type
+            .clone()
+            .filter(|_| body.discount_id.is_some())
+            .map(|t| (t, resolved_discount_value)),
+    ) {
+        let row: (Option<Uuid>, Option<String>) = sqlx::query_as(
+            "UPDATE orders SET discount_kind = $2, discount_percent_bps = $3,
+                    discount_applied_by = COALESCE(
+                        (SELECT id FROM users WHERE id = $4 AND org_id = $6), $5),
+                    discount_approval_id = $7
+              WHERE id = $1
+          RETURNING discount_applied_by,
+                    (SELECT name FROM users WHERE id = orders.discount_applied_by)",
+        )
+        .bind(order.id)
+        .bind(ask.kind)
+        .bind(ask.percent_bps.map(|p| p as i32))
+        .bind(body.discount_applied_by)
+        .bind(actor.teller_id)
+        .bind(actor.org_id)
+        .bind(body.discount_approval_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        order.discount_kind = Some(ask.kind.to_string());
+        order.discount_percent_bps = ask.percent_bps.map(|p| p as i32);
+        order.discount_applied_by = row.0;
+        order.discount_applied_by_name = row.1;
+        order.discount_approval_id = body.discount_approval_id;
+    }
 
     if let Some(customer) = attach_customer {
         crate::customers::handlers::attach_to_order(
@@ -3294,10 +3436,12 @@ pub(crate) async fn void_order_inner(
     // Offline voids carry their real time; reject only a future device clock.
     crate::clock::reject_if_future(voided_at, "voided_at")?;
 
-    // restock=true → items go back to stock; restock=false → they were made and
-    // discarded (logged as waste). Either way the void touches the ledger, so
-    // fetch the lines now.
-    let restock = body.restore_inventory.unwrap_or(false);
+    // A VOID ALWAYS RESTORES STOCK (owner ruling, 2026-09): a void says the
+    // sale never happened, so the item was never made or handed over and every
+    // deduction it took is put back. `restore_inventory` is ignored — an older
+    // till that still sends `false` gets the same restock. Food that was made
+    // and handed over is a REFUND, which keeps the deduction and logs it as
+    // waste (`refunds::handlers::post_refund_waste`).
     let items = fetch_order_items_full(pool.get_ref(), order_id).await?;
 
     let mut tx = pool.begin().await?;
@@ -3347,12 +3491,7 @@ pub(crate) async fn void_order_inner(
         return Ok(HttpResponse::Ok().json(current));
     };
 
-    // A void always REVERSES the original sale deduction (void_restock +). When
-    // the food was NOT put back (restock=false) it was made and discarded, so we
-    // then re-deduct it as WASTE (−). Net stock for a discard is unchanged, but
-    // the ledger now reads "sale reversed → logged as waste" — self-describing and
-    // consistent with how a delivery cancel logs a made-but-not-restocked order,
-    // instead of leaving an orphan `sale` deduction on a voided order.
+    // Reverse every sale deduction through the ledger (void_restock +).
     for item in items {
         let Some(deductions) = item.item.deductions_snapshot.as_array() else {
             continue;
@@ -3389,26 +3528,6 @@ pub(crate) async fn void_order_inner(
                 },
             )
             .await?;
-
-            if !restock {
-                // Made & discarded → re-deduct, logged as waste.
-                crate::inventory::movements::record_movement(
-                    &mut *tx,
-                    crate::inventory::movements::MovementParams {
-                        branch_id: order.branch_id,
-                        org_ingredient_id: ing_id,
-                        movement_type: "waste",
-                        quantity: -qty,
-                        unit_cost,
-                        reason: Some("order_cancelled"),
-                        source_type: Some("order"),
-                        source_id: Some(order.id),
-                        note: Some("Order voided — made, not restocked"),
-                        created_by: Some(actor.teller_id),
-                    },
-                )
-                .await?;
-            }
         }
     }
 

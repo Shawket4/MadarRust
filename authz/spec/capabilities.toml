@@ -1936,13 +1936,13 @@ key = "till.cash_spot_check"
 group = "till"
 tier = "configurable"
 risk = "money"
-defaults = ""
+defaults = "om"
 approval = true
 pos = true
-en = "Count the drawer during a shift (spot check)"
-ar = "جرد الدرج أثناء الوردية (جرد مفاجئ)"
-hint_en = "Off for everyone by default. With \"ask a manager\", a teller can request one and a manager approves with their PIN."
-hint_ar = "مغلق للجميع افتراضيًا. مع \"اطلب من المدير\" يمكن للكاشير طلبه ويوافق المدير برقمه السري."
+en = "Cash spot: see and print the live drawer figures"
+ar = "الجرد المفاجئ: عرض أرقام الخزنة المباشرة وطباعتها"
+hint_en = "On for owners and managers: Cash spot shows the full live till report (expected cash, every payment method, all figures) and prints it, and the expected figures show before closing. Without it a person counts blind at close and sees the report after closing; someone holding it can unlock one look with their PIN. Every look is recorded."
+hint_ar = "مفعّل للمالك والمديرين: يعرض الجرد المفاجئ تقرير الوردية المباشر كاملًا (النقد المتوقع، كل طرق الدفع، كل الأرقام) ويطبعه، وتظهر الأرقام المتوقعة قبل الإغلاق. بدونه يعدّ الشخص عند الإغلاق دون رؤية المتوقع ويرى التقرير بعد الإغلاق؛ ويمكن لمن يملكه فتح عرض واحد برقمه السري. كل عرض يُسجَّل."
 
 [[cap]]
 id = 204
@@ -2141,6 +2141,20 @@ defaults = "o"
 en = "Re-apply packaging rules to every menu item"
 # AR draft (2026-09-16), pending owner review.
 ar = "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة"
+
+[[cap]]
+id = 222
+key = "orders.held.resume_others"
+group = "selling"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+approval = true
+pos = true
+en = "Resume an order someone else started"
+ar = "استئناف طلب بدأه شخص آخر"
+hint_en = "A held order another person parked on this till. Without it, a manager enters their PIN."
+hint_ar = "طلب معلّق تركه شخص آخر على هذا الجهاز. بدونها يُدخل المدير رمزه."
 
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the

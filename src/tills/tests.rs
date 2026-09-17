@@ -140,6 +140,8 @@ async fn test_open_shift_cash_continuity(pool: PgPool) {
                     closing_cash_declared: declared,
                     cash_note: None,
                     closed_at: None,
+                    held_orders_left_open: None,
+                    held_orders_left_open_total: None,
                 })
                 .to_request();
             test::call_service(app, req).await
@@ -608,6 +610,8 @@ async fn test_normal_close_and_report(pool: PgPool) {
             closing_cash_declared: 1000,
             cash_note: None,
             closed_at: None,
+            held_orders_left_open: None,
+            held_orders_left_open_total: None,
         })
         .to_request();
     let resp_close = test::call_service(&app, req_close).await;
@@ -962,6 +966,8 @@ async fn test_close_cash_uses_is_cash_snapshot(pool: PgPool) {
                 closing_cash_declared: 1500,
                 cash_note: None,
                 closed_at: None,
+                held_orders_left_open: None,
+                held_orders_left_open_total: None,
             })
             .to_request(),
     )
@@ -1036,6 +1042,8 @@ async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
                 closing_cash_declared: 0,
                 cash_note: None,
                 closed_at: None,
+                held_orders_left_open: None,
+                held_orders_left_open_total: None,
             })
             .to_request(),
     )
@@ -1067,6 +1075,8 @@ async fn test_teller_cannot_close_another_tellers_shift(pool: PgPool) {
                 closing_cash_declared: 0,
                 cash_note: None,
                 closed_at: None,
+                held_orders_left_open: None,
+                held_orders_left_open_total: None,
             })
             .to_request(),
     )
@@ -1306,6 +1316,8 @@ async fn test_shift_timestamp_guards(pool: PgPool) {
                 closing_cash_declared: 1000,
                 cash_note: None,
                 closed_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+                held_orders_left_open: None,
+                held_orders_left_open_total: None,
             })
             .to_request(),
     )
@@ -1757,6 +1769,8 @@ async fn test_standard_float_proposes_the_safe_drop(pool: PgPool) {
                 closing_cash_declared: 5000,
                 cash_note: None,
                 closed_at: None,
+                held_orders_left_open: None,
+                held_orders_left_open_total: None,
             })
             .to_request(),
     )
@@ -1868,6 +1882,8 @@ async fn test_branch_manager_works_the_till(pool: PgPool) {
                 closing_cash_declared: 0,
                 cash_note: None,
                 closed_at: None,
+                held_orders_left_open: None,
+                held_orders_left_open_total: None,
             })
             .to_request(),
     )
@@ -1962,6 +1978,8 @@ async fn test_close_shift_closes_unbumped_kitchen_tickets_in_till_mode(pool: PgP
                 closing_cash_declared: 100,
                 cash_note: None,
                 closed_at: None,
+                held_orders_left_open: None,
+                held_orders_left_open_total: None,
             })
             .to_request(),
     )

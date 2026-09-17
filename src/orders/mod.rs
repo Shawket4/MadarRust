@@ -1,5 +1,6 @@
 pub mod component_resolve;
 pub mod cost_math;
+pub mod discount_authz;
 pub mod handlers;
 pub mod routes;
 

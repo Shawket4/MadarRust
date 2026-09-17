@@ -258,6 +258,7 @@ paths(
         crate::inventory::handlers::list_movements,
         crate::inventory::handlers::create_waste,
         crate::inventory::handlers::list_waste,
+        crate::inventory::waste::record_waste,
         crate::inventory::handlers::create_transfer,
         crate::inventory::handlers::list_transfers,
         crate::inventory::handlers::update_transfer,
@@ -308,6 +309,8 @@ paths(
         crate::tills::handlers::force_close_till,
         crate::tills::handlers::add_cash_movement,
         crate::tills::handlers::list_cash_movements,
+        crate::tills::spot_views::create_spot_view,
+        crate::tills::spot_views::list_spot_views,
         crate::tills::handlers::delete_till,
         crate::refunds::handlers::list_till_refunds,
         // ── devices ──────────────────────────────────────────────────
