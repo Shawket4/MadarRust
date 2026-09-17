@@ -76783,6 +76783,30 @@
             "format": "int32",
             "description": "What the till handed back. Recorded as the drawer saw it, like a\ncounter sale's; absent, it is derived from `amount_tendered` and the\nserver's total."
           },
+          "discount_amount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the till actually took off this bill, in minor units — the figure\nthe drawer charged. Additive; absent, the server computes it as before.\nThis is also what a replayed bill keeps when its preset has since been\nswitched off: the money as rung, never recomputed from a dead rule."
+          },
+          "discount_applied_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who put the discount on the bill. Read on replay (live, it is the\ncashier holding the token). Additive."
+          },
+          "discount_approval_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The manager approval that let the bill's discount past the cashier's\ncap, verified at replay like a counter sale's. Additive."
+          },
           "discount_id": {
             "type": [
               "string",
@@ -76790,6 +76814,21 @@
             ],
             "format": "uuid",
             "description": "Settle-time discount. ABSENT (all three fields) means the waiter's\nticket discount is inherited, as it always was — but the till can now\nsee that discount on the ticket view. The literal `discount_type:\n\"none\"` settles with no discount at all; any other value (or a\n`discount_id`) replaces the waiter's."
+          },
+          "discount_kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which discount act this bill performs: `preset` | `manual_amount` |\n`manual_percent`. A table bill is gated exactly like a counter sale, so\nit names its act in the same vocabulary. ADDITIVE — an older tablet\nsends nothing and the kind is derived as it always was (a `discount_id`\nmeans preset, an ad-hoc discount is manual of its type)."
+          },
+          "discount_percent_bps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Basis points for a percentage bill discount (1250 = 12.5%). Additive."
           },
           "discount_type": {
             "type": [

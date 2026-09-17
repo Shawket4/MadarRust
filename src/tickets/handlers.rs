@@ -77,6 +77,87 @@ fn client_prices(actor: &ActingContext) -> crate::orders::handlers::ClientPrices
 /// waiter's discount. Absent means inherit it; anything else overrides it.
 pub const DISCOUNT_NONE: &str = "none";
 
+/// The ticket's own discount, as stored by the waiter at order time.
+pub(crate) type TicketDiscount = (
+    Option<Uuid>,
+    Option<String>,
+    Option<rust_decimal::Decimal>,
+);
+
+/// WHICH discount a settle actually charges — the one rule, in one place.
+///
+/// The cashier says nothing → the waiter's ticket discount is inherited (and
+/// the ticket view shows it, so "nothing" is a choice). `discount_type: "none"`
+/// → no discount, whatever the waiter set. Anything else the cashier sends
+/// replaces the waiter's OUTRIGHT — never a field-by-field merge, which is how
+/// a settle used to end up with the waiter's `discount_type` under the
+/// cashier's `discount_value`.
+///
+/// The settle core and the permission gate both call this, so the discount that
+/// is CHARGED and the discount that is JUDGED can never be two different
+/// things — a waiter's 40% inherited in silence is gated exactly like the
+/// cashier typing 40% at the till.
+pub(crate) fn resolve_settle_discount(
+    body: &SettleOpenTicketRequest,
+    ticket: TicketDiscount,
+) -> TicketDiscount {
+    let cashier_spoke =
+        body.discount_id.is_some() || body.discount_type.is_some() || body.discount_value.is_some();
+    if body.discount_type.as_deref() == Some(DISCOUNT_NONE) {
+        (None, None, None)
+    } else if cashier_spoke {
+        (
+            body.discount_id,
+            body.discount_type.clone(),
+            body.discount_value,
+        )
+    } else {
+        ticket
+    }
+}
+
+/// True when the CASHIER stated the discount rather than inheriting the
+/// waiter's. Only then do the cashier's `discount_kind`/`discount_percent_bps`
+/// describe the act; an inherited one is derived from the ticket's own fields.
+pub(crate) fn settle_cashier_spoke(body: &SettleOpenTicketRequest) -> bool {
+    body.discount_id.is_some() || body.discount_type.is_some() || body.discount_value.is_some()
+}
+
+/// The discount act a settle performs, if any — the SAME `DiscountAsk` a
+/// counter sale produces, so the same caps and the same `decide` answer it.
+///
+/// Reads the ticket to resolve an inherited discount, because a bill settled in
+/// silence still charges the waiter's discount and must be gated for it.
+pub(crate) async fn settle_discount_ask(
+    pool: &sqlx::PgPool,
+    org_id: Uuid,
+    ticket_id: Uuid,
+    body: &SettleOpenTicketRequest,
+) -> Result<Option<crate::orders::discount_authz::DiscountAsk>, AppError> {
+    let ticket: TicketDiscount = sqlx::query_as(
+        "SELECT discount_id, discount_type, discount_value \
+           FROM open_tickets WHERE id = $1 AND org_id = $2",
+    )
+    .bind(ticket_id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or((None, None, None));
+    let (discount_id, discount_type, discount_value) = resolve_settle_discount(body, ticket);
+    let spoke = settle_cashier_spoke(body);
+    let fields = crate::orders::discount_authz::DiscountFields {
+        discount_id,
+        discount_type: discount_type.as_deref(),
+        discount_value,
+        discount_amount: body.discount_amount,
+        // An inherited discount is the WAITER's act, described by the ticket's
+        // own fields; only a cashier who stated the discount names its kind.
+        discount_kind: body.discount_kind.as_deref().filter(|_| spoke),
+        discount_percent_bps: body.discount_percent_bps.filter(|_| spoke),
+    };
+    crate::orders::discount_authz::discount_ask(pool, org_id, &fields).await
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct SettleOpenTicketRequest {
     #[serde(alias = "shift_id")]
@@ -93,6 +174,30 @@ pub struct SettleOpenTicketRequest {
     pub discount_type: Option<String>,
     #[serde(default)]
     pub discount_value: Option<rust_decimal::Decimal>,
+    /// Which discount act this bill performs: `preset` | `manual_amount` |
+    /// `manual_percent`. A table bill is gated exactly like a counter sale, so
+    /// it names its act in the same vocabulary. ADDITIVE — an older tablet
+    /// sends nothing and the kind is derived as it always was (a `discount_id`
+    /// means preset, an ad-hoc discount is manual of its type).
+    #[serde(default)]
+    pub discount_kind: Option<String>,
+    /// Basis points for a percentage bill discount (1250 = 12.5%). Additive.
+    #[serde(default)]
+    pub discount_percent_bps: Option<i32>,
+    /// What the till actually took off this bill, in minor units — the figure
+    /// the drawer charged. Additive; absent, the server computes it as before.
+    /// This is also what a replayed bill keeps when its preset has since been
+    /// switched off: the money as rung, never recomputed from a dead rule.
+    #[serde(default)]
+    pub discount_amount: Option<i32>,
+    /// Who put the discount on the bill. Read on replay (live, it is the
+    /// cashier holding the token). Additive.
+    #[serde(default)]
+    pub discount_applied_by: Option<Uuid>,
+    /// The manager approval that let the bill's discount past the cashier's
+    /// cap, verified at replay like a counter sale's. Additive.
+    #[serde(default)]
+    pub discount_approval_id: Option<Uuid>,
     #[serde(default)]
     pub tip_amount: Option<i32>,
     #[serde(default)]
@@ -1109,6 +1214,33 @@ pub async fn settle_open_ticket(
     check_permission(pool.get_ref(), &claims, "orders", "create").await?;
     check_permission(pool.get_ref(), &claims, "payments", "create").await?;
     require_ticket_branch_access(pool.get_ref(), &claims, *id).await?;
+
+    // A discount on a TABLE'S BILL is the same act as a discount at the
+    // counter, with the same three capabilities and the same per-person caps.
+    // It used to be the one way round them: a cashier with no discount grant at
+    // all could take 50% off a bill because the settle route never asked.
+    //
+    // Live, there is no manager on hand: anything `decide` does not allow
+    // outright is refused (403), matching `POST /orders`. Offline, the money has
+    // already moved, so `/sync/replay` accepts and flags instead.
+    let mut body = body;
+    if let Some(org) = claims.org_id()
+        && let Some(ask) = settle_discount_ask(pool.get_ref(), org, *id, &body).await?
+    {
+        let branch: Option<Uuid> =
+            sqlx::query_scalar("SELECT branch_id FROM open_tickets WHERE id = $1")
+                .bind(*id)
+                .fetch_optional(pool.get_ref())
+                .await?;
+        let eff =
+            crate::authz::require::effective_for_claims(pool.get_ref(), &claims, branch).await?;
+        if ask.decide(&eff) != crate::authz::Decision::Allow {
+            return Err(crate::authz::require::denied(ask.cap));
+        }
+        body.discount_applied_by = Some(claims.user_id());
+        body.discount_approval_id = None;
+    }
+
     settle_open_ticket_inner(
         pool.clone(),
         id.into_inner(),
@@ -1285,26 +1417,11 @@ pub(crate) async fn settle_open_ticket_inner(
         }
     }
 
-    // The discount, explicitly. The cashier says nothing → the waiter's ticket
-    // discount is inherited (and the ticket view shows it, so "nothing" is a
-    // choice). `discount_type: "none"` → no discount, whatever the waiter set.
-    // Anything else the cashier sends replaces the waiter's outright — never a
-    // field-by-field merge, which is how a settle used to end up with the
-    // waiter's `discount_type` under the cashier's `discount_value`.
-    let cashier_spoke =
-        body.discount_id.is_some() || body.discount_type.is_some() || body.discount_value.is_some();
+    // The discount, explicitly — one rule, shared with the permission gate so
+    // the discount CHARGED and the discount JUDGED are the same act.
+    let cashier_spoke = settle_cashier_spoke(&body);
     let (discount_id, discount_type, discount_value) =
-        if body.discount_type.as_deref() == Some(DISCOUNT_NONE) {
-            (None, None, None)
-        } else if cashier_spoke {
-            (
-                body.discount_id,
-                body.discount_type.clone(),
-                body.discount_value,
-            )
-        } else {
-            (t_disc_id, t_disc_type, t_disc_value)
-        };
+        resolve_settle_discount(&body, (t_disc_id, t_disc_type, t_disc_value));
 
     // Build a POS order request. The TICKET ID is the order idempotency key, so a
     // retried/concurrent settle dedups to one paid order. `create_order_inner`
@@ -1328,10 +1445,14 @@ pub(crate) async fn settle_open_ticket_inner(
         discount_type,
         discount_value,
         discount_id,
-        discount_kind: None,
-        discount_percent_bps: None,
-        discount_applied_by: None,
-        discount_approval_id: None,
+        // A bill's discount is attributed exactly like a counter sale's. The
+        // kind/percent only describe the act when the CASHIER stated it; an
+        // inherited waiter discount is derived from the ticket's own fields by
+        // `create_order_inner`, as it always was.
+        discount_kind: body.discount_kind.clone().filter(|_| cashier_spoke),
+        discount_percent_bps: body.discount_percent_bps.filter(|_| cashier_spoke),
+        discount_applied_by: body.discount_applied_by,
+        discount_approval_id: body.discount_approval_id,
         amount_tendered: body.amount_tendered,
         tip_amount: body.tip_amount,
         tip_payment_method: body.tip_payment_method.clone(),
@@ -1344,7 +1465,9 @@ pub(crate) async fn settle_open_ticket_inner(
         // and stamps the same instant on the ticket's `settled_at`.
         created_at: Some(body.settled_at.unwrap_or_else(chrono::Utc::now)),
         subtotal: None,
-        discount_amount: None,
+        // The figure the till took off, when it sent one (additive). Absent —
+        // every build up to 0.7.8 — the server computes it exactly as before.
+        discount_amount: body.discount_amount,
         tax_amount: None,
         // The till's figure, through the same drift check a counter checkout
         // gets. A drawer that collected the ticket SUBTOTAL for a bill the

@@ -589,9 +589,56 @@ pub async fn replay(
     // A sale's discount is its own act with its own caps (phase 6). Asked
     // before the approval is verified, so an approval for it is checked
     // against the sale's REAL figures, not the ones the approval names.
+    //
+    // A TABLE BILL is a sale too. A settle carries its own discount ask (the
+    // cashier's, or the waiter's inherited in silence) and is judged by the
+    // same three capabilities with the same caps — per SETTLE, so a split bill
+    // and a partial settle each answer for the discount they charged.
     let discount = match &op {
         ReplayOp::CreateOrder { request, .. } => {
-            crate::orders::discount_authz::discount_ask(pool.get_ref(), token_org, request).await?
+            crate::orders::discount_authz::discount_ask(
+                pool.get_ref(),
+                token_org,
+                &request.discount_fields(),
+            )
+            .await?
+        }
+        ReplayOp::SettleOpenTicket {
+            ticket_id, request, ..
+        } => {
+            crate::tickets::handlers::settle_discount_ask(
+                pool.get_ref(),
+                token_org,
+                *ticket_id,
+                request,
+            )
+            .await?
+        }
+        _ => None,
+    };
+
+    // A PRESET SWITCHED OFF while the till was offline. The bill was rung, the
+    // money was taken, the customer left. Refusing the replay (a 400 from
+    // `create_order_inner`'s preset lookup) would not un-take it — it would only
+    // lose the sale. So the sale lands with the amount AS RUNG and the owner is
+    // told, exactly like any other accept-and-flag.
+    let dead_preset = match &op {
+        ReplayOp::CreateOrder { request, .. } => {
+            dead_preset_of(pool.get_ref(), token_org, request.discount_id).await?
+        }
+        ReplayOp::SettleOpenTicket {
+            ticket_id, request, ..
+        } => {
+            let id = match crate::tickets::handlers::settle_cashier_spoke(request) {
+                true => request.discount_id,
+                // Inherited in silence: the WAITER's preset is the one charged.
+                false => sqlx::query_scalar("SELECT discount_id FROM open_tickets WHERE id = $1")
+                    .bind(*ticket_id)
+                    .fetch_optional(pool.get_ref())
+                    .await?
+                    .flatten(),
+            };
+            dead_preset_of(pool.get_ref(), token_org, id).await?
         }
         _ => None,
     };
@@ -710,6 +757,13 @@ pub async fn replay(
             flags.push(ask.cap.key().to_string());
         }
     }
+    // The reason vocabulary (`authz_replay_flags.reason`) is fixed; the DETAIL
+    // rides in the capability cell, which is free text, so the owner's review
+    // queue reads "orders.discount.preset:inactive" and knows at a glance that
+    // this is a dead rule, not a revoked person.
+    if let Some(state) = dead_preset {
+        flags.push(format!("{}:{state}", crate::authz::Cap::OrdersDiscountPreset.key()));
+    }
     let mut op = op;
     let order_key = match &mut op {
         ReplayOp::CreateOrder { request, .. } => {
@@ -722,6 +776,19 @@ pub async fn replay(
                 }
             }
             request.idempotency_key
+        }
+        // A settle's paid order is keyed by the TICKET id (see
+        // `settle_open_ticket_inner`), which is what the flag's subject needs.
+        ReplayOp::SettleOpenTicket {
+            ticket_id, request, ..
+        } => {
+            if discount.is_some() {
+                request.discount_approval_id = discount_approval;
+                if request.discount_applied_by.is_none() {
+                    request.discount_applied_by = Some(teller_id);
+                }
+            }
+            Some(*ticket_id)
         }
         _ => None,
     };
@@ -928,6 +995,30 @@ fn replay_occurred_at(body: &serde_json::Value) -> chrono::DateTime<chrono::Utc>
         .or_else(|| parse(req.and_then(|r| r.get("created_at"))))
         .or_else(|| parse(req.and_then(|r| r.get("viewed_at"))))
         .unwrap_or_else(chrono::Utc::now)
+}
+
+/// Is this preset gone or switched off? `None` when there is no preset, or it
+/// is alive and well. `Some("inactive")` / `Some("missing")` otherwise — the
+/// detail the owner's review queue shows beside the flag.
+async fn dead_preset_of(
+    pool: &PgPool,
+    org_id: Uuid,
+    discount_id: Option<Uuid>,
+) -> Result<Option<&'static str>, AppError> {
+    let Some(id) = discount_id else {
+        return Ok(None);
+    };
+    let alive: Option<bool> =
+        sqlx::query_scalar("SELECT is_active FROM discounts WHERE id = $1 AND org_id = $2")
+            .bind(id)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(match alive {
+        Some(true) => None,
+        Some(false) => Some("inactive"),
+        None => Some("missing"),
+    })
 }
 
 /// Record the accept-and-flag rows for one replayed op (§4.4.5).

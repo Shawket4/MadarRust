@@ -1533,7 +1533,8 @@ pub async fn create_order(
     let mut body = body;
     if let Some(org) = claims.org_id()
         && let Some(ask) =
-            super::discount_authz::discount_ask(pool.get_ref(), org, &body).await?
+            super::discount_authz::discount_ask(pool.get_ref(), org, &body.discount_fields())
+                .await?
     {
         let eff = crate::authz::require::effective_for_claims(
             pool.get_ref(),
@@ -1820,16 +1821,41 @@ pub(crate) async fn create_order_inner(
 
     let (resolved_discount_type, resolved_discount_value) = if let Some(disc_id) = body.discount_id
     {
-        let row: Option<(String, Decimal)> = sqlx::query_as(
-                "SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2 AND is_active = true"
+        let row: Option<(String, Decimal, bool)> = sqlx::query_as(
+                "SELECT type::text, value, is_active FROM discounts WHERE id = $1 AND org_id = $2"
             )
             .bind(disc_id)
             .bind(org_id)
             .fetch_optional(pool.get_ref())
             .await?;
         match row {
-            Some((dtype, dvalue)) => (Some(dtype), dvalue),
-            None => {
+            Some((dtype, dvalue, true)) => (Some(dtype), dvalue),
+            // A DEAD PRESET. Live, a till picking a rule that no longer exists
+            // is a clean error — nothing has happened yet, and the cashier can
+            // pick another. On REPLAY the sale already happened: the customer
+            // paid what the till rang under the rule as it stood, and refusing
+            // the op would not un-take the money, it would only lose the record
+            // and leave the drawer short at close. So the sale lands with the
+            // amount AS RUNG (`discount_amount`, the figure the POS actually
+            // charged — never recomputed from a rule that is now missing or
+            // changed), and `/sync/replay` flags it for the owner.
+            Some((_, _, false)) | None if actor.replay => {
+                let rung = body.discount_amount.unwrap_or(0);
+                tracing::warn!(
+                    %disc_id, %org_id, rung,
+                    "replayed a sale whose discount preset is gone or switched off — \
+                     accepted with the amount as rung and flagged for review"
+                );
+                // A preset row that is truly GONE cannot be referenced by the
+                // order's FK, so the sale keeps the money and loses the pointer.
+                if row.is_none() {
+                    body.discount_id = None;
+                }
+                body.discount_amount = Some(rung);
+                // No rule to apply: the till's figure stands on its own.
+                (None, Decimal::ZERO)
+            }
+            _ => {
                 return Err(AppError::BadRequest(
                     "Discount not found or inactive".into(),
                 ));
@@ -2493,7 +2519,7 @@ pub(crate) async fn create_order_inner(
     // columns the insert wrote. Only on a sale that carries a discount.
     let mut order = order;
     if let Some(ask) = super::discount_authz::ask_from(
-        &body,
+        &body.discount_fields(),
         resolved_discount_type
             .clone()
             .filter(|_| body.discount_id.is_some())

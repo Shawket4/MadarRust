@@ -62,15 +62,48 @@ pub fn percent_bps_of(value: Decimal) -> i64 {
         .clamp(0, 10_000)
 }
 
-/// What discount act `body` performs, if any. A preset's type and value are
+/// The discount figures of ANY sale-shaped request: a counter sale
+/// (`CreateOrderRequest`) or a table bill's settle (`SettleOpenTicketRequest`).
+///
+/// A bill is a sale. Once the discount act is expressed in one vocabulary, the
+/// counter gate and the floor gate are literally the same code, and they cannot
+/// drift into two different answers for the same discount.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiscountFields<'a> {
+    pub discount_id: Option<Uuid>,
+    pub discount_type: Option<&'a str>,
+    pub discount_value: Option<Decimal>,
+    pub discount_amount: Option<i32>,
+    pub discount_kind: Option<&'a str>,
+    pub discount_percent_bps: Option<i32>,
+}
+
+impl CreateOrderRequest {
+    pub fn discount_fields(&self) -> DiscountFields<'_> {
+        DiscountFields {
+            discount_id: self.discount_id,
+            discount_type: self.discount_type.as_deref(),
+            discount_value: self.discount_value,
+            discount_amount: self.discount_amount,
+            discount_kind: self.discount_kind.as_deref(),
+            discount_percent_bps: self.discount_percent_bps,
+        }
+    }
+}
+
+/// What discount act `fields` performs, if any. A preset's type and value are
 /// read from the `discounts` table (of this org) when it still exists, else
 /// from what the till sent. `None` when the sale carries no discount.
+///
+/// The lookup deliberately does NOT filter on `is_active`: a preset switched
+/// off after a bill was rung must still be JUDGED on the figures it really had,
+/// not silently demoted to a manual discount with different caps.
 pub async fn discount_ask(
     pool: &sqlx::PgPool,
     org_id: Uuid,
-    body: &CreateOrderRequest,
+    fields: &DiscountFields<'_>,
 ) -> Result<Option<DiscountAsk>, AppError> {
-    let preset: Option<(String, Decimal)> = match body.discount_id {
+    let preset: Option<(String, Decimal)> = match fields.discount_id {
         Some(id) => {
             sqlx::query_as("SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2")
                 .bind(id)
@@ -80,15 +113,18 @@ pub async fn discount_ask(
         }
         None => None,
     };
-    Ok(ask_from(body, preset))
+    Ok(ask_from(fields, preset))
 }
 
 /// The pure half of [`discount_ask`].
-pub fn ask_from(body: &CreateOrderRequest, preset: Option<(String, Decimal)>) -> Option<DiscountAsk> {
+pub fn ask_from(
+    body: &DiscountFields<'_>,
+    preset: Option<(String, Decimal)>,
+) -> Option<DiscountAsk> {
     let (dtype, value) = match &preset {
         Some((t, v)) => (Some(t.as_str()), *v),
         None => (
-            body.discount_type.as_deref(),
+            body.discount_type,
             body.discount_value.unwrap_or(Decimal::ZERO),
         ),
     };
@@ -115,7 +151,7 @@ pub fn ask_from(body: &CreateOrderRequest, preset: Option<(String, Decimal)>) ->
     };
     // An explicit kind wins; otherwise a preset id says preset, and an ad-hoc
     // discount is manual of its type (what an older client's ad-hoc one was).
-    let kind = match body.discount_kind.as_deref() {
+    let kind = match body.discount_kind {
         Some(KIND_PRESET) => KIND_PRESET,
         Some(KIND_MANUAL_AMOUNT) => KIND_MANUAL_AMOUNT,
         Some(KIND_MANUAL_PERCENT) => KIND_MANUAL_PERCENT,
@@ -151,8 +187,8 @@ mod tests {
     use crate::authz::{CapSet, Limits};
     use rust_decimal_macros::dec;
 
-    fn body() -> CreateOrderRequest {
-        CreateOrderRequest::default()
+    fn body() -> DiscountFields<'static> {
+        DiscountFields::default()
     }
 
     #[test]
@@ -174,13 +210,13 @@ mod tests {
     #[test]
     fn an_ad_hoc_discount_is_manual_of_its_type_in_either_spelling() {
         let mut b = body();
-        b.discount_type = Some("percentage".into());
+        b.discount_type = Some("percentage");
         b.discount_value = Some(dec!(12));
         let a = ask_from(&b, None).unwrap();
         assert_eq!((a.cap, a.percent_bps), (Cap::OrdersDiscountManualPercent, Some(1200)));
 
         let mut b = body();
-        b.discount_type = Some("fixed".into());
+        b.discount_type = Some("fixed");
         b.discount_value = Some(dec!(500));
         let a = ask_from(&b, None).unwrap();
         assert_eq!((a.cap, a.amount_minor), (Cap::OrdersDiscountManualAmount, Some(500)));
@@ -197,8 +233,8 @@ mod tests {
             Limits { max_amount: Some(1000), ..Default::default() },
         );
         let mut b = body();
-        b.discount_kind = Some("manual_amount".into());
-        b.discount_type = Some("fixed".into());
+        b.discount_kind = Some("manual_amount");
+        b.discount_type = Some("fixed");
         b.discount_amount = Some(1000);
         assert_eq!(ask_from(&b, None).unwrap().decide(&eff), Decision::Allow);
         b.discount_amount = Some(1001);
