@@ -162,6 +162,12 @@ fn price_bill_under(
     dtype: Option<&str>,
     dvalue: Decimal,
 ) -> TicketBill {
+    // A bill's own lines are priced by this server when each round is fired, so
+    // a negative subtotal here would mean a voided line took more off than the
+    // rounds put on. It cannot be booked, and `clamp(0, subtotal)` below would
+    // PANIC on it (`min > max`) rather than say so — floor it, and the settle's
+    // own guard refuses the sale with a message the cashier can act on.
+    let subtotal = subtotal.max(0);
     let discount_amount =
         crate::discounts::handlers::calc_discount(dtype, dvalue, subtotal).clamp(0, subtotal);
     let b = crate::tax::compute(subtotal as i64, discount_amount as i64, policy);

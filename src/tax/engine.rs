@@ -281,6 +281,92 @@ impl TaxPolicy {
     }
 }
 
+// ── No bill may be negative ──────────────────────────────────────────────
+//
+// THE RULE (owner, 2026-09-18), and the reason it is split in two.
+//
+// A DISCOUNT IS CAPPED, NEVER REFUSED. `discount_amount` above clamps a
+// percentage to `[0, 1]` of its base and a fixed amount to `[0, base]`. A
+// discount that overshoots is a person saying "make it free" in a clumsy way —
+// it has one obvious correct reading, and refusing the sale over it would
+// leave a customer standing at the counter. So it is capped, silently and
+// identically on both sides of the wire.
+//
+// EVERY OTHER NEGATIVE IS REFUSED, NEVER CAPPED. A negative line, subtotal,
+// service charge, tax, total or tender has NO correct reading: it is a stale
+// build, a bad modifier price, or a forged payload. Capping it to zero would
+// write a sale into the books that nobody made, and the books would balance
+// against nothing. So the sale is refused — at the till before it can be
+// queued, and at the server on the live route and at replay.
+//
+// Refusing at replay does not contradict the accept-and-flag rule
+// (TILLS_CONTRACT §4.4.5). That rule answers "MAY this actor do this?" and
+// says a sale whose money already moved is recorded even when the actor's
+// grant was missing. This answers "IS this a sale at all?". A negative total
+// is not a sale that happened, it is corrupt input, and it is refused for the
+// same reason `quantity <= 0` already is. The op dead-letters on the till and
+// surfaces in the stuck list for the owner rather than retrying for ever.
+
+/// A money figure that may never be negative, named for the message the teller
+/// reads and the field the owner looks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NegativePart {
+    /// One line of the bill (unit price + modifiers, × quantity).
+    Line,
+    /// The sum of the lines.
+    Subtotal,
+    /// The amount taken off. Capped upstream, so this only fires on a figure
+    /// that never went through `discount_amount`.
+    Discount,
+    ServiceCharge,
+    Tax,
+    /// What the customer pays.
+    Total,
+    /// Cash handed over, a split leg, or the change given back.
+    Tender,
+}
+
+impl NegativePart {
+    /// A stable word for logs, wire messages and tests. Never translated —
+    /// the human-facing sentence is composed by the caller in its own language.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NegativePart::Line => "line",
+            NegativePart::Subtotal => "subtotal",
+            NegativePart::Discount => "discount",
+            NegativePart::ServiceCharge => "service_charge",
+            NegativePart::Tax => "tax",
+            NegativePart::Total => "total",
+            NegativePart::Tender => "tender",
+        }
+    }
+}
+
+/// The first negative component of a priced bill, if any. `None` means every
+/// figure on it is zero or better and the sale may be recorded.
+///
+/// `compute` already floors the base it taxes, so this can only fire on a
+/// `subtotal` that arrived negative — which is exactly the case worth
+/// catching, because that subtotal is what the books store.
+pub fn negative_part(b: &Breakdown) -> Option<NegativePart> {
+    if b.subtotal < 0 {
+        return Some(NegativePart::Subtotal);
+    }
+    if b.discount < 0 {
+        return Some(NegativePart::Discount);
+    }
+    if b.service_charge < 0 {
+        return Some(NegativePart::ServiceCharge);
+    }
+    if b.tax < 0 {
+        return Some(NegativePart::Tax);
+    }
+    if b.total < 0 {
+        return Some(NegativePart::Total);
+    }
+    None
+}
+
 /// The tax and service charge a refund takes back, as `(tax, service_charge)`.
 ///
 /// A refund records an AMOUNT; the books also need to know how much of that
