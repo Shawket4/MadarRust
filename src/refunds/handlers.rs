@@ -62,6 +62,10 @@ pub struct CreateRefundRequest {
     /// handing the money out again.
     #[serde(default)]
     pub client_ref: Option<Uuid>,
+    /// A manager's on-the-spot unlock for a refund over the issuer's own
+    /// `max_amount` (the teller default is 0, so every refund asks). Additive.
+    #[serde(default)]
+    pub live_approval: Option<crate::sync::handlers::ReplayApproval>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -196,6 +200,52 @@ pub async fn create_refund(
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
     let mut body = body.into_inner();
     body.device_id = body.device_id.or(device.0);
+
+    // THE LIMIT, LIVE. `refunds.create` is capped by `max_amount` (the teller
+    // default is 0, so every refund asks a manager). Decided through the same
+    // helpers replay uses — `authz::acts::refund_request` and
+    // `allow_or_approved_live` — never a second, forked rule. A manager's PIN
+    // unlock rides in `live_approval` and is recorded; without one, over the
+    // cap is a 403.
+    if let Some(org) = claims.org_id() {
+        let eff = crate::authz::require::effective_for_claims(
+            pool.get_ref(),
+            &claims,
+            Some(order.branch_id),
+        )
+        .await?;
+        let req_limits = crate::authz::acts::refund_request(i64::from(body.amount));
+        let decision = crate::authz::decide(&eff, &req_limits);
+        let allowed_outright = crate::sync::handlers::allow_or_approved_live(
+            pool.get_ref(),
+            decision,
+            crate::authz::Cap::RefundsCreate,
+            body.live_approval.as_ref(),
+            claims.user_id(),
+            org,
+            None,
+            None,
+        )
+        .await?;
+        if !allowed_outright {
+            let a = body
+                .live_approval
+                .clone()
+                .expect("checked by allow_or_approved_live");
+            crate::sync::handlers::record_approval(
+                pool.get_ref(),
+                &a,
+                org,
+                Some(order.branch_id),
+                body.device_id,
+                claims.user_id(),
+                "create_refund_live",
+                chrono::Utc::now(),
+                &Ok(crate::authz::Cap::RefundsCreate),
+            )
+            .await;
+        }
+    }
     if let Some(till) = body.till_id {
         crate::tills::handlers::guard_till_device(pool.get_ref(), till, device.0).await?;
     }

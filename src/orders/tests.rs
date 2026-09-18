@@ -421,6 +421,7 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(false),
+            live_approval: None,
     };
     let req = test::TestRequest::post()
         .uri(&format!("/orders/{}/void", o1.order.id))
@@ -1061,6 +1062,7 @@ async fn test_void_order(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(true),
+            live_approval: None,
     };
 
     let req = test::TestRequest::post()
@@ -1165,6 +1167,7 @@ async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
                 note: None,
                 voided_at: None,
                 restore_inventory: Some(false),
+            live_approval: None,
             })
             .to_request(),
     )
@@ -1225,6 +1228,7 @@ async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
             note: None,
             voided_at: None,
             restore_inventory: Some(false),
+            live_approval: None,
         })
     };
     let pool_data = crate::db::Db::bypass(&pool);
@@ -1855,6 +1859,7 @@ async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(true),
+            live_approval: None,
     };
     for _ in 0..2 {
         let resp = test::call_service(
@@ -2044,6 +2049,7 @@ async fn test_summary_excludes_voided_discounts(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(false),
+            live_approval: None,
     };
     test::call_service(
         &app,
@@ -3371,6 +3377,7 @@ async fn test_void_voided_at_guard(pool: PgPool) {
                 note: None,
                 voided_at,
                 restore_inventory: Some(false),
+            live_approval: None,
             })
             .to_request()
     };
@@ -3783,6 +3790,7 @@ async fn a_void_is_one_transaction_across_every_ledger(pool: PgPool) {
                 note: Some("rang twice".into()),
                 voided_at: None,
                 restore_inventory: Some(true),
+            live_approval: None,
             })
             .to_request(),
     )
@@ -3909,6 +3917,7 @@ async fn a_sale_that_has_refunded_money_cannot_be_voided(pool: PgPool) {
                 note: None,
                 voided_at: None,
                 restore_inventory: Some(true),
+            live_approval: None,
             })
             .to_request(),
     )

@@ -642,6 +642,27 @@ pub async fn replay(
         }
         _ => None,
     };
+    // THE SAME limit questions the live routes now ask (`authz::acts`), asked
+    // here of the queued op — a void judged at the moment it was rung (the op's
+    // own `occurred_at`, never the drain time), a refund at its amount.
+    let money_req = match &op {
+        ReplayOp::VoidOrder {
+            order_id,
+            teller_id: author,
+            ..
+        } => Some(
+            crate::authz::acts::void_ask(pool.get_ref(), *order_id, *author, occurred_at)
+                .await?
+                .request(),
+        ),
+        ReplayOp::RefundOrder { request, .. } => Some(crate::authz::acts::refund_request(
+            i64::from(request.amount),
+        )),
+        _ => None,
+    };
+    // One `Request` for the approval to be judged against: whichever act this
+    // op is, framed by the SERVER.
+    let server_req = money_req.or_else(|| discount.as_ref().map(|d| d.request()));
     let approved = match &approval {
         Some(a) => {
             verify_approval(
@@ -650,7 +671,7 @@ pub async fn replay(
                 teller_id,
                 token_org,
                 waste_plan.as_ref().map(|p| p.value_minor.unwrap_or(0)),
-                discount.as_ref(),
+                server_req.as_ref(),
             )
             .await
         }
@@ -702,6 +723,27 @@ pub async fn replay(
                 }
                 _ => "inventory_waste:create".to_string(),
             });
+        }
+    }
+
+    // THE VOID AND REFUND LIMITS on a queued op, decided by the same
+    // `authz::acts` request the live route builds and the same approval
+    // helper. The two halves part company only where the locked rule says they
+    // must (§4.4.5): a VOID moved no money, so an over-limit void with no valid
+    // approval is refused here exactly as it is live; a REFUND did move money —
+    // the customer has the cash — so it lands and is flagged for the owner.
+    if let Some(req) = &money_req {
+        let cap = match &op {
+            ReplayOp::VoidOrder { .. } => crate::authz::Cap::OrdersVoid,
+            _ => crate::authz::Cap::RefundsCreate,
+        };
+        let decision = crate::authz::require::decide_for(pool.get_ref(), teller_id, req, None).await?;
+        if !decision.is_allow() && !approved.as_ref().is_ok_and(|c| *c == cap) {
+            match &op {
+                ReplayOp::VoidOrder { .. } => return Err(crate::authz::require::denied(cap)),
+                _ if flags.is_empty() => flags.push(cap.key().to_string()),
+                _ => {}
+            }
         }
     }
 
@@ -899,7 +941,11 @@ pub(crate) async fn verify_approval(
     org: Uuid,
     // The op's value as the SERVER computed it; wins over the till's figure.
     value_minor: Option<i64>,
-    discount: Option<&crate::orders::discount_authz::DiscountAsk>,
+    // The act as the SERVER framed it (a discount's figures, a void's
+    // own/age, a refund's amount). When given for this same capability it
+    // REPLACES the figures the approval names, so an approval minted for a
+    // small act cannot be spent on a big one.
+    server_req: Option<&madar_authz::Request>,
 ) -> Result<crate::authz::Cap, String> {
     let cap = crate::authz::Cap::from_key(&a.capability).ok_or("unknown capability")?;
     if a.approver_id == author {
@@ -919,9 +965,9 @@ pub(crate) async fn verify_approval(
     let eff = crate::authz::require::effective(pool, a.approver_id, None)
         .await
         .map_err(|e| e.to_string())?;
-    let req = match discount.filter(|d| d.cap == cap) {
-        // The sale's own figures: an approval minted for less does not stretch.
-        Some(d) => d.request(),
+    let req = match server_req.filter(|r| r.cap == cap.id()) {
+        // The act's own figures: an approval minted for less does not stretch.
+        Some(r) => r.clone(),
         None => {
             let mut req = madar_authz::Request::of(cap);
             req.amount = a.amount_minor;
@@ -955,7 +1001,7 @@ pub(crate) async fn allow_or_approved_live(
     author: Uuid,
     org: Uuid,
     value_minor: Option<i64>,
-    discount: Option<&crate::orders::discount_authz::DiscountAsk>,
+    server_req: Option<&madar_authz::Request>,
 ) -> Result<bool, AppError> {
     if decision.is_allow() {
         return Ok(true);
@@ -963,7 +1009,7 @@ pub(crate) async fn allow_or_approved_live(
     let Some(a) = approval else {
         return Err(crate::authz::require::denied(cap));
     };
-    match verify_approval(pool, a, author, org, value_minor, discount).await {
+    match verify_approval(pool, a, author, org, value_minor, server_req).await {
         Ok(verified_cap) if verified_cap == cap => Ok(false),
         _ => Err(crate::authz::require::denied(cap)),
     }
