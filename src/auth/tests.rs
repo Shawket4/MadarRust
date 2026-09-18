@@ -1820,3 +1820,182 @@ async fn an_owner_pin_on_a_pre_0_8_tablet_is_refused(pool: PgPool) {
     let resp = test::call_service(&app, login("Teller", "271828", None)).await;
     assert_eq!(resp.status(), 200, "a teller on an old tablet is unaffected");
 }
+
+// ── An open till gates a TILL sign-in, never a dashboard one ───
+//
+// Staging run 2, observation 3: the owner's POS till was open, and his
+// email/password sign-in to the DASHBOARD was refused with
+// 409 "You already have an open shift at another branch". The rule exists to
+// stop one person standing at two drawers at once; a web session holds no
+// drawer, so it must not apply there.
+
+/// Seed an owner (org_admin, email+password) plus a branch, and open a till
+/// for them at that branch.
+async fn seed_owner_with_an_open_till(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid) {
+    let org_id = seed_org(pool).await;
+    let till_branch = seed_branch(pool, org_id).await;
+    let other_branch = seed_branch(pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let pw = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+    let pin = bcrypt::hash("4321", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash, pin_hash)
+         VALUES ($1, $2, 'Owner', 'org_admin'::user_role, 'owner-openshift@test.com', $3, $4)",
+        user_id,
+        org_id,
+        pw,
+        pin
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO tills (branch_id, teller_id, status) VALUES ($1, $2, 'open')")
+        .bind(till_branch)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    (org_id, till_branch, other_branch, user_id)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_open_till_does_not_block_an_email_sign_in_to_the_dashboard(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let (_org, _till_branch, _other, _user) = seed_owner_with_an_open_till(&pool).await;
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "email": "owner-openshift@test.com",
+            "password": "password123"
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "an owner with an open till must still be able to sign in to the dashboard"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_open_till_still_blocks_a_pin_sign_in_at_another_branch(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let (_org, _till_branch, other_branch, user_id) = seed_owner_with_an_open_till(&pool).await;
+    assign_teller_to_branch(&pool, user_id, other_branch).await;
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "pin": "4321",
+            "branch_id": other_branch
+        }))
+        .insert_header(("X-Madar-Device-Id", "dev-openshift-1"))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        409,
+        "a till sign-in at another branch while a till is open is still refused"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_pin_sign_in_at_the_branch_of_the_open_till_still_resumes(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let (_org, till_branch, _other, user_id) = seed_owner_with_an_open_till(&pool).await;
+    assign_teller_to_branch(&pool, user_id, till_branch).await;
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "pin": "4321",
+            "branch_id": till_branch
+        }))
+        .insert_header(("X-Madar-Device-Id", "dev-openshift-2"))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "resuming the shift at its own branch is unchanged"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_teller_with_an_open_till_is_still_blocked_on_a_legacy_email_till_login(pool: PgPool) {
+    // Old clients (<= v0.7.8) that sign a teller in with email + password +
+    // branch_id must keep the gate: the role is still branch-bound, so the
+    // session is still a till session.
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let till_branch = seed_branch(&pool, org_id).await;
+    let other_branch = seed_branch(&pool, org_id).await;
+    let user_id = Uuid::new_v4();
+    let pw = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+    sqlx::query!(
+        "INSERT INTO users (id, org_id, name, role, email, password_hash)
+         VALUES ($1, $2, 'Legacy Teller', 'teller'::user_role, 'legacy-teller@test.com', $3)",
+        user_id,
+        org_id,
+        pw
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assign_teller_to_branch(&pool, user_id, till_branch).await;
+    assign_teller_to_branch(&pool, user_id, other_branch).await;
+    sqlx::query("INSERT INTO tills (branch_id, teller_id, status) VALUES ($1, $2, 'open')")
+        .bind(till_branch)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let req = test::TestRequest::post()
+        .uri("/auth/login")
+        .set_json(&json!({
+            "email": "legacy-teller@test.com",
+            "password": "password123",
+            "branch_id": other_branch
+        }))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        409,
+        "a teller's till login at another branch stays blocked, however it authenticates"
+    );
+}
