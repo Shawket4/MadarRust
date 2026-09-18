@@ -4,6 +4,7 @@
 //! byte-identical copy). This module loads grants from Postgres and adapts the
 //! crate to actix handlers.
 
+pub mod acts;
 pub mod api;
 pub mod keys;
 pub mod load;

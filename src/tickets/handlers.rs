@@ -1240,6 +1240,7 @@ pub async fn settle_open_ticket(
         let eff =
             crate::authz::require::effective_for_claims(pool.get_ref(), &claims, branch).await?;
         let decision = ask.decide(&eff);
+        let ask_req = ask.request();
         let allowed_outright = crate::sync::handlers::allow_or_approved_live(
             pool.get_ref(),
             decision,
@@ -1248,7 +1249,7 @@ pub async fn settle_open_ticket(
             claims.user_id(),
             org,
             None,
-            Some(&ask),
+            Some(&ask_req),
         )
         .await?;
         body.discount_applied_by = Some(claims.user_id());

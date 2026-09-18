@@ -715,6 +715,11 @@ pub struct VoidOrderRequest {
     /// Ignored: a void always puts the sale's stock back. Kept so older tills
     /// that still send it are read, not refused.
     pub restore_inventory: Option<bool>,
+    /// A manager's on-the-spot unlock for a void the teller's own limits do not
+    /// allow (someone else's sale, or one older than their window). Additive:
+    /// an older till never sends it and is refused exactly as before.
+    #[serde(default)]
+    pub live_approval: Option<crate::sync::handlers::ReplayApproval>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -1553,6 +1558,7 @@ pub async fn create_order(
         )
         .await?;
         let decision = ask.decide(&eff);
+        let ask_req = ask.request();
         let allowed_outright = crate::sync::handlers::allow_or_approved_live(
             pool.get_ref(),
             decision,
@@ -1561,7 +1567,7 @@ pub async fn create_order(
             claims.user_id(),
             org,
             None,
-            Some(&ask),
+            Some(&ask_req),
         )
         .await?;
         body.discount_applied_by = Some(claims.user_id());
@@ -3417,6 +3423,80 @@ pub async fn void_order(
     check_permission(pool.get_ref(), &claims, "orders", "delete").await?;
     let order = fetch_order_or_404(pool.get_ref(), *order_id).await?;
     require_branch_access(pool.get_ref(), &claims, order.branch_id).await?;
+
+    // THE LIMITS, LIVE. The legacy cell above answers "may this person void at
+    // all"; the phase 5 limits answer "may they void THIS sale, NOW" — own-only
+    // and a maximum age. They are decided here through the very same helpers
+    // replay uses (`authz::acts::void_ask` → `madar_authz::decide` →
+    // `allow_or_approved_live`), so the online and the offline answer cannot
+    // drift. Over the limit, a manager's PIN unlock (`live_approval`) carries
+    // it and is recorded; without one it is a 403, as offline already is.
+    if let Some(org) = claims.org_id() {
+        let ask = crate::authz::acts::void_ask(
+            pool.get_ref(),
+            order.id,
+            claims.user_id(),
+            chrono::Utc::now(),
+        )
+        .await?
+        .unwrap_or(crate::authz::acts::VoidAsk {
+            own: false,
+            age_minutes: 0,
+        });
+        let eff = crate::authz::require::effective_for_claims(
+            pool.get_ref(),
+            &claims,
+            Some(order.branch_id),
+        )
+        .await?;
+        // OLD CLIENTS AND OLD ORGS. The legacy `(resource, action)` cell above
+        // has already said yes. The limits are an architecture-E refinement of
+        // that yes, so they are only asked of a person who actually HOLDS the
+        // capability in their effective set: a shop whose E grants were never
+        // written (every org running before provisioning) decides exactly as it
+        // did yesterday, and no till that voids legitimately today starts
+        // getting a 403 the moment this deploys. Where the grant does exist,
+        // absent limits are unrestricted and still decide `Allow` — only a
+        // deliberately limited grant (the provisioned teller default: own sale,
+        // 10 minutes) is now enforced live as well as offline.
+        let void_req = ask.request();
+        let decision = if eff.can(crate::authz::Cap::OrdersVoid) {
+            crate::authz::decide(&eff, &void_req)
+        } else {
+            crate::authz::Decision::Allow
+        };
+        let allowed_outright = crate::sync::handlers::allow_or_approved_live(
+            pool.get_ref(),
+            decision,
+            crate::authz::Cap::OrdersVoid,
+            body.live_approval.as_ref(),
+            claims.user_id(),
+            org,
+            None,
+            // The approver answers for THIS sale — not their own, this old —
+            // so the server's framing of the act wins over the approval's.
+            Some(&void_req),
+        )
+        .await?;
+        if !allowed_outright {
+            let a = body
+                .live_approval
+                .clone()
+                .expect("checked by allow_or_approved_live");
+            crate::sync::handlers::record_approval(
+                pool.get_ref(),
+                &a,
+                org,
+                Some(order.branch_id),
+                crate::devices::DeviceHeader::from_request_headers(&req),
+                claims.user_id(),
+                "void_order_live",
+                chrono::Utc::now(),
+                &Ok(crate::authz::Cap::OrdersVoid),
+            )
+            .await;
+        }
+    }
     void_order_inner(
         pool.clone(),
         order_id.into_inner(),

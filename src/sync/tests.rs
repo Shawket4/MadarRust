@@ -1945,3 +1945,107 @@ async fn each_settle_of_a_split_bill_answers_for_its_own_discount(pool: PgPool) 
         "the discount is per settle, not per party"
     );
 }
+
+/// THE TWO HALVES AGREE. A queued void and a queued refund are now judged by
+/// the same `authz::acts` limits the live routes ask — and they part company
+/// only where the locked rule says they must (§4.4.5): a void moved no money,
+/// so an over-limit one is refused here as it is live; a refund did, so it
+/// lands and is flagged for the owner.
+#[sqlx::test]
+async fn the_void_and_refund_limits_hold_on_replay_too(pool: PgPool) {
+    let app = app!(pool);
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let org = seed_org(&pool).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    // The provisioned teller default: own sale, ten minutes; refunds capped at
+    // nothing, so every refund asks a manager.
+    for (cap, limits) in [
+        (64, serde_json::json!({"own": true, "max_age_minutes": 10})),
+        (69, serde_json::json!({"max_amount": 0})),
+    ] {
+        sqlx::query(
+            "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, limits, reason) \
+             VALUES ($1, $2, $3, 'allow', $4, 'test')",
+        )
+        .bind(org)
+        .bind(teller)
+        .bind(cap)
+        .bind(limits)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let seed_order = |n: i32, mins: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO orders (branch_id, teller_id, till_id, idempotency_key, subtotal, \
+                                     tax_amount, total_amount, status, order_number, \
+                                     payment_method, order_ref, created_at) \
+                 VALUES ($1, $2, $3, gen_random_uuid(), 300, 0, 300, 'completed', $4, 'cash', \
+                         gen_random_uuid()::text, now() - make_interval(mins => $5)) RETURNING id",
+            )
+            .bind(branch)
+            .bind(teller)
+            .bind(shift)
+            .bind(n)
+            .bind(mins)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let bearer = token(teller, org, UserRole::Teller);
+    let void = |order: Uuid, at: chrono::DateTime<chrono::Utc>| {
+        serde_json::json!({
+            "op": "void_order", "teller_id": teller, "order_id": order,
+            "occurred_at": at,
+            "request": { "reason": "mistake", "voided_at": at }
+        })
+    };
+
+    // Judged at the moment it was rung, not at the moment the queue drained:
+    // a two-minute-old sale voided offline still lands an hour later.
+    let fresh = seed_order(1, 2).await;
+    let r = replay(&app, &bearer, &void(fresh, chrono::Utc::now())).await;
+    assert!(
+        r.status().is_success(),
+        "own sale inside the window: {}",
+        r.status()
+    );
+
+    let stale = seed_order(2, 40).await;
+    let r = replay(&app, &bearer, &void(stale, chrono::Utc::now())).await;
+    assert_eq!(r.status(), 403, "own sale, 40 minutes old, no approval");
+
+    // A refund over the cap is NOT refused — the customer already has the
+    // money — it lands and the owner is told.
+    let paid = seed_order(3, 5).await;
+    let refund = serde_json::json!({
+        "op": "refund_order", "teller_id": teller,
+        "request": { "order_id": paid, "shift_id": shift, "amount": 100, "method": "cash",
+                     "reason": "quality_issue", "client_ref": Uuid::new_v4() }
+    });
+    let r = replay(&app, &bearer, &refund).await;
+    assert_eq!(r.status(), 201, "a queued refund over the cap still lands");
+    let flagged: Vec<String> = sqlx::query_scalar(
+        "SELECT capability FROM authz_replay_flags WHERE org_id = $1 AND op = 'RefundOrder'",
+    )
+    .bind(org)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(flagged, vec!["refunds.create".to_string()]);
+}

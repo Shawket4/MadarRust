@@ -942,3 +942,139 @@ async fn a_replayed_refund_logs_its_waste_once(pool: PgPool) {
     assert_eq!(rows, 1);
     assert_eq!(on_hand(&pool, &t, ing).await, 960.0);
 }
+
+// ── The phase 5 REFUND limit, live ────────────────────────────
+//
+// `refunds.create` is capped by `max_amount` (the provisioned teller default is
+// 0, so every refund asks a manager). Until `authz::acts` the live route asked
+// only the legacy `refunds:create` cell and the cap was enforced nowhere.
+
+const CAP_REFUNDS_CREATE: i32 = 69;
+
+async fn grant_refunds(pool: &PgPool, org: Uuid, user: Uuid, limits: Option<Value>) {
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, limits, reason) \
+         VALUES ($1, $2, $3, 'allow', $4, 'test')",
+    )
+    .bind(org)
+    .bind(user)
+    .bind(CAP_REFUNDS_CREATE)
+    .bind(limits)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_manager(pool: &PgPool, org: Uuid, branch: Uuid, limits: Option<Value>) -> Uuid {
+    let id = seed_user(pool, org, "branch_manager").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(id)
+        .bind(branch)
+        .execute(pool)
+        .await
+        .unwrap();
+    grant_refunds(pool, org, id, limits).await;
+    id
+}
+
+#[sqlx::test]
+async fn the_live_route_enforces_the_refund_cap(pool: PgPool) {
+    let app = app!(pool);
+    let till = seed_till(&pool).await;
+    grant_refunds(&pool, till.org_id, till.teller_id, Some(json!({"max_amount": 100}))).await;
+
+    assert_eq!(
+        post_refund(&app, &till.token, &refund_body(till.order_id, 50))
+            .await
+            .status()
+            .as_u16(),
+        201,
+        "50 is within the 100 cap"
+    );
+    assert_eq!(
+        post_refund(&app, &till.token, &refund_body(till.order_id, 150))
+            .await
+            .status()
+            .as_u16(),
+        403,
+        "150 is over it"
+    );
+    assert_eq!(refund_rows(&pool, till.order_id).await, (1, 50));
+}
+
+#[sqlx::test]
+async fn a_managers_live_approval_carries_an_over_cap_refund(pool: PgPool) {
+    let app = app!(pool);
+    let till = seed_till(&pool).await;
+    grant_refunds(&pool, till.org_id, till.teller_id, Some(json!({"max_amount": 100}))).await;
+    let manager = seed_manager(&pool, till.org_id, till.branch_id, None).await;
+    // A manager who is himself capped at 100 cannot approve a 150 refund: the
+    // approval is judged on the SERVER's figure, not the one it names.
+    let capped = seed_manager(
+        &pool,
+        till.org_id,
+        till.branch_id,
+        Some(json!({"max_amount": 100})),
+    )
+    .await;
+
+    let over = |approver: Uuid, id: Uuid| {
+        let mut b = refund_body(till.order_id, 150);
+        b["live_approval"] = json!({ "id": id, "capability": "refunds.create",
+                                     "approver_id": approver, "amount_minor": 50 });
+        b
+    };
+
+    assert_eq!(
+        post_refund(&app, &till.token, &over(capped, Uuid::new_v4()))
+            .await
+            .status()
+            .as_u16(),
+        403,
+        "the approver's own cap is below what is being refunded"
+    );
+    assert_eq!(
+        post_refund(&app, &till.token, &over(till.teller_id, Uuid::new_v4()))
+            .await
+            .status()
+            .as_u16(),
+        403,
+        "self-approval"
+    );
+
+    let approval_id = Uuid::new_v4();
+    assert_eq!(
+        post_refund(&app, &till.token, &over(manager, approval_id))
+            .await
+            .status()
+            .as_u16(),
+        201,
+        "an uncapped manager carries it"
+    );
+    assert_eq!(refund_rows(&pool, till.order_id).await, (1, 150));
+    let (approver, op): (Uuid, String) =
+        sqlx::query_as("SELECT approver_user_id, op FROM approvals WHERE id = $1")
+            .bind(approval_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(approver, manager);
+    assert_eq!(op, "create_refund_live");
+}
+
+/// THE OLD-CLIENT / OLD-ORG GOLDEN CHECK, refund half: an org with no
+/// capability grants refunds exactly as it did before this code shipped, from a
+/// till that sends no `live_approval`.
+#[sqlx::test]
+async fn an_org_with_no_capability_grants_refunds_exactly_as_before(pool: PgPool) {
+    let app = app!(pool);
+    let till = seed_till(&pool).await;
+    assert_eq!(
+        post_refund(&app, &till.token, &refund_body(till.order_id, 200))
+            .await
+            .status()
+            .as_u16(),
+        201
+    );
+    assert_eq!(refund_rows(&pool, till.order_id).await, (1, 200));
+}
