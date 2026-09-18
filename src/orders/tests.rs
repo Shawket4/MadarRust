@@ -4255,3 +4255,251 @@ async fn resolver_swap_picks_are_deterministic(pool: PgPool) {
         .unwrap();
     assert_eq!(row["default_milk_addon_id"], whole_addon.to_string());
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// No order may be negative (owner, 2026-09-18)
+//
+// The rule is split: a DISCOUNT is capped, and every other negative figure is
+// REFUSED. These pin both halves on the live route. `sync::tests` pins the
+// replay half, which is where a negative can actually arrive from a till.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Org + branch + teller + till + a 5.00 menu item, ready to ring a sale.
+async fn negative_money_fixture(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid, Uuid, String) {
+    let org_id = seed_org(pool).await;
+    let branch_id = seed_branch(pool, org_id).await;
+    let user_id = seed_user(pool, org_id, "teller").await;
+    assign_user_to_branch(pool, user_id, branch_id).await;
+    grant_permission(pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let till_id = seed_shift(pool, branch_id, user_id).await;
+    let cat_id = seed_category(pool, org_id).await;
+    let item_id = seed_menu_item(pool, org_id, cat_id).await;
+    (org_id, branch_id, user_id, till_id, item_id, token)
+}
+
+fn one_item_order(branch_id: Uuid, till_id: Uuid, item_id: Uuid) -> CreateOrderRequest {
+    CreateOrderRequest {
+        branch_id,
+        till_id,
+        payment_method: "cash".to_string(),
+        items: vec![OrderItemInput {
+            menu_item_id: Some(item_id),
+            quantity: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+macro_rules! neg_app {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(get_secret()))
+                .configure(routes::configure),
+        )
+        .await
+    };
+}
+
+async fn post_order(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    body: &CreateOrderRequest,
+) -> actix_web::http::StatusCode {
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(body)
+        .to_request();
+    test::call_service(app, req).await.status()
+}
+
+/// A till stating a subtotal below zero is told no — and, crucially, is told
+/// no rather than taking the request thread down. `clamp(0, subtotal)` panics
+/// when `subtotal` is negative (`min > max`), so this used to be a 500.
+#[sqlx::test]
+async fn a_negative_subtotal_is_refused_rather_than_panicking(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.subtotal = Some(-1);
+    let status = post_order(&app, &token, &body).await;
+    assert_eq!(status, 400, "a negative subtotal must be a refusal, not a 500");
+
+    // And nothing was written.
+    let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE branch_id = $1")
+        .bind(branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(orders, 0);
+}
+
+/// A split leg below zero. It used to reconcile perfectly against the total
+/// when paired with a larger positive leg, and then be refused row by row
+/// halfway through the write.
+#[sqlx::test]
+async fn a_negative_split_leg_is_refused_even_when_the_legs_add_up(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    // 500 + 70 tax = 570. The legs sum to 570 exactly — and one of them is
+    // less than nothing.
+    body.payment_splits = Some(vec![
+        PaymentSplitInput {
+            method: "cash".into(),
+            amount: 1070,
+            reference: None,
+        },
+        PaymentSplitInput {
+            method: "cash".into(),
+            amount: -500,
+            reference: None,
+        },
+    ]);
+    assert_eq!(post_order(&app, &token, &body).await, 400);
+}
+
+#[sqlx::test]
+async fn negative_cash_taken_or_change_given_is_refused(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.amount_tendered = Some(-100);
+    assert_eq!(post_order(&app, &token, &body).await, 400);
+
+    let mut body = one_item_order(branch, till, item);
+    body.change_given = Some(-100);
+    assert_eq!(post_order(&app, &token, &body).await, 400);
+}
+
+/// The OTHER half of the rule, and the one that must not become a refusal: a
+/// discount bigger than the bill is CAPPED and the sale goes through at zero.
+/// A teller with a customer in front of them is never stuck over this.
+#[sqlx::test]
+async fn a_fixed_discount_larger_than_the_bill_sells_at_zero_rather_than_refusing(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.discount_type = Some("fixed".into());
+    body.discount_value = Some(dec!(999999));
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.subtotal, 500);
+    assert_eq!(full.order.discount_amount, 500, "capped at the subtotal");
+    assert_eq!(full.order.tax_amount, 0);
+    assert_eq!(full.order.total_amount, 0);
+}
+
+/// A percentage above 100 takes the whole bill and no more — never a rebate.
+///
+/// Written in the LEGACY spelling (`150` = 150%) on purpose. Under today's
+/// convention a percentage is a fraction and cannot exceed `1`, so
+/// `resolve_discount_value` reads anything above `1` as the pre-2026-09
+/// spelling and divides by 100 — which means an over-100% percentage can only
+/// reach the engine this way. The cap has to hold on that path too, and this
+/// is the path a stale till actually uses.
+#[sqlx::test]
+async fn a_percentage_over_a_hundred_sells_at_zero_and_never_pays_the_customer(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.discount_type = Some("percentage".into());
+    body.discount_value = Some(dec!(150)); // legacy spelling for 150%
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.discount_amount, 500);
+    assert_eq!(full.order.total_amount, 0);
+}
+
+/// Exactly 100% in today's spelling: the whole bill off, tax and service
+/// charge included, and a total of zero rather than anything below it.
+#[sqlx::test]
+async fn a_hundred_percent_off_lands_on_zero_with_no_tax_left_behind(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.discount_type = Some("percentage".into());
+    body.discount_value = Some(dec!(1));
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.discount_amount, 500);
+    assert_eq!(full.order.tax_amount, 0);
+    assert_eq!(full.order.total_amount, 0);
+}
+
+/// An order of nothing but zero-priced items is a zero bill, not a negative
+/// one — and a discount on it takes nothing rather than going under.
+#[sqlx::test]
+async fn an_order_of_only_zero_priced_items_is_zero_not_negative(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+    // Reuse the fixture's category (its name is unique per org).
+    let cat: Uuid = sqlx::query_scalar("SELECT category_id FROM menu_items WHERE id = $1")
+        .bind(item)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let free = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) \
+         VALUES ($1, $2, $3, 'Tap water', 0, true)",
+    )
+    .bind(free)
+    .bind(org)
+    .bind(cat)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut body = one_item_order(branch, till, free);
+    body.discount_type = Some("fixed".into());
+    body.discount_value = Some(dec!(5000));
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.subtotal, 0);
+    assert_eq!(full.order.discount_amount, 0);
+    assert_eq!(full.order.total_amount, 0);
+}

@@ -8,5 +8,6 @@ pub mod policy;
 pub mod vectors;
 
 pub use engine::{
-    Breakdown, Discount, Minor, SaleChannel, TaxPolicy, compute, discount_amount, refund_split,
+    Breakdown, Discount, Minor, NegativePart, SaleChannel, TaxPolicy, compute, discount_amount,
+    negative_part, refund_split,
 };

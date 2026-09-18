@@ -1372,6 +1372,26 @@ pub(crate) async fn resolve_order_line(
         if prices == ClientPrices::AsCharged {
             for (i, a) in resolved_addons.iter_mut().enumerate() {
                 if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
+                    // A MODIFIER MAY NOT BE PRICED BELOW NOTHING.
+                    //
+                    // Checked here rather than left to the line guard, because
+                    // the line guard cannot see it: a -5.00 modifier on a
+                    // 20.00 coffee leaves the LINE at 15.00, perfectly
+                    // positive, and stores a negative `order_item_addons` row
+                    // underneath it. That row is what the add-on revenue
+                    // reports sum, so the sale looks right and the modifier's
+                    // revenue goes backwards.
+                    //
+                    // Replay is the only path that reaches here — live, the
+                    // server prices the addon itself — so this is exactly the
+                    // till-authored figure that needs the check.
+                    if p < 0 {
+                        return Err(AppError::BadRequest(format!(
+                            "The modifier '{}' is priced at {}. A modifier can never be \
+                             priced below nothing.",
+                            a.addon_name, p
+                        )));
+                    }
                     a.unit_price = p;
                 }
             }
@@ -2011,6 +2031,22 @@ pub(crate) async fn create_order_inner(
         let charged_line_subtotal = charged_line_subtotal - covered;
         let is_reward_line = covered > 0;
 
+        // NO LINE MAY BE NEGATIVE (owner, 2026-09-18). A line goes below zero
+        // only through a price this server did not set — a replayed
+        // `unit_price`, a replayed addon delta, or a modifier priced below the
+        // item it modifies — and there is no honest way to book it. Capping it
+        // to zero would invent a free sale; the order is refused instead, and
+        // the till dead-letters it into the stuck list where the owner sees it.
+        // See `tax::negative_part` for why a discount is capped and this is not.
+        if charged_line_subtotal < 0 {
+            return Err(AppError::BadRequest(format!(
+                "Line {} of this order comes to {} — a line can never be less than zero. \
+                 Check the item's price and its modifiers.",
+                line_index + 1,
+                charged_line_subtotal
+            )));
+        }
+
         // Flag the line when what was charged differs from what the menu says,
         // or the item was disabled at this branch. Both mean the same thing —
         // a sale rung against a catalogue that has since moved — and both are
@@ -2108,6 +2144,19 @@ pub(crate) async fn create_order_inner(
             resolved_discount_type.as_deref(),
             Some("percentage") | Some("fixed")
         );
+    // The subtotal the till stated, before anything is computed on it.
+    //
+    // This is checked HERE, ahead of the clamp below, for two reasons. The
+    // books store this figure verbatim, so a negative one is a negative sale
+    // on the P&L. And `clamp(0, subtotal)` PANICS when `subtotal` is negative
+    // (`min > max`), so a till sending `subtotal: -1` took the request thread
+    // down with a 500 rather than being told no.
+    if subtotal < 0 {
+        return Err(AppError::BadRequest(format!(
+            "This order's subtotal comes to {subtotal} — an order can never be less than \
+             zero. Check the line prices and their modifiers."
+        )));
+    }
     let discount_amount = if rule_discount {
         calc_discount(subtotal)
     } else {
@@ -2116,6 +2165,17 @@ pub(crate) async fn create_order_inner(
     }
     .clamp(0, subtotal);
     let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
+    // Belt and braces over the whole priced bill: discount, service charge, tax
+    // and total. `compute` floors what it taxes, so this fires only on a figure
+    // that reached it another way — but this is the bill the books keep, and it
+    // is checked rather than assumed.
+    if let Some(part) = crate::tax::negative_part(&breakdown) {
+        return Err(AppError::BadRequest(format!(
+            "This order's {} is negative. An order can never be less than zero — the till's \
+             settings are out of date; sign in again to refresh them, then retake the order.",
+            part.as_str()
+        )));
+    }
     let service_charge_amount = breakdown.service_charge as i32;
     // What the waiver took off: the charge this bill would have carried.
     let service_charge_waived_amount = if service_waiver.is_some() {
@@ -2172,6 +2232,36 @@ pub(crate) async fn create_order_inner(
     // the whole bill (which read 0 change on every split). A split that names
     // no usable tender — every till sends 0 for one — records none, rather
     // than a "Cash 0.00" that each receipt and reprint then printed.
+    // A tip is money too. The DB has refused a negative one since
+    // 20260912030000, but as a constraint violation — a 500, and a queued sale
+    // dead-lettering on an opaque error. Said properly here instead.
+    if body.tip_amount.is_some_and(|t| t < 0) {
+        return Err(AppError::BadRequest(
+            "The tip is negative. A tip can never be less than zero.".into(),
+        ));
+    }
+
+    // NO TENDER MAY BE NEGATIVE. A split leg is checked here as well as at the
+    // row insert, because the legs are summed into `cash_legs` and reconciled
+    // against the total FIRST: a leg of `-500` paired with one of `+500` used
+    // to reconcile perfectly and then be refused row by row, halfway through
+    // the write. Cash handed over and change given back are the other two
+    // figures a customer would feel, so they are named the same way.
+    if let Some(splits) = &body.payment_splits
+        && let Some(bad) = splits.iter().find(|s| s.amount < 0)
+    {
+        return Err(AppError::BadRequest(format!(
+            "A {} payment of {} is negative. A payment can never be less than zero.",
+            bad.method, bad.amount
+        )));
+    }
+    if body.amount_tendered.is_some_and(|t| t < 0) || body.change_given.is_some_and(|c| c < 0) {
+        return Err(AppError::BadRequest(
+            "The cash taken or the change given is negative. Neither can be less than zero."
+                .into(),
+        ));
+    }
+
     let (amount_tendered, change_given) =
         match body.payment_splits.as_ref().filter(|s| !s.is_empty()) {
             Some(splits) => {
