@@ -162,16 +162,16 @@ async fn overrides_obey_the_guard(pool: PgPool) {
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 
-    // The owner gives it; money needs a reason.
+    // The owner gives it. A reason is never required, not even for money.
     let (s, _) = call(&app, put(mgr).set_json(json!({"capability": "staff.permissions.edit", "effect": "allow", "reason": "shift lead"})), &ot).await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = call(
+    let (s, body) = call(
         &app,
         put(teller).set_json(json!({"capability": "refunds.create", "effect": "deny"})),
         &mt,
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "reason required for money");
+    assert_eq!(s, StatusCode::OK, "no reason is fine for money: {body}");
 
     // Now the manager: can deny a cashier's refunds, can't grant what they lack,
     // can't remove core, can't touch themselves or the owner.
@@ -1037,4 +1037,87 @@ async fn a_flag_approval_is_refused_unless_the_approver_really_holds_the_review(
     )
     .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+/// The owner's bug (2026-09-18): the limits popover on a money capability sends
+/// `effect: allow` plus limits and has nowhere to type a reason, so every save
+/// used to come back 400 "Say why". A reason is optional now — absent, null or
+/// empty — while a reason that IS sent is still stored for the audit trail.
+#[sqlx::test]
+async fn a_reason_is_never_required_on_an_override(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b = branch(&pool, o).await;
+    let owner = user(&pool, o, "org_admin", "Owner", None).await;
+    let teller = user(&pool, o, "teller", "Sara", None).await;
+    assign(&pool, teller, b).await;
+    let ot = token(owner, o, UserRole::OrgAdmin);
+    let put = || test::TestRequest::put().uri(&format!("/authz/users/{teller}/overrides"));
+
+    // 1. The limits popover: a money capability, allow + limits, no reason key.
+    let (s, body) = call(
+        &app,
+        put().set_json(json!({
+            "capability": "refunds.create",
+            "effect": "allow",
+            "limits": {"max_amount": 5000},
+        })),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "limits save with no reason: {body}");
+
+    // 2. An explicit null, and 3. an empty / whitespace string: all accepted.
+    for r in [json!(null), json!(""), json!("   ")] {
+        let (s, body) = call(
+            &app,
+            put().set_json(json!({"capability": "refunds.create", "effect": "deny", "reason": r})),
+            &ot,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "reason {r:?}: {body}");
+    }
+
+    // 4. An admin-risk capability with no reason.
+    let (s, body) = call(
+        &app,
+        put().set_json(json!({"capability": "staff.permissions.edit", "effect": "allow"})),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "admin risk with no reason: {body}");
+
+    // 5. An old client still sends one, and it is still written to the row.
+    let (s, body) = call(
+        &app,
+        put().set_json(json!({
+            "capability": "orders.void",
+            "effect": "allow",
+            "reason": "  covering the late shift  ",
+        })),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT reason FROM user_overrides WHERE user_id = $1 AND revoked_at IS NULL
+           AND capability_id = (SELECT id FROM capabilities WHERE key = 'orders.void')",
+    )
+    .bind(teller)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some("covering the late shift"), "trimmed and kept");
+
+    // And the reason-less saves really are rows, with no reason on them.
+    let nulls: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_overrides WHERE user_id = $1 AND revoked_at IS NULL
+           AND coalesce(reason, '') = ''",
+    )
+    .bind(teller)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(nulls >= 2, "reason-less overrides are stored, got {nulls}");
 }
