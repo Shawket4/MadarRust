@@ -319,6 +319,103 @@ async fn test_offline_auth_bundle_returns_org_tellers(pool: PgPool) {
     assert!(lan_secret.chars().all(|c| c.is_ascii_hexdigit()), "hex");
 }
 
+// An OWNER (or any all-branches manager) is provisioned under architecture E with
+// `role_assignments.all_branches` and NO legacy `user_branch_assignments` row. The
+// device-scoped bundle used to filter on the legacy table alone, so the owner was
+// dropped from every device's bundle — and because the POS resolves an approver's
+// PIN against that bundle (`session::bundle_person_by_pin`), the owner's PIN could
+// not approve ANYTHING at a till: a void over the limit, مراجعة الخزنة, or the
+// flag batch. Reported by the owner from a real till, 2026-09-18.
+#[sqlx::test]
+async fn test_offline_auth_bundle_includes_an_all_branches_owner(pool: PgPool) {
+    crate::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Org', $2)")
+        .bind(org_id)
+        .bind(format!("org-{org_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let branch_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Main')")
+        .bind(branch_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A registered, unretired device of that branch — the bundle is branch-scoped
+    // by this header.
+    let device_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO devices (id, org_id, branch_id, code, kind) VALUES ($1,$2,$3,'D01','pos')")
+        .bind(device_id)
+        .bind(org_id)
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // The teller: branch-assigned the legacy way (the control — always worked).
+    let teller = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Sayed','teller'::user_role,'h')")
+        .bind(teller).bind(org_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1,$2)")
+        .bind(teller).bind(branch_id).execute(&pool).await.unwrap();
+
+    // The owner: a PIN, NO legacy branch row, an all-branches role assignment.
+    let owner = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role, pin_hash) VALUES ($1,$2,'Peter',$3,'h','org_admin'::user_role,'h')")
+        .bind(owner).bind(org_id).bind(format!("o-{org_id}@t.com")).execute(&pool).await.unwrap();
+    // Creating the owner provisions their role assignment for them: all branches,
+    // and NO `user_branch_assignments` row. That is the shape the bug lived in,
+    // so assert it rather than building it by hand.
+    let (all_branches, legacy_rows): (bool, i64) = sqlx::query_as(
+        "SELECT ra.all_branches,
+                (SELECT count(*) FROM user_branch_assignments a WHERE a.user_id = $1)
+           FROM role_assignments ra
+          WHERE ra.user_id = $1 AND ra.revoked_at IS NULL",
+    )
+    .bind(owner)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(all_branches, "an owner is provisioned across all branches");
+    assert_eq!(legacy_rows, 0, "and holds no legacy branch assignment");
+
+    let token = generate_org_admin_token(org_id);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orgs/{org_id}/offline-auth-bundle"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("X-Madar-Device", device_id.to_string()))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let tellers = body["tellers"].as_array().unwrap();
+    let names: Vec<&str> = tellers.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        names.contains(&"Sayed"),
+        "the branch-assigned teller is listed: {names:?}"
+    );
+    assert!(
+        names.contains(&"Peter"),
+        "an all-branches owner must be listed for this branch's device, \
+         otherwise their PIN can never approve anything at the till: {names:?}"
+    );
+}
+
 // Authorization: a token from a DIFFERENT org cannot fetch this org's bundle.
 #[sqlx::test]
 async fn test_offline_auth_bundle_cross_org_forbidden(pool: PgPool) {
