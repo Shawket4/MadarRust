@@ -13,6 +13,7 @@
 //! - `GET|PUT /authz/policy`                 "ask a manager" per capability
 //! - `GET  /authz/flags`                     offline acts accepted and flagged
 //! - `POST /authz/flags/{id}/review`         acknowledge one
+//! - `POST /authz/flags/bulk-review`         acknowledge many (optional one-time approval)
 //!
 //! Every write goes through `madar_authz::guard`: no self-edit, dominate the
 //! target, hold what you grant, owners protected, core grants kept.
@@ -294,6 +295,12 @@ pub struct FlagQuery {
     /// to look at.
     #[serde(default)]
     pub include_reviewed: bool,
+    /// Optional one-time manager approval, the ordinary `ReplayApproval` shape
+    /// JSON-encoded (a GET has no body). A till signed in as a TELLER uses it
+    /// to pull its own branch's flags with a manager's PIN; leaving it out is
+    /// exactly the old behaviour, `approvals.review` on the bearer.
+    #[serde(default)]
+    pub approval: Option<String>,
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -1392,6 +1399,81 @@ pub async fn set_policy(
     get_policy(req, pool).await
 }
 
+/// Who may work the flag queue on this call (owner-approved, 2026-09-18).
+///
+/// WITHOUT an approval the answer is exactly what it has always been:
+/// `approvals.review`, held by the bearer, org-wide. WITH one, the same shared
+/// rule the rest of the system uses decides it
+/// ([`crate::sync::handlers::allow_or_approved_live`] -> `verify_approval`), so
+/// a till signed in as a teller can pull and clear its own backlog with a
+/// manager's one-time PIN.
+///
+/// What an approval buys is deliberately narrow: this one call, scoped to the
+/// session's own branch, recorded under the APPROVER. It is not a session
+/// upgrade, it cannot be minted for another act, it cannot be self-issued, and
+/// a session with no branch cannot use one at all.
+struct ReviewAuthority {
+    /// Whose name goes on the review.
+    reviewer: Uuid,
+    /// `Some(branch)` when an approval opened the door: this call may only see
+    /// or touch that branch's flags (and branch-less ones, which name no branch
+    /// to leak). `None` = the bearer's own right, org-wide as before.
+    branch_scope: Option<Uuid>,
+    /// The approval to record once the call has done its work.
+    approval: Option<crate::sync::handlers::ReplayApproval>,
+}
+
+async fn review_authority(
+    pool: &sqlx::PgPool,
+    claims: &Claims,
+    org: Uuid,
+    approval: Option<crate::sync::handlers::ReplayApproval>,
+) -> Result<ReviewAuthority, AppError> {
+    let me = claims.user_id();
+    let Some(a) = approval else {
+        // The plain path, untouched.
+        super::require::require(pool, claims, Cap::ApprovalsReview, None).await?;
+        return Ok(ReviewAuthority { reviewer: me, branch_scope: None, approval: None });
+    };
+    let eff = super::require::effective_for_claims(pool, claims, None).await?;
+    let decision = madar_authz::decide(&eff, &madar_authz::Request::of(Cap::ApprovalsReview));
+    // An approval never widens what a session can SEE, so it only speaks for a
+    // session that names a branch. A bearer who holds the capability outright
+    // is unaffected by anything sent alongside it.
+    if !decision.is_allow() && claims.branch_id().is_none() {
+        return Err(super::require::denied(Cap::ApprovalsReview));
+    }
+    let outright = crate::sync::handlers::allow_or_approved_live(
+        pool,
+        decision,
+        Cap::ApprovalsReview,
+        Some(&a),
+        me,
+        org,
+        None,
+        None,
+    )
+    .await?;
+    if outright {
+        return Ok(ReviewAuthority { reviewer: me, branch_scope: None, approval: None });
+    }
+    Ok(ReviewAuthority {
+        reviewer: a.approver_id,
+        branch_scope: claims.branch_id(),
+        approval: Some(a),
+    })
+}
+
+/// The approver's own name, for the note that records who cleared a flag.
+async fn approver_label(pool: &sqlx::PgPool, approver: Uuid) -> String {
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM users WHERE id = $1").bind(approver).fetch_optional(pool).await.ok().flatten();
+    match name {
+        Some(n) if !n.trim().is_empty() => format!("{n} ({approver})"),
+        _ => approver.to_string(),
+    }
+}
+
 #[utoipa::path(get, path = "/authz/flags", tag = "authz", params(FlagQuery),
     responses((status = 200, description = "Flagged offline actions", body = Vec<ReplayFlag>), AppErrorResponse),
     security(("bearer_jwt" = [])))]
@@ -1402,7 +1484,28 @@ pub async fn list_flags(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
-    super::require::require(pool.get_ref(), &claims, Cap::ApprovalsReview, None).await?;
+    let approval = match q.approval.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            serde_json::from_str::<crate::sync::handlers::ReplayApproval>(raw)
+                .map_err(|e| AppError::BadRequest(format!("approval: {e}")))?,
+        ),
+    };
+    let authority = review_authority(pool.get_ref(), &claims, org, approval).await?;
+    if let Some(a) = authority.approval.as_ref() {
+        crate::sync::handlers::record_approval(
+            pool.get_ref(),
+            a,
+            org,
+            authority.branch_scope,
+            crate::devices::DeviceHeader::from_request_headers(&req),
+            claims.user_id(),
+            "list_flags_live",
+            chrono::Utc::now(),
+            &Ok(Cap::ApprovalsReview),
+        )
+        .await;
+    }
     let rows: Vec<ReplayFlag> = sqlx::query_as::<
         _,
         (
@@ -1424,11 +1527,15 @@ pub async fn list_flags(
            FROM authz_replay_flags f
            LEFT JOIN users u ON u.id = f.author_id
           WHERE f.org_id = $1 AND ($2 OR f.reviewed_at IS NULL)
+            -- An approval-opened pull sees its own branch only; a flag with no
+            -- branch (a wrong-branch PIN) names none, so it stays visible.
+            AND ($3::uuid IS NULL OR f.branch_id = $3 OR f.branch_id IS NULL)
           ORDER BY f.created_at DESC
           LIMIT 500",
     )
     .bind(org)
     .bind(q.include_reviewed)
+    .bind(authority.branch_scope)
     .fetch_all(pool.get_ref())
     .await?
     .into_iter()
@@ -1503,6 +1610,11 @@ pub struct BulkReviewRequest {
     pub flag_ids: Vec<i64>,
     #[serde(default)]
     pub note: Option<String>,
+    /// Optional one-time manager approval (the ordinary `ReplayApproval`
+    /// shape, as `live_approval` carries on an order, a refund or a waste).
+    /// Additive: without it the call behaves exactly as before.
+    #[serde(default)]
+    pub approval: Option<crate::sync::handlers::ReplayApproval>,
 }
 
 #[derive(serde::Serialize, utoipa::ToSchema)]
@@ -1536,19 +1648,49 @@ pub async fn bulk_review_flags(
 ) -> Result<HttpResponse, AppError> {
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
-    // Permission FIRST, before the id list is even looked at.
-    super::require::require(pool.get_ref(), &claims, Cap::ApprovalsReview, None).await?;
-    let me = claims.user_id();
+    // Permission FIRST, before the id list is even looked at — the bearer's
+    // own `approvals.review`, or a verified one-time approval for it.
+    let authority =
+        review_authority(pool.get_ref(), &claims, org, body.approval.clone()).await?;
+    let me = authority.reviewer;
+    let note = match authority.approval.as_ref() {
+        // The note is the server's word, not the till's: it names the person
+        // who actually approved, whatever the client sent along.
+        Some(a) => {
+            let who = approver_label(pool.get_ref(), a.approver_id).await;
+            Some(match body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                Some(n) => format!("{n} \u{2014} approved by {who}"),
+                None => format!("approved by {who}"),
+            })
+        }
+        None => body.note.clone(),
+    };
+    if let Some(a) = authority.approval.as_ref() {
+        crate::sync::handlers::record_approval(
+            pool.get_ref(),
+            a,
+            org,
+            authority.branch_scope,
+            crate::devices::DeviceHeader::from_request_headers(&req),
+            claims.user_id(),
+            "bulk_review_flags_live",
+            chrono::Utc::now(),
+            &Ok(Cap::ApprovalsReview),
+        )
+        .await;
+    }
     let mut resolved = Vec::new();
     let mut pending = Vec::new();
     for id in body.flag_ids.iter().copied() {
         // Idempotent per item: an already-reviewed flag is a no-op success,
         // never a second row and never an error on resubmit.
         let already: Option<bool> = sqlx::query_scalar(
-            "SELECT true FROM authz_replay_flags WHERE id = $1 AND org_id = $2 AND reviewed_at IS NOT NULL",
+            "SELECT true FROM authz_replay_flags WHERE id = $1 AND org_id = $2 AND reviewed_at IS NOT NULL
+               AND ($3::uuid IS NULL OR branch_id = $3 OR branch_id IS NULL)",
         )
         .bind(id)
         .bind(org)
+        .bind(authority.branch_scope)
         .fetch_optional(pool.get_ref())
         .await?;
         if already.is_some() {
@@ -1558,12 +1700,14 @@ pub async fn bulk_review_flags(
         let updated = sqlx::query(
             "UPDATE authz_replay_flags
                 SET reviewed_at = now(), reviewed_by = $3, review_note = $4
-              WHERE id = $1 AND org_id = $2 AND reviewed_at IS NULL",
+              WHERE id = $1 AND org_id = $2 AND reviewed_at IS NULL
+                AND ($5::uuid IS NULL OR branch_id = $5 OR branch_id IS NULL)",
         )
         .bind(id)
         .bind(org)
         .bind(me)
-        .bind(body.note.as_deref())
+        .bind(note.as_deref())
+        .bind(authority.branch_scope)
         .execute(pool.get_ref())
         .await;
         match updated {
