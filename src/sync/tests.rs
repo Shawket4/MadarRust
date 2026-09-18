@@ -2049,3 +2049,126 @@ async fn the_void_and_refund_limits_hold_on_replay_too(pool: PgPool) {
     .unwrap();
     assert_eq!(flagged, vec!["refunds.create".to_string()]);
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// A negative order is refused AT REPLAY (owner, 2026-09-18)
+//
+// This is the one validation that refuses a money op at replay, and it does
+// not contradict accept-and-flag (§4.4.5). That rule answers "MAY this actor
+// do this", and says a sale whose money already moved is recorded even when
+// the grant was missing. This answers "IS this a sale at all". A negative
+// total is not a sale that happened — it is corrupt input, from a bad price
+// or a stale build — and there is no honest row to write for it. It is
+// refused for exactly the reason `quantity <= 0` already is.
+//
+// A refused op dead-letters on the till and surfaces in the stuck list, so an
+// old client (<= v0.7.8) that queued one does not retry for ever, and the
+// owner is shown it rather than finding a negative sale in the books.
+// ────────────────────────────────────────────────────────────────────────
+
+/// A replayed sale whose stated subtotal is below zero. This is the payload
+/// shape that used to PANIC the handler (`clamp(0, subtotal)` with
+/// `min > max`) rather than be refused.
+#[sqlx::test]
+async fn a_replayed_order_with_a_negative_subtotal_is_refused_not_booked(pool: PgPool) {
+    let app = app!(pool);
+    let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let op = serde_json::json!({
+        "op": "create_order",
+        "teller_id": teller,
+        "request": {
+            "branch_id": branch,
+            "shift_id": shift,
+            "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "items": [{ "menu_item_id": item, "quantity": 1 }],
+            "subtotal": -2000,
+            "total_amount": -2280
+        }
+    });
+    let r = replay(&app, &bearer, &op).await;
+    assert_eq!(r.status(), 400, "a negative sale is corrupt input, not a sale");
+
+    let booked: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE branch_id = $1")
+        .bind(branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(booked, 0, "nothing negative may reach the books");
+}
+
+/// A replayed line priced below zero. Replay is the ONE path that takes the
+/// till's line prices verbatim (`ClientPrices::AsCharged`), because the sale
+/// already happened at the price on the screen — which is exactly why it is
+/// also the one path a negative line can arrive on.
+#[sqlx::test]
+async fn a_replayed_line_priced_below_zero_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let op = serde_json::json!({
+        "op": "create_order",
+        "teller_id": teller,
+        "request": {
+            "branch_id": branch,
+            "shift_id": shift,
+            "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "items": [{ "menu_item_id": item, "quantity": 1, "unit_price": -500 }],
+            "total_amount": 0
+        }
+    });
+    assert_eq!(replay(&app, &bearer, &op).await.status(), 400);
+
+    let booked: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE branch_id = $1")
+        .bind(branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(booked, 0);
+}
+
+/// The other half at replay: an over-large discount is still CAPPED and the
+/// sale still lands. Refusing here would lose a sale that really happened —
+/// the distinction the whole rule turns on.
+#[sqlx::test]
+async fn a_replayed_discount_bigger_than_the_bill_is_capped_and_still_booked(pool: PgPool) {
+    let app = app!(pool);
+    let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // The item is 20.00; the till rang 999.99 off it.
+    let op = serde_json::json!({
+        "op": "create_order",
+        "teller_id": teller,
+        "request": {
+            "branch_id": branch,
+            "shift_id": shift,
+            "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "discount_kind": "manual_amount",
+            "discount_type": "fixed",
+            "discount_value": 99999,
+            "discount_amount": 99999,
+            "discount_applied_by": teller,
+            "items": [{ "menu_item_id": item, "quantity": 1 }],
+            "total_amount": 0
+        }
+    });
+    let r = replay(&app, &bearer, &op).await;
+    assert!(r.status().is_success(), "{:?}", r.status());
+
+    let (subtotal, discount, total): (i32, i32, i32) = sqlx::query_as(
+        "SELECT subtotal, discount_amount, total_amount FROM orders \
+         WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(discount, subtotal, "capped at the bill, never past it");
+    assert_eq!(total, 0, "zero, never below");
+}
