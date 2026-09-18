@@ -206,11 +206,88 @@ async fn roster(pool: &PgPool, org: Uuid, user: Uuid, shift: Uuid, day_of_week: 
     .unwrap();
 }
 
-/// Wall-clock time `minutes_ago` before now, as a `NaiveTime` in UTC. Used to
-/// place a shift's start relative to the moment the test runs.
+/// THE CLOCK-RELATIVE FIXTURES ARE DAY-AWARE.
+///
+/// These tests say "the shift started 40 minutes ago" by writing a bare
+/// `NaiveTime` into `work_shifts.start_time`, and the server re-materialises it
+/// as `business_date + start_time`. A bare time has no day, so a run near
+/// midnight used to wrap: at 00:10 UTC, "40 minutes ago" is 23:30 — a time the
+/// server places on the wrong side of midnight from the punch, and every dated
+/// fixture beside it (an approved late arrival's `on_date`) then names a
+/// different day from the attendance record's. Two tests failed that way in the
+/// last verification, and only between 00:00 and 00:40 UTC.
+///
+/// The fix is to give the fixtures a day that cannot turn over while they run:
+/// the branch is pinned to the whole-hour zone in which THIS RUN is local noon,
+/// so an offset of ±8 hours still lands on the same local date, whatever the
+/// wall clock in UTC says. Every offset below is a LOCAL time in that zone.
+fn stable_zone_at(base: chrono::DateTime<Utc>) -> String {
+    // POSIX sign convention: `Etc/GMT-2` is two hours AHEAD of UTC.
+    let shift = 12 - base.hour() as i64;
+    format!("Etc/GMT{}{}", if shift > 0 { '-' } else { '+' }, shift.abs())
+}
+
+fn stable_zone() -> String {
+    stable_zone_at(Utc::now())
+}
+
+/// The local date and time, in [`stable_zone_at`]'s zone, `minutes` from
+/// `base` — derived from one full date-time, so the date always belongs to the
+/// time beside it.
+fn local_offset_at(base: chrono::DateTime<Utc>, minutes: i64) -> (chrono::NaiveDate, NaiveTime) {
+    let shift = 12 - base.hour() as i64;
+    let local = (base + Duration::hours(shift) + Duration::minutes(minutes)).naive_utc();
+    (
+        local.date(),
+        NaiveTime::from_hms_opt(local.hour(), local.minute(), 0).unwrap(),
+    )
+}
+
+/// Wall-clock time `minutes` from now in the fixtures' zone. Used to place a
+/// shift's start relative to the moment the test runs.
 fn utc_time_offset(minutes: i64) -> NaiveTime {
-    let t = (Utc::now() + Duration::minutes(minutes)).time();
-    NaiveTime::from_hms_opt(t.hour(), t.minute(), 0).unwrap()
+    local_offset_at(Utc::now(), minutes).1
+}
+
+/// The BUSINESS DATE that time falls on — what a dated fixture row (a leave or
+/// late-arrival request) must name for the server to find it.
+fn local_date_offset(minutes: i64) -> chrono::NaiveDate {
+    local_offset_at(Utc::now(), minutes).0
+}
+
+#[actix_web::test]
+async fn the_clock_fixtures_hold_on_both_sides_of_midnight() {
+    let at = |h: u32, m: u32| {
+        chrono::DateTime::from_naive_utc_and_offset(
+            chrono::NaiveDate::from_ymd_opt(2026, 3, 14)
+                .unwrap()
+                .and_hms_opt(h, m, 0)
+                .unwrap(),
+            Utc,
+        )
+    };
+    // Ten minutes either side of midnight UTC — the window that broke — plus a
+    // midday run, and every hour of the day for good measure.
+    for base in [at(23, 50), at(0, 10), at(12, 0)] {
+        let (start_date, start) = local_offset_at(base, -40);
+        let (end_date, end) = local_offset_at(base, 440);
+        let (now_date, now) = local_offset_at(base, 0);
+        assert_eq!(start_date, now_date, "the shift started on the punch's day");
+        assert_eq!(end_date, now_date, "and ends on it");
+        assert!(start < now && now < end, "{start} < {now} < {end}");
+        assert_eq!(
+            (now - start).num_minutes(),
+            40,
+            "forty minutes, not twenty-three hours and twenty"
+        );
+    }
+    for hour in 0..24 {
+        let base = at(hour, 30);
+        let (d, t) = local_offset_at(base, 0);
+        assert_eq!(d, local_offset_at(base, -40).0, "no wrap at {hour}:30 UTC");
+        assert_eq!(d, local_offset_at(base, 480).0, "nor forward");
+        assert_eq!(t.hour(), 12, "the run sits at local noon");
+    }
 }
 
 async fn check_in(
@@ -237,7 +314,7 @@ async fn check_in(
 #[sqlx::test]
 async fn check_in_inside_the_geofence_is_accepted(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -272,7 +349,7 @@ async fn check_in_inside_the_geofence_is_accepted(pool: PgPool) {
 #[sqlx::test]
 async fn check_in_outside_the_geofence_is_refused(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -305,7 +382,7 @@ async fn check_in_outside_the_geofence_is_refused(pool: PgPool) {
 #[sqlx::test]
 async fn geofencing_can_be_turned_off_per_org(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -338,7 +415,7 @@ async fn geofencing_can_be_turned_off_per_org(pool: PgPool) {
 #[sqlx::test]
 async fn arriving_within_grace_is_present_not_late(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     // Shift started 10 minutes ago with 15 minutes of grace.
     let shift = seed_shift(
@@ -363,7 +440,7 @@ async fn arriving_within_grace_is_present_not_late(pool: PgPool) {
 #[sqlx::test]
 async fn arriving_past_grace_is_late_by_the_excess_only(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     // Started 40 minutes ago, 15 minutes of grace → 25 minutes late.
     let shift = seed_shift(
@@ -392,7 +469,7 @@ async fn arriving_past_grace_is_late_by_the_excess_only(pool: PgPool) {
 #[sqlx::test]
 async fn an_approved_late_arrival_forgives_the_lateness(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -409,11 +486,15 @@ async fn an_approved_late_arrival_forgives_the_lateness(pool: PgPool) {
     // Approved arrival 5 minutes from now — comfortably after the punch.
     sqlx::query(
         "INSERT INTO staff_requests (org_id, user_id, kind, on_date, to_time, status, decided_at) \
-         VALUES ($1, $2, 'late_arrival', (now() AT TIME ZONE 'UTC')::date, $3, 'approved', now())",
+         VALUES ($1, $2, 'late_arrival', $4, $3, 'approved', now())",
     )
     .bind(f.org)
     .bind(f.employee)
     .bind(utc_time_offset(5))
+    // The DAY the punch belongs to, derived beside the time (see
+    // `stable_zone_at`) — not "today in UTC", which is a different day for a
+    // run either side of midnight.
+    .bind(local_date_offset(0))
     .execute(&pool)
     .await
     .unwrap();
@@ -433,7 +514,7 @@ async fn an_approved_late_arrival_forgives_the_lateness(pool: PgPool) {
 #[sqlx::test]
 async fn checking_in_twice_is_a_conflict_not_a_second_day(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -472,7 +553,7 @@ async fn checking_in_twice_is_a_conflict_not_a_second_day(pool: PgPool) {
 #[sqlx::test]
 async fn clocking_straight_back_out_is_a_half_day_not_an_absence(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -521,7 +602,7 @@ async fn checking_out_without_checking_in_is_a_404(pool: PgPool) {
 #[sqlx::test]
 async fn today_tells_the_app_which_branch_to_clock_in_at(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -604,7 +685,7 @@ async fn a_suspended_employee_cannot_clock_in(pool: PgPool) {
 #[sqlx::test]
 async fn check_out_closes_the_day_and_records_worked_minutes(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let shift = seed_shift(
         &pool,
@@ -1572,7 +1653,7 @@ async fn a_percentage_bonus_resolves_against_base_salary(pool: PgPool) {
 #[sqlx::test]
 async fn an_employee_sees_only_their_own_payslips(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
     let other = seed_user(&pool, f.org, "Other", UserRole::Teller).await;
     seed_profile(&pool, f.org, other, 900_000).await;
@@ -1642,7 +1723,7 @@ async fn check_out(
 #[sqlx::test]
 async fn a_late_arrival_is_priced_by_the_ladder_at_check_out(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_late_ladder(&pool, f.org).await;
     // 60 minutes past a 15-minute grace = 45 late → the half-day rung.
     seed_late_setup(&pool, &f, 60, 15).await;
@@ -1671,17 +1752,21 @@ async fn a_late_arrival_is_priced_by_the_ladder_at_check_out(pool: PgPool) {
 #[sqlx::test]
 async fn an_approved_late_arrival_means_there_is_no_penalty_to_waive(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_late_ladder(&pool, f.org).await;
     seed_late_setup(&pool, &f, 60, 15).await;
 
     // Permission to arrive 5 minutes from now — granted before the punch.
     sqlx::query(
-        "INSERT INTO staff_requests (org_id, user_id, kind, on_date, to_time, status, decided_at)          VALUES ($1, $2, 'late_arrival', (now() AT TIME ZONE 'UTC')::date, $3, 'approved', now())",
+        "INSERT INTO staff_requests (org_id, user_id, kind, on_date, to_time, status, decided_at)          VALUES ($1, $2, 'late_arrival', $4, $3, 'approved', now())",
     )
     .bind(f.org)
     .bind(f.employee)
     .bind(utc_time_offset(5))
+    // The DAY the punch belongs to, derived beside the time (see
+    // `stable_zone_at`) — not "today in UTC", which is a different day for a
+    // run either side of midnight.
+    .bind(local_date_offset(0))
     .execute(&pool)
     .await
     .unwrap();
@@ -1793,7 +1878,7 @@ async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool)
 #[sqlx::test]
 async fn a_waived_penalty_survives_the_nightly_sweep(pool: PgPool) {
     let app = app!(pool);
-    let f = seed(&pool, "UTC").await;
+    let f = seed(&pool, &stable_zone()).await;
     seed_late_ladder(&pool, f.org).await;
     seed_late_setup(&pool, &f, 60, 15).await;
     let employee_token = token_for(f.employee, f.org, UserRole::Teller);
