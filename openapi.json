@@ -1898,6 +1898,18 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "approval",
+            "in": "query",
+            "description": "Optional one-time manager approval, the ordinary `ReplayApproval` shape\nJSON-encoded (a GET has no body). A till signed in as a TELLER uses it\nto pull its own branch's flags with a manager's PIN; leaving it out is\nexactly the old behaviour, `approvals.review` on the bearer.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -57765,6 +57777,17 @@
           "flag_ids"
         ],
         "properties": {
+          "approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReplayApproval",
+                "description": "Optional one-time manager approval (the ordinary `ReplayApproval`\nshape, as `live_approval` carries on an order, a refund or a waste).\nAdditive: without it the call behaves exactly as before."
+              }
+            ]
+          },
           "flag_ids": {
             "type": "array",
             "items": {

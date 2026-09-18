@@ -796,3 +796,245 @@ async fn a_permissions_editor_cannot_escalate(pool: PgPool) {
     let (s, _) = call(&app, put(owner).set_json(ask("refunds.create", "deny")), &mt).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "the owner");
 }
+
+// ── a till signed in as a TELLER clears its own backlog with a manager's PIN ──
+// (owner-approved, 2026-09-18). `GET /authz/flags` and the bulk review take an
+// OPTIONAL one-time approval, the same `ReplayApproval` shape as `live_approval`
+// elsewhere, decided by the same shared helper. Without one, nothing changes.
+
+fn branch_token(user: Uuid, org: Uuid, role: UserRole, branch: Uuid) -> String {
+    crate::auth::jwt::create_token(&secret(), user, Some(org), role, Some(branch), 24).unwrap()
+}
+
+fn approval(cap: &str, approver: Uuid) -> Value {
+    json!({ "id": Uuid::new_v4(), "capability": cap, "approver_id": approver })
+}
+
+async fn a_flag(pool: &PgPool, org: Uuid, branch: Option<Uuid>, author: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO authz_replay_flags
+             (org_id, branch_id, op, author_id, capability, reason, occurred_at)
+         VALUES ($1, $2, 'RefundOrder', $3, 'refunds:create', 'stale_snapshot', now())
+         RETURNING id",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(author)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test]
+async fn a_teller_till_pulls_and_clears_its_flags_with_a_managers_one_time_approval(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b = branch(&pool, o).await;
+    let manager = user(&pool, o, "org_admin", "Mona", None).await;
+    assign(&pool, manager, b).await;
+    let teller = user(&pool, o, "teller", "Sara", None).await;
+    assign(&pool, teller, b).await;
+    let id = a_flag(&pool, o, Some(b), teller).await;
+    let tt = branch_token(teller, o, UserRole::Teller, b);
+
+    // Unchanged without an approval: the teller may neither pull nor clear.
+    let (s, _) = call(&app, test::TestRequest::get().uri("/authz/flags"), &tt).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "the plain path is exactly as before");
+    let (s, _) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": [id] })),
+        &tt,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+
+    // With a manager's one-time approval the same session pulls its own flags.
+    let a = approval("approvals.review", manager);
+    let (s, list) = call(
+        &app,
+        test::TestRequest::get().uri(&format!(
+            "/authz/flags?approval={}",
+            urlencoding::encode(&a.to_string())
+        )),
+        &tt,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["id"], json!(id));
+
+    // ...and clears them. The review is recorded under the APPROVER.
+    let (s, result) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": [id], "note": "till 3", "approval": a })),
+        &tt,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(result["resolved"], json!([id]));
+    let (by, note): (Option<Uuid>, Option<String>) =
+        sqlx::query_as("SELECT reviewed_by, review_note FROM authz_replay_flags WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(by, Some(manager), "the approver's name is on it, not the teller's");
+    let note = note.unwrap();
+    assert!(note.contains("till 3"), "the till's own note is kept: {note}");
+    assert!(note.contains("Mona"), "and the note names the approver: {note}");
+
+    // Idempotent re-submit with the same approval: still resolved, still clean.
+    let (s, again) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": [id], "approval": approval("approvals.review", manager) })),
+        &tt,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(again["resolved"], json!([id]));
+    let (by_after,): (Option<Uuid>,) =
+        sqlx::query_as("SELECT reviewed_by FROM authz_replay_flags WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(by_after, Some(manager), "a no-op resubmit rewrites nothing");
+}
+
+/// What an approval does NOT unlock.
+#[sqlx::test]
+async fn a_flag_approval_is_refused_unless_the_approver_really_holds_the_review(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b = branch(&pool, o).await;
+    let other_b = branch(&pool, o).await;
+    let manager = user(&pool, o, "org_admin", "Mona", None).await;
+    assign(&pool, manager, b).await;
+    let teller = user(&pool, o, "teller", "Sara", None).await;
+    assign(&pool, teller, b).await;
+    let waiter = user(&pool, o, "waiter", "Nour", None).await;
+    assign(&pool, waiter, b).await;
+
+    // Another org entirely.
+    let o2 = org(&pool).await;
+    let b2 = branch(&pool, o2).await;
+    let outsider = user(&pool, o2, "org_admin", "Far", None).await;
+    assign(&pool, outsider, b2).await;
+
+    let id = a_flag(&pool, o, Some(b), teller).await;
+    let elsewhere = a_flag(&pool, o, Some(other_b), teller).await;
+    let tt = branch_token(teller, o, UserRole::Teller, b);
+
+    let refused = |a: Value| {
+        let app = &app;
+        let tt = tt.clone();
+        async move {
+            let (get, _) = call(
+                app,
+                test::TestRequest::get().uri(&format!(
+                    "/authz/flags?approval={}",
+                    urlencoding::encode(&a.to_string())
+                )),
+                &tt,
+            )
+            .await;
+            let (post, _) = call(
+                app,
+                test::TestRequest::post()
+                    .uri("/authz/flags/bulk-review")
+                    .set_json(json!({ "flag_ids": [id], "approval": a })),
+                &tt,
+            )
+            .await;
+            (get, post)
+        }
+    };
+
+    // An approver who does not hold `approvals.review`.
+    assert_eq!(
+        refused(approval("approvals.review", waiter)).await,
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN)
+    );
+    // Self-approval.
+    assert_eq!(
+        refused(approval("approvals.review", teller)).await,
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN)
+    );
+    // Someone from another org.
+    assert_eq!(
+        refused(approval("approvals.review", outsider)).await,
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN)
+    );
+    // An approval minted for a different act cannot be spent here.
+    assert_eq!(
+        refused(approval("orders.void", manager)).await,
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN)
+    );
+    // A made-up capability.
+    assert_eq!(
+        refused(approval("not.a.capability", manager)).await,
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN)
+    );
+
+    // A good approval still does not widen what this till can see or touch:
+    // another branch's flag is neither listed nor clearable.
+    let a = approval("approvals.review", manager);
+    let (s, list) = call(
+        &app,
+        test::TestRequest::get().uri(&format!(
+            "/authz/flags?approval={}",
+            urlencoding::encode(&a.to_string())
+        )),
+        &tt,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let seen: Vec<i64> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(seen, vec![id], "its own branch only");
+    let (s, result) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": [elsewhere], "approval": a })),
+        &tt,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(result["resolved"].as_array().unwrap().is_empty());
+    assert_eq!(result["pending"][0]["id"], json!(elsewhere));
+    let (still_open,): (Option<chrono::DateTime<chrono::Utc>>,) =
+        sqlx::query_as("SELECT reviewed_at FROM authz_replay_flags WHERE id = $1")
+            .bind(elsewhere)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(still_open.is_none(), "another branch's flag is untouched");
+
+    // A session with no branch cannot spend an approval at all: an approval
+    // never buys org-wide sight.
+    let unbound = branch_token(teller, o, UserRole::Teller, b);
+    let _ = unbound;
+    let no_branch = token(teller, o, UserRole::Teller);
+    let (s, _) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/authz/flags/bulk-review")
+            .set_json(json!({ "flag_ids": [id], "approval": approval("approvals.review", manager) })),
+        &no_branch,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
