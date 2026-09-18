@@ -61581,6 +61581,17 @@
               "$ref": "#/components/schemas/RefundLineInput"
             }
           },
+          "live_approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReplayApproval",
+                "description": "A manager's on-the-spot unlock for a refund over the issuer's own\n`max_amount` (the teller default is 0, so every refund asks). Additive."
+              }
+            ]
+          },
           "method": {
             "type": "string",
             "description": "How the money went back — a name from the org's payment-method\nvocabulary. One tender per refund; a split is two refunds."
@@ -82798,6 +82809,17 @@
           "reason"
         ],
         "properties": {
+          "live_approval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReplayApproval",
+                "description": "A manager's on-the-spot unlock for a void the teller's own limits do not\nallow (someone else's sale, or one older than their window). Additive:\nan older till never sends it and is refused exactly as before."
+              }
+            ]
+          },
           "note": {
             "type": [
               "string",
