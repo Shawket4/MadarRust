@@ -3432,16 +3432,39 @@ pub async fn void_order(
     // drift. Over the limit, a manager's PIN unlock (`live_approval`) carries
     // it and is recorded; without one it is a 403, as offline already is.
     if let Some(org) = claims.org_id() {
-        let ask =
-            crate::authz::acts::void_ask(pool.get_ref(), order.id, claims.user_id(), chrono::Utc::now())
-                .await?;
+        let ask = crate::authz::acts::void_ask(
+            pool.get_ref(),
+            order.id,
+            claims.user_id(),
+            chrono::Utc::now(),
+        )
+        .await?
+        .unwrap_or(crate::authz::acts::VoidAsk {
+            own: false,
+            age_minutes: 0,
+        });
         let eff = crate::authz::require::effective_for_claims(
             pool.get_ref(),
             &claims,
             Some(order.branch_id),
         )
         .await?;
-        let decision = crate::authz::decide(&eff, &ask.request());
+        // OLD CLIENTS AND OLD ORGS. The legacy `(resource, action)` cell above
+        // has already said yes. The limits are an architecture-E refinement of
+        // that yes, so they are only asked of a person who actually HOLDS the
+        // capability in their effective set: a shop whose E grants were never
+        // written (every org running before provisioning) decides exactly as it
+        // did yesterday, and no till that voids legitimately today starts
+        // getting a 403 the moment this deploys. Where the grant does exist,
+        // absent limits are unrestricted and still decide `Allow` — only a
+        // deliberately limited grant (the provisioned teller default: own sale,
+        // 10 minutes) is now enforced live as well as offline.
+        let void_req = ask.request();
+        let decision = if eff.can(crate::authz::Cap::OrdersVoid) {
+            crate::authz::decide(&eff, &void_req)
+        } else {
+            crate::authz::Decision::Allow
+        };
         let allowed_outright = crate::sync::handlers::allow_or_approved_live(
             pool.get_ref(),
             decision,
@@ -3450,7 +3473,9 @@ pub async fn void_order(
             claims.user_id(),
             org,
             None,
-            None,
+            // The approver answers for THIS sale — not their own, this old —
+            // so the server's framing of the act wins over the approval's.
+            Some(&void_req),
         )
         .await?;
         if !allowed_outright {

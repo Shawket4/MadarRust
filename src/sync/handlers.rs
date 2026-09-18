@@ -650,11 +650,9 @@ pub async fn replay(
             order_id,
             teller_id: author,
             ..
-        } => Some(
-            crate::authz::acts::void_ask(pool.get_ref(), *order_id, *author, occurred_at)
-                .await?
-                .request(),
-        ),
+        } => crate::authz::acts::void_ask(pool.get_ref(), *order_id, *author, occurred_at)
+            .await?
+            .map(|ask| ask.request()),
         ReplayOp::RefundOrder { request, .. } => Some(crate::authz::acts::refund_request(
             i64::from(request.amount),
         )),
@@ -737,7 +735,13 @@ pub async fn replay(
             ReplayOp::VoidOrder { .. } => crate::authz::Cap::OrdersVoid,
             _ => crate::authz::Cap::RefundsCreate,
         };
-        let decision = crate::authz::require::decide_for(pool.get_ref(), teller_id, req, None).await?;
+        // Same old-org guard as the live route: the limits refine a grant that
+        // exists, they do not invent one where architecture E was never filled in.
+        let eff = crate::authz::require::effective(pool.get_ref(), teller_id, None).await?;
+        let decision = match eff.can(cap) {
+            true => crate::authz::decide(&eff, req),
+            false => crate::authz::Decision::Allow,
+        };
         if !decision.is_allow() && !approved.as_ref().is_ok_and(|c| *c == cap) {
             match &op {
                 ReplayOp::VoidOrder { .. } => return Err(crate::authz::require::denied(cap)),

@@ -45,23 +45,26 @@ impl VoidAsk {
 /// Read the sale being voided: is it the actor's own, and how old is it.
 /// A sale the actor did not ring is `own = false`; a clock that puts the sale
 /// in the future is read as age 0 rather than a negative age.
+///
+/// `None` when there is no such order: whether it is missing is not a
+/// permission question, and the handler that owns the 404 answers it. Asking
+/// here first would turn a would-be 403 into a 404 and leak that the order
+/// does not exist.
 pub async fn void_ask(
     pool: &sqlx::PgPool,
     order_id: Uuid,
     actor: Uuid,
     at: chrono::DateTime<chrono::Utc>,
-) -> Result<VoidAsk, AppError> {
+) -> Result<Option<VoidAsk>, AppError> {
     let row: Option<(Uuid, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as("SELECT teller_id, created_at FROM orders WHERE id = $1")
             .bind(order_id)
             .fetch_optional(pool)
             .await?;
-    let (teller_id, created_at) =
-        row.ok_or_else(|| AppError::NotFound("Order not found".into()))?;
-    Ok(VoidAsk {
+    Ok(row.map(|(teller_id, created_at)| VoidAsk {
         own: teller_id == actor,
         age_minutes: (at - created_at).num_minutes().max(0),
-    })
+    }))
 }
 
 /// A refund is judged on the money going back (`max_amount`, minor units).

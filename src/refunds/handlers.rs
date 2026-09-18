@@ -215,7 +215,21 @@ pub async fn create_refund(
         )
         .await?;
         let req_limits = crate::authz::acts::refund_request(i64::from(body.amount));
-        let decision = crate::authz::decide(&eff, &req_limits);
+        // OLD CLIENTS AND OLD ORGS. The legacy `(resource, action)` cell above
+        // has already said yes. The limits are an architecture-E refinement of
+        // that yes, so they are only asked of a person who actually HOLDS the
+        // capability in their effective set: a shop whose E grants were never
+        // written (every org running before provisioning) decides exactly as it
+        // did yesterday, and no till that voids legitimately today starts
+        // getting a 403 the moment this deploys. Where the grant does exist,
+        // absent limits are unrestricted and still decide `Allow` — only a
+        // deliberately limited grant (the provisioned teller default: own sale,
+        // 10 minutes) is now enforced live as well as offline.
+        let decision = if eff.can(crate::authz::Cap::RefundsCreate) {
+            crate::authz::decide(&eff, &req_limits)
+        } else {
+            crate::authz::Decision::Allow
+        };
         let allowed_outright = crate::sync::handlers::allow_or_approved_live(
             pool.get_ref(),
             decision,
@@ -224,7 +238,9 @@ pub async fn create_refund(
             claims.user_id(),
             org,
             None,
-            None,
+            // The approval is judged on the amount REALLY going back, never on
+            // the figure the till's approval names.
+            Some(&req_limits),
         )
         .await?;
         if !allowed_outright {
