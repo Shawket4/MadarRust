@@ -2172,3 +2172,57 @@ async fn a_replayed_discount_bigger_than_the_bill_is_capped_and_still_booked(poo
     assert_eq!(discount, subtotal, "capped at the bill, never past it");
     assert_eq!(total, 0, "zero, never below");
 }
+
+/// A modifier priced below nothing, hiding inside a line that is comfortably
+/// positive. The line guard cannot see this one: -5.00 of modifier on a 20.00
+/// coffee leaves the LINE at 15.00, and the negative `order_item_addons` row
+/// underneath it is what the add-on revenue reports sum. The sale looks right
+/// and the modifier's revenue goes backwards.
+#[sqlx::test]
+async fn a_replayed_modifier_priced_below_nothing_is_refused_even_inside_a_positive_line(
+    pool: PgPool,
+) {
+    let app = app!(pool);
+    let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    let addon = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO addon_items (id, org_id, name, default_price, type, is_active) \
+         VALUES ($1, $2, 'Extra shot', 500, 'generic', true)",
+    )
+    .bind(addon)
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let op = serde_json::json!({
+        "op": "create_order",
+        "teller_id": teller,
+        "request": {
+            "branch_id": branch,
+            "shift_id": shift,
+            "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "items": [{
+                "menu_item_id": item,
+                "quantity": 1,
+                // The line still comes to 20.00 - 5.00 = 15.00: positive.
+                "addons": [{ "addon_item_id": addon, "quantity": 1, "unit_price": -500 }]
+            }]
+        }
+    });
+    assert_eq!(replay(&app, &bearer, &op).await.status(), 400);
+
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM order_item_addons a \
+         JOIN order_items i ON i.id = a.order_item_id \
+         JOIN orders o ON o.id = i.order_id WHERE o.branch_id = $1",
+    )
+    .bind(branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 0, "no negative add-on row may reach the revenue reports");
+}

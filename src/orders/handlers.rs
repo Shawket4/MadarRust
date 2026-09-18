@@ -1372,6 +1372,26 @@ pub(crate) async fn resolve_order_line(
         if prices == ClientPrices::AsCharged {
             for (i, a) in resolved_addons.iter_mut().enumerate() {
                 if let Some(p) = item_input.addons.get(i).and_then(|ai| ai.unit_price) {
+                    // A MODIFIER MAY NOT BE PRICED BELOW NOTHING.
+                    //
+                    // Checked here rather than left to the line guard, because
+                    // the line guard cannot see it: a -5.00 modifier on a
+                    // 20.00 coffee leaves the LINE at 15.00, perfectly
+                    // positive, and stores a negative `order_item_addons` row
+                    // underneath it. That row is what the add-on revenue
+                    // reports sum, so the sale looks right and the modifier's
+                    // revenue goes backwards.
+                    //
+                    // Replay is the only path that reaches here — live, the
+                    // server prices the addon itself — so this is exactly the
+                    // till-authored figure that needs the check.
+                    if p < 0 {
+                        return Err(AppError::BadRequest(format!(
+                            "The modifier '{}' is priced at {}. A modifier can never be \
+                             priced below nothing.",
+                            a.addon_name, p
+                        )));
+                    }
                     a.unit_price = p;
                 }
             }
@@ -2212,6 +2232,15 @@ pub(crate) async fn create_order_inner(
     // the whole bill (which read 0 change on every split). A split that names
     // no usable tender — every till sends 0 for one — records none, rather
     // than a "Cash 0.00" that each receipt and reprint then printed.
+    // A tip is money too. The DB has refused a negative one since
+    // 20260912030000, but as a constraint violation — a 500, and a queued sale
+    // dead-lettering on an opaque error. Said properly here instead.
+    if body.tip_amount.is_some_and(|t| t < 0) {
+        return Err(AppError::BadRequest(
+            "The tip is negative. A tip can never be less than zero.".into(),
+        ));
+    }
+
     // NO TENDER MAY BE NEGATIVE. A split leg is checked here as well as at the
     // row insert, because the legs are summed into `cash_legs` and reconciled
     // against the total FIRST: a leg of `-500` paired with one of `+500` used
