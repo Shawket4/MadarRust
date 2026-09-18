@@ -573,6 +573,21 @@ pub async fn offline_auth_bundle(
           AND ($2::uuid IS NULL
                OR EXISTS (SELECT 1 FROM user_branch_assignments a
                            WHERE a.user_id = u.id AND a.branch_id = $2)
+               -- Architecture E: a live role assignment that covers this branch.
+               -- An owner (or an all-branches manager) is provisioned with
+               -- `all_branches` and NO legacy `user_branch_assignments` row, so
+               -- the clause above alone dropped them from every device's bundle
+               -- and their PIN could never approve anything at a till.
+               OR EXISTS (SELECT 1 FROM role_assignments ra
+                           WHERE ra.user_id = u.id
+                             AND ra.org_id = u.org_id
+                             AND ra.revoked_at IS NULL
+                             AND (ra.valid_from IS NULL OR ra.valid_from <= now())
+                             AND (ra.valid_to IS NULL OR ra.valid_to > now())
+                             AND (ra.all_branches
+                                  OR EXISTS (SELECT 1 FROM role_assignment_branches rb
+                                              WHERE rb.assignment_id = ra.id
+                                                AND rb.branch_id = $2)))
                OR (u.role IN ('teller', 'waiter', 'kitchen')
                    AND NOT EXISTS (SELECT 1 FROM user_branch_assignments a
                                     WHERE a.user_id = u.id)))
