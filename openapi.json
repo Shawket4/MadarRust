@@ -76971,7 +76971,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Optional audit note. Never required: an absent or empty reason is\naccepted for every capability. Stored (trimmed) when it is sent."
           },
           "valid_to": {
             "type": [

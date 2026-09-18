@@ -203,6 +203,9 @@ pub struct SetOverrideRequest {
     pub effect: String,
     pub branch_id: Option<Uuid>,
     pub limits: Option<LimitsView>,
+    /// Optional audit note. Never required: an absent or empty reason is
+    /// accepted for every capability. Stored (trimmed) when it is sent.
+    #[serde(default)]
     pub reason: Option<String>,
     pub valid_to: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -972,13 +975,11 @@ pub async fn set_override(
         }
         "allow" | "deny" => {
             let allow = body.effect == "allow";
-            if matches!(cap.meta().risk, super::Risk::Money | super::Risk::Admin)
-                && body.reason.as_deref().is_none_or(|r| r.trim().is_empty())
-            {
-                return Err(AppError::BadRequest(
-                    "Say why: a reason is required for money and admin permissions".into(),
-                ));
-            }
+            // `reason` is OPTIONAL everywhere (owner, 2026-09-18). It used to be
+            // demanded for money/admin capabilities, which broke every control
+            // that had nowhere to type one (the limits popover above all). It is
+            // still stored verbatim when it is sent, so the audit trail keeps
+            // whatever context the caller gives; it is simply never required.
             g::may_set_override(
                 &actor,
                 &actor_id(&claims),
