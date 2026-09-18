@@ -414,8 +414,18 @@ async fn a_live_waste_over_the_limit_with_a_managers_pin_is_allowed(pool: PgPool
     let mut over = waste_body(Uuid::new_v4(), branch, "ingredient", beans, 1000.0, None);
     let approval_id = Uuid::new_v4();
 
-    // A manager who does NOT hold the capability doesn't unlock it either.
+    // A manager who does NOT hold the capability (denied for this one person,
+    // over the "om" role default) doesn't unlock it either.
     let other_manager = seed_user(&pool, org, "branch_manager").await;
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason) \
+         VALUES ($1, $2, 49, 'deny', 'test')",
+    )
+    .bind(org)
+    .bind(other_manager)
+    .execute(&pool)
+    .await
+    .unwrap();
     over["live_approval"] = json!({
         "id": approval_id, "capability": "inventory.waste.record",
         "approver_id": other_manager, "value_minor": 2000,
