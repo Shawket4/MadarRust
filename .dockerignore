@@ -7,3 +7,7 @@ api_dumps/
 .env.*
 *.md
 openapi.json
+
+# Nested build artefacts (authz/crate, authz/gen): `target/` above matches only
+# the repo root, so without this ~320MB of local build output joins the context.
+**/target/
