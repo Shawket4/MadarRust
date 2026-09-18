@@ -509,12 +509,35 @@ pub async fn login(
     //     each on their own till/drawer. The one-open-per-till index (not login)
     //     prevents two people sharing one drawer.
     //
+    // The rule is about TILLS: it stops one person standing at two drawers in two
+    // shops at once. It has nothing to say about a web/dashboard session, which
+    // holds no drawer — so an owner with a till open must still be able to open
+    // the dashboard (staging run 2, observation 3).
+    //
+    // The discriminator is the one the session itself already carries, not a new
+    // client-supplied flag: a sign-in mints a till session when it comes in on a
+    // PIN, or when the person is one of the device-bound, branch-bound roles
+    // (teller / waiter / kitchen). That is exactly the condition `token_branch_id`
+    // uses below, so "gated" and "branch-bound session" stay the same set. Old
+    // clients (<= v0.7.8) are unaffected: their till sign-ins are PIN sign-ins,
+    // and any legacy email+password till login is by a teller/waiter/kitchen user,
+    // which still falls inside the gate.
+    let via_pin = body.pin.is_some() && body.email.is_none();
+    let till_session = via_pin
+        || matches!(
+            user.role,
+            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
+        );
+
     // (1) This teller's own open shift must be at the branch they're signing into.
-    let open_shift_branch: Option<Uuid> =
+    let open_shift_branch: Option<Uuid> = if till_session {
         sqlx::query_scalar("SELECT branch_id FROM tills WHERE teller_id = $1 AND status = 'open'")
             .bind(user.id)
             .fetch_optional(pool.get_ref())
-            .await?;
+            .await?
+    } else {
+        None
+    };
     if let Some(open_branch) = open_shift_branch
         && body.branch_id != Some(open_branch)
     {
@@ -543,16 +566,7 @@ pub async fn login(
     // Tellers, waiters AND kitchen users are device-bound (PIN) and branch-bound;
     // waiters/kitchen just never hold a shift. All get the short device TTL.
     // A PIN sign-in is a till session whatever the role: branch-bound, short.
-    let via_pin = body.pin.is_some() && body.email.is_none();
-    let token_branch_id = if via_pin
-        || matches!(
-            user.role,
-            UserRole::Teller | UserRole::Waiter | UserRole::Kitchen
-        ) {
-        body.branch_id
-    } else {
-        None
-    };
+    let token_branch_id = if till_session { body.branch_id } else { None };
 
     let hours = if token_branch_id.is_some() { 12 } else { 24 };
 
