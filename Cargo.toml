@@ -122,9 +122,27 @@ strip = true
 # carry none. Faster builds and a much smaller target dir.
 [profile.dev]
 debug = "line-tables-only"
+# Never strip. Cargo strips AUTOMATICALLY whenever a profile lowers debug info,
+# and Apple's `strip` on Xcode 27 / macOS 27 corrupts what it touches: a
+# proc-macro dylib (sqlx-macros) that `dlopen` refuses with "mis-aligned
+# LINKEDIT string pool", and a test binary whose ad-hoc signature no longer
+# matches, which macOS then kills on exec with SIGKILL — and reports to the
+# user as malware. The symptom is deterministic and survives `cargo clean -p`,
+# re-signing with codesign, and freeing disk, because each rebuild strips
+# again. See CLAUDE.md.
+strip = false
 
 [profile.dev.package."*"]
 debug = false
+strip = false
+
+# `cargo test` inherits dev, but spell it out: these are the binaries macOS was
+# killing, and a later edit to dev must not silently re-enable stripping here.
+[profile.test]
+strip = false
+
+[profile.test.package."*"]
+strip = false
 
 # The POS real-backend scenarios (madar/tool/offline_b_backend.sh): release
 # optimisations without LTO, so the scenario backend builds in minutes.
