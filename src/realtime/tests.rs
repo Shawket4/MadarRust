@@ -85,6 +85,12 @@ fn get(uri: &str, token: &str) -> test::TestRequest {
 /// Read whatever the stream emits within `window` (the body is infinite, so
 /// this is the only way to look at it). Keep-alive pings may be mixed in.
 async fn read_for(mut body: actix_web::body::BoxBody, window: Duration) -> String {
+    read_for_body(&mut body, window).await
+}
+
+/// Same, but borrowing the body so a test can publish between the response's
+/// headers and its frames.
+async fn read_for_body(body: &mut actix_web::body::BoxBody, window: Duration) -> String {
     let mut out = String::new();
     let deadline = tokio::time::Instant::now() + window;
     loop {
@@ -94,7 +100,7 @@ async fn read_for(mut body: actix_web::body::BoxBody, window: Duration) -> Strin
         }
         let next = tokio::time::timeout(
             left,
-            futures::future::poll_fn(|cx| Pin::new(&mut body).as_mut().poll_next(cx)),
+            futures::future::poll_fn(|cx| Pin::new(&mut *body).poll_next(cx)),
         )
         .await;
         match next {
@@ -317,5 +323,63 @@ async fn resume_replays_the_gap_or_asks_for_a_resync(pool: PgPool) {
     assert!(
         body.starts_with("event: resync"),
         "stale cursor opens with resync: {body}"
+    );
+}
+
+/// The whole point of a resync: the connection is USABLE afterwards. A backend
+/// restart leaves every device holding a cursor from the previous process
+/// lifetime while the bus numbers from 1 again — if the live filter keeps
+/// trusting that cursor the device shows "online" and receives nothing until the
+/// branch publishes past the stale number. After the resync frame, the very next
+/// published event must arrive.
+#[sqlx::test]
+async fn after_a_resync_a_newly_published_event_is_delivered(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let hub = BranchEventHub::new();
+    let app = app!(pool, hub);
+    let t = token(teller, org, UserRole::Teller, Some(branch));
+
+    // A freshly restarted bus: it exists (someone subscribed) and has issued
+    // nothing, while the device still holds a cursor from before the restart.
+    let _first = hub.subscribe(branch);
+
+    let resp = test::call_service(
+        &app,
+        get(
+            &format!("/realtime/stream?branch_id={branch}&topics=tickets"),
+            &t,
+        )
+        .insert_header(("Last-Event-ID", "5000"))
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body();
+
+    // The handler has subscribed by now; publish as the restarted bus would.
+    hub.publish(
+        branch,
+        BranchEvent::new(Topic::Tickets, "ticket.fired", &serde_json::json!({"n": 1})),
+    );
+
+    let out = read_for_body(&mut body, Duration::from_millis(500)).await;
+    assert!(
+        out.contains("event: resync"),
+        "the stale cursor still opens with a resync: {out}"
+    );
+    assert!(
+        out.contains("\"reason\":\"restart\""),
+        "a cursor ahead of anything we issued is a restart, not an eviction gap: {out}"
+    );
+    assert!(
+        out.contains("\"last_event_id\":0") && out.contains("\nid: 0\n"),
+        "the resync carries the cursor the client must adopt: {out}"
+    );
+    assert!(
+        out.contains("event: ticket.fired"),
+        "the event published AFTER the resync must reach the device: {out}"
     );
 }

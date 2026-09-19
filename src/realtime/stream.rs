@@ -115,23 +115,41 @@ pub async fn stream(
     // whose gap we cannot fully cover (buffer evicted, or a cursor from before a
     // restart) opens with a `resync` frame: the client re-seeds, then keeps
     // consuming live events from here.
-    let (replayed, complete) = match last_event_id {
+    let (replayed, complete, server_last_id) = match last_event_id {
         Some(id) => {
             let r = hub.replay_since(query.branch_id, id);
-            (r.events, r.complete)
+            (r.events, r.complete, r.server_last_id)
         }
-        None => (Vec::new(), true),
+        None => (Vec::new(), true, 0),
     };
-    let max_replayed = replayed
-        .iter()
-        .map(|e| e.id)
-        .max()
-        .unwrap_or_else(|| last_event_id.unwrap_or(0));
+    // The live filter's low-water mark. On a COMPLETE replay the client's own
+    // cursor is trustworthy, so keep it (nothing in the overlap is delivered
+    // twice). On an INCOMPLETE one it is not: after a restart the bus numbers
+    // from 1 again while the client still holds a cursor from the previous
+    // process lifetime, and trusting it would drop every live event until the
+    // branch published past that stale number — the device shows "online" and
+    // receives nothing. A resync re-seeds the client anyway, so the mark drops
+    // to what we actually replayed (usually nothing).
+    let max_replayed = if complete {
+        replayed
+            .iter()
+            .map(|e| e.id)
+            .max()
+            .unwrap_or_else(|| last_event_id.unwrap_or(0))
+    } else {
+        replayed.iter().map(|e| e.id).max().unwrap_or(0)
+    };
     let mut replay_frames: Vec<Result<Bytes, actix_web::Error>> = Vec::new();
     if !complete {
-        replay_frames.push(Ok(Bytes::from_static(
-            b"event: resync\ndata: {\"reason\":\"gap\"}\n\n",
-        )));
+        // The frame carries the cursor the client must adopt: the highest id this
+        // process has issued (0 on a fresh bus). The trailing `id:` line makes any
+        // plain SSE client — including shipped ones that only track `id:` — reset
+        // itself, so a restarted backend heals old and new clients alike.
+        let stale = last_event_id.unwrap_or(0) > server_last_id;
+        let reason = if stale { "restart" } else { "gap" };
+        replay_frames.push(Ok(Bytes::from(format!(
+            "event: resync\ndata: {{\"reason\":\"{reason}\",\"last_event_id\":{server_last_id}}}\nid: {server_last_id}\n\n"
+        ))));
     }
     replay_frames.extend(
         replayed

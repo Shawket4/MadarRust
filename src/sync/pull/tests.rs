@@ -812,3 +812,163 @@ async fn pull_concurrent_pulls_on_small_pool_all_complete(pool: PgPool) {
         assert!(resp.full || resp.changes.iter().any(|c| c.ty == "category"));
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// A branch born after the org's data
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The owner's bug: payment methods do not show on a NEW device at a NEW till,
+/// with the org's methods present and no override restricting them.
+///
+/// `sync_emit_org` fans an org write out to the branches that exist AT THAT
+/// MOMENT, and a device's full snapshot is built from feed rows rather than
+/// from the live tables — so a branch opened after the methods were created
+/// has no feed row for any of them and its first device sees none. Nothing
+/// above notices: the checksum is computed from the same feed, so device and
+/// server agree perfectly on nothing.
+#[sqlx::test]
+async fn a_branch_created_after_the_orgs_data_still_gets_all_of_it(pool: PgPool) {
+    let s = shop(&pool).await;
+
+    // The org is set up first — methods, menu, a discount, staff.
+    let method: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon) \
+         VALUES ($1, 'Instapay', '#000', 'card') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let cat = category(&pool, s.org, "Hot drinks").await;
+
+    // THEN a second branch opens.
+    let later: Uuid = sqlx::query_scalar(
+        "INSERT INTO branches (org_id, name, code) VALUES ($1, 'Later', 'LATE') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // A brand-new device there takes its first snapshot.
+    let resp = super::pull_core(&pool, s.org, &req(later), None)
+        .await
+        .unwrap();
+    let methods = resp.data.get("payment_method").cloned().unwrap_or_default();
+    assert!(
+        methods.iter().any(|v| v["id"] == method.to_string()),
+        "a till opened after the org's payment methods must still see them: {methods:?}"
+    );
+    let cats = resp.data.get("category").cloned().unwrap_or_default();
+    assert!(
+        cats.iter().any(|v| v["id"] == cat.to_string()),
+        "…and the menu it is supposed to sell: {cats:?}"
+    );
+    assert!(
+        resp.data
+            .get("teller")
+            .map(|t| t.iter().any(|v| v["id"] == s.admin.to_string()))
+            .unwrap_or(false),
+        "…and the people who sign in on it"
+    );
+
+    // The older branch is untouched and still complete.
+    let first = super::pull_core(&pool, s.org, &req(s.branch), None)
+        .await
+        .unwrap();
+    assert!(
+        first
+            .data
+            .get("payment_method")
+            .map(|m| m.iter().any(|v| v["id"] == method.to_string()))
+            .unwrap_or(false),
+        "the branch that was there all along keeps its rows"
+    );
+}
+
+/// The feed must equal the live set for EVERY branch, not only ones created
+/// before their org's data. This is the invariant the branch backfill restores
+/// and the sweep keeps: without it the hole above exists for ten of the feed's
+/// types, not just payment methods.
+#[sqlx::test]
+async fn the_feed_matches_the_live_set_even_for_a_late_branch(pool: PgPool) {
+    let s = shop(&pool).await;
+    seed_every_type(&pool, &s).await;
+
+    let later: Uuid = sqlx::query_scalar(
+        "INSERT INTO branches (org_id, name, code) VALUES ($1, 'Later', 'LATE') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let missing: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT l.type, count(*) FROM sync_live_rows() l \
+          WHERE l.branch_id = $1 \
+            AND NOT EXISTS (SELECT 1 FROM sync_changes c \
+                             WHERE c.branch_id = l.branch_id AND c.type = l.type \
+                               AND c.entity_id = l.entity_id) \
+          GROUP BY l.type ORDER BY l.type",
+    )
+    .bind(later)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        missing.is_empty(),
+        "the late branch is short of feed rows it should have: {missing:?}"
+    );
+}
+
+/// Belt and braces: even if a feed row goes missing some other way — a path
+/// that forgets to emit, a restore, a hand-written INSERT — the sweep closes
+/// the hole without anyone touching the device.
+#[sqlx::test]
+async fn the_sweep_re_emits_live_rows_the_feed_never_heard_of(pool: PgPool) {
+    let s = shop(&pool).await;
+    let method: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon) \
+         VALUES ($1, 'Instapay', '#000', 'card') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Simulate the hole exactly as the org fan-out used to leave it.
+    sqlx::query("DELETE FROM sync_changes WHERE branch_id = $1 AND type = 'payment_method'")
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = super::pull_core(&pool, s.org, &req(s.branch), None)
+        .await
+        .unwrap();
+    assert!(
+        before
+            .data
+            .get("payment_method")
+            .map(|m| m.is_empty())
+            .unwrap_or(true),
+        "the hole is real: the snapshot shows no methods"
+    );
+
+    let report = super::sweeper::sweep_once(&pool).await.unwrap();
+    assert!(
+        report.upserts_emitted >= 1,
+        "the sweep noticed the missing row: {report:?}"
+    );
+
+    let after = super::pull_core(&pool, s.org, &req(s.branch), None)
+        .await
+        .unwrap();
+    assert!(
+        after
+            .data
+            .get("payment_method")
+            .map(|m| m.iter().any(|v| v["id"] == method.to_string()))
+            .unwrap_or(false),
+        "…and the device's next pull brings the method back"
+    );
+}
