@@ -164,6 +164,9 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "customer" => {
             "EXISTS (SELECT 1 FROM customers x WHERE x.id = $ID AND sync_live_customer(x))"
         }
+        // A recorded staff drink is an immutable audit row: once it exists it
+        // is live, and it is never edited or withdrawn. Nothing to age out.
+        "staff_drink" => "EXISTS (SELECT 1 FROM staff_drinks x WHERE x.id = $ID)",
         _ => return None,
     })
 }
@@ -635,4 +638,28 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
         }
         other => return Err(AppError::BadRequest(format!("Unknown sync type `{other}`"))),
     })
+}
+
+#[cfg(test)]
+mod projection_gate_tests {
+    /// Every wire type the POS may ask for must have a projection gate.
+    ///
+    /// `project()` refuses an unknown type with `Unknown sync type`, so a type
+    /// added to `ALL_TYPES` (and to `sync_source_tables()`, and given a feed
+    /// trigger) but NOT given an arm here fails only at runtime, on the pull —
+    /// the rows are emitted and then never delivered. `staff_drink` shipped
+    /// exactly that way and was caught by a feature test rather than here.
+    ///
+    /// The existing `.expect("state type has a projection gate")` in
+    /// `sync::pull` covers state types only, which is why a LEDGER type slipped
+    /// through; this covers every type either way.
+    #[test]
+    fn every_wire_type_has_a_projection_gate() {
+        for ty in crate::sync::pull::ALL_TYPES {
+            assert!(
+                super::projects_sql(ty).is_some(),
+                "`{ty}` is in ALL_TYPES but has no arm in projects_sql, so a pull for it 400s"
+            );
+        }
+    }
 }
