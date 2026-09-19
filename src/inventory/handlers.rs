@@ -1350,7 +1350,14 @@ pub async fn create_waste(
     )
     .await?;
     let (value, _) =
-        crate::inventory::waste::value_of(&[(body.org_ingredient_id, body.quantity, cost)]);
+        crate::inventory::waste::value_of(&[(body.org_ingredient_id, body.quantity, cost)])
+            .map_err(|_| {
+                AppError::BadRequest(
+                    "This waste does not come to a real amount. Check the quantity and the \
+                     ingredient's cost."
+                        .into(),
+                )
+            })?;
     let eff =
         crate::authz::require::effective_for_claims(pool.get_ref(), &claims, Some(*branch_id))
             .await?;

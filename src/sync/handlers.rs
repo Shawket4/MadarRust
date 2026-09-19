@@ -668,7 +668,11 @@ pub async fn replay(
                 a,
                 teller_id,
                 token_org,
-                waste_plan.as_ref().map(|p| p.value_minor.unwrap_or(0)),
+                // The SAME rule the ceiling uses: a value nobody could work
+                // out is not zero, and a known one is judged by its magnitude.
+                waste_plan
+                    .as_ref()
+                    .map(|p| madar_authz::required_value(p.value_minor)),
                 server_req.as_ref(),
             )
             .await
@@ -976,7 +980,9 @@ pub(crate) async fn verify_approval(
             let mut req = madar_authz::Request::of(cap);
             req.amount = a.amount_minor;
             req.percent = a.percent_bps;
-            req.value = value_minor.or(a.value_minor);
+            // A ceiling is about size: a negative figure must never compare
+            // as under one.
+            req.value = value_minor.or(a.value_minor).map(madar_authz::magnitude);
             req
         }
     };

@@ -128,19 +128,38 @@ pub struct WastePlan {
     pub value_partial: bool,
 }
 
+/// A waste whose worth is not a real, non-negative amount of money, so it must
+/// not be recorded at all. Stock is destroyed, never created: a negative
+/// quantity or unit cost is bad data, and letting it through would also make
+/// the total compare as under every `max_value` ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadValue;
+
 /// `Σ qty × unit cost`, rounded once; partial when a line has no cost.
-/// The till computes the same figure (`madar-core` `waste::value_of`).
-pub fn value_of(lines: &[(Uuid, f64, Option<f64>)]) -> (Option<i64>, bool) {
-    let known: Vec<f64> = lines
-        .iter()
-        .filter_map(|(_, q, c)| c.map(|c| q * c))
-        .collect();
+/// The till computes the same figure (`madar-core` `waste::value_of`) — keep
+/// the two in step, including the `BadValue` rules.
+pub fn value_of(lines: &[(Uuid, f64, Option<f64>)]) -> Result<(Option<i64>, bool), BadValue> {
+    let mut known: Vec<f64> = Vec::with_capacity(lines.len());
+    for (_, q, c) in lines {
+        if !q.is_finite() || *q < 0.0 {
+            return Err(BadValue);
+        }
+        if let Some(c) = c {
+            if !c.is_finite() || *c < 0.0 {
+                return Err(BadValue);
+            }
+            known.push(q * c);
+        }
+    }
     let partial = known.len() < lines.len();
     if known.is_empty() {
-        (None, partial)
-    } else {
-        (Some(known.iter().sum::<f64>().round() as i64), partial)
+        return Ok((None, partial));
     }
+    let total = known.iter().sum::<f64>().round();
+    if !total.is_finite() || total < 0.0 || total > i64::MAX as f64 {
+        return Err(BadValue);
+    }
+    Ok((Some(total as i64), partial))
 }
 
 /// The branch's actual cost per unit, else the org standard cost (unrounded).
@@ -256,7 +275,9 @@ pub async fn plan_waste(
         }
         _ => return Err(bad("subject_kind must be `ingredient` or `menu_item`")),
     };
-    let (value_minor, value_partial) = value_of(&lines);
+    let (value_minor, value_partial) = value_of(&lines).map_err(|BadValue| {
+        bad("This waste does not come to a real amount. Check the quantity and the ingredient's cost.")
+    })?;
     Ok(WastePlan {
         subject_name,
         unit,
@@ -446,10 +467,13 @@ async fn existing_in_org(
 }
 
 /// The limit request for a waste of this value.
+///
+/// The value is REQUIRED here, so it goes through `madar_authz::required_value`
+/// — the ONE rule the till also uses (`madar-core` `waste::waste_request`): a
+/// value nobody could work out needs a manager rather than counting as zero,
+/// and a known value is judged by its magnitude.
 pub fn limit_request(value_minor: Option<i64>) -> madar_authz::Request {
-    let mut r = madar_authz::Request::of(Cap::InventoryWasteRecord);
-    r.value = Some(value_minor.unwrap_or(0));
-    r
+    madar_authz::Request::of(Cap::InventoryWasteRecord).required_value(value_minor)
 }
 
 fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {

@@ -704,6 +704,13 @@ impl Request {
         self.value = Some(minor);
         self
     }
+    /// The judged figure for an act whose value is REQUIRED (a waste's worth).
+    /// See [`required_value`]: unknown never slips under a ceiling, and a known
+    /// figure is judged by its magnitude.
+    pub fn required_value(mut self, minor: Option<i64>) -> Request {
+        self.value = Some(required_value(minor));
+        self
+    }
     pub fn age_minutes(mut self, minutes: i64) -> Request {
         self.age_minutes = Some(minutes);
         self
@@ -713,6 +720,25 @@ impl Request {
         self.own = Some(own);
         self
     }
+}
+
+/// The size a ceiling judges a known figure by. A limit is about magnitude, so
+/// a negative figure must never compare as UNDER one: `-1_000_00 > 500_00` is
+/// false, which would wave a big waste through as if it were nothing.
+pub fn magnitude(minor: i64) -> i64 {
+    minor.saturating_abs()
+}
+
+/// The figure to judge an act whose value is REQUIRED but may not be known
+/// (e.g. a waste whose ingredients have no cost on file).
+///
+/// `None` means nobody could work the value out. An amount that cannot be
+/// judged must never slip under a ceiling, so it is treated as beyond every
+/// finite one and routed to a manager — the same principle as `own` above: a
+/// caller that cannot answer must not silently pass the check. Someone whose
+/// limit is unlimited is still allowed, which is right: no ceiling to exceed.
+pub fn required_value(minor: Option<i64>) -> i64 {
+    minor.map_or(i64::MAX, magnitude)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

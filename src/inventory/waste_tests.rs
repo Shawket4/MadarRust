@@ -639,3 +639,103 @@ async fn the_log_orders_by_when_the_waste_happened(pool: PgPool) {
     );
     assert!(log[1].received_at.unwrap() > log[1].occurred_at.unwrap());
 }
+
+/// Set an ingredient's org cost directly, including the values a well-behaved
+/// UI would never send (unknown, negative).
+async fn set_cost(pool: &PgPool, ing: Uuid, cost: Option<f64>) {
+    sqlx::query("UPDATE org_ingredients SET cost_per_unit = $2 WHERE id = $1")
+        .bind(ing)
+        .bind(cost.map(|c| rust_decimal::Decimal::try_from(c).unwrap()))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A waste whose worth cannot be worked out (no cost on file) used to be judged
+/// as ZERO, which is under every ceiling — so the most expensive kind of waste,
+/// the one nobody can put a number on, was the one that recorded itself with no
+/// approval at all. It must ask a manager instead. Live and replay, one rule.
+#[sqlx::test]
+async fn a_waste_whose_value_is_unknown_needs_approval_instead_of_counting_as_zero(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    allow_waste(&pool, org, teller, Some(500)).await;
+    let beans = seed_ingredient(&pool, org, "Beans", "g", 2.0).await;
+    set_cost(&pool, beans, None).await;
+    let bearer = token(teller, org, UserRole::Teller);
+
+    // Live: no approval offered, so it is refused rather than waved through.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/inventory/waste")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(waste_body(
+                Uuid::new_v4(),
+                branch,
+                "ingredient",
+                beans,
+                10_000.0,
+                None,
+            ))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        403,
+        "an unjudgeable value must not bypass the cap"
+    );
+    assert_eq!(on_hand(&pool, branch, beans).await, 0.0, "nothing recorded");
+
+    // Replay: the food is already in the bin, so it is accepted AND flagged.
+    let op = json!({ "op": "record_waste", "teller_id": teller,
+        "request": waste_body(Uuid::new_v4(), branch, "ingredient", beans, 10_000.0, None) });
+    assert_eq!(replay(&app, &bearer, &op).await.status(), 201);
+    assert_eq!(
+        flags(&pool, teller).await,
+        vec![(
+            "inventory.waste.record:max_value".to_string(),
+            "unauthorized_offline".to_string()
+        )],
+        "replay judges it by the same rule as the live route"
+    );
+}
+
+/// A negative unit cost is bad data, and it used to make `value_minor` NEGATIVE
+/// — which compares as under every `max_value` ceiling, so an unlimited-size
+/// waste recorded itself with no approval. It is refused outright now, on both
+/// halves, and nothing reaches the ledger.
+#[sqlx::test]
+async fn a_waste_with_a_negative_unit_cost_is_refused_and_never_recorded(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    allow_waste(&pool, org, teller, Some(500)).await;
+    let beans = seed_ingredient(&pool, org, "Beans", "g", 2.0).await;
+    set_cost(&pool, beans, Some(-50.0)).await;
+    let bearer = token(teller, org, UserRole::Teller);
+    let id = Uuid::new_v4();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/inventory/waste")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(waste_body(id, branch, "ingredient", beans, 1_000.0, None))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "a negative value is not a waste at all");
+    assert_eq!(waste_movements(&pool, id).await, 0);
+    assert_eq!(on_hand(&pool, branch, beans).await, 0.0);
+
+    // The replay half refuses it too, by the same shared rule.
+    let op = json!({ "op": "record_waste", "teller_id": teller,
+        "request": waste_body(Uuid::new_v4(), branch, "ingredient", beans, 1_000.0, None) });
+    assert_eq!(replay(&app, &bearer, &op).await.status(), 400);
+    assert_eq!(on_hand(&pool, branch, beans).await, 0.0);
+}
