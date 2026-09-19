@@ -1116,18 +1116,33 @@ pub async fn get_till(
 }
 
 #[utoipa::path(get, path = "/tills/{till_id}/report", tag = "tills",
-    params(("till_id" = Uuid, Path, description = "Till ID")),
+    params(
+        ("till_id" = Uuid, Path, description = "Till ID"),
+        ("X-Madar-Approval" = Option<String>, Header, description = "A one-time manager-PIN unlock (a `ReplayApproval` as JSON) for an OPEN till's figures, when the caller does not hold `till.cash_spot_check`. Read from POS/KDS clients >= 0.7.11 only; a closed till's report never needs it."),
+    ),
     responses((status = 200, description = "Till (Z) report", body = TillReportResponse), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn get_till_report(
     req: HttpRequest,
     pool: crate::db::Db,
     till_id: web::Path<Uuid>,
+    device: DeviceHeader,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
+    // An OPEN till's figures follow `till.cash_spot_check` for a POS build
+    // that knows how to ask; a closed till's finished report never does.
+    crate::tills::figures_guard::require_live_figures(
+        pool.get_ref(),
+        &claims,
+        &req,
+        &till,
+        crate::tills::figures_guard::OP_REPORT,
+        device.0,
+    )
+    .await?;
     // Horizon first, figures after: the figures then include at least everything
     // up to it (READ COMMITTED; the horizon waits out uncommitted emitters).
     let as_of_seq: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0, 200)")
@@ -1537,18 +1552,33 @@ pub async fn list_cash_movements(
 // ── T8 close preview / T9 close / T10 force close ──────────────
 
 #[utoipa::path(get, path = "/tills/{till_id}/close-preview", tag = "tills",
-    params(("till_id" = Uuid, Path, description = "Till ID")),
+    params(
+        ("till_id" = Uuid, Path, description = "Till ID"),
+        ("X-Madar-Approval" = Option<String>, Header, description = "A one-time manager-PIN unlock (a `ReplayApproval` as JSON) for the expected figures before a close, when the caller does not hold `till.cash_spot_check`. Read from POS/KDS clients >= 0.7.11 only."),
+    ),
     responses((status = 200, description = "What the close screen shows", body = CloseTillPreview), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn close_preview(
     req: HttpRequest,
     pool: crate::db::Db,
     till_id: web::Path<Uuid>,
+    device: DeviceHeader,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "update").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
+    // The expected figures BEFORE the close are the same secret as the live
+    // report's, and follow the same gate.
+    crate::tills::figures_guard::require_live_figures(
+        pool.get_ref(),
+        &claims,
+        &req,
+        &till,
+        crate::tills::figures_guard::OP_CLOSE_PREVIEW,
+        device.0,
+    )
+    .await?;
     let expected_cash = match till.closing_cash_system {
         Some(v) => v as i64,
         None => compute_system_cash(pool.get_ref(), till.id).await?,

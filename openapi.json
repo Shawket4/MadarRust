@@ -52270,6 +52270,18 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "X-Madar-Approval",
+            "in": "header",
+            "description": "A one-time manager-PIN unlock (a `ReplayApproval` as JSON) for the expected figures before a close, when the caller does not hold `till.cash_spot_check`. Read from POS/KDS clients >= 0.7.11 only.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -52570,6 +52582,18 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Madar-Approval",
+            "in": "header",
+            "description": "A one-time manager-PIN unlock (a `ReplayApproval` as JSON) for an OPEN till's figures, when the caller does not hold `till.cash_spot_check`. Read from POS/KDS clients >= 0.7.11 only; a closed till's report never needs it.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
