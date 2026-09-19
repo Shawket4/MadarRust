@@ -355,3 +355,72 @@ pub async fn record(
     };
     Ok(HttpResponse::build(status).json(done.drink))
 }
+
+// ── The report: the drinks themselves, with their notes ─────────────────────
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListQuery {
+    pub branch_id: Uuid,
+    /// Business days, inclusive. Both default to the branch's today.
+    #[serde(default)]
+    pub from: Option<NaiveDate>,
+    #[serde(default)]
+    pub to: Option<NaiveDate>,
+    /// Only the drinks that went past the allowance.
+    #[serde(default)]
+    pub overspent_only: Option<bool>,
+}
+
+/// The staff drinks of a branch over a range of business days, newest first.
+///
+/// This is the whole point of the note: with no "who is this for" field by
+/// design, the note is the only record of who drank it, and this is where an
+/// owner reads it.
+#[utoipa::path(get, path = "/staff-pool/drinks", tag = "staff_pool",
+    operation_id = "list_staff_drinks", params(ListQuery),
+    responses((status = 200, body = Vec<StaffDrink>), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn list(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<ListQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = crate::orgs::handlers::extract_claims(&req)?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        Cap::OrdersStaffDrinkRecord,
+        Some(query.branch_id),
+    )
+    .await?;
+    crate::delivery::require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
+
+    let tz = crate::tz::effective_tz(pool.get_ref(), query.branch_id).await?;
+    let today = engine::business_date_of(tz, Utc::now());
+    let from = query.from.unwrap_or(today);
+    let to = query.to.unwrap_or(today);
+    if to < from {
+        return Err(AppError::BadRequest(
+            "The end of the range comes before its start".into(),
+        ));
+    }
+
+    let drinks: Vec<StaffDrink> = sqlx::query_as(
+        "SELECT id, branch_id, order_id, menu_item_id, item_name, size_label, quantity, note, \
+                business_date, allowance_at_record, used_before, overspent, overspent_on_replay, \
+                cost_minor, recorded_by, recorded_at \
+           FROM staff_drinks \
+          WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 \
+            AND ($4::boolean IS NOT TRUE OR overspent) \
+          ORDER BY business_date DESC, recorded_at DESC, id",
+    )
+    .bind(query.branch_id)
+    .bind(from)
+    .bind(to)
+    .bind(query.overspent_only)
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(drinks))
+}

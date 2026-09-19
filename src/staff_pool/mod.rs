@@ -12,4 +12,6 @@ pub mod routes;
 pub mod settings;
 
 #[cfg(test)]
+mod tests;
+#[cfg(test)]
 mod vectors_tests;

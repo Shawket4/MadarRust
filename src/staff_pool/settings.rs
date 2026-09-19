@@ -250,11 +250,14 @@ pub async fn delete_settings(
     pool: web::Data<PgPool>,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
+    // The capability is asked FIRST, before the shape of the request is
+    // judged: someone who may not edit settings must be told that, not handed
+    // a hint about which argument was missing.
+    let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
+    require(pool.get_ref(), &claims, Cap::OrgSettingsEdit, query.branch_id).await?;
     let branch_id = query.branch_id.ok_or_else(|| {
         AppError::BadRequest("Name the branch whose override you want to remove".into())
     })?;
-    let (org_id, claims) = scope_org(pool.get_ref(), &req, Some(branch_id)).await?;
-    require(pool.get_ref(), &claims, Cap::OrgSettingsEdit, Some(branch_id)).await?;
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
     sqlx::query("DELETE FROM staff_pool_settings WHERE org_id = $1 AND branch_id = $2")
         .bind(org_id)
