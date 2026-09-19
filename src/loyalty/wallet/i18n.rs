@@ -93,7 +93,8 @@ pub fn labels() -> Vec<Pair> {
         pair("Reward earned", "مكافأة جاهزة"),
         pair("How it works", "طريقة الاستخدام"),
         pair("Member", "العضو"),
-        pair("Rewards you can claim", "مكافآت متاحة"),
+        // "Rewards you can claim" went with the back-of-card list it labelled
+        // (owner, 2026-09-19) — see `back_of_card`.
         pair("Where it works", "أماكن الاستخدام"),
         pair("Terms", "الشروط"),
         pair("Find us", "تجدنا هنا"),

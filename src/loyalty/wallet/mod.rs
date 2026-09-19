@@ -497,13 +497,14 @@ pub fn back_of_card(
             value: format!("{} · {}", member.name, member.phone),
         },
     ];
-    if !copy.rewards.is_empty() {
-        out.push(BackLine {
-            key: "rewards",
-            label: "Rewards you can claim".into(),
-            value: copy.rewards.join("\n"),
-        });
-    }
+    // The claimable-rewards list used to sit here and is deliberately gone
+    // (owner, 2026-09-19): a wallet back field is one block of text, so a shop
+    // with several rewards printed a list that ran past the field and showed
+    // only its first lines — worse than not printing it, because a customer
+    // read a truncated list as the whole offer. What a member is working
+    // towards is already on the FRONT (the headline and the progress line),
+    // and the full catalogue lives where it can be laid out properly: the web
+    // card and the app. `CardCopy::rewards` is still gathered for those.
     if !copy.branches.is_empty() {
         let mut value = copy
             .branches

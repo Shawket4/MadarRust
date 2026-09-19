@@ -2845,6 +2845,109 @@ async fn a_void_claws_back_what_its_sale_earned(pool: PgPool) {
     assert_eq!(balance_of(&pool, member).await, 0);
 }
 
+/// A PARTIAL refund claws the earn back IN PROPORTION, and only in proportion:
+/// `floor(earned × refunded ÷ total)`, cumulative across refunds, never more
+/// than the sale earned. The rule lives in the `order_refunds` trigger
+/// (20260912090000), and it is the arithmetic a customer would argue about at
+/// the counter, so it is pinned here rather than inferred from the void case.
+#[sqlx::test]
+async fn a_partial_refund_claws_back_the_earn_in_proportion(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    let member = seed_member(&pool, org, "201000000001", "Mparttoken00000000001").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // 100 EGP at a point per 10 EGP: ten points.
+    let order = seed_settled_order(&pool, branch, shift, teller, 10_000, 1).await;
+    let req = test::TestRequest::post()
+        .uri("/loyalty/award")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "branch_id": branch, "order_id": order, "customer_id": member }))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["points_awarded"], 10, "{body}");
+
+    // A quarter of the money back takes a quarter of the points: floor(10 × 1/4).
+    refund_row(&pool, branch, order, shift, teller, 2_500).await;
+    assert_eq!(balance_of(&pool, member).await, 8, "floor(10 × 2500/10000) = 2 back");
+
+    // Another 3 EGP: the target is cumulative, not per refund. floor(10 × 2800/10000)
+    // is 2, which is already reversed, so nothing moves — a rounding step the
+    // customer does not pay for twice.
+    refund_row(&pool, branch, order, shift, teller, 300).await;
+    assert_eq!(balance_of(&pool, member).await, 8, "cumulative, and floor still 2");
+
+    // Up to 60% refunded: floor(10 × 6000/10000) = 6, so four more come back.
+    refund_row(&pool, branch, order, shift, teller, 3_200).await;
+    assert_eq!(balance_of(&pool, member).await, 4);
+
+    // The rest of the money: every point is gone and the sale reads refunded.
+    refund_row(&pool, branch, order, shift, teller, 4_000).await;
+    assert_eq!(balance_of(&pool, member).await, 0, "all ten back, never eleven");
+    let status: String = sqlx::query_scalar("SELECT status::text FROM orders WHERE id = $1")
+        .bind(order)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "refunded");
+
+    // The ledger tells the story: one earn, then reversals that all name it and
+    // all say a refund did it. Lifetime is net, as with a void.
+    let rows = ledger_rows(&pool, member).await;
+    assert_eq!(rows[0].0, "earn");
+    assert!(
+        rows[1..].iter().all(|r| r.0 == "reverse_earn" && r.1 == "refund"),
+        "{rows:?}"
+    );
+    let clawed: i32 = rows[1..].iter().map(|r| r.2).sum();
+    assert_eq!(clawed, -10, "no more than the sale earned: {rows:?}");
+    let lifetime: i32 =
+        sqlx::query_scalar("SELECT lifetime_points FROM loyalty_customers WHERE id = $1")
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(lifetime, 0);
+}
+
+/// A refund written straight to the table, so the trigger under test is the one
+/// that runs. The handler is covered by its own tests; this is the ledger rule.
+async fn refund_row(
+    pool: &PgPool,
+    branch: Uuid,
+    order: Uuid,
+    shift: Uuid,
+    by: Uuid,
+    amount: i32,
+) {
+    sqlx::query(
+        "INSERT INTO order_refunds \
+             (branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by) \
+         VALUES ($1,$2,$3,$4,'cash',true,'customer_request',$5)",
+    )
+    .bind(branch)
+    .bind(order)
+    .bind(shift)
+    .bind(amount)
+    .bind(by)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// The points were already spent when the sale was voided. Default (a): clamp
 /// at zero — the shop eats the reward, and the earn stays visibly part-reversed.
 /// `allow_negative_balance` lets a shop that would rather the books balance
