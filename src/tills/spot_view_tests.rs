@@ -144,7 +144,10 @@ async fn a_manager_views_and_prints_the_spot_report_and_the_z_report_lists_it(po
     assert_eq!(row["viewed_by"], MANAGER);
     assert_eq!(row["printed"], false);
     assert!(row["approved_by"].is_null());
-    assert!(row.get("counted_cash").is_none(), "no amounts in a spot view");
+    assert!(
+        row.get("counted_cash").is_none(),
+        "no amounts in a spot view"
+    );
 
     // The print of the same view marks the same row.
     let (s, row) = call(
@@ -188,7 +191,10 @@ async fn a_manager_views_and_prints_the_spot_report_and_the_z_report_lists_it(po
     .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(report["spot_views"].as_array().unwrap().len(), 2);
-    assert_eq!(report["expected_cash"], 6000, "a view never moves the drawer");
+    assert_eq!(
+        report["expected_cash"], 6000,
+        "a view never moves the drawer"
+    );
 
     // A closed till has no live spot report.
     let (s, _) = call(
@@ -273,7 +279,8 @@ async fn the_live_route_honours_a_one_time_unlock_once(pool: PgPool) {
     let app = app!(pool);
     let till = open_till(&app).await;
     let approval = Uuid::new_v4();
-    let unlock = json!({ "id": approval, "capability": "till.cash_spot_check", "approver_id": MANAGER });
+    let unlock =
+        json!({ "id": approval, "capability": "till.cash_spot_check", "approver_id": MANAGER });
     let (s, row) = call(
         &app,
         test::TestRequest::post()
@@ -315,7 +322,8 @@ fn view_op(till: Uuid, id: Uuid, approver: Option<&str>) -> Value {
         "request": { "id": id, "printed": true, "viewed_at": "2026-09-17T09:00:00Z" }
     });
     if let Some(a) = approver {
-        op["approval"] = json!({ "id": Uuid::new_v4(), "capability": "till.cash_spot_check", "approver_id": a });
+        op["approval"] =
+            json!({ "id": Uuid::new_v4(), "capability": "till.cash_spot_check", "approver_id": a });
     }
     op
 }
@@ -343,7 +351,10 @@ async fn a_tellers_queued_view_is_kept_and_flagged_without_an_approval(pool: PgP
             .unwrap();
     assert_eq!(
         flags,
-        vec![("SpotReportView".to_string(), "till.cash_spot_check".to_string())]
+        vec![(
+            "SpotReportView".to_string(),
+            "till.cash_spot_check".to_string()
+        )]
     );
     let (s, _) = call(
         &app,
@@ -376,7 +387,10 @@ async fn a_managers_pin_unlocks_one_queued_view_for_a_teller(pool: PgPool) {
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
-    assert!(row["approved_by"].is_null(), "self-approval approves nothing");
+    assert!(
+        row["approved_by"].is_null(),
+        "self-approval approves nothing"
+    );
     let (s, row) = call(
         &app,
         test::TestRequest::post()
@@ -404,10 +418,12 @@ async fn a_blind_close_with_a_discrepancy_lands_in_the_review_queue(pool: PgPool
     let till = open_till(&app).await;
     let (s, out) = call(
         &app,
-        test::TestRequest::post().uri("/sync/replay").set_json(json!({
-            "op": "close_till", "teller_id": TELLER_A, "till_id": till,
-            "request": { "closing_cash_declared": 5700 }
-        })),
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .set_json(json!({
+                "op": "close_till", "teller_id": TELLER_A, "till_id": till,
+                "request": { "closing_cash_declared": 5700 }
+            })),
         bearer(TELLER_A, UserRole::Teller),
     )
     .await;

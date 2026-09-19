@@ -265,7 +265,11 @@ async fn a_one_time_manager_pin_unlock_opens_the_live_figures_and_is_recorded(po
         h,
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "a retry of the same look is not a replay");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "a retry of the same look is not a replay"
+    );
 
     // But nobody else may spend it — that is the replay that matters.
     let mut theirs = who(TELLER_B, UserRole::Teller, Some(NEW_POS));

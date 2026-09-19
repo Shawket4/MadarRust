@@ -75,8 +75,7 @@ pub fn enforced_client(headers: &actix_web::http::header::HeaderMap) -> bool {
             .get(crate::devices::CLIENT_HEADER)
             .and_then(|v| v.to_str().ok()),
     );
-    matches!(c.app.as_deref(), Some("pos" | "kds"))
-        && c.version.is_some_and(|v| v >= ENFORCED_FROM)
+    matches!(c.app.as_deref(), Some("pos" | "kds")) && c.version.is_some_and(|v| v >= ENFORCED_FROM)
 }
 
 /// The unlock carried on the request, when the header holds one.
@@ -105,7 +104,8 @@ pub async fn require_live_figures(
     if !enforced_client(req.headers()) {
         return Ok(());
     }
-    if crate::authz::require::can(pool, claims, Cap::TillCashSpotCheck, Some(till.branch_id)).await?
+    if crate::authz::require::can(pool, claims, Cap::TillCashSpotCheck, Some(till.branch_id))
+        .await?
     {
         return Ok(());
     }
