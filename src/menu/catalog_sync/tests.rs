@@ -144,17 +144,22 @@ async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) ->
 }
 
 async fn seed_size(pool: &PgPool, item: Uuid, label: &str, price: i32, sort: i32) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query(
+    // Upsert, and take the id BACK: an item is born with a `one_size` row, so a
+    // fixture naming that label updates the existing row rather than creating
+    // one, and the row keeps its own id.
+    let id: Uuid = sqlx::query_scalar(
         "INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort, is_active) \
-         VALUES ($1, $2, $3, $4, $5, true)",
+         VALUES ($1, $2, $3, $4, $5, true) \
+         ON CONFLICT (menu_item_id, label) DO UPDATE \
+             SET price = EXCLUDED.price, sort = EXCLUDED.sort, is_active = true \
+         RETURNING id",
     )
-    .bind(id)
+    .bind(Uuid::new_v4())
     .bind(item)
     .bind(label)
     .bind(price)
     .bind(sort)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .unwrap();
     id

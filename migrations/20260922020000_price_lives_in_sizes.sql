@@ -220,6 +220,39 @@ CREATE TRIGGER menu_items_ensure_one_size
 AFTER INSERT ON menu_items
 FOR EACH ROW EXECUTE FUNCTION menu_items_ensure_one_size();
 
+-- (a2) The synthetic `one_size` row retires itself the moment the item gains a
+--      REAL size. Anything that creates an item and then gives it sizes — the
+--      dashboard editor, a linked copy, a duplicate, the demo seed, an import —
+--      would otherwise leave the sentinel behind, and the item would read as
+--      multi-size with a phantom cheapest size dragging its "from" price down.
+--
+--      Deliberately narrow, so it can never destroy authored work:
+--        * only the SYNTHETIC row (the stable md5 id), never a size a person
+--          happened to name "one_size";
+--        * only when a real ACTIVE size exists to take over the price;
+--        * only while the sentinel owns no recipe lines — once someone has
+--          written a recipe against it, it is real work and the editor renames
+--          it instead (that is what the dashboard does).
+CREATE OR REPLACE FUNCTION menu_item_sizes_retire_sentinel() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+    IF NEW.label = 'one_size' OR NOT NEW.is_active THEN
+        RETURN NULL;
+    END IF;
+    DELETE FROM menu_item_sizes z
+     WHERE z.menu_item_id = NEW.menu_item_id
+       AND z.label = 'one_size'
+       AND z.id = (md5(z.menu_item_id::text || ':one_size'))::uuid
+       AND NOT EXISTS (SELECT 1 FROM recipe_lines rl
+                        WHERE rl.owner_type = 'item_size' AND rl.owner_id = z.id);
+    RETURN NULL;
+END $$;
+
+DROP TRIGGER IF EXISTS menu_item_sizes_retire_sentinel ON menu_item_sizes;
+CREATE TRIGGER menu_item_sizes_retire_sentinel
+AFTER INSERT OR UPDATE OF is_active, label ON menu_item_sizes
+FOR EACH ROW EXECUTE FUNCTION menu_item_sizes_retire_sentinel();
+
 -- (b) A live item cannot END a transaction with no active size.
 --     This is a DEFERRED constraint trigger, checked at COMMIT rather than per
 --     statement, so the ordinary editor pattern of replacing an item's whole

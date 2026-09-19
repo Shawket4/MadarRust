@@ -2459,11 +2459,6 @@ async fn add_size(pool: &PgPool, item: Uuid, label: &str, price: i32) {
     .execute(&mut *tx)
     .await
     .unwrap();
-    sqlx::query("DELETE FROM menu_item_sizes WHERE menu_item_id = $1 AND label = 'one_size'")
-        .bind(item)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
     tx.commit().await.unwrap();
 }
 async fn seed_item_priced(pool: &PgPool, org: Uuid, cat: Uuid, name: &str, price: i32) -> Uuid {

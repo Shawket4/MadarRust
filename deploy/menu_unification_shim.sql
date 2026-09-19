@@ -40,10 +40,18 @@ DROP TABLE IF EXISTS menu_item_addon_slots            CASCADE;
 DROP TABLE IF EXISTS addon_item_ingredients           CASCADE;
 DROP TABLE IF EXISTS addon_items                      CASCADE;
 DROP TABLE IF EXISTS menu_item_recipes                CASCADE;
-DROP TABLE IF EXISTS item_sizes                       CASCADE;
+-- item_sizes may already BE the view: the price-lives-in-sizes migration
+-- (20260922020000) converges every database on that shape, so this file has to
+-- be re-appliable rather than assume it is still a table.
+DO $shim$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_class WHERE relname = 'item_sizes' AND relkind = 'r') THEN
+        DROP TABLE item_sizes CASCADE;
+    END IF;
+END $shim$;
 
 -- ── item_sizes ← menu_item_sizes (drop the synthetic one_size sentinel rows). ──
-CREATE VIEW item_sizes AS
+CREATE OR REPLACE VIEW item_sizes AS
 SELECT z.id, z.menu_item_id, z.label, z.price AS price_override, z.is_active
 FROM menu_item_sizes z
 WHERE NOT (z.label = 'one_size' AND z.id = (md5(z.menu_item_id::text || ':one_size'))::uuid);

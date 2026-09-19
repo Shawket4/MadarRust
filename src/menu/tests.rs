@@ -653,27 +653,43 @@ async fn test_delete_size_success(pool: PgPool) {
     let cat_id = seed_category(&pool, org_id, "Mains").await;
     let item_id = seed_menu_item(&pool, org_id, cat_id, "Coffee", 500).await;
 
-    let req_body = UpsertSizeRequest {
-        label: "large".to_string(),
-        price_override: 700,
-    };
-
     let token = generate_org_admin_token(user_id, org_id);
-    let req = test::TestRequest::post()
-        .uri(&format!("/menu-items/{}/sizes", item_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&req_body)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    let size: ItemSize = test::read_body_json(resp).await;
+    // Two sizes, because price lives in sizes and an item may never be left
+    // without one — deleting the only size is refused (asserted below).
+    let mut ids = Vec::new();
+    for (label, price) in [("large", 700), ("small", 500)] {
+        let req = test::TestRequest::post()
+            .uri(&format!("/menu-items/{}/sizes", item_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&UpsertSizeRequest {
+                label: label.to_string(),
+                price_override: price,
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let size: ItemSize = test::read_body_json(resp).await;
+        ids.push(size.id);
+    }
 
     let req_del = test::TestRequest::delete()
-        .uri(&format!("/menu-items/{}/sizes/{}", item_id, size.id))
+        .uri(&format!("/menu-items/{}/sizes/{}", item_id, ids[0]))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
 
     let resp_del = test::call_service(&app, req_del).await;
     assert!(resp_del.status().is_success());
+
+    // The one that is left holds the item's price, so it stays.
+    let req_last = test::TestRequest::delete()
+        .uri(&format!("/menu-items/{}/sizes/{}", item_id, ids[1]))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp_last = test::call_service(&app, req_last).await;
+    assert_eq!(
+        resp_last.status(),
+        400,
+        "an item may never be left with no size: that is where its price lives"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1192,11 +1208,6 @@ async fn add_item_size(pool: &PgPool, item: Uuid, label: &str, price: i32) {
     .execute(&mut *tx)
     .await
     .unwrap();
-    sqlx::query("DELETE FROM menu_item_sizes WHERE menu_item_id = $1 AND label = 'one_size'")
-        .bind(item)
-        .execute(&mut *tx)
-        .await
-        .unwrap();
     tx.commit().await.unwrap();
 }
 

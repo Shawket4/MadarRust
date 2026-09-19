@@ -1279,8 +1279,9 @@ async fn test_catalog_unit_change_rebases_recipes(pool: PgPool) {
         .unwrap();
     let mi = Uuid::new_v4();
     sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1,$2,$3,'Bread',100,true)").bind(mi).bind(org_id).bind(cat).execute(&pool).await.unwrap();
-    let size = Uuid::new_v4();
-    sqlx::query("INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort) VALUES ($1,$2,'one_size',100,0)").bind(size).bind(mi).execute(&pool).await.unwrap();
+    // The item is born with its `one_size` row; take that one rather than
+    // inserting a second under the same label.
+    let size: Uuid = sqlx::query_scalar("SELECT id FROM menu_item_sizes WHERE menu_item_id = $1 AND label = 'one_size'").bind(mi).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size',$1,$2,18,'g')").bind(size).bind(ing).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, ingredient_name, ingredient_unit, quantity_used, org_ingredient_id) VALUES ($1,'one_size','Flour','g',18,$2)").bind(mi).bind(ing).execute(&pool).await.unwrap();
     let token = generate_org_admin_token(user_id, org_id);
@@ -1333,8 +1334,7 @@ async fn test_yield_change_rebases_recipe_quantities(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let size = Uuid::new_v4();
-    sqlx::query("INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort) VALUES ($1,$2,'one_size',1000,0)").bind(size).bind(item).execute(&pool).await.unwrap();
+    let size: Uuid = sqlx::query_scalar("SELECT id FROM menu_item_sizes WHERE menu_item_id = $1 AND label = 'one_size'").bind(item).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size',$1,$2,200,'g')").bind(size).bind(ing).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, ingredient_name, ingredient_unit, quantity_used, org_ingredient_id) VALUES ($1,'one_size','Chicken','g',200,$2)").bind(item).bind(ing).execute(&pool).await.unwrap();
 
@@ -1606,6 +1606,9 @@ async fn legacy_ingredient_edit_bumps_catalog_revision(pool: PgPool) {
         .bind(org_id).bind(cat).fetch_one(&mut *tx).await.unwrap();
     let size: Uuid = sqlx::query_scalar("INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES ($1, 'Cup', 100) RETURNING id")
         .bind(item).fetch_one(&mut *tx).await.unwrap();
+    // 'Cup' is a real size, so the `one_size` row the item was born with goes.
+    sqlx::query("DELETE FROM menu_item_sizes WHERE menu_item_id = $1 AND label = 'one_size'")
+        .bind(item).execute(&mut *tx).await.unwrap();
     sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size', $1, $2, 1, 'kg')")
         .bind(size).bind(ing_id).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();

@@ -114,7 +114,9 @@ async fn item(
     for (i, l) in labels.iter().enumerate() {
         sizes.push(
             sqlx::query_scalar(
-                "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, $2, 100, $3) RETURNING id",
+                "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, $2, 100, $3)
+                 ON CONFLICT (menu_item_id, label) DO UPDATE SET price = EXCLUDED.price, sort = EXCLUDED.sort
+                 RETURNING id",
             )
             .bind(id)
             .bind(l)
