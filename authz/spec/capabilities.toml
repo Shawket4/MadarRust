@@ -2142,19 +2142,17 @@ en = "Re-apply packaging rules to every menu item"
 # AR draft (2026-09-16), pending owner review.
 ar = "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة"
 
-[[cap]]
-id = 222
-key = "orders.held.resume_others"
-group = "selling"
-tier = "configurable"
-risk = "money"
-defaults = "om"
-approval = true
-pos = true
-en = "Resume an order someone else started"
-ar = "استكمال طلب حد تاني بدأه"
-hint_en = "A held order another person parked on this till. Without it, a manager enters their PIN."
-hint_ar = "طلب معلّق سايبه حد تاني على الجهاز ده. من غيرها المدير يدخل الرقم السري بتاعه."
+# id 222 RETIRED 2026-09-19 (`orders.held.resume_others`, "Resume an order
+# someone else started"). The owner overruled the gate: a held order is shared
+# state on the till, exactly like a floor table, so resuming one — anyone's,
+# including a manager's — never asks for a capability or a manager's PIN. The
+# only condition is that somebody is signed in, which the POS core enforces
+# without a capability (`madar-core/src/queue.rs`, rule 4). Nothing checks 222
+# any more, so it is removed rather than left as a toggle the owner can flip
+# with no effect. The ID IS RESERVED AND MUST NEVER BE REUSED: ids are stable
+# forever, gaps are fine, and no other capability shifts. Migration
+# 20260922010000 removes the grants 20260921050100 seeded. `started_by` on the
+# order is untouched — the handover is still traced.
 
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the

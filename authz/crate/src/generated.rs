@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "eba43e906e9a05e5";
+pub const SPEC_HASH: &str = "aa8db466ef758739";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -189,7 +189,6 @@ pub enum Cap {
     CustomersErase = 219,
     ReportsLegal = 220,
     MenuPackagingRulesApply = 221,
-    OrdersHeldResumeOthers = 222,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -372,7 +371,6 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::CustomersErase, key: "customers.erase", legacy: None, group: "customers", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Erase a customer's personal data (PDPL)", ar: "محو البيانات الشخصية للعميل", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::ReportsLegal, key: "reports.legal", legacy: None, group: "reports", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See legal reports: tax, refunds, voids, discounts, waivers and price overrides", ar: "عرض التقارير القانونية: الضريبة والمرتجعات والإلغاءات والخصومات والإعفاءات وتعديلات الأسعار", hint_en: Some("They name the staff who gave money back. A manager sees only their own branches."), hint_ar: Some("ت\u{64f}ظهر أسماء الموظفين الذين أعادوا المال. يرى المدير فروعه فقط.") },
     CapMeta { cap: Cap::MenuPackagingRulesApply, key: "menu.packaging_rules.apply", legacy: None, group: "menu", tier: Tier::Advanced, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Re-apply packaging rules to every menu item", ar: "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة", hint_en: None, hint_ar: None },
-    CapMeta { cap: Cap::OrdersHeldResumeOthers, key: "orders.held.resume_others", legacy: None, group: "selling", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: true, limits: &[], pos: true, protected: false, en: "Resume an order someone else started", ar: "استكمال طلب حد تاني بدأه", hint_en: Some("A held order another person parked on this till. Without it, a manager enters their PIN."), hint_ar: Some("طلب معل\u{651}ق سايبه حد تاني على الجهاز ده. من غيرها المدير يدخل الرقم السري بتاعه.") },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[

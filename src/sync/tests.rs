@@ -917,9 +917,15 @@ async fn a_manager_approval_carries_a_void_the_teller_does_not_hold(pool: PgPool
 
 /// Deferred feature 5: teller A started a cart, parked it, and teller B
 /// resumed it after a teller switch and settled it. The replayed sale is B's
-/// (drawer, reports) and records A as the person who started it, with the
-/// manager's approval kept when one rode along. A `started_by` naming nobody
-/// of the org is dropped, never a refusal: the sale happened.
+/// (drawer, reports) and records A as the person who started it.
+///
+/// Owner decision 2026-09-19: a resume is NOT an act that needs a grant
+/// (capability 222 `orders.held.resume_others` is retired), so no such sale is
+/// ever flagged for review — with or without the old manager approval on the
+/// envelope, which a v0.7.9 till still sends and which is simply not looked
+/// for. The attribution is what survives, and it is what the dashboard shows.
+/// A `started_by` naming nobody of the org is dropped, never a refusal: the
+/// sale happened.
 #[sqlx::test]
 async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: PgPool) {
     let app = app_with_orders!(pool);
@@ -970,6 +976,8 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
         v
     };
 
+    // An OLD client (<= v0.7.9) still rings a manager's approval for the
+    // resume and sends it. It must not regress: accepted, unflagged.
     let approval = serde_json::json!({ "id": Uuid::new_v4(), "capability": "orders.held.resume_others", "approver_id": manager });
     let r = replay(&app, &bearer, &sale(ali, Some(approval))).await;
     assert!(r.status().is_success(), "{}", r.status());
@@ -996,20 +1004,11 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
             .await
             .unwrap();
     assert_eq!((teller, by), (badr, Some(ali)));
-    let (verified, approver): (bool, Uuid) = sqlx::query_as(
-        "SELECT verified, approver_user_id FROM approvals WHERE subject_user_id = $1 AND op = 'CreateOrder'",
-    )
-    .bind(badr)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(verified, "the manager holds orders.held.resume_others");
     assert_eq!(
         flags_of(&pool, badr).await,
         0,
-        "an approved resume is clean"
+        "an old client's approved resume is clean"
     );
-    assert_eq!(approver, manager);
 
     // A name from another org is dropped, the sale still lands.
     let r = replay(&app, &bearer, &sale(stranger, None)).await;
@@ -1027,31 +1026,38 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
     let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(order.order.started_by, None);
 
-    // Ali's order settled by Badr with no approval: accepted and flagged.
+    // A NEW client (v0.7.10+): a plain teller settles Ali's order with no
+    // approval at all. Accepted, attributed, and NOT flagged — the whole point
+    // of the owner's decision. This is the line that used to file a flag.
     let r = replay(&app, &bearer, &sale(ali, None)).await;
-    assert!(r.status().is_success(), "accept and flag: {}", r.status());
+    assert!(r.status().is_success(), "accepted: {}", r.status());
     let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(
         order.order.started_by,
         Some(ali),
         "the sale still names both"
     );
-    let (cap, reason): (String, String) =
-        sqlx::query_as("SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1")
-            .bind(badr)
-            .fetch_one(&pool)
-            .await
-            .expect("one flag for the owner");
-    assert_eq!(cap, "orders.held.resume_others");
-    assert_eq!(reason, "unauthorized_offline");
+    assert_eq!(
+        flags_of(&pool, badr).await,
+        0,
+        "a resume needs no grant, so it is never flagged"
+    );
 
-    // A manager who holds the capability settles Ali's order: clean.
+    // And a manager's held order resumed by that same plain teller: the sale
+    // names the manager and is just as clean. Nobody's PIN was involved.
     sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
         .bind(manager)
         .bind(branch)
         .execute(&pool)
         .await
         .unwrap();
+    let r = replay(&app, &bearer, &sale(manager, None)).await;
+    assert!(r.status().is_success(), "{}", r.status());
+    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    assert_eq!(order.order.started_by, Some(manager));
+    assert_eq!(flags_of(&pool, badr).await, 0, "still clean");
+
+    // The other way round: the manager rings the teller's held order.
     let mbearer = token(manager, org, UserRole::BranchManager);
     let mshift = open_shift_row(&pool, branch, manager).await;
     let mut msale = sale(ali, None);
@@ -1059,7 +1065,7 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
     msale["request"]["till_id"] = serde_json::json!(mshift);
     let r = replay(&app, &mbearer, &msale).await;
     assert!(r.status().is_success(), "{}", r.status());
-    assert_eq!(flags_of(&pool, manager).await, 0, "the manager holds it");
+    assert_eq!(flags_of(&pool, manager).await, 0, "never flagged either way");
 }
 
 async fn flags_of(pool: &PgPool, author: Uuid) -> i64 {
