@@ -140,11 +140,18 @@ async fn enable_program_mode(
     default_cost: i32,
     require_otp: bool,
 ) {
+    // `stamp_per_line_item` named explicitly, as false. The column DEFAULTS to
+    // true — a stamp card means one stamp per ITEM — but almost every test
+    // below was written for, and describes, a programme that counts SALES, the
+    // way every programme did before the switch existed. Letting the default
+    // through here would silently retime all of them; a test that wants the new
+    // rule asks for it with `count_per_item`. The default itself is pinned by
+    // `a_new_programme_counts_items_without_anyone_finding_the_switch`.
     sqlx::query(
         "INSERT INTO loyalty_settings \
             (org_id, branch_id, enabled, mode, earn_piastres_per_point, default_reward_cost, \
-             require_otp) \
-         VALUES ($1, NULL, true, $2, $3, $4, $5)",
+             require_otp, stamp_per_line_item) \
+         VALUES ($1, NULL, true, $2, $3, $4, $5, false)",
     )
     .bind(org)
     .bind(mode)
@@ -4775,9 +4782,15 @@ async fn a_redeemed_unit_earns_nothing_but_the_paid_ones_still_do(pool: PgPool) 
     assert_eq!(visits_of(&pool, member).await, 2);
 }
 
-/// A programme that was already running keeps counting sales.
+/// A programme that counts sales keeps counting sales.
+///
+/// One half of the migration's promise. The other half — that a NEW programme
+/// counts items — is the column's DEFAULT, pinned just below: a `sqlx::test`
+/// starts from an empty database, so the migration's one-time `UPDATE` of the
+/// rows that already existed has nothing here to apply to, and what is worth
+/// pinning is the behaviour it bought rather than the statement itself.
 #[sqlx::test]
-async fn an_existing_programme_still_gives_one_stamp_per_order(pool: PgPool) {
+async fn a_per_order_programme_still_gives_one_stamp_per_order(pool: PgPool) {
     perms(&pool).await;
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org, "Maadi").await;
@@ -4790,15 +4803,16 @@ async fn an_existing_programme_still_gives_one_stamp_per_order(pool: PgPool) {
     let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
     let member = seed_member(&pool, org, "201000000105", "Mstampline000000000005").await;
 
-    // The migration's promise, checked at the source: an existing row counts
-    // sales even though the column's DEFAULT is per-item.
+    // The helper wrote the switch off, which is the state the migration put
+    // every programme that already existed into — its members are holding
+    // cards that were filled one per visit.
     let per_item: bool =
         sqlx::query_scalar("SELECT stamp_per_line_item FROM loyalty_settings WHERE org_id = $1")
             .bind(org)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(!per_item, "an existing programme must keep per-order");
+    assert!(!per_item);
 
     let (p, s) = app_data(&pool);
     let app = test::init_service(
@@ -4968,6 +4982,30 @@ async fn a_replayed_sale_earns_exactly_what_the_live_one_did(pool: PgPool) {
     );
     assert_eq!(visits_of(&pool, live_member).await, 4);
     assert_eq!(visits_of(&pool, drained_member).await, 4);
+}
+
+/// The other half: a programme created from today counts items, and nobody had
+/// to find a switch to get it.
+#[sqlx::test]
+async fn a_new_programme_counts_items_without_anyone_finding_the_switch(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    // A bare insert, naming no counting mode — a programme created by anything
+    // that has not heard of the switch.
+    sqlx::query(
+        "INSERT INTO loyalty_settings (org_id, branch_id, enabled, mode) \
+         VALUES ($1, NULL, true, 'visits')",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let per_item: bool =
+        sqlx::query_scalar("SELECT stamp_per_line_item FROM loyalty_settings WHERE org_id = $1")
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(per_item, "a new stamp card should count items");
 }
 
 // ── Settings and the eligible-item list, over the wire ───────────────────────
