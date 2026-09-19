@@ -869,7 +869,8 @@ async fn a_branch_created_after_the_orgs_data_still_gets_all_of_it(pool: PgPool)
             .get("teller")
             .map(|t| t.iter().any(|v| v["id"] == s.admin.to_string()))
             .unwrap_or(false),
-        "…and the people who sign in on it"
+        "…and the people who sign in on it — a new branch with no staff is the \
+         same bug wearing a different hat"
     );
 
     // The older branch is untouched and still complete.
@@ -971,4 +972,103 @@ async fn the_sweep_re_emits_live_rows_the_feed_never_heard_of(pool: PgPool) {
             .unwrap_or(false),
         "…and the device's next pull brings the method back"
     );
+}
+
+/// A device that ALREADY took the empty snapshot heals by itself: the backfill
+/// emits with fresh seqs, so the rows arrive on its next ORDINARY incremental
+/// pull. No full re-sync, no checksum repair, nobody reinstalling a till.
+#[sqlx::test]
+async fn a_device_that_already_synced_the_empty_snapshot_heals_on_its_next_pull(pool: PgPool) {
+    let s = shop(&pool).await;
+    let method: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon) \
+         VALUES ($1, 'Instapay', '#000', 'card') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Put the branch in the broken state the old fan-out left behind.
+    sqlx::query("DELETE FROM sync_changes WHERE branch_id = $1 AND type = 'payment_method'")
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // The device bootstraps and gets nothing, then parks on its cursor.
+    let first = super::pull_core(&pool, s.org, &req(s.branch), None)
+        .await
+        .unwrap();
+    assert!(
+        first
+            .data
+            .get("payment_method")
+            .map(|m| m.is_empty())
+            .unwrap_or(true),
+        "the device starts out short, as the field does"
+    );
+    let cursor = first.next.unwrap_or_else(|| 0);
+
+    // The fix lands (the migration runs this for every branch).
+    let healed: i32 = sqlx::query_scalar("SELECT sync_backfill_branch($1)")
+        .bind(s.branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(healed >= 1, "the backfill emitted the missing rows");
+
+    // The device does nothing special — its ordinary incremental pull.
+    let next = super::pull_core(&pool, s.org, &req(s.branch), Some(cursor))
+        .await
+        .unwrap();
+    assert!(
+        !next.resync_required,
+        "no full re-sync is demanded of it: {next:?}"
+    );
+    // An incremental pull answers with `changes`, the ordinary per-row feed.
+    assert!(
+        next.changes
+            .iter()
+            .any(|c| c.ty == "payment_method" && c.id == method && c.op == "upsert"),
+        "and the method it was missing simply arrives, as an ordinary change: {:?}",
+        next.changes
+    );
+}
+
+/// The affected set is not "payment methods". A late branch was missing its
+/// STAFF and its ADD-ONS too — a fresh device on it could show no one to sign
+/// in as and no add-ons to sell. Pinned so a future emit path that reintroduces
+/// the hole for any of these fails here.
+#[sqlx::test]
+async fn a_late_branch_has_its_staff_and_addons_too(pool: PgPool) {
+    let s = shop(&pool).await;
+    seed_every_type(&pool, &s).await;
+    let later: Uuid = sqlx::query_scalar(
+        "INSERT INTO branches (org_id, name, code) VALUES ($1, 'Later', 'LATE') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let resp = super::pull_core(&pool, s.org, &req(later), None)
+        .await
+        .unwrap();
+    for ty in [
+        "teller",
+        "addon_item",
+        "payment_method",
+        "menu_item",
+        "category",
+        "discount",
+        "ingredient",
+        "bundle",
+        "customer",
+    ] {
+        assert!(
+            resp.data.get(ty).map(|v| !v.is_empty()).unwrap_or(false),
+            "a branch opened after its org's data must still see `{ty}`"
+        );
+    }
 }
