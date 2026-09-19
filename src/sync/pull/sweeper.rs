@@ -3,6 +3,12 @@
 //!    row write to fire a trigger, so the sweep emits their `delete`.
 //! 2. Tombstones older than 30 days are purged and the branch watermark raised,
 //!    so a device whose cursor predates the purge is told to resync.
+//! 3. The mirror of (1): live rows with NO feed row are emitted as `upsert`.
+//!    A branch backfills itself at creation (migration 20260922020000), but the
+//!    sweep is what makes the feed self-healing — any hole from a path that
+//!    forgets to emit, a restore, or a hand-written INSERT closes within ten
+//!    minutes, and the devices pick the rows up on their next ordinary pull.
+//!    Nobody reinstalls a till.
 use std::time::Duration;
 
 use sqlx::PgPool;
@@ -15,6 +21,8 @@ const TIME_BASED: &[&str] = &["kitchen_ticket", "delivery", "booking"];
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
     pub deletes_emitted: i64,
+    /// Live rows that had no feed row at all — a feed hole, now closed.
+    pub upserts_emitted: i64,
     pub tombstones_purged: i64,
 }
 
@@ -72,6 +80,23 @@ async fn sweep_locked(conn: &mut sqlx::PgConnection) -> Result<SweepReport, sqlx
     .fetch_one(&mut *conn)
     .await?;
 
+    // The mirror of the delete pass, over EVERY type: anything live that the
+    // feed never heard of. This is what heals a branch whose rows were never
+    // emitted — the org fan-out only ever reached the branches that existed at
+    // write time, so a branch opened later had nothing for its org's payment
+    // methods, menu, discounts or staff, and its devices read a perfectly
+    // consistent empty snapshot.
+    let upserts_emitted: i64 = sqlx::query_scalar(
+        "WITH gap AS ( \
+            SELECT l.branch_id, l.type, l.entity_id FROM sync_live_rows() l \
+             WHERE NOT EXISTS (SELECT 1 FROM sync_changes c \
+                                WHERE c.branch_id = l.branch_id AND c.type = l.type \
+                                  AND c.entity_id = l.entity_id)) \
+         SELECT count(*) FROM (SELECT sync_emit(branch_id, type, entity_id, 'upsert') FROM gap) x",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
     let purged: Vec<(uuid::Uuid, i64, i64)> = sqlx::query_as(
         "WITH dead AS ( \
             DELETE FROM sync_changes WHERE op = 'delete' AND changed_at < now() - interval '30 days' \
@@ -96,6 +121,7 @@ async fn sweep_locked(conn: &mut sqlx::PgConnection) -> Result<SweepReport, sqlx
     }
     Ok(SweepReport {
         deletes_emitted,
+        upserts_emitted,
         tombstones_purged,
     })
 }
