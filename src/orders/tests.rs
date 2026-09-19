@@ -4503,3 +4503,111 @@ async fn an_order_of_only_zero_priced_items_is_zero_not_negative(pool: PgPool) {
     assert_eq!(full.order.discount_amount, 0);
     assert_eq!(full.order.total_amount, 0);
 }
+
+/// A ZERO-PRICED line still takes its recipe off the stock.
+///
+/// This is the fact the staff drinks pool rests on (STAFF_POOL.md, owner
+/// decision 7: "Stock still deducts — the drink was made"). A staff drink is
+/// the REAL menu item rung at zero, so the deduction it causes is the ordinary
+/// one every sale causes; the loop in `create_order` walks `resolved.deductions`,
+/// which comes from the recipe and never looks at price.
+///
+/// It is worth pinning because the thing the pool REPLACES got this wrong. The
+/// duplicate zero-priced "… staff" items Drops rang until now carry no recipe
+/// at all — all 16 of them, confirmed against the 2026-09-15 prod dump — so
+/// staff consumption was never coming off the books. Ringing the real item is
+/// what fixes that, and this test is the reason we can say so.
+#[sqlx::test]
+async fn a_zero_priced_line_still_takes_its_recipe_off_the_stock(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+
+    // A drink that costs the customer nothing, and the shop a real 18g of beans.
+    let free_item = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) \
+         VALUES ($1, $2, $3, 'Staff latte', 0, true)",
+    )
+    .bind(free_item)
+    .bind(org_id)
+    .bind(cat_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let ing_id = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(&pool, free_item, ing_id, 18.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        amount_tendered: Some(0),
+        items: vec![OrderItemInput {
+            menu_item_id: Some(free_item),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        ..Default::default()
+    };
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "a free drink is still a sale: {:?}", resp.status());
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    // It rang at zero and it is STILL A SALE — it does not vanish from the books.
+    assert_eq!(order_full.order.subtotal, 0);
+    assert_eq!(order_full.order.total_amount, 0);
+    assert_eq!(order_full.order.status, "completed");
+
+    // And the beans are gone.
+    let on_hand: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(ing_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(on_hand, 982.0, "18g of beans must come off a drink that was made");
+
+    // Recorded as a real sale movement against this order, not a special case.
+    let moves: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_movements \
+          WHERE source_type = 'order' AND source_id = $1 AND type = 'sale'",
+    )
+    .bind(order_full.order.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(moves, 1);
+}

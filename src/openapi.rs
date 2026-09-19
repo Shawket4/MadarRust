@@ -411,6 +411,12 @@ paths(
         // ── loyalty: the points program ───────────────────────────────
         crate::loyalty::settings::get_settings,
         crate::loyalty::settings::put_settings,
+        crate::staff_pool::settings::get_settings,
+        crate::staff_pool::settings::put_settings,
+        crate::staff_pool::settings::delete_settings,
+        crate::staff_pool::record::get_today,
+        crate::staff_pool::record::record,
+        crate::staff_pool::record::list,
         crate::loyalty::settings::delete_settings,
         crate::loyalty::settings::get_reward_items,
         crate::loyalty::settings::put_reward_items,
@@ -649,6 +655,10 @@ paths(
         // listing the shared error body explicitly makes it discoverable.
         crate::errors::ErrorBody,
         crate::loyalty::settings::LoyaltySettings,
+        crate::staff_pool::settings::StaffPoolSettings,
+        crate::staff_pool::record::StaffPoolToday,
+        crate::staff_pool::record::StaffDrink,
+        crate::staff_pool::record::RecordStaffDrinkRequest,
         crate::loyalty::settings::RewardItem,
         crate::loyalty::settings::RewardCatalogue,
         crate::loyalty::model::MemberView,

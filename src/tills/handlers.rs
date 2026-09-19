@@ -337,6 +337,14 @@ pub struct TillReportFigures {
     pub standard_float: Option<i64>,
     pub suggested_safe_drop: Option<i64>,
     pub expected_cash: i64,
+    /// Staff drinks put on the branch's pool during this till, and how many of
+    /// them were past the day's allowance. The Z report shows what the shop
+    /// gave its own people; the money is zero, so neither figure enters any
+    /// total. Additive — an older tablet simply does not read them.
+    #[serde(default)]
+    pub staff_drinks_count: i64,
+    #[serde(default)]
+    pub staff_drinks_overspent_count: i64,
     /// Who viewed (and printed) the cash spot report of this till, oldest first. Additive.
     #[serde(default)]
     pub spot_views: Vec<crate::tills::spot_views::TillSpotView>,
@@ -1286,7 +1294,18 @@ pub(crate) async fn report_figures(
         _ => None,
     };
     let spot_views = crate::tills::spot_views::spot_views_for_till(pool, till_id).await?;
+    // What the shop gave its own people on this till. Zero money, so it enters
+    // no total — it is a count the owner reads beside the takings.
+    let (staff_drinks_count, staff_drinks_overspent_count): (Option<i64>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT sum(quantity)::bigint,                     sum(quantity) FILTER (WHERE overspent)::bigint                FROM staff_drinks WHERE till_id = $1",
+        )
+        .bind(till_id)
+        .fetch_one(pool)
+        .await?;
     Ok(TillReportFigures {
+        staff_drinks_count: staff_drinks_count.unwrap_or(0),
+        staff_drinks_overspent_count: staff_drinks_overspent_count.unwrap_or(0),
         spot_views,
         payment_summary,
         total_payments,

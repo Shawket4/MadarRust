@@ -57,9 +57,16 @@ pub const ALL_TYPES: &[&str] = &[
     "refund",
     "addon_item",
     "customer",
+    "staff_drink",
 ];
 /// Ledger types: never checksummed; windowed in full snapshots.
-pub const LEDGER_TYPES: &[&str] = &["till", "cash_movement", "order", "refund"];
+///
+/// `staff_drink` belongs here rather than among the state types: the rows are
+/// dated and grow forever, and a till only ever needs the business day it is
+/// working. The 48-hour window covers today and yesterday, which spans the
+/// business-day boundary in any timezone — a device coming back at 01:00 local
+/// still sees the day it is counting against.
+pub const LEDGER_TYPES: &[&str] = &["till", "cash_movement", "order", "refund", "staff_drink"];
 /// How far back a full snapshot's ledger window reaches.
 pub const LEDGER_WINDOW_HOURS: i64 = 48;
 const DEFAULT_LIMIT: i64 = 2000;
