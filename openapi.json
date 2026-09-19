@@ -67792,6 +67792,13 @@
                   "$ref": "#/components/schemas/AddonSlot"
                 }
               },
+              "all_sizes": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ItemSize"
+                },
+                "description": "Every size row, INCLUDING the synthetic `one_size` one. Additive: this is\nwhere price actually lives, and it is what the dashboard's size editor\nand new POS builds read. An item always has at least one entry."
+              },
               "allowed_addon_ids": {
                 "type": "array",
                 "items": {
@@ -67823,7 +67830,8 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/ItemSize"
-                }
+                },
+                "description": "LEGACY SHAPE — unchanged for clients at or below v0.7.11: the synthetic\n`one_size` row that now carries a single-price item's price is hidden\nhere, so an old till still sees a size-less item exactly as it did."
               }
             }
           }
