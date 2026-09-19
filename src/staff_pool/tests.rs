@@ -642,6 +642,16 @@ async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) 
     // The business day is resolved SERVER-side and carried, so a till never
     // re-derives it from an instant and a timezone it might not have.
     assert_eq!(d["business_date"], "2026-09-19");
+
+    // A projection nobody may ask for is no better than no projection, so the
+    // type has to be on the wire list too — and on the LEDGER list, because
+    // these rows are dated and grow for ever and must be windowed rather than
+    // checksummed in full.
+    assert!(crate::sync::pull::ALL_TYPES.contains(&"staff_drink"));
+    assert!(
+        crate::sync::pull::is_ledger("staff_drink"),
+        "an ever-growing dated table must not be checksummed in full"
+    );
 }
 
 /// A branch row overrides the org one wholesale in the projection too, or a
@@ -661,15 +671,4 @@ async fn the_projection_prefers_the_branch_override(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(settings[&branch]["staff_pool"]["daily_allowance"], 2);
-}
-
-/// `staff_drink` is a wire type the POS may ask for, and a LEDGER one — the
-/// rows are dated and grow forever, so a full snapshot windows them.
-#[test]
-fn staff_drink_is_a_windowed_wire_type() {
-    assert!(crate::sync::pull::ALL_TYPES.contains(&"staff_drink"));
-    assert!(
-        crate::sync::pull::is_ledger("staff_drink"),
-        "an ever-growing dated table must not be checksummed in full"
-    );
 }
