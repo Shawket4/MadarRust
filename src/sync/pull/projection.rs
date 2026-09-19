@@ -264,6 +264,26 @@ pub async fn project(
             )
             .await?
         }
+        // The till counts its branch's pool from these rows, so every device of
+        // a branch converges on the same day's count over the cloud exactly as
+        // it does over the LAN. `business_date` is the branch's business day,
+        // already resolved server-side — the till must never re-derive it from
+        // `recorded_at` and a timezone it might not have.
+        "staff_drink" => {
+            by_sql(
+                conn,
+                "SELECT s.id, json_build_object('id', s.id, 'branch_id', s.branch_id, \
+                        'business_date', s.business_date, 'quantity', s.quantity, \
+                        'menu_item_id', s.menu_item_id, 'item_name', s.item_name, \
+                        'size_label', s.size_label, 'note', s.note, \
+                        'overspent', s.overspent, 'overspent_on_replay', s.overspent_on_replay, \
+                        'cost_minor', s.cost_minor, 'order_id', s.order_id, \
+                        'recorded_at', s.recorded_at, 'updated_at', s.updated_at) \
+                   FROM staff_drinks s WHERE s.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
         "bundle" => {
             let mut out = keyed(
                 crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,
@@ -360,7 +380,12 @@ pub async fn project(
                         'loyalty', (SELECT json_build_object('enabled', l.enabled, 'mode', l.mode, \
                                 'program_name', l.program_name, 'program_name_ar', l.program_name_ar) \
                               FROM loyalty_settings l WHERE l.org_id = b.org_id AND (l.branch_id = b.id OR l.branch_id IS NULL) \
-                             ORDER BY l.branch_id NULLS LAST LIMIT 1)) \
+                             ORDER BY l.branch_id NULLS LAST LIMIT 1), \
+                        'staff_pool', (SELECT json_build_object('enabled', sp.enabled, \
+                                'daily_allowance', sp.daily_allowance, \
+                                'eligible_item_ids', sp.eligible_item_ids) \
+                              FROM staff_pool_settings sp WHERE sp.org_id = b.org_id AND (sp.branch_id = b.id OR sp.branch_id IS NULL) \
+                             ORDER BY sp.branch_id NULLS LAST LIMIT 1)) \
                    FROM branches b JOIN organizations o ON o.id = b.org_id \
                   WHERE b.id = ANY($1) AND b.deleted_at IS NULL",
                 tile_hash("o.logo_group_id")

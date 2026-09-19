@@ -586,3 +586,90 @@ async fn a_teller_without_the_grant_cannot_read_the_notes(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), 403);
 }
+
+// ── The feed ────────────────────────────────────────────────────────────────
+
+/// The till reads the allowance out of the `branch_settings` projection, and
+/// counts the day out of `staff_drink` rows. Neither existed until the
+/// projection carried them — the tables and triggers alone left the POS
+/// reading the pool as OFF, with the action never appearing.
+#[sqlx::test]
+async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_item(&pool, org, "Latte").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let bearer = token(admin, org, UserRole::OrgAdmin);
+    set_pool(&pool, org, None, 4, &[item]).await;
+
+    let drink_id = Uuid::new_v4();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/staff-pool/drinks")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(&drink_body(drink_id, branch, item, "for Sara", "2026-09-19T09:00:00Z"))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+
+    let mut conn = pool.acquire().await.unwrap();
+
+    // The allowance rides the projection the tablet already reads.
+    let settings = crate::sync::pull::projection::project(
+        &mut conn, org, branch, "branch_settings", &[branch],
+    )
+    .await
+    .unwrap();
+    let sp = settings[&branch]["staff_pool"].clone();
+    assert_eq!(sp["enabled"], true, "the till must not read the pool as off: {settings:?}");
+    assert_eq!(sp["daily_allowance"], 4);
+    assert_eq!(sp["eligible_item_ids"][0], item.to_string());
+
+    // And the drink itself reaches every device of the branch.
+    let drinks = crate::sync::pull::projection::project(
+        &mut conn, org, branch, "staff_drink", &[drink_id],
+    )
+    .await
+    .unwrap();
+    let d = &drinks[&drink_id];
+    assert_eq!(d["branch_id"], branch.to_string());
+    assert_eq!(d["quantity"], 1);
+    assert_eq!(d["note"], "for Sara");
+    assert_eq!(d["overspent"], false);
+    // The business day is resolved SERVER-side and carried, so a till never
+    // re-derives it from an instant and a timezone it might not have.
+    assert_eq!(d["business_date"], "2026-09-19");
+}
+
+/// A branch row overrides the org one wholesale in the projection too, or a
+/// branch would run on numbers its own settings screen does not show.
+#[sqlx::test]
+async fn the_projection_prefers_the_branch_override(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_item(&pool, org, "Latte").await;
+    set_pool(&pool, org, None, 9, &[item]).await;
+    set_pool(&pool, org, Some(branch), 2, &[item]).await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let settings = crate::sync::pull::projection::project(
+        &mut conn, org, branch, "branch_settings", &[branch],
+    )
+    .await
+    .unwrap();
+    assert_eq!(settings[&branch]["staff_pool"]["daily_allowance"], 2);
+}
+
+/// `staff_drink` is a wire type the POS may ask for, and a LEDGER one — the
+/// rows are dated and grow forever, so a full snapshot windows them.
+#[test]
+fn staff_drink_is_a_windowed_wire_type() {
+    assert!(crate::sync::pull::ALL_TYPES.contains(&"staff_drink"));
+    assert!(
+        crate::sync::pull::is_ledger("staff_drink"),
+        "an ever-growing dated table must not be checksummed in full"
+    );
+}
