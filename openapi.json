@@ -43398,6 +43398,612 @@
         ]
       }
     },
+    "/staff-pool/drinks": {
+      "get": {
+        "tags": [
+          "staff_pool"
+        ],
+        "summary": "The staff drinks of a branch over a range of business days, newest first.",
+        "description": "This is the whole point of the note: with no \"who is this for\" field by\ndesign, the note is the only record of who drank it, and this is where an\nowner reads it.",
+        "operationId": "list_staff_drinks",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Business days, inclusive. Both default to the branch's today.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "overspent_only",
+            "in": "query",
+            "description": "Only the drinks that went past the allowance.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StaffDrink"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "staff_pool"
+        ],
+        "operationId": "record_staff_drink",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordStaffDrinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffDrink"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff-pool/settings": {
+      "get": {
+        "tags": [
+          "staff_pool"
+        ],
+        "operationId": "get_staff_pool_settings",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Omit for the org-wide default; supply a branch for its override.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffPoolSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "staff_pool"
+        ],
+        "operationId": "put_staff_pool_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StaffPoolSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffPoolSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "staff_pool"
+        ],
+        "operationId": "delete_staff_pool_settings",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Omit for the org-wide default; supply a branch for its override.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff-pool/today": {
+      "get": {
+        "tags": [
+          "staff_pool"
+        ],
+        "operationId": "get_staff_pool_today",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "business_date",
+            "in": "query",
+            "description": "The business day to ask about. Defaults to the branch's today.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffPoolToday"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/attendance": {
       "get": {
         "tags": [
@@ -75632,6 +76238,110 @@
           }
         }
       },
+      "RecordStaffDrinkRequest": {
+        "type": "object",
+        "description": "The body both the live route and the replay op carry.",
+        "required": [
+          "id",
+          "branch_id",
+          "menu_item_id",
+          "note"
+        ],
+        "properties": {
+          "allowance_at_record": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the DEVICE believed the pool stood at. Kept for the owner to\ncompare against what the server recomputed; never trusted."
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cost_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-minted, and the idempotency key: replaying the same drink twice\nis the same row, not a second one off the allowance."
+          },
+          "item_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Frozen at the till, so a later rename never rewrites history."
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": "string",
+            "description": "REQUIRED. Who the drink is for and why, in the teller's own words."
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The zero-priced sale this drink rang as, when there is one."
+          },
+          "overspent": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "recorded_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the teller rang it. Defaults to now; the business day is derived\nfrom this in the BRANCH's timezone, never from the server's clock date."
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "till_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "used_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "RecordWasteRequest": {
         "type": "object",
         "description": "One waste as a till (or the API) records it.",
@@ -78250,6 +78960,188 @@
           }
         }
       },
+      "StaffDrink": {
+        "type": "object",
+        "description": "One recorded staff drink, as every reader sees it.",
+        "required": [
+          "id",
+          "branch_id",
+          "item_name",
+          "quantity",
+          "note",
+          "business_date",
+          "allowance_at_record",
+          "used_before",
+          "overspent",
+          "overspent_on_replay",
+          "recorded_at"
+        ],
+        "properties": {
+          "allowance_at_record": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "business_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "cost_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item_name": {
+            "type": "string"
+          },
+          "menu_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "note": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "overspent": {
+            "type": "boolean",
+            "description": "Past the allowance, as the SERVER recounted it."
+          },
+          "overspent_on_replay": {
+            "type": "boolean",
+            "description": "The server made it an overspend and the till had not."
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "recorded_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "used_before": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "StaffPoolSettings": {
+        "type": "object",
+        "description": "The settings as the API states them, and as the PUT body accepts them.",
+        "required": [
+          "org_id"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`null` = the org-wide default. A branch id = that branch's override."
+          },
+          "daily_allowance": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Staff drinks this branch may give in one business day."
+          },
+          "eligible_item_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The menu items that count. EMPTY = the pool is off."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "The owner's master switch for this scope."
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "StaffPoolToday": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "business_date",
+          "enabled",
+          "allowance",
+          "used",
+          "remaining",
+          "over",
+          "eligible_item_ids"
+        ],
+        "properties": {
+          "allowance": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "business_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "eligible_item_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "over": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "remaining": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "used": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "StaffRequest": {
         "type": "object",
         "required": [
@@ -80638,6 +81530,15 @@
               "$ref": "#/components/schemas/TillSpotView"
             },
             "description": "Who viewed (and printed) the cash spot report of this till, oldest first. Additive."
+          },
+          "staff_drinks_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Staff drinks put on the branch's pool during this till, and how many of\nthem were past the day's allowance. The Z report shows what the shop\ngave its own people; the money is zero, so neither figure enters any\ntotal. Additive — an older tablet simply does not read them."
+          },
+          "staff_drinks_overspent_count": {
+            "type": "integer",
+            "format": "int64"
           },
           "standard_float": {
             "type": [

@@ -243,6 +243,13 @@ pub enum ReplayOp {
         teller_id: Uuid,
         request: crate::inventory::waste::RecordWasteRequest,
     },
+    // A staff drink put on the branch's daily pool (`orders.staff_drink.record`).
+    // The id inside the request is client-minted, so a re-flush posts once and
+    // a retry never spends a second drink off the allowance.
+    RecordStaffDrink {
+        teller_id: Uuid,
+        request: crate::staff_pool::record::RecordStaffDrinkRequest,
+    },
 }
 
 impl ReplayOp {
@@ -274,7 +281,8 @@ impl ReplayOp {
             | ReplayOp::AwardLoyaltyPoints { teller_id, .. }
             | ReplayOp::CreateCustomer { teller_id, .. }
             | ReplayOp::AttachCustomer { teller_id, .. }
-            | ReplayOp::RecordWaste { teller_id, .. } => *teller_id,
+            | ReplayOp::RecordWaste { teller_id, .. }
+            | ReplayOp::RecordStaffDrink { teller_id, .. } => *teller_id,
         }
     }
 
@@ -308,6 +316,7 @@ impl ReplayOp {
             ReplayOp::CreateCustomer { .. } => "CreateCustomer",
             ReplayOp::AttachCustomer { .. } => "AttachCustomer",
             ReplayOp::RecordWaste { .. } => "RecordWaste",
+            ReplayOp::RecordStaffDrink { .. } => "RecordStaffDrink",
         }
     }
 
@@ -346,6 +355,9 @@ impl ReplayOp {
                 // The food is already in the bin: stock moved whether or not
                 // the person was allowed to say so.
                 | ReplayOp::RecordWaste { .. }
+                // The drink was made and the sale was rung: stock moved
+                // whether or not the pool had room for it.
+                | ReplayOp::RecordStaffDrink { .. }
         )
     }
 
@@ -439,6 +451,8 @@ impl ReplayOp {
             // Same capability as `POST /inventory/waste`; its `max_value` limit
             // and branch scope are checked in `replay` with the waste's value.
             ReplayOp::RecordWaste { .. } => &[("inventory_waste", "create")],
+            // Architecture E capability with no legacy cell: see `flagged_caps`.
+            ReplayOp::RecordStaffDrink { .. } => &[],
         }
     }
 
@@ -450,6 +464,9 @@ impl ReplayOp {
     fn flagged_caps(&self) -> &'static [crate::authz::Cap] {
         match self {
             ReplayOp::SpotReportView { .. } => &[crate::authz::Cap::TillCashSpotCheck],
+            // A teller who was not granted it still rang a drink that was
+            // drunk. The record lands and the owner is told.
+            ReplayOp::RecordStaffDrink { .. } => &[crate::authz::Cap::OrdersStaffDrinkRecord],
             _ => &[],
         }
     }
@@ -701,6 +718,47 @@ pub async fn replay(
                 flags.push(format!("{resource}:{action}"))
             }
             Err(e) => return Err(e),
+        }
+    }
+
+    // The staff pool, recounted by the SERVER. The till decided from its own
+    // copy of today's pool, which may have been behind — another device's
+    // drinks, or its own queued ones. The true count lives here, so the rule is
+    // re-run against it and any divergence is flagged for the owner. It is
+    // never a refusal: the drink was made and the sale was rung, and the
+    // locked rule for a money op is accept-and-flag (§4.4.5).
+    if let ReplayOp::RecordStaffDrink { request, .. } = &op {
+        let cap = crate::authz::Cap::OrdersStaffDrinkRecord.key();
+        if let Ok((_, org_id)) = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT id, org_id FROM branches WHERE id = $1",
+        )
+        .bind(request.branch_id)
+        .fetch_one(pool.get_ref())
+        .await
+        .map(|r| (r.0, r.1))
+        {
+            let tz = crate::tz::effective_tz(pool.get_ref(), request.branch_id).await?;
+            let at = request.recorded_at.unwrap_or(occurred_at);
+            let day = crate::staff_pool::engine::business_date_of(tz, at);
+            let settings =
+                crate::staff_pool::settings::load_effective(pool.get_ref(), org_id, request.branch_id)
+                    .await?;
+            let used =
+                crate::staff_pool::record::used_on(pool.get_ref(), request.branch_id, day).await?;
+            let d = crate::staff_pool::engine::decide(
+                &settings.for_engine(),
+                &day.to_string(),
+                &request.menu_item_id.to_string(),
+                &request.note,
+                used,
+            );
+            if let Some(r) = d.refusal {
+                flags.push(format!("{cap}:{}", r.token()));
+            } else if d.overspent && !request.overspent.unwrap_or(false) {
+                // The server says over and the till did not: this is the
+                // convergence case the owner asked to see.
+                flags.push(format!("{cap}:overspent"));
+            }
         }
     }
 
@@ -1598,6 +1656,26 @@ async fn replay_dispatch(
             Ok(HttpResponse::Ok()
                 .json(serde_json::json!({"order_id": order_id, "customer_id": resolved})))
         }
+        ReplayOp::RecordStaffDrink { mut request, .. } => {
+            request.device_id = request.device_id.or(header_device);
+            // The server's own recount decides what is stored; the divergence
+            // was already flagged above. Nothing here can refuse a drink that
+            // was already drunk — only a blank note can, and that is a broken
+            // client, not a teller.
+            let out = crate::staff_pool::record::record_inner(
+                pool.get_ref(),
+                actor.org_id,
+                Some(actor.teller_id),
+                &request,
+                true,
+            )
+            .await?;
+            Ok(if out.deduplicated {
+                HttpResponse::Ok().json(out.drink)
+            } else {
+                HttpResponse::Created().json(out.drink)
+            })
+        }
         ReplayOp::RecordWaste { mut request, .. } => {
             request.device_id = request.device_id.or(header_device);
             let out = crate::inventory::waste::record_waste_inner(
@@ -1750,6 +1828,12 @@ async fn op_branch_must_be_in_org(
             None => None,
         },
         ReplayOp::RecordWaste { request, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
+                .bind(request.branch_id)
+                .fetch_optional(pool)
+                .await?
+        }
+        ReplayOp::RecordStaffDrink { request, .. } => {
             sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
                 .bind(request.branch_id)
                 .fetch_optional(pool)

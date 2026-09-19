@@ -59,6 +59,7 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
     .configure(costing::routes::configure)
     .configure(delivery::routes::configure)
     .configure(loyalty::routes::configure)
+    .configure(crate::staff_pool::routes::configure)
     // Apple's own paths, where a pass's `webServiceURL` points. Not
     // under JwtMiddleware: the caller is a customer's phone, which
     // authenticates with the pass's own token.

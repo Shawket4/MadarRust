@@ -83,6 +83,13 @@ The Rust code is not what's slow: each `#[sqlx::test]` creates a fresh database 
 - **Never pass `--no-capture` to nextest for a multi-test run**: it forces tests to run one at a time and looks exactly like a hang. Failing tests print their output anyway. Don't pipe a run through `sort`/`uniq`, which hides all progress until the end.
 - **Never run two full suites at once** against the same cluster, and never pass `--test-threads` below the default without a reason.
 - **A run that sits at ~0% CPU with test connections idle (`ClientRead`) is a deadlock in app code** (usually a handler holding a transaction while waiting for a second pool connection, or an advisory lock), not slowness. nextest's timeout names the test; fix the cause.
+- **While other agents build, run the suite from a nextest ARCHIVE.** Worktrees that share one `CARGO_TARGET_DIR` overwrite each other's *unhashed* binaries (`target/debug/<name>` is a hardlink to `deps/<name>-<hash>`, and last writer wins). A plain `cargo nextest run` then dies mid-run with `failed to exec .../deps/madar_rust-<hash>: No such file or directory` — deterministically, hundreds of tests in, looking like a mass test failure rather than a build problem. Build once, then run from the archive, which extracts to a private directory nothing else touches:
+  ```
+  cargo nextest archive --archive-file /tmp/madar_tests.tar.zst      # ~160 MB, needs DATABASE_URL
+  cargo nextest run --archive-file /tmp/madar_tests.tar.zst --workspace-remap .
+  ```
+  The same collision silently breaks `cargo run --bin export-openapi`: it can run ANOTHER worktree's binary and write a spec with none of your work in it. Verify before trusting it (`strings target/debug/export-openapi | grep <your-new-route>`), or run the hashed binary in `target/debug/deps/` directly.
+- **A `mis-aligned LINKEDIT string pool` dlopen error on a proc-macro dylib means the DISK IS FULL**, not that the crate is broken. Linking on a 99%-full volume writes a truncated file. `du -sh target/debug/incremental` (it reaches several GB and is pure scratch) and delete it — with no cargo running — before blaming the build.
 - Test databases are named `_sqlx_test_*`; after killed runs drop leftovers: `psql -p 5433 -d postgres -Atc "select 'drop database \"'||datname||'\";' from pg_database where datname like '_sqlx_test%'" | psql -p 5433 -d postgres`.
 
 Notes:

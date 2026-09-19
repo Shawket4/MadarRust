@@ -54,6 +54,7 @@ pub mod refunds;
 pub mod reports;
 pub mod reservations;
 pub mod staff;
+pub mod staff_pool;
 pub mod stocktakes;
 pub mod sync;
 pub mod tax;
