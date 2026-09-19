@@ -1072,3 +1072,62 @@ async fn a_late_branch_has_its_staff_and_addons_too(pool: PgPool) {
         );
     }
 }
+
+/// It is not ONLY a new-branch problem. `sync_emit_org` also skips a
+/// SOFT-DELETED branch, so a branch that is deleted and later restored is
+/// short of everything its org wrote while it was gone — the same ten types,
+/// on a branch that has been live for months. This is why the reconcile lives
+/// in the 10-minute sweep and not only in the creation trigger.
+#[sqlx::test]
+async fn a_restored_branch_is_short_until_the_sweep_catches_it(pool: PgPool) {
+    let s = shop(&pool).await;
+
+    sqlx::query("UPDATE branches SET deleted_at = now() WHERE id = $1")
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The org carries on working while the branch is away.
+    let method: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon) \
+         VALUES ($1, 'Instapay', '#000', 'card') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE branches SET deleted_at = NULL WHERE id = $1")
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Restored, live, and silently short: no INSERT fired, so the creation
+    // trigger never ran.
+    let short: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sync_live_rows() l \
+          WHERE l.branch_id = $1 \
+            AND NOT EXISTS (SELECT 1 FROM sync_changes c \
+                             WHERE c.branch_id=l.branch_id AND c.type=l.type \
+                               AND c.entity_id=l.entity_id)",
+    )
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(short >= 1, "the restored branch really is short");
+
+    // The sweep closes it, with nobody touching the device.
+    let report = super::sweeper::sweep_once(&pool).await.unwrap();
+    assert!(report.upserts_emitted >= short, "{report:?}");
+    let resp = super::pull_core(&pool, s.org, &req(s.branch), None)
+        .await
+        .unwrap();
+    assert!(
+        resp.data
+            .get("payment_method")
+            .map(|m| m.iter().any(|v| v["id"] == method.to_string()))
+            .unwrap_or(false),
+        "and the branch has what its org wrote while it was away"
+    );
+}
