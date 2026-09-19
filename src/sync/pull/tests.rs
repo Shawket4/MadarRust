@@ -556,6 +556,8 @@ BEGIN
     INSERT INTO discounts (org_id, name, type, value) VALUES (org, 'Staff', 'percentage', 0.1);
     INSERT INTO addon_items (org_id, name, type, default_price) VALUES (org, 'Oat milk', 'milk', 1500);
     INSERT INTO customers (org_id, name, phone, phone_key) VALUES (org, 'Mona', '0100 123 4567', '01001234567');
+    INSERT INTO staff_drinks (id, org_id, branch_id, menu_item_id, item_name, note, business_date, recorded_at)
+      VALUES (gen_random_uuid(), org, br, NULL, 'Latte', 'for Sara, closing shift', current_date, now());
     INSERT INTO devices (id, org_id, branch_id, code) VALUES (gen_random_uuid(), org, br, 'A') RETURNING id INTO dev;
     INSERT INTO device_payment_methods (device_id, payment_method_id, org_id) VALUES (dev, pm, org);
     INSERT INTO floor_sections (org_id, branch_id, name) VALUES (org, br, 'Main') RETURNING id INTO sec;
