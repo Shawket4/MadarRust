@@ -229,10 +229,17 @@ FOR EACH ROW EXECUTE FUNCTION menu_items_ensure_one_size();
 --      Deliberately narrow, so it can never destroy authored work:
 --        * only the SYNTHETIC row (the stable md5 id), never a size a person
 --          happened to name "one_size";
---        * only when a real ACTIVE size exists to take over the price;
+--        * only a sentinel INSERTED BY THIS VERY TRANSACTION (its xmin is the
+--          current xid) — i.e. one this item was born with moments ago, in the
+--          same unit of work that is now giving it real sizes. An item that has
+--          carried a `one_size` row since the unification backfill is never
+--          touched, however its sizes change later;
 --        * only while the sentinel owns no recipe lines — once someone has
 --          written a recipe against it, it is real work and the editor renames
 --          it instead (that is what the dashboard does).
+--
+--      The editor's own flow is unaffected either way: `put_sizes` replaces the
+--      whole set, so a sentinel absent from the incoming set is dropped there.
 CREATE OR REPLACE FUNCTION menu_item_sizes_retire_sentinel() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
@@ -243,6 +250,7 @@ BEGIN
      WHERE z.menu_item_id = NEW.menu_item_id
        AND z.label = 'one_size'
        AND z.id = (md5(z.menu_item_id::text || ':one_size'))::uuid
+       AND z.xmin = pg_current_xact_id()::xid
        AND NOT EXISTS (SELECT 1 FROM recipe_lines rl
                         WHERE rl.owner_type = 'item_size' AND rl.owner_id = z.id);
     RETURN NULL;

@@ -1501,6 +1501,24 @@ pub async fn upsert_size(
     .fetch_one(&mut *tx)
     .await?;
 
+    // Giving a simple item its first REAL size retires the `one_size` row it
+    // was born with — the sentinel is not a size anyone picks, and leaving it
+    // would show the item as multi-size with a phantom cheapest size. Only the
+    // synthetic row, and only while nothing has been authored against it.
+    if body.label != "one_size" {
+        sqlx::query(
+            "DELETE FROM menu_item_sizes z
+              WHERE z.menu_item_id = $1
+                AND z.label = 'one_size'
+                AND z.id = (md5(z.menu_item_id::text || ':one_size'))::uuid
+                AND NOT EXISTS (SELECT 1 FROM recipe_lines rl
+                                 WHERE rl.owner_type = 'item_size' AND rl.owner_id = z.id)",
+        )
+        .bind(*id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     // Write price epoch if this is new or the price changed.
     // Write price epoch if this is new or the price changed.
     if old_price.is_none_or(|p| p != body.price_override) {

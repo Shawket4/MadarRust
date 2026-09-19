@@ -1307,8 +1307,14 @@ pub async fn duplicate_item(
     let mut size_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     for (old_id, label, price, sort, is_active) in &src_sizes {
         let new_size: Uuid = sqlx::query_scalar(
+            // The copy is born with its own `one_size` row, so copying a simple
+            // item's size means writing that same label again: take over the
+            // row rather than colliding with it.
             "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (menu_item_id, label) DO UPDATE \
+                 SET price = EXCLUDED.price, sort = EXCLUDED.sort, is_active = EXCLUDED.is_active \
+             RETURNING id",
         )
         .bind(new_item)
         .bind(label)

@@ -40,20 +40,7 @@ async fn item(pool: &PgPool, org: Uuid, name: &str) -> Uuid {
 }
 
 async fn size(pool: &PgPool, item: Uuid, label: &str, sort: i32) -> Uuid {
-    // Upsert: an item is born with a `one_size` row, so a fixture naming that
-    // label is asserting the row rather than creating it.
-    let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, $2, 100, $3)
-         ON CONFLICT (menu_item_id, label) DO UPDATE SET price = EXCLUDED.price, sort = EXCLUDED.sort
-         RETURNING id",
-    )
-    .bind(item)
-    .bind(label)
-    .bind(sort)
-    .fetch_one(pool)
-    .await
-    .unwrap();
-    id
+    crate::test_support::seed_real_size(pool, item, label, 100, sort).await
 }
 
 async fn ingredient(pool: &PgPool, org: Uuid, name: &str, unit: &str, slug: &str) -> Uuid {

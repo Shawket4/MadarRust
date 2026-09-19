@@ -801,11 +801,14 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
         backfilled >= 8,
         "the bug: every ledger row stamped as changed at migration time ({backfilled})"
     );
+    // Counted as ROWS, not by stamp: the point is that the ledger backfill does
+    // not WINDOW state rows away. A later migration may legitimately re-stamp a
+    // catalog row — the price-lives-in-sizes migration mirrors every item's
+    // price from its sizes, and a till must re-pull the catalog when it does —
+    // so the stamp is not the invariant here; the row surviving is.
     let state_before = i64_of(
         &pool,
-        &format!(
-            "SELECT count(*) FROM sync_changes WHERE type = 'menu_item' AND changed_at = {stamp}"
-        ),
+        "SELECT count(*) FROM sync_changes WHERE type = 'menu_item'",
     )
     .await;
     // A change made after the feed exists keeps its real stamp.
@@ -855,9 +858,13 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
     .unwrap();
     assert_eq!(closed_till.to_rfc3339(), "2026-09-01T12:00:00+00:00");
     assert_eq!(
-        i64_of(&pool, &format!("SELECT count(*) FROM sync_changes WHERE type = 'menu_item' AND changed_at = {stamp}")).await,
+        i64_of(
+            &pool,
+            "SELECT count(*) FROM sync_changes WHERE type = 'menu_item'"
+        )
+        .await,
         state_before,
-        "state rows are not windowed and keep their stamp"
+        "state rows are not windowed away by the ledger backfill"
     );
 
     // The full pull: the closed till's old history is out of the window; the
