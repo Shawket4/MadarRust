@@ -51,6 +51,11 @@ impl BranchBus {
 pub struct Replay {
     pub events: Vec<BranchEvent>,
     pub complete: bool,
+    /// The highest id this process has issued for the branch (0 if none). A client
+    /// whose replay is incomplete resets its cursor to this: its own cursor may
+    /// belong to a previous process lifetime, and trusting it would filter out
+    /// every live event until the branch published past it.
+    pub server_last_id: u64,
 }
 
 /// Branch-keyed broadcast registry. Cheap to clone (`Arc` inside) so it lives in
@@ -118,11 +123,16 @@ impl BranchEventHub {
                     // the event just before the oldest retained one.
                     oldest.is_some_and(|o| after_id + 1 >= o)
                 };
-                Replay { events, complete }
+                Replay {
+                    events,
+                    complete,
+                    server_last_id: bus.next_id.saturating_sub(1),
+                }
             }
             None => Replay {
                 events: Vec::new(),
                 complete: after_id == 0,
+                server_last_id: 0,
             },
         }
     }
