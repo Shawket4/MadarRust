@@ -118,26 +118,28 @@ async fn fixture(pool: &PgPool) -> Fx {
     let straw = ingredient(pool, org, "Straw", "pcs", "packaging", 1).await;
 
     // Sizes: Cup (sort 0) and Can (sort 1, the one we preview).
-    for (label, price) in [("Can", 170), ("Cup", 150)] {
-        sqlx::query(
-            "INSERT INTO item_sizes (menu_item_id, label, price_override) VALUES ($1, $2, $3)",
-        )
+    //
+    // Written ONCE, to `menu_item_sizes`. `item_sizes` is the old-client view
+    // over that same table now, so writing both would collide on
+    // (menu_item_id, label). Replacing the whole set in one transaction is also
+    // what the editor does, and it is what clears the `one_size` row the item
+    // was born with — leaving it would make this a three-size item.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("DELETE FROM menu_item_sizes WHERE menu_item_id = $1")
         .bind(item)
-        .bind(label)
-        .bind(price)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .unwrap();
-    }
-    let can_size: Uuid = sqlx::query_scalar("INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, 'Can', 170, 1) RETURNING id")
-        .bind(item).fetch_one(pool).await.unwrap();
     sqlx::query(
         "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, 'Cup', 150, 0)",
     )
     .bind(item)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    let can_size: Uuid = sqlx::query_scalar("INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, 'Can', 170, 1) RETURNING id")
+        .bind(item).fetch_one(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
     for (ing, name, qty, unit) in [
         (full_cream, "Full cream milk", 250.0, "g"),
         (house, "House beans", 18.0, "g"),

@@ -945,6 +945,16 @@ pub async fn put_sizes(
     let item_id = basics.id;
     let incoming = body.into_inner().sizes;
 
+    // Price lives in sizes, so an item with none has no price at all. The schema
+    // refuses it at COMMIT; say so here instead, with a message a person can act
+    // on rather than a constraint name.
+    if !incoming.iter().any(|s| s.is_active) {
+        return Err(AppError::BadRequest(
+            "A menu item must keep at least one active size — that is where its price lives."
+                .into(),
+        ));
+    }
+
     // Reject duplicate labels in the payload (UNIQUE(menu_item_id,label) would 500).
     let mut seen = std::collections::HashSet::new();
     for s in &incoming {

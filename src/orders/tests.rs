@@ -2440,16 +2440,31 @@ async fn set_branch_override(
     .bind(branch).bind(item).bind(price).bind(available).execute(pool).await.unwrap();
 }
 async fn add_size(pool: &PgPool, item: Uuid, label: &str, price: i32) {
+    // Written to `menu_item_sizes`: `item_sizes` is the old-client view over it
+    // now, so there is one table, not two. Giving an item its first REAL size
+    // also retires the `one_size` row it was born with — the sentinel is not a
+    // size anyone chooses, and leaving it behind would make every such item
+    // multi-size and drag its "from" price down to the sentinel's. This is what
+    // the editor's replace-set does; done in one transaction, because an item is
+    // never allowed to COMMIT with no active size.
+    let mut tx = pool.begin().await.unwrap();
     sqlx::query(
-        "INSERT INTO item_sizes (id, menu_item_id, label, price_override, is_active)
-         VALUES (gen_random_uuid(), $1, $2, $3, true)",
+        "INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES ($1, $2, $3)
+         ON CONFLICT (menu_item_id, label)
+         DO UPDATE SET price = EXCLUDED.price, is_active = true",
     )
     .bind(item)
     .bind(label)
     .bind(price)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .unwrap();
+    sqlx::query("DELETE FROM menu_item_sizes WHERE menu_item_id = $1 AND label = 'one_size'")
+        .bind(item)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
 }
 async fn seed_item_priced(pool: &PgPool, org: Uuid, cat: Uuid, name: &str, price: i32) -> Uuid {
     let id = Uuid::new_v4();
