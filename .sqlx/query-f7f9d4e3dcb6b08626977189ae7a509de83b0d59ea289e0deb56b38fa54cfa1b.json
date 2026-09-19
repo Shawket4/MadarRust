@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (id, org_id, name, role, email, password_hash, pin_hash)\n         VALUES ($1, $2, 'Owner', 'org_admin'::user_role, 'owner-openshift@test.com', $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f7f9d4e3dcb6b08626977189ae7a509de83b0d59ea289e0deb56b38fa54cfa1b"
+}

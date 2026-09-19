@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (id, org_id, name, role, email, password_hash) VALUES ($1, $2, 'Delete Me', 'branch_manager'::user_role, 'del@t.com', 'h')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9debf90068192eba25fe21906f8dabe7125caf1e642f3b12ea71a39cad341986"
+}
