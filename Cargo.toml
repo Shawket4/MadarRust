@@ -151,6 +151,12 @@ inherits = "release"
 lto = false
 codegen-units = 16
 incremental = true
+# `release` strips (it ships to Linux, where stripping is fine and the size
+# matters). This profile never ships — it only builds a backend for the POS
+# scenarios to talk to on THIS machine — and on macOS 27 a stripped binary is
+# corrupt, so the scenario backend would not run at all. Inheriting `release`
+# means inheriting `strip = true`, hence the explicit override.
+strip = false
 
 [dev-dependencies]
 # Measures the shipped font in the QR-card layout test, so the "Powered by"
