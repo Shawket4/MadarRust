@@ -4508,3 +4508,665 @@ async fn liability_trend_sums_to_balances_and_new_reports_are_gated(pool: PgPool
         );
     }
 }
+
+// ── Stamps per line item, end to end ─────────────────────────────────────────
+// The pure arithmetic is pinned in `earn.rs`. What these pin is that the LIVE
+// path feeds that rule the right facts: the order's own lines, its own branch's
+// list of collecting items, and the units a reward already paid for — none of
+// which the till sends, and all of which it therefore cannot get wrong.
+
+/// Switch a programme to counting items, and narrow it to a list if asked.
+async fn count_per_item(pool: &PgPool, org: Uuid, eligible: &[Uuid]) {
+    sqlx::query("UPDATE loyalty_settings SET stamp_per_line_item = true WHERE org_id = $1")
+        .bind(org)
+        .execute(pool)
+        .await
+        .unwrap();
+    for (i, id) in eligible.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO loyalty_earning_items (org_id, menu_item_id, sort_order) \
+             VALUES ($1,$2,$3)",
+        )
+        .bind(org)
+        .bind(id)
+        .bind(i as i32)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// Place a sale with whatever lines the test wants, and return its id and key.
+async fn place_lines(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    jwt: &str,
+    branch: Uuid,
+    shift: Uuid,
+    items: Value,
+) -> (Uuid, Uuid) {
+    let key = Uuid::new_v4();
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+            "idempotency_key": key, "items": items
+        }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(status.is_success(), "order failed: {status} {body}");
+    (
+        Uuid::parse_str(body["id"].as_str().expect("order id")).unwrap(),
+        key,
+    )
+}
+
+async fn press_award(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    jwt: &str,
+    branch: Uuid,
+    order_id: Uuid,
+    member_token: &str,
+) -> Value {
+    let req = test::TestRequest::post()
+        .uri("/loyalty/award")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "branch_id": branch, "order_id": order_id, "token": member_token
+        }))
+        .to_request();
+    test::call_and_read_body_json(app, req).await
+}
+
+/// Three lattes on one bill is three stamps — the whole ask.
+#[sqlx::test]
+async fn a_line_counting_programme_gives_a_stamp_per_item_sold(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    // No list: every item collects, which is where a programme starts.
+    count_per_item(&pool, org, &[]).await;
+    let member = seed_member(&pool, org, "201000000101", "Mstampline000000000001").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    let (order, _) = place_lines(
+        &app,
+        &jwt,
+        branch,
+        shift,
+        json!([{ "menu_item_id": latte, "quantity": 3 }]),
+    )
+    .await;
+    let body = press_award(&app, &jwt, branch, order, "Mstampline000000000001").await;
+    assert_eq!(body["points_awarded"], 3, "{body}");
+    assert_eq!(visits_of(&pool, member).await, 3);
+
+    // And the ledger holds ONE row for the order, worth three — the per-order
+    // idempotency index is unchanged by any of this.
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM loyalty_transactions WHERE order_id = $1 AND kind = 'earn'",
+    )
+    .bind(order)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+    let body = press_award(&app, &jwt, branch, order, "Mstampline000000000001").await;
+    assert_eq!(body["already_awarded"], true);
+    assert_eq!(visits_of(&pool, member).await, 3);
+}
+
+/// Quantity across lines, and the items nobody chose sitting the round out.
+#[sqlx::test]
+async fn only_the_chosen_items_collect_and_quantity_multiplies(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    let croissant = seed_menu_item(&pool, org, "Croissant", 4_000).await;
+    let water = seed_menu_item(&pool, org, "Water", 1_000).await;
+    count_per_item(&pool, org, &[latte, croissant]).await;
+    let member = seed_member(&pool, org, "201000000102", "Mstampline000000000002").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // Two lattes, a croissant, and four bottles of water the card ignores.
+    let (order, _) = place_lines(
+        &app,
+        &jwt,
+        branch,
+        shift,
+        json!([
+            { "menu_item_id": latte, "quantity": 2 },
+            { "menu_item_id": croissant, "quantity": 1 },
+            { "menu_item_id": water, "quantity": 4 },
+        ]),
+    )
+    .await;
+    let body = press_award(&app, &jwt, branch, order, "Mstampline000000000002").await;
+    assert_eq!(body["points_awarded"], 3, "{body}");
+    assert_eq!(visits_of(&pool, member).await, 3);
+}
+
+/// A bill of nothing the programme collects earns nothing — not even a visit.
+#[sqlx::test]
+async fn a_bill_with_no_eligible_item_earns_no_stamp(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    let water = seed_menu_item(&pool, org, "Water", 1_000).await;
+    count_per_item(&pool, org, &[latte]).await;
+    let member = seed_member(&pool, org, "201000000103", "Mstampline000000000003").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    let (order, _) = place_lines(
+        &app,
+        &jwt,
+        branch,
+        shift,
+        json!([{ "menu_item_id": water, "quantity": 6 }]),
+    )
+    .await;
+    let body = press_award(&app, &jwt, branch, order, "Mstampline000000000003").await;
+    assert_eq!(body["points_awarded"], 0, "{body}");
+    assert_eq!(visits_of(&pool, member).await, 0);
+}
+
+/// The free latte does not hand a stamp back, and the ones beside it still do.
+#[sqlx::test]
+async fn a_redeemed_unit_earns_nothing_but_the_paid_ones_still_do(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    seed_reward(&pool, org, latte, "visits", 5).await;
+    count_per_item(&pool, org, &[]).await;
+    let member = seed_member(&pool, org, "201000000104", "Mstampline000000000004").await;
+    // Five stamps in hand, enough for exactly one free latte.
+    grant(&pool, org, member, branch, "visits", 5).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // Three lattes, one of them free.
+    let (status, body) = place_with_rewards(
+        &app,
+        &jwt,
+        branch,
+        shift,
+        json!([{ "menu_item_id": latte, "quantity": 3 }]),
+        member,
+        json!([{ "item_index": 0, "units": 1 }]),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    let order = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+    // The reward spent the five.
+    assert_eq!(visits_of(&pool, member).await, 0);
+
+    let body = press_award(&app, &jwt, branch, order, "Mstampline000000000004").await;
+    // Two paid lattes, two stamps. Not three — the free one earns nothing.
+    assert_eq!(body["points_awarded"], 2, "{body}");
+    assert_eq!(visits_of(&pool, member).await, 2);
+}
+
+/// A programme that was already running keeps counting sales.
+#[sqlx::test]
+async fn an_existing_programme_still_gives_one_stamp_per_order(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    // `enable_program_mode` writes the row without naming the column, exactly as
+    // a programme created before this feature existed did.
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    let member = seed_member(&pool, org, "201000000105", "Mstampline000000000005").await;
+
+    // The migration's promise, checked at the source: an existing row counts
+    // sales even though the column's DEFAULT is per-item.
+    let per_item: bool =
+        sqlx::query_scalar("SELECT stamp_per_line_item FROM loyalty_settings WHERE org_id = $1")
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!per_item, "an existing programme must keep per-order");
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    let (order, _) = place_lines(
+        &app,
+        &jwt,
+        branch,
+        shift,
+        json!([{ "menu_item_id": latte, "quantity": 3 }]),
+    )
+    .await;
+    let body = press_award(&app, &jwt, branch, order, "Mstampline000000000005").await;
+    assert_eq!(body["points_awarded"], 1, "{body}");
+    assert_eq!(visits_of(&pool, member).await, 1);
+}
+
+/// The ceiling still trims the accrual and still never fails the sale.
+///
+/// The one place per-item stamps could plausibly have broken something: a
+/// programme that used to add one at a time now adds several, and so reaches a
+/// full card mid-order rather than between orders.
+#[sqlx::test]
+async fn the_balance_cap_trims_a_line_counted_award_without_failing_the_sale(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    sqlx::query(
+        "UPDATE loyalty_settings SET balance_cap_enabled = true, balance_cap = 10 \
+          WHERE org_id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    count_per_item(&pool, org, &[]).await;
+    let member = seed_member(&pool, org, "201000000106", "Mstampline000000000006").await;
+    grant(&pool, org, member, branch, "visits", 8).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+
+    // Six lattes into a card with room for two. The sale goes through; the
+    // award is trimmed to the room, not refused.
+    let (order, _) = place_lines(
+        &app,
+        &jwt,
+        branch,
+        shift,
+        json!([{ "menu_item_id": latte, "quantity": 6 }]),
+    )
+    .await;
+    let body = press_award(&app, &jwt, branch, order, "Mstampline000000000006").await;
+    assert_eq!(body["points_awarded"], 2, "{body}");
+    assert_eq!(visits_of(&pool, member).await, 10);
+
+    // A full card is not an error, and the next sale is still served.
+    let (order2, _) = place_lines(
+        &app,
+        &jwt,
+        branch,
+        shift,
+        json!([{ "menu_item_id": latte, "quantity": 2 }]),
+    )
+    .await;
+    let body = press_award(&app, &jwt, branch, order2, "Mstampline000000000006").await;
+    assert_eq!(body["points_awarded"], 0, "{body}");
+    assert_eq!(visits_of(&pool, member).await, 10);
+}
+
+/// Live and replayed sales of the same shape are worth the same stamps.
+///
+/// The parity that matters most: a till that was offline all morning must not
+/// hand its customers a different number from the till beside it. It holds for
+/// free here — both paths award off the ORDER's rows — and this is what would
+/// catch someone later deciding the till should send its own count.
+#[sqlx::test]
+async fn a_replayed_sale_earns_exactly_what_the_live_one_did(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    let water = seed_menu_item(&pool, org, "Water", 1_000).await;
+    count_per_item(&pool, org, &[latte]).await;
+    let live_member = seed_member(&pool, org, "201000000107", "Mstampline000000000007").await;
+    let drained_member = seed_member(&pool, org, "201000000108", "Mstampline000000000008").await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(crate::orders::routes::configure)
+            .configure(crate::sync::routes::configure)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+    let lines = json!([
+        { "menu_item_id": latte, "quantity": 4 },
+        { "menu_item_id": water, "quantity": 2 },
+    ]);
+
+    // The till that was online.
+    let (live_order, _) = place_lines(&app, &jwt, branch, shift, lines.clone()).await;
+    let live = press_award(&app, &jwt, branch, live_order, "Mstampline000000000007").await;
+
+    // The till that was not, draining afterwards through the same door.
+    let key = Uuid::new_v4();
+    let req = test::TestRequest::post()
+        .uri("/sync/replay")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "op": "create_order", "teller_id": teller,
+            "request": {
+                "branch_id": branch, "shift_id": shift, "payment_method": "cash",
+                "idempotency_key": key, "items": lines
+            }
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let replayed_order: Uuid =
+        sqlx::query_scalar("SELECT id FROM orders WHERE idempotency_key = $1")
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let replayed = press_award(
+        &app,
+        &jwt,
+        branch,
+        replayed_order,
+        "Mstampline000000000008",
+    )
+    .await;
+
+    assert_eq!(live["points_awarded"], 4, "{live}");
+    assert_eq!(
+        live["points_awarded"], replayed["points_awarded"],
+        "live {live} vs replayed {replayed}"
+    );
+    assert_eq!(visits_of(&pool, live_member).await, 4);
+    assert_eq!(visits_of(&pool, drained_member).await, 4);
+}
+
+// ── Settings and the eligible-item list, over the wire ───────────────────────
+
+/// The switch survives a round trip, and a client that has never heard of it
+/// cannot move it in either direction.
+#[sqlx::test]
+async fn the_counting_switch_round_trips_and_an_old_client_cannot_flip_it(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(admin, org, UserRole::OrgAdmin, None);
+
+    let get = || {
+        test::TestRequest::get()
+            .uri("/loyalty/settings")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .to_request()
+    };
+    let put = |body: Value| {
+        test::TestRequest::put()
+            .uri("/loyalty/settings")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .set_json(body)
+            .to_request()
+    };
+
+    // A brand new programme, saved by a client that says nothing about the
+    // switch. A stamp card means per item, so that is what it gets.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        put(json!({
+            "org_id": org, "branch_id": null, "enabled": true, "program_name": "Beans",
+            "mode": "visits", "earn_piastres_per_point": 1000, "earn_on_discounted": true,
+            "earn_include_tax": false, "default_reward_cost": 5, "require_otp": false
+        })),
+    )
+    .await;
+    assert_eq!(body["stamp_per_line_item"], true, "{body}");
+
+    // The owner turns it off, deliberately.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        put(json!({
+            "org_id": org, "branch_id": null, "enabled": true, "program_name": "Beans",
+            "mode": "visits", "earn_piastres_per_point": 1000, "earn_on_discounted": true,
+            "earn_include_tax": false, "default_reward_cost": 5, "require_otp": false,
+            "stamp_per_line_item": false
+        })),
+    )
+    .await;
+    assert_eq!(body["stamp_per_line_item"], false, "{body}");
+    let body: Value = test::call_and_read_body_json(&app, get()).await;
+    assert_eq!(body["stamp_per_line_item"], false, "{body}");
+
+    // Now an old dashboard saves an unrelated change. It must not undo the
+    // owner's decision by omission — this is the whole reason the field is
+    // nullable on the way in.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        put(json!({
+            "org_id": org, "branch_id": null, "enabled": true, "program_name": "Beans & Co",
+            "mode": "visits", "earn_piastres_per_point": 1000, "earn_on_discounted": true,
+            "earn_include_tax": false, "default_reward_cost": 5, "require_otp": false
+        })),
+    )
+    .await;
+    assert_eq!(body["program_name"], "Beans & Co");
+    assert_eq!(body["stamp_per_line_item"], false, "{body}");
+
+    // And the same in the other direction: an omission cannot silently switch a
+    // per-item programme back to per-order either.
+    test::call_service(
+        &app,
+        put(json!({
+            "org_id": org, "branch_id": null, "enabled": true, "program_name": "Beans & Co",
+            "mode": "visits", "earn_piastres_per_point": 1000, "earn_on_discounted": true,
+            "earn_include_tax": false, "default_reward_cost": 5, "require_otp": false,
+            "stamp_per_line_item": true
+        })),
+    )
+    .await;
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        put(json!({
+            "org_id": org, "branch_id": null, "enabled": true, "program_name": "Beans & Co",
+            "mode": "visits", "earn_piastres_per_point": 1000, "earn_on_discounted": true,
+            "earn_include_tax": false, "default_reward_cost": 5, "require_otp": false
+        })),
+    )
+    .await;
+    assert_eq!(body["stamp_per_line_item"], true, "{body}");
+}
+
+/// The picker: saving a list, clearing it, a branch overriding the org's, and
+/// another tenant's item being refused rather than quietly listed.
+#[sqlx::test]
+async fn the_earning_item_list_saves_inherits_and_stays_inside_its_tenant(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let latte = seed_menu_item(&pool, org, "Latte", 6_000).await;
+    let cake = seed_menu_item(&pool, org, "Cake", 9_000).await;
+    let other_org = seed_org(&pool).await;
+    let their_item = seed_menu_item(&pool, other_org, "Secret", 1_234).await;
+
+    let (p, s) = app_data(&pool);
+    let app = test::init_service(
+        App::new()
+            .app_data(p)
+            .app_data(s)
+            .configure(super::routes::configure),
+    )
+    .await;
+    let jwt = token(admin, org, UserRole::OrgAdmin, None);
+    let put = |body: Value| {
+        test::TestRequest::put()
+            .uri("/loyalty/earning-items")
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .set_json(body)
+            .to_request()
+    };
+    let get = |uri: &str| {
+        test::TestRequest::get()
+            .uri(uri)
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .to_request()
+    };
+
+    // Nothing chosen yet: an empty list, which MEANS everything collects.
+    let body: Value = test::call_and_read_body_json(&app, get("/loyalty/earning-items")).await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 0, "{body}");
+
+    // The org picks coffee.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        put(json!({ "branch_id": null, "menu_item_ids": [latte] })),
+    )
+    .await;
+    assert_eq!(body["items"][0]["menu_item_id"], latte.to_string(), "{body}");
+    assert_eq!(body["items"][0]["name"], "Latte");
+
+    // A branch with no list of its own inherits the org's.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        get(&format!("/loyalty/earning-items?branch_id={branch}")),
+    )
+    .await;
+    assert_eq!(body["inherited"], true, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1);
+
+    // Then departs from it wholesale.
+    test::call_service(
+        &app,
+        put(json!({ "branch_id": branch, "menu_item_ids": [cake] })),
+    )
+    .await;
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        get(&format!("/loyalty/earning-items?branch_id={branch}")),
+    )
+    .await;
+    assert_eq!(body["inherited"], false, "{body}");
+    assert_eq!(body["items"][0]["menu_item_id"], cake.to_string());
+
+    // Clearing the branch's list puts it back on the org's.
+    test::call_service(&app, put(json!({ "branch_id": branch, "menu_item_ids": [] }))).await;
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        get(&format!("/loyalty/earning-items?branch_id={branch}")),
+    )
+    .await;
+    assert_eq!(body["inherited"], true, "{body}");
+    assert_eq!(body["items"][0]["menu_item_id"], latte.to_string());
+
+    // Saving the same item twice is one row, not two — this list's emptiness is
+    // load-bearing and its length is read by people.
+    let body: Value = test::call_and_read_body_json(
+        &app,
+        put(json!({ "branch_id": null, "menu_item_ids": [latte, latte, cake] })),
+    )
+    .await;
+    assert_eq!(body["items"].as_array().unwrap().len(), 2, "{body}");
+
+    // Another tenant's item is refused rather than listed back with its name
+    // and price, which is how the reward catalogue would have leaked one.
+    let resp = test::call_service(
+        &app,
+        put(json!({ "branch_id": null, "menu_item_ids": [their_item] })),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

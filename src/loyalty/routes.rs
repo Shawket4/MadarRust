@@ -40,6 +40,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/settings", web::delete().to(settings::delete_settings))
                 .route("/reward-items", web::get().to(settings::get_reward_items))
                 .route("/reward-items", web::put().to(settings::put_reward_items))
+                // What FILLS a card, beside what it buys.
+                .route("/earning-items", web::get().to(settings::get_earning_items))
+                .route("/earning-items", web::put().to(settings::put_earning_items))
                 .route("/lookup", web::post().to(handlers::lookup))
                 .route("/award", web::post().to(award::award))
                 .route("/adjust", web::post().to(handlers::adjust))
