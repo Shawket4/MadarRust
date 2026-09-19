@@ -764,22 +764,14 @@ pub async fn replay(
         }
     }
 
-    // A sale of a held order someone else started (the POS queue, deferred
-    // feature 5) asks the ringer for `orders.held.resume_others`, or a
-    // manager's approval for it. The sale already happened, so a miss is
-    // accepted and flagged, never refused.
-    if let ReplayOp::CreateOrder { request, .. } = &op
-        && let Some(by) = request.started_by
-        && by != teller_id
-    {
-        let cap = crate::authz::Cap::OrdersHeldResumeOthers;
-        let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
-            .await?
-            .can(cap);
-        if !held && !approved.as_ref().is_ok_and(|c| *c == cap) {
-            flags.push(cap.key().to_string());
-        }
-    }
+    // A sale of a held order someone else started (`request.started_by`) is
+    // NOT an act that needs a grant (owner decision 2026-09-19, capability 222
+    // `orders.held.resume_others` retired): a held order is shared state on the
+    // till, like a floor table, so a resume is never flagged for review. The
+    // author is still RECORDED on the order below — that is how a handover is
+    // traced. A v0.7.9 till still sends its old manager approval on the
+    // envelope; it is simply not looked for here, so such a sale replays clean
+    // instead of flagged, which is never a regression.
 
     for &cap in op.flagged_caps() {
         let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
