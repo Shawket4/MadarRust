@@ -3603,3 +3603,87 @@ async fn rename_branch(pool: &PgPool, branch: Uuid, name: &str) {
         .await
         .unwrap();
 }
+
+/// The till-sessions report is a drawer reconciliation, so the columns must
+/// ADD UP: opening + net cash + pay-ins − pay-outs − drops has to land on the
+/// expected figure the close computed. This walks one till through a cash
+/// sale, a refund, and every movement kind — including a correction, which
+/// must count against the bucket it corrects rather than a bucket of its own.
+#[sqlx::test]
+async fn till_sessions_report_reconciles_the_drawer(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+
+    // Opening float 10000, one 570 cash sale.
+    let till_id = seed_shift(&pool, branch_id, user_id).await;
+    seed_order(&pool, branch_id, user_id, till_id).await;
+
+    // A pay-in (+2000), a pay-out (−500), a safe drop (−3000), and a
+    // correction (−100) against the pay-in.
+    let pay_in = Uuid::new_v4();
+    for (id, amount, kind, corrects) in [
+        (pay_in, 2000_i32, "pay_in", None),
+        (Uuid::new_v4(), -500, "pay_out", None),
+        (Uuid::new_v4(), -3000, "safe_drop", None),
+        (Uuid::new_v4(), -100, "correction", Some(pay_in)),
+    ] {
+        sqlx::query(
+            "INSERT INTO till_cash_movements (id, till_id, amount, kind, corrects_id, moved_by, note)
+             VALUES ($1, $2, $3, $4, $5, $6, 'test')",
+        )
+        .bind(id)
+        .bind(till_id)
+        .bind(amount)
+        .bind(kind)
+        .bind(corrects)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/branches/{branch_id}/tills"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "till sessions report failed");
+
+    let rows: Vec<serde_json::Value> = test::read_body_json(resp).await;
+    assert_eq!(rows.len(), 1, "one till session");
+    let r = &rows[0];
+
+    assert_eq!(r["opening_cash"], json!(10000));
+    assert_eq!(r["orders_count"], json!(1), "one sale rung on this till");
+    assert_eq!(r["gross_sales"], json!(570), "net of refunds");
+    assert_eq!(r["net_cash_payment"], json!(570), "the one cash sale");
+    // The correction rides with the pay-in it corrects: 2000 − 100.
+    assert_eq!(r["pay_ins"], json!(1900), "correction folds into pay_in");
+    assert_eq!(r["pay_outs"], json!(500), "reported as a magnitude");
+    assert_eq!(r["cash_drops"], json!(3000), "reported as a magnitude");
+    assert_eq!(r["branch_name"], json!("Test Branch"));
+    assert!(r["business_date"].is_string(), "business date is derived");
+    assert!(r["closed_at"].is_null(), "still open");
+    assert!(
+        r["closing_cash_declared"].is_null(),
+        "an open till has no declared figure — null, never 0"
+    );
+
+    // The reconciliation identity the whole report exists to show.
+    let expected = r["opening_cash"].as_i64().unwrap()
+        + r["net_cash_payment"].as_i64().unwrap()
+        + r["pay_ins"].as_i64().unwrap()
+        - r["pay_outs"].as_i64().unwrap()
+        - r["cash_drops"].as_i64().unwrap();
+    let system_cash = crate::tills::handlers::compute_system_cash(&pool, till_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        expected, system_cash,
+        "the columns must add up to what close() would compute"
+    );
+}
