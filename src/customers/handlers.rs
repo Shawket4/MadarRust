@@ -801,7 +801,11 @@ pub async fn update_customer(
     }
     tx.commit().await?;
     if cur.is_member && (cur.name != name || cur.locale != locale) {
-        // The card carries the name and is written in the locale.
+        // The card carries the name and is written in the locale. The stored
+        // pass is dropped HERE as well as inside `push_update`: that path is
+        // skipped when no wallet is configured or the member has no Apple
+        // pass yet, and the bytes must not outlive the name either way.
+        crate::loyalty::wallet::store::invalidate(pool.get_ref(), id).await;
         crate::loyalty::wallet::push_update(pool.get_ref(), id);
     }
     Ok(HttpResponse::Ok().json(detail(pool.get_ref(), org, id).await?))
@@ -1001,6 +1005,33 @@ pub async fn erase_customer(
     let org = org_of(&req, &claims)?;
     require(pool.get_ref(), &claims, Cap::CustomersErase, None).await?;
     let id = path.into_inner();
+    // A member is erased the way loyalty forgets one (`model::forget`): the
+    // same scrub of the person, plus the card's token, devices, aliases, phone
+    // history and pre-built pass. Erasing only the `customers` row would leave
+    // a live card with no name and a stored pass that still carries it.
+    let member: Option<Uuid> = sqlx::query_scalar(
+        "SELECT m.id FROM loyalty_customers m JOIN customers c ON c.id = m.id \
+          WHERE m.id = $1 AND m.org_id = $2 AND m.deleted_at IS NULL \
+            AND c.erased_at IS NULL AND c.merged_into IS NULL",
+    )
+    .bind(id)
+    .bind(org)
+    .fetch_optional(pool.get_ref())
+    .await?;
+    if let Some(member) = member {
+        let Some(before) = crate::loyalty::model::forget(pool.get_ref(), member).await? else {
+            return Err(AppError::NotFound("Customer not found".into()));
+        };
+        // A network call: after the commit, never inside it.
+        tokio::spawn(async move {
+            if let Err(e) = crate::loyalty::wallet::google::expire_object(&before).await {
+                use crate::observability::report::{Failure, report};
+                report(Failure::new("loyalty", "expire_google_object"), &e);
+            }
+        });
+        return Ok(HttpResponse::NoContent().finish());
+    }
+    let mut tx = pool.get_ref().begin().await?;
     let done = sqlx::query(
         "UPDATE customers SET name = '', phone = NULL, phone_key = NULL, notes = NULL,
                 birth_month = NULL, birth_day = NULL, marketing_opt_out = true,
@@ -1009,10 +1040,17 @@ pub async fn erase_customer(
     )
     .bind(id)
     .bind(org)
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await?;
     if done.rows_affected() == 0 {
         return Err(AppError::NotFound("Customer not found".into()));
     }
+    // The numbers they used to have are personal data too.
+    sqlx::query("DELETE FROM customer_phone_history WHERE customer_id = $1 AND org_id = $2")
+        .bind(id)
+        .bind(org)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(HttpResponse::NoContent().finish())
 }

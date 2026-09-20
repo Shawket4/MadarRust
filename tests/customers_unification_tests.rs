@@ -584,6 +584,149 @@ async fn a_join_over_an_existing_manual_customer_gives_that_person_the_card(pool
     assert_eq!(source, "pos");
 }
 
+// ── The pre-built pass follows the person ───────────────────────────────────
+
+async fn cache_pass(pool: &PgPool, org: Uuid, member: Uuid) {
+    sqlx::query(
+        "INSERT INTO loyalty_pass_cache (customer_id, org_id, bytes, fingerprint) \
+         VALUES ($1, $2, '\\x00'::bytea, 'stale')",
+    )
+    .bind(member)
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+async fn cached(pool: &PgPool, member: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM loyalty_pass_cache WHERE customer_id = $1")
+        .bind(member)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A stored pass has the member's name baked in. A rename drops it, a merge
+/// drops both sides', and no wallet needs to be configured for that to happen.
+#[sqlx::test]
+async fn a_rename_and_a_merge_drop_the_stored_pass(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let owner = seed_user(&pool, org, "org_admin").await;
+    let bearer = token(owner, org, UserRole::OrgAdmin);
+    let keep = seed_loyalty_member(&pool, org, "01001234567", "Omar", "Mpc-keep-1").await;
+    let dupe = seed_loyalty_member(&pool, org, "01112345678", "Omar M", "Mpc-dupe-1").await;
+    cache_pass(&pool, org, keep).await;
+
+    // Notes are not on the card: the stored pass stays.
+    let (s, body) = call(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/customers/{keep}"))
+            .set_json(json!({ "notes": "no sugar" })),
+        &bearer,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(cached(&pool, keep).await, 1);
+
+    let (s, body) = call(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/customers/{keep}"))
+            .set_json(json!({ "name": "Omar Hassan" })),
+        &bearer,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(cached(&pool, keep).await, 0, "the name is on the card");
+
+    cache_pass(&pool, org, keep).await;
+    cache_pass(&pool, org, dupe).await;
+    let (s, body) = call(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/customers/{dupe}/merge"))
+            .set_json(json!({ "into": keep })),
+        &bearer,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert_eq!(cached(&pool, keep).await, 0);
+    assert_eq!(cached(&pool, dupe).await, 0);
+}
+
+/// Erasing a customer who holds a card erases the card too: the token dies,
+/// the stored pass and the phone history go, and the ledger stays.
+#[sqlx::test]
+async fn erasing_a_member_kills_the_card_and_its_stored_pass(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let owner = seed_user(&pool, org, "org_admin").await;
+    let bearer = token(owner, org, UserRole::OrgAdmin);
+    let member = seed_loyalty_member(&pool, org, "01001234567", "Omar", "Merase-0001").await;
+    adjust(&pool, org, member, branch, 10).await;
+    cache_pass(&pool, org, member).await;
+    sqlx::query(
+        "INSERT INTO customer_phone_history (org_id, customer_id, phone, phone_key) \
+         VALUES ($1, $2, '01112345678', '201112345678')",
+    )
+    .bind(org)
+    .bind(member)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (s, body) = call(
+        &app,
+        test::TestRequest::post().uri(&format!("/customers/{member}/erase")),
+        &bearer,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT, "{body}");
+
+    let (name, phone, erased): (String, Option<String>, bool) =
+        sqlx::query_as("SELECT name, phone, erased_at IS NOT NULL FROM customers WHERE id = $1")
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((name.as_str(), phone, erased), ("", None, true));
+    let (gone, tok): (bool, String) = sqlx::query_as(
+        "SELECT deleted_at IS NOT NULL, member_token FROM loyalty_customers WHERE id = $1",
+    )
+    .bind(member)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(gone, "the card is retired with the person");
+    assert_ne!(tok, "Merase-0001", "the barcode is dead");
+    assert!(
+        madar_rust::loyalty::model::find_by_token(&pool, "Merase-0001")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(cached(&pool, member).await, 0);
+    assert_eq!(
+        i64_of(
+            &pool,
+            &format!("SELECT count(*) FROM customer_phone_history WHERE customer_id = '{member}'")
+        )
+        .await,
+        0
+    );
+    // The books are not the member's data.
+    assert_eq!(
+        i64_of(
+            &pool,
+            &format!("SELECT count(*) FROM loyalty_transactions WHERE customer_id = '{member}'")
+        )
+        .await,
+        1
+    );
+}
+
 // ── Customers unification: the seeded data migration ────────────────────────
 
 const PRE_CUSTOMERS_UNIFICATION: i64 = 20260925010000;

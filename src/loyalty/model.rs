@@ -588,6 +588,12 @@ pub async fn forget(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>,
         .bind(member_id)
         .execute(&mut *tx)
         .await?;
+    // The pre-built pass has their name baked into it. In the transaction, so
+    // there is no moment at which the person is erased and the bytes are not.
+    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(Some(before))
 }
@@ -753,6 +759,12 @@ pub async fn merge_memberships(
     .bind(loser_id)
     .execute(&mut *conn)
     .await?;
+    // Both pre-built passes are wrong now: the loser's is a retired card with
+    // its name on it, the survivor's shows the balance before the transfer.
+    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)")
+        .bind(&[loser_id, survivor_id][..])
+        .execute(&mut *conn)
+        .await?;
     Ok(loser)
 }
 
