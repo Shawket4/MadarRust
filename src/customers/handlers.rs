@@ -1293,7 +1293,10 @@ pub async fn erase_inner(
         .execute(&mut *tx)
         .await?;
     if !phones.is_empty() {
-        sqlx::query("DELETE FROM delivery_otp WHERE phone = ANY($1)")
+        // Through the definer function: the tenant role cannot see
+        // `delivery_otp` rows (row security, no policy), so a plain DELETE
+        // here would succeed and remove nothing.
+        sqlx::query("SELECT customers_purge_otp($1)")
             .bind(&phones[..])
             .execute(&mut *tx)
             .await?;

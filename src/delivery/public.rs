@@ -1815,7 +1815,7 @@ pub async fn create_delivery_order(
         // answers with the order that won, not with a 409.
         Err(sqlx::Error::Database(db))
             if db.code().as_deref() == Some("23505")
-                && db.constraint().is_some_and(|c| c.contains("idempotency")) =>
+                && db.constraint().is_some_and(|c| c.contains("idem")) =>
         {
             drop(tx);
             if let Some(key) = idem
