@@ -15,5 +15,3 @@ pub mod studio;
 mod modeling_f_tests;
 #[cfg(test)]
 mod price_model_tests;
-#[cfg(test)]
-mod tests;

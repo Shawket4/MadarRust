@@ -1,19 +1,21 @@
 #![allow(unused_imports, unused_variables, dead_code)]
+mod common;
+
 use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::menu::handlers::*;
-use crate::menu::routes;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::menu::handlers::*;
+use madar_rust::menu::routes;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -406,7 +408,7 @@ async fn test_menu_catalog_paginated_with_costs(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
-            .configure(crate::costing::routes::configure),
+            .configure(madar_rust::costing::routes::configure),
     )
     .await;
 
@@ -2171,7 +2173,7 @@ async fn test_menu_catalog_overridden_filter_and_sort(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
-            .configure(crate::costing::routes::configure),
+            .configure(madar_rust::costing::routes::configure),
     )
     .await;
     let org = seed_org(&pool).await;
@@ -2230,20 +2232,20 @@ async fn test_menu_catalog_overridden_filter_and_sort(pool: PgPool) {
 
 async fn attach_photo(
     pool: &PgPool,
-    store: &crate::assets::AssetStore,
+    store: &madar_rust::assets::AssetStore,
     org: Uuid,
-    table: crate::assets::ingest::AssetTable,
-    purpose: crate::assets::ingest::AssetPurpose,
+    table: madar_rust::assets::ingest::AssetTable,
+    purpose: madar_rust::assets::ingest::AssetPurpose,
     id: Uuid,
     seed: u32,
 ) -> Uuid {
-    use crate::assets::ingest::*;
+    use madar_rust::assets::ingest::*;
     let o = ingest_bytes(
         pool,
         store,
         Some(org),
         purpose,
-        crate::assets::tests::photo_png(80, 60, seed),
+        common::photo_png(80, 60, seed),
         SourceKind::Upload,
         Some("x.png"),
         None,
@@ -2273,15 +2275,15 @@ fn assert_image(v: &serde_json::Value, group: Uuid, ctx: &str) {
 
 #[sqlx::test]
 async fn image_refs_on_all_menu_reads(pool: PgPool) {
-    use crate::assets::ingest::{AssetPurpose, AssetTable};
-    let (_d, store) = crate::assets::tests::tmp_store();
+    use madar_rust::assets::ingest::{AssetPurpose, AssetTable};
+    let (_d, store) = common::tmp_store();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
-            .configure(crate::costing::routes::configure)
-            .configure(crate::bundles::routes::configure),
+            .configure(madar_rust::costing::routes::configure)
+            .configure(madar_rust::bundles::routes::configure),
     )
     .await;
     let org = seed_org(&pool).await;
@@ -2537,10 +2539,10 @@ async fn the_has_recipe_filter_needs_recipes_read(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
-            .configure(crate::costing::routes::configure),
+            .configure(madar_rust::costing::routes::configure),
     )
     .await;
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org_id = seed_org(&pool).await;
