@@ -168,8 +168,12 @@ pub async fn create_linked_copy(
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
+        // Same as the duplicate path: the linked copy is born with a `one_size`
+        // row, so a simple source's size writes that label again.
         "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active) \
-         SELECT $1, label, $2, sort, is_active FROM menu_item_sizes WHERE menu_item_id = $3",
+         SELECT $1, label, $2, sort, is_active FROM menu_item_sizes WHERE menu_item_id = $3 \
+         ON CONFLICT (menu_item_id, label) DO UPDATE \
+             SET price = EXCLUDED.price, sort = EXCLUDED.sort, is_active = EXCLUDED.is_active",
     )
     .bind(new_item)
     .bind(b.price)

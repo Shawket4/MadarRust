@@ -168,10 +168,13 @@ async fn seed_item(pool: &PgPool, org_id: Uuid, cat: Uuid, name: &str, price: i6
     .execute(pool)
     .await
     .unwrap();
-    // Unified catalog SKU row (the ledger's catalog side).
+    // Unified catalog SKU row (the ledger's catalog side). The item is born
+    // with this row already — price lives in sizes — so this only asserts its
+    // price rather than creating it.
     sqlx::query(
         "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active) \
-         VALUES ($1, 'one_size', $2, 0, true)",
+         VALUES ($1, 'one_size', $2, 0, true) \
+         ON CONFLICT (menu_item_id, label) DO UPDATE SET price = EXCLUDED.price",
     )
     .bind(id)
     .bind(price)

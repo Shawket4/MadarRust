@@ -153,20 +153,7 @@ async fn seed_ingredient(
 }
 
 async fn seed_size(pool: &PgPool, item: Uuid, label: &str, price: i32, sort: i32) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort, is_active) \
-         VALUES ($1, $2, $3, $4, $5, true)",
-    )
-    .bind(id)
-    .bind(item)
-    .bind(label)
-    .bind(price)
-    .bind(sort)
-    .execute(pool)
-    .await
-    .unwrap();
-    id
+    crate::test_support::seed_real_size(pool, item, label, price, sort).await
 }
 
 async fn seed_recipe_line(

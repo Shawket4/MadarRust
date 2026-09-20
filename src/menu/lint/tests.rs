@@ -40,15 +40,7 @@ async fn item(pool: &PgPool, org: Uuid, name: &str) -> Uuid {
 }
 
 async fn size(pool: &PgPool, item: Uuid, label: &str, sort: i32) -> Uuid {
-    sqlx::query_scalar(
-        "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, $2, 100, $3) RETURNING id",
-    )
-    .bind(item)
-    .bind(label)
-    .bind(sort)
-    .fetch_one(pool)
-    .await
-    .unwrap()
+    crate::test_support::seed_real_size(pool, item, label, 100, sort).await
 }
 
 async fn ingredient(pool: &PgPool, org: Uuid, name: &str, unit: &str, slug: &str) -> Uuid {

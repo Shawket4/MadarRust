@@ -1452,22 +1452,36 @@ pub(crate) async fn resolve_order_line(
 }
 
 /// The catalogue unit price of a menu-item line at a branch (item name,
-/// translations, price in piastres, branch-disabled flag). Shared by order
-/// creation and the dry-run preview (`POST /menu-items/{id}/preview`).
+/// translations, price in piastres, branch-disabled flag).
+///
+/// **The one resolver.** An item has no price of its own: price lives in
+/// `menu_item_sizes`, and every live item always has at least one size row
+/// (enforced in the schema — see `20260922020000_price_lives_in_sizes.sql`).
+///
+/// - with a size label → that size's price;
+/// - without one → the LOWEST active size price (the "from" price a
+///   multi-size item shows; for a single-size item it is simply its price).
+///
+/// `menu_items.base_price` is never read here. It survives only as a
+/// trigger-maintained mirror of that same lowest price, so clients at or below
+/// v0.7.11 — which read an item price from the API — still charge the right
+/// thing. Branch and branch-size overrides layer on top exactly as before.
 pub(crate) async fn catalog_unit_price(
     pool: &PgPool,
     m_item_id: Uuid,
     size_label: Option<&str>,
     branch_id: Uuid,
 ) -> Result<(String, serde_json::Value, i32, bool), AppError> {
-    let (item_name, name_translations, base_price, branch_price_override, branch_disabled): (
+    let (item_name, name_translations, lowest_size_price, branch_price_override, branch_disabled): (
         String,
         serde_json::Value,
-        i32,
+        Option<i32>,
         Option<i32>,
         bool,
     ) = sqlx::query_as(
-        "SELECT mi.name, mi.name_translations, mi.base_price,
+        "SELECT mi.name, mi.name_translations,
+                (SELECT min(z.price) FROM menu_item_sizes z
+                  WHERE z.menu_item_id = mi.id AND z.is_active),
                 bmo.price_override,
                 COALESCE(bmo.is_available, true) = false AS branch_disabled
          FROM menu_items mi
@@ -1481,14 +1495,20 @@ pub(crate) async fn catalog_unit_price(
     .await?
     .ok_or_else(|| AppError::NotFound(format!("Menu item {} not found", m_item_id)))?;
 
-    // Branch-effective base: the override price replaces the catalog base_price.
-    let base_price = branch_price_override.unwrap_or(base_price);
+    // A live item without a single size row is impossible after the schema
+    // change; treat it as a catalog fault rather than silently charging zero.
+    let lowest_size_price = lowest_size_price.ok_or_else(|| {
+        AppError::BadRequest(format!("Menu item {} has no priced size", m_item_id))
+    })?;
+
+    // Branch-effective fallback: a branch override replaces the item's "from" price.
+    let fallback = branch_price_override.unwrap_or(lowest_size_price);
 
     let unit_price: i32 = match size_label {
         Some(size) => {
             // A per-(branch, item, size) override wins for that size; otherwise the
-            // catalog size price; otherwise the branch-effective base. (A branch base
-            // override never silently changes an explicitly-priced size.)
+            // catalog size price; otherwise the branch-effective fallback. (A branch
+            // base override never silently changes an explicitly-priced size.)
             let branch_size: Option<i32> = sqlx::query_scalar(
                 "SELECT price_override FROM branch_menu_size_overrides \
                  WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3",
@@ -1503,19 +1523,18 @@ pub(crate) async fn catalog_unit_price(
                 Some(bs) => bs,
                 None => {
                     let p: Option<i32> = sqlx::query_scalar(
-                        "SELECT price_override FROM item_sizes \
+                        "SELECT price FROM menu_item_sizes \
                          WHERE menu_item_id = $1 AND label = $2 AND is_active = true",
                     )
                     .bind(m_item_id)
                     .bind(size)
                     .fetch_optional(pool)
-                    .await?
-                    .flatten();
-                    p.unwrap_or(base_price)
+                    .await?;
+                    p.unwrap_or(fallback)
                 }
             }
         }
-        None => base_price,
+        None => fallback,
     };
     Ok((item_name, name_translations, unit_price, branch_disabled))
 }

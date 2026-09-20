@@ -253,7 +253,15 @@ pub struct AddonItemIngredient {
 pub struct MenuItemFull {
     #[serde(flatten)]
     pub item: MenuItem,
+    /// LEGACY SHAPE — unchanged for clients at or below v0.7.11: the synthetic
+    /// `one_size` row that now carries a single-price item's price is hidden
+    /// here, so an old till still sees a size-less item exactly as it did.
     pub sizes: Vec<ItemSize>,
+    /// Every size row, INCLUDING the synthetic `one_size` one. Additive: this is
+    /// where price actually lives, and it is what the dashboard's size editor
+    /// and new POS builds read. An item always has at least one entry.
+    #[serde(default)]
+    pub all_sizes: Vec<ItemSize>,
     pub addon_slots: Vec<AddonSlot>,
     pub optional_fields: Vec<OptionalField>,
     pub recipes: Vec<MenuItemRecipe>,
@@ -915,10 +923,13 @@ pub async fn list_menu_items(
         attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
         for item in items {
             let mut sizes = fetch_sizes(pool.get_ref(), item.id).await?;
+            let mut all_sizes = fetch_all_sizes(pool.get_ref(), item.id).await?;
             // Branch menu (branch_id set): overlay this branch's per-size price overrides
             // so the POS sees branch-effective size prices, not just the catalog ones.
             if let Some(branch_id) = query.branch_id {
                 apply_branch_size_overrides(pool.get_ref(), branch_id, item.id, &mut sizes).await?;
+                apply_branch_size_overrides(pool.get_ref(), branch_id, item.id, &mut all_sizes)
+                    .await?;
             }
             let addon_slots = fetch_addon_slots(pool.get_ref(), item.id).await?;
             let optional_fields = fetch_optional_fields(pool.get_ref(), item.id).await?;
@@ -928,6 +939,7 @@ pub async fn list_menu_items(
             result.push(MenuItemFull {
                 item,
                 sizes,
+                all_sizes,
                 addon_slots,
                 optional_fields,
                 recipes,
@@ -1119,6 +1131,7 @@ pub async fn get_menu_item(
     attach_item_refs(pool.get_ref(), item.org_id, std::slice::from_mut(&mut item)).await?;
 
     let sizes = fetch_sizes(pool.get_ref(), *id).await?;
+    let all_sizes = fetch_all_sizes(pool.get_ref(), *id).await?;
     let addon_slots = fetch_addon_slots(pool.get_ref(), *id).await?;
     let optional_fields = fetch_optional_fields(pool.get_ref(), *id).await?;
     let recipes = fetch_item_recipes(pool.get_ref(), *id).await?;
@@ -1128,6 +1141,7 @@ pub async fn get_menu_item(
     Ok(HttpResponse::Ok().json(MenuItemFull {
         item,
         sizes,
+        all_sizes,
         addon_slots,
         optional_fields,
         recipes,
@@ -1223,9 +1237,14 @@ pub async fn create_menu_item(
 
     let mut item = item;
     attach_item_refs(pool.get_ref(), item.org_id, std::slice::from_mut(&mut item)).await?;
+    // The item was born with a `one_size` row carrying the price it was created
+    // with (schema trigger), so it is never price-less. `sizes` stays empty —
+    // the synthetic row is hidden from the legacy projection on purpose.
+    let all_sizes = fetch_all_sizes(pool.get_ref(), item.id).await?;
     Ok(HttpResponse::Created().json(MenuItemFull {
         item,
         sizes: vec![],
+        all_sizes,
         addon_slots: vec![],
         optional_fields: vec![],
         recipes: vec![],
@@ -1327,6 +1346,25 @@ pub async fn update_menu_item(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Menu item not found".into()))?;
+
+    // `base_price` is a mirror, not truth. A caller that still sends one — a
+    // legacy client, a CSV import — is expressing "this item costs X", which is
+    // only meaningful for a single-size item; push it into that one size row so
+    // the charged price actually moves. A multi-size item ignores it: its price
+    // lives in its sizes and its displayed number is the lowest of them.
+    // (The schema trigger then re-mirrors base_price from the sizes.)
+    if let Some(new_price) = mut_body.base_price {
+        sqlx::query(
+            "UPDATE menu_item_sizes z SET price = $2
+              WHERE z.menu_item_id = $1 AND z.is_active
+                AND (SELECT count(*) FROM menu_item_sizes s
+                      WHERE s.menu_item_id = $1 AND s.is_active) = 1",
+        )
+        .bind(*id)
+        .bind(new_price)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // Maintain price epoch whenever base_price actually changed.
     if let Some(new_price) = mut_body.base_price
@@ -1439,30 +1477,47 @@ pub async fn upsert_size(
 
     // Capture old price (if exists) before the upsert.
     let old_price: Option<i32> = sqlx::query_scalar(
-        "SELECT price_override FROM item_sizes \
+        "SELECT price FROM menu_item_sizes \
          WHERE menu_item_id = $1 AND label = $2",
     )
     .bind(*id)
     .bind(&body.label)
     .fetch_optional(pool.get_ref())
-    .await?
-    .flatten();
+    .await?;
 
     let mut tx = pool.get_ref().begin().await?;
 
     let row = sqlx::query_as::<_, ItemSize>(
-        "INSERT INTO item_sizes (menu_item_id, label, price_override)
+        "INSERT INTO menu_item_sizes (menu_item_id, label, price)
          VALUES ($1, $2, $3)
          ON CONFLICT (menu_item_id, label) DO UPDATE SET
-             price_override = EXCLUDED.price_override,
-             is_active      = TRUE
-         RETURNING id, menu_item_id, label::text, price_override, is_active",
+             price     = EXCLUDED.price,
+             is_active = TRUE
+         RETURNING id, menu_item_id, label::text, price AS price_override, is_active",
     )
     .bind(*id)
     .bind(&body.label)
     .bind(body.price_override)
     .fetch_one(&mut *tx)
     .await?;
+
+    // Giving a simple item its first REAL size retires the `one_size` row it
+    // was born with — the sentinel is not a size anyone picks, and leaving it
+    // would show the item as multi-size with a phantom cheapest size. Only the
+    // synthetic row, and only while nothing has been authored against it.
+    if body.label != "one_size" {
+        sqlx::query(
+            "DELETE FROM menu_item_sizes z
+              WHERE z.menu_item_id = $1
+                AND z.label = 'one_size'
+                AND z.id = (md5(z.menu_item_id::text || ':one_size'))::uuid
+                AND NOT EXISTS (SELECT 1 FROM recipe_lines rl
+                                 WHERE rl.owner_type = 'item_size' AND rl.owner_id = z.id)",
+        )
+        .bind(*id)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // Write price epoch if this is new or the price changed.
     // Write price epoch if this is new or the price changed.
@@ -1524,7 +1579,7 @@ pub async fn delete_size(
 
     // Capture the label before we delete the row so we can close the epoch.
     let label: Option<String> = sqlx::query_scalar(
-        "SELECT label::text FROM item_sizes WHERE id = $1 AND menu_item_id = $2",
+        "SELECT label::text FROM menu_item_sizes WHERE id = $1 AND menu_item_id = $2",
     )
     .bind(sid)
     .bind(item_id)
@@ -1543,7 +1598,7 @@ pub async fn delete_size(
         .await?;
     }
 
-    sqlx::query("DELETE FROM item_sizes WHERE id = $1 AND menu_item_id = $2")
+    sqlx::query("DELETE FROM menu_item_sizes WHERE id = $1 AND menu_item_id = $2")
         .bind(sid)
         .bind(item_id)
         .execute(&mut *tx)
@@ -2904,7 +2959,7 @@ pub async fn upsert_branch_menu_override(
             }
         }
         let valid: Vec<String> = sqlx::query_scalar(
-            "SELECT label::text FROM item_sizes WHERE menu_item_id = $1 AND is_active = true",
+            "SELECT label::text FROM menu_item_sizes WHERE menu_item_id = $1 AND is_active = true",
         )
         .bind(body.menu_item_id)
         .fetch_all(pool.get_ref())
@@ -3178,6 +3233,21 @@ async fn fetch_addon_item(pool: &PgPool, id: Uuid) -> Result<AddonItem, AppError
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Addon item not found".into()))
+}
+
+/// Every size row of an item, including the synthetic `one_size` row — i.e.
+/// `menu_item_sizes` itself rather than the old-client `item_sizes` view.
+/// This is the priced truth; `fetch_sizes` is the legacy projection.
+async fn fetch_all_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, AppError> {
+    Ok(sqlx::query_as::<_, ItemSize>(
+        "SELECT id, menu_item_id, label::text, price AS price_override, is_active
+         FROM menu_item_sizes
+         WHERE menu_item_id = $1
+         ORDER BY sort ASC, label ASC",
+    )
+    .bind(item_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 async fn fetch_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, AppError> {
