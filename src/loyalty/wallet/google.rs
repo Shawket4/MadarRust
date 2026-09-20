@@ -119,7 +119,7 @@ pub async fn check(org_id: Option<uuid::Uuid>) -> Result<String, String> {
         );
     };
     let id = class_id(&issuer, org_id);
-    let resp = reqwest::Client::new()
+    let resp = http()
         .get(format!("{WALLET_API}/loyaltyClass/{id}"))
         .bearer_auth(&token)
         .send()
@@ -745,6 +745,74 @@ pub async fn save_url_recorded(
 /// touched again would keep a shop's first logo and colours forever, and there
 /// is no other moment that would notice the branding had changed.
 #[allow(clippy::too_many_arguments)]
+/// What we have already pushed to Google, and what it looked like.
+///
+/// `ensure_class` and `ensure_object` ran on EVERY card view, and each is a
+/// POST that 409s followed by a PATCH — three to four round-trips to Google on
+/// the customer's critical path. Measured against production, that was ~2.7 s
+/// of the card endpoint's ~3 s.
+///
+/// The reason they ran every time is sound and worth keeping: a save link
+/// points at something Google holds, and that thing is only as current as the
+/// last write, so a class pushed once and never again freezes a shop's colours
+/// and branch list for ever. What was wrong was the assumption underneath —
+/// the comment called this "a page a customer opens rarely", and it is in fact
+/// the page a customer opens to look at their stamps.
+///
+/// So: push when the CONTENT has changed, not when a page was viewed. The key
+/// is the id being written; the value is a hash of the exact body last sent. A
+/// branding edit, a renamed programme, a new branch — all change the body, so
+/// all still push immediately. An identical body within the hour does not.
+///
+/// The hour is a backstop for the case this cannot see: someone editing the
+/// class in Google's own console, or Google losing it. It is also why this is a
+/// cache rather than a column — being wrong here costs one redundant push, and
+/// an empty cache after a deploy is simply the old behaviour for one view.
+static PUSHED: std::sync::LazyLock<moka::future::Cache<String, u64>> =
+    std::sync::LazyLock::new(|| {
+        moka::future::Cache::builder()
+            // One class per shop and one object per member who has opened their
+            // card this hour.
+            .max_capacity(10_000)
+            .time_to_live(std::time::Duration::from_secs(3600))
+            .build()
+    });
+
+fn body_hash(body: &serde_json::Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // `to_string` on a serde_json::Value orders object keys deterministically
+    // (serde_json preserves insertion order, and these bodies are built by the
+    // same code path every time), so the same inputs hash the same.
+    body.to_string().hash(&mut h);
+    h.finish()
+}
+
+/// Has this exact body already been pushed under this id, recently?
+async fn already_pushed(id: &str, body: &serde_json::Value) -> bool {
+    PUSHED.get(id).await == Some(body_hash(body))
+}
+
+async fn record_pushed(id: &str, body: &serde_json::Value) {
+    PUSHED.insert(id.to_string(), body_hash(body)).await;
+}
+
+/// One HTTP client, not one per request.
+///
+/// `reqwest::Client::new()` was called at each of these call sites. A `Client`
+/// OWNS the connection pool, so a fresh one per call means a fresh TCP and TLS
+/// handshake to Google every time and nothing reused between the class write
+/// and the object write that follows it. It is designed to be shared.
+fn http() -> &'static reqwest::Client {
+    static HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+        reqwest::Client::builder()
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_default()
+    });
+    &HTTP
+}
+
 async fn ensure_class(
     token: &str,
     issuer: &str,
@@ -756,7 +824,7 @@ async fn ensure_class(
 ) -> Result<(), AppError> {
     let body = loyalty_class(issuer, org_id, brand, settings, locations);
     let id = class_id(issuer, org_id);
-    let http = reqwest::Client::new();
+    let http = http();
     // `UNDER_REVIEW` is what a class written through the API must carry, on the
     // update as well as the insert — and it is not optional, which cost this
     // feature a fortnight to learn.
@@ -778,6 +846,11 @@ async fn ensure_class(
     // moved on without it.
     let mut sent = body.clone();
     sent["reviewStatus"] = json!("UNDER_REVIEW");
+    // Google already holds exactly this. Nothing to say.
+    if already_pushed(&id, &sent).await {
+        steps.push(WalletStep::new("class already current", 0, String::new()));
+        return Ok(());
+    }
     let insert = sent.clone();
     let resp = http
         .post(format!("{WALLET_API}/loyaltyClass"))
@@ -796,6 +869,7 @@ async fn ensure_class(
             created.as_u16(),
             resp.text().await.unwrap_or_default(),
         ));
+        record_pushed(&id, &sent).await;
         return Ok(());
     }
     if created != reqwest::StatusCode::CONFLICT {
@@ -881,7 +955,12 @@ async fn ensure_class(
             "loyalty: Google would not update the card class; \
              customers keep the one it already has"
         );
+        // NOT recorded. A refused update means Google is still holding
+        // something other than `sent`, so the next view should try again rather
+        // than believe this one succeeded.
+        return Ok(());
     }
+    record_pushed(&id, &sent).await;
     Ok(())
 }
 
@@ -899,12 +978,17 @@ async fn ensure_object(
     steps: &mut Vec<WalletStep>,
 ) -> Result<String, AppError> {
     let id = object_id(issuer, member);
-    let resp = reqwest::Client::new()
+    let body = loyalty_object(issuer, member, settings, locations, copy, headline);
+    // Google already holds this exact card, and `decorate` has already run for
+    // it. Nothing to write, and nothing to wait for.
+    if already_pushed(&id, &body).await {
+        steps.push(WalletStep::new("object already current", 0, String::new()));
+        return Ok(id);
+    }
+    let resp = http()
         .post(format!("{WALLET_API}/loyaltyObject"))
         .bearer_auth(token)
-        .json(&loyalty_object(
-            issuer, member, settings, locations, copy, headline,
-        ))
+        .json(&body)
         .send()
         .await
         .map_err(|e| {
@@ -919,6 +1003,7 @@ async fn ensure_object(
             resp.text().await.unwrap_or_default(),
         ));
         decorate(token, &id, member.org_id, brand, steps).await;
+        record_pushed(&id, &body).await;
         return Ok(id);
     }
     if created != reqwest::StatusCode::CONFLICT {
@@ -950,12 +1035,10 @@ async fn ensure_object(
     // that field from an int to a string therefore left BOTH set on any object
     // saved before the change, which Google rejects. A put replaces the
     // resource with the body, and the body below is the whole card.
-    let resp = reqwest::Client::new()
+    let resp = http()
         .put(format!("{WALLET_API}/loyaltyObject/{id}"))
         .bearer_auth(token)
-        .json(&loyalty_object(
-            issuer, member, settings, locations, copy, headline,
-        ))
+        .json(&body)
         .send()
         .await;
     // And, as with the class: this is a refresh of something that already
@@ -965,15 +1048,21 @@ async fn ensure_object(
     match resp {
         Ok(r) => {
             let status = r.status();
-            let body = r.text().await.unwrap_or_default();
+            // `answer`, not `body`: `body` is the card we SENT, and the record
+            // below must hash that rather than Google's reply.
+            let answer = r.text().await.unwrap_or_default();
             steps.push(WalletStep::new(
                 "update the object",
                 status.as_u16(),
-                body.clone(),
+                answer.clone(),
             ));
-            if !status.is_success() {
+            if status.is_success() {
+                // Only on success: a refused update means Google still holds
+                // the older card, so the next view should try again.
+                record_pushed(&id, &body).await;
+            } else {
                 tracing::warn!(
-                    status = %status, detail = %first_reason(&body), object = %id,
+                    status = %status, detail = %first_reason(&answer), object = %id,
                     "loyalty: Google would not update this card; the customer keeps the older one"
                 );
             }
@@ -1007,7 +1096,7 @@ async fn decorate(
         ));
         return;
     };
-    let resp = reqwest::Client::new()
+    let resp = http()
         .patch(format!("{WALLET_API}/loyaltyObject/{id}"))
         .bearer_auth(token)
         .json(&json!({ "heroImage": hero }))
@@ -1094,7 +1183,7 @@ pub async fn read_object(member: &MemberRow) -> Result<serde_json::Value, String
         .clone()
         .unwrap_or_else(|| object_id(&issuer, member));
     let token = access_token().await.map_err(|e| e.to_string())?;
-    let resp = reqwest::Client::new()
+    let resp = http()
         .get(format!("{WALLET_API}/loyaltyObject/{id}"))
         .bearer_auth(token)
         .send()
@@ -1129,7 +1218,7 @@ pub async fn add_message(member: &MemberRow, body: &str) -> Result<(), AppError>
         .clone()
         .unwrap_or_else(|| object_id(&issuer, member));
     let token = access_token().await?;
-    let resp = reqwest::Client::new()
+    let resp = http()
         .post(format!("{WALLET_API}/loyaltyObject/{id}/addMessage"))
         .bearer_auth(token)
         .json(&json!({
@@ -1174,7 +1263,7 @@ pub async fn expire_object(member: &MemberRow) -> Result<(), AppError> {
         return Ok(());
     }
     let token = access_token().await?;
-    let resp = reqwest::Client::new()
+    let resp = http()
         .patch(format!("{WALLET_API}/loyaltyObject/{object_id}"))
         .bearer_auth(token)
         .json(&json!({ "state": "EXPIRED" }))
@@ -1224,7 +1313,7 @@ pub async fn read_class(org_id: uuid::Uuid) -> Result<serde_json::Value, String>
         return Err("LOYALTY_GOOGLE_ISSUER_ID is not set".into());
     };
     let token = access_token().await.map_err(|e| e.to_string())?;
-    let resp = reqwest::Client::new()
+    let resp = http()
         .get(format!(
             "{WALLET_API}/loyaltyClass/{}",
             class_id(&issuer, org_id)
@@ -1303,7 +1392,7 @@ async fn mint_access_token() -> Result<String, AppError> {
     // needs percent-encoding, so the body is exact.
     let body =
         format!("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={assertion}");
-    let resp = reqwest::Client::new()
+    let resp = http()
         .post("https://oauth2.googleapis.com/token")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
@@ -1372,7 +1461,7 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     // writer and one shape: a card that changed on a sale and a card that
     // changed on a save cannot end up different objects.
     let body = loyalty_object(&issuer, member, &settings, &locations, &copy, &headline);
-    let http = reqwest::Client::new();
+    let http = http();
     let resp = http
         .put(format!("{WALLET_API}/loyaltyObject/{object_id}"))
         .bearer_auth(&token)

@@ -51,7 +51,12 @@ fn u(s: &str) -> Uuid {
 }
 
 macro_rules! app {
-    ($pool:expr) => {
+    ($pool:expr) => {{
+        // These tests drive the identity endpoints more than five times from
+        // one address; the per-IP limiter is not what they are about. Read once,
+        // when the routes are configured. (nextest: one process per test.)
+        // SAFETY: set before any other thread of this test exists to read it.
+        unsafe { std::env::set_var("MADAR_DISABLE_RATE_LIMIT", "1") };
         test::init_service(
             App::new()
                 .app_data(web::Data::new($pool.clone()))
@@ -67,7 +72,7 @@ macro_rules! app {
                 .configure(madar_rust::orders::routes::configure),
         )
         .await
-    };
+    }};
 }
 
 async fn send<S>(app: &S, req: test::TestRequest) -> (StatusCode, Value)
