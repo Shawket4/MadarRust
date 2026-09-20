@@ -6,15 +6,15 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn token(user: Uuid, org: Uuid, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&secret(), user, Some(org), role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&secret(), user, Some(org), role, None, 24).unwrap()
 }
 
 async fn org(pool: &PgPool) -> Uuid {
@@ -74,15 +74,15 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
-                .configure(crate::authz::api::configure)
-                .configure(crate::auth::routes::configure),
+                .configure(madar_rust::authz::api::configure)
+                .configure(madar_rust::auth::routes::configure),
         )
         .await
     };
 }
 
 async fn seed(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
 }
@@ -498,7 +498,7 @@ async fn owners_are_protected_and_assign_owners_only_themselves(pool: PgPool) {
         &app,
         test::TestRequest::post()
             .uri("/auth/login")
-            .insert_header((crate::tickets::DEVICE_ID_HEADER, "tablet-08"))
+            .insert_header((madar_rust::tickets::DEVICE_ID_HEADER, "tablet-08"))
             .set_json(json!({"name": "Owner", "pin": "1111", "branch_id": b}))
             .to_request(),
     )
@@ -803,7 +803,7 @@ async fn a_permissions_editor_cannot_escalate(pool: PgPool) {
 // elsewhere, decided by the same shared helper. Without one, nothing changes.
 
 fn branch_token(user: Uuid, org: Uuid, role: UserRole, branch: Uuid) -> String {
-    crate::auth::jwt::create_token(&secret(), user, Some(org), role, Some(branch), 24).unwrap()
+    madar_rust::auth::jwt::create_token(&secret(), user, Some(org), role, Some(branch), 24).unwrap()
 }
 
 fn approval(cap: &str, approver: Uuid) -> Value {

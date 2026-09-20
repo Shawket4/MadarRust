@@ -12,9 +12,9 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::integrations::routes;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::integrations::routes;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -31,7 +31,7 @@ fn super_admin_token(user_id: Uuid, org_id: Uuid) -> String {
 }
 
 fn token_for(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn basic(username: &str, secret: &str) -> String {
@@ -370,7 +370,7 @@ async fn excludes_voided_and_refunded_and_reports_order_money_only(pool: PgPool)
         300,
     )
     .await;
-    // Still open on the KDS — counts as a sale (crate::orders::SOLD).
+    // Still open on the KDS — counts as a sale (madar_rust::orders::SOLD).
     seed_order(
         &pool,
         &s,
@@ -915,7 +915,7 @@ async fn cannot_issue_a_credential_for_another_orgs_branch(pool: PgPool) {
 #[sqlx::test]
 async fn non_admins_cannot_touch_the_credential_surface(pool: PgPool) {
     let s = seed(&pool, "role", Some("Africa/Cairo")).await;
-    let token = crate::auth::jwt::create_token(
+    let token = madar_rust::auth::jwt::create_token(
         &get_secret(),
         s.teller,
         Some(s.org),

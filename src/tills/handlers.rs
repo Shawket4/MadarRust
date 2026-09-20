@@ -578,7 +578,7 @@ async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
 /// voided) + movements − cash refunds issued from this till.
-pub(crate) async fn compute_system_cash<'e, E>(
+pub async fn compute_system_cash<'e, E>(
     executor: E,
     till_id: Uuid,
 ) -> Result<i64, sqlx::Error>

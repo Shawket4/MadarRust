@@ -13,16 +13,16 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::insights::routes;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::insights::routes;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),

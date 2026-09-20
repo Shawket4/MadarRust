@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{ALL_TYPES, PullRequest, checksum::checksum_of, pull_core};
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::sync::pull::{ALL_TYPES, PullRequest, checksum::checksum_of, pull_core};
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 struct Shop {
     org: Uuid,
@@ -94,7 +94,7 @@ async fn pull_full_snapshot_includes_all_types_and_next(pool: PgPool) {
         resp.asset_bundle.is_some(),
         "full carries asset_bundle (null when none built)"
     );
-    for ty in super::LEDGER_TYPES {
+    for ty in madar_rust::sync::pull::LEDGER_TYPES {
         assert!(
             !resp.checksums.contains_key(*ty),
             "ledger types are not checksummed"
@@ -238,7 +238,7 @@ async fn pull_types_subset_requires_no_since(pool: PgPool) {
     let err = pull_core(&pool, s.org, &r, Some(0)).await.unwrap_err();
     assert!(matches!(
         err,
-        crate::errors::AppError::Coded {
+        madar_rust::errors::AppError::Coded {
             code: "TYPES_REQUIRE_FULL",
             ..
         }
@@ -250,7 +250,7 @@ async fn pull_types_subset_requires_no_since(pool: PgPool) {
     let err = pull_core(&pool, s.org, &r, None).await.unwrap_err();
     assert!(matches!(
         err,
-        crate::errors::AppError::Coded {
+        madar_rust::errors::AppError::Coded {
             code: "UNKNOWN_SYNC_TYPE",
             ..
         }
@@ -265,7 +265,7 @@ async fn pull_checksums_match_reference_formula(pool: PgPool) {
     }
     let resp = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     for (ty, rows) in &resp.data {
-        if super::is_ledger(ty) {
+        if madar_rust::sync::pull::is_ledger(ty) {
             continue;
         }
         let pairs: Vec<(String, i64)> = rows
@@ -338,7 +338,7 @@ async fn pull_gzip_negotiated(pool: PgPool) {
             .wrap(Compress::default())
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(JwtSecret("test_secret".into())))
-            .configure(crate::sync::routes::configure),
+            .configure(madar_rust::sync::routes::configure),
     )
     .await;
     let token = create_token(
@@ -375,7 +375,7 @@ async fn legacy_catalog_sync_unchanged(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(JwtSecret("test_secret".into())))
-            .configure(crate::menu::routes::configure),
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
     let token = create_token(
@@ -387,7 +387,7 @@ async fn legacy_catalog_sync_unchanged(pool: PgPool) {
         24,
     )
     .unwrap();
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let resp = test::call_service(
@@ -460,7 +460,7 @@ async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
     .await
     .unwrap();
 
-    let report = super::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
     assert!(report.deletes_emitted >= 1, "{report:?}");
     assert!(report.tombstones_purged >= 1, "{report:?}");
     assert_eq!(op(pool.clone()).await, "delete");
@@ -483,7 +483,7 @@ async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
 
 #[::core::prelude::v1::test]
 fn sync_changed_debounced_per_branch() {
-    use super::listener::{DEBOUNCE, Debouncer};
+    use madar_rust::sync::pull::listener::{DEBOUNCE, Debouncer};
     use std::time::Instant;
     let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
     let t0 = Instant::now();
@@ -506,9 +506,9 @@ fn sync_changed_debounced_per_branch() {
 #[sqlx::test]
 async fn sync_changed_realtime_published_debounced(pool: PgPool) {
     let s = shop(&pool).await;
-    let hub = crate::realtime::hub::BranchEventHub::new();
+    let hub = madar_rust::realtime::hub::BranchEventHub::new();
     let mut rx = hub.subscribe(s.branch);
-    super::listener::spawn(pool.clone(), hub.clone());
+    madar_rust::sync::pull::listener::spawn(pool.clone(), hub.clone());
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     for i in 0..5 {
         category(&pool, s.org, &format!("Burst {i}")).await;
@@ -642,7 +642,7 @@ END $$;
 /// A device's local store: type → id → seq, exactly what the POS core keeps.
 type Store = std::collections::BTreeMap<String, std::collections::BTreeMap<String, i64>>;
 
-fn store_from_full(resp: &super::PullResponse) -> Store {
+fn store_from_full(resp: &madar_rust::sync::pull::PullResponse) -> Store {
     let mut store = Store::new();
     for ty in ALL_TYPES {
         let rows = store.entry(ty.to_string()).or_default();
@@ -656,7 +656,7 @@ fn store_from_full(resp: &super::PullResponse) -> Store {
     store
 }
 
-fn apply_changes(store: &mut Store, resp: &super::PullResponse) {
+fn apply_changes(store: &mut Store, resp: &madar_rust::sync::pull::PullResponse) {
     for c in &resp.changes {
         let rows = store.entry(c.ty.clone()).or_default();
         if c.op == "upsert" {
@@ -669,10 +669,10 @@ fn apply_changes(store: &mut Store, resp: &super::PullResponse) {
 
 /// Every type the response checksums must match the store; ledger types carry
 /// none. Returns the mismatching types (empty = the POS would not self-heal).
-fn mismatches(store: &Store, resp: &super::PullResponse) -> Vec<String> {
+fn mismatches(store: &Store, resp: &madar_rust::sync::pull::PullResponse) -> Vec<String> {
     let mut bad = Vec::new();
     for ty in ALL_TYPES {
-        if super::is_ledger(ty) {
+        if madar_rust::sync::pull::is_ledger(ty) {
             if resp.checksums.contains_key(*ty) {
                 bad.push(format!("{ty}: ledger type checksummed"));
             }
@@ -853,7 +853,7 @@ async fn a_branch_created_after_the_orgs_data_still_gets_all_of_it(pool: PgPool)
     .unwrap();
 
     // A brand-new device there takes its first snapshot.
-    let resp = super::pull_core(&pool, s.org, &req(later), None)
+    let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(later), None)
         .await
         .unwrap();
     let methods = resp.data.get("payment_method").cloned().unwrap_or_default();
@@ -876,7 +876,7 @@ async fn a_branch_created_after_the_orgs_data_still_gets_all_of_it(pool: PgPool)
     );
 
     // The older branch is untouched and still complete.
-    let first = super::pull_core(&pool, s.org, &req(s.branch), None)
+    let first = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
         .unwrap();
     assert!(
@@ -945,7 +945,7 @@ async fn the_sweep_re_emits_live_rows_the_feed_never_heard_of(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let before = super::pull_core(&pool, s.org, &req(s.branch), None)
+    let before = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
         .unwrap();
     assert!(
@@ -957,13 +957,13 @@ async fn the_sweep_re_emits_live_rows_the_feed_never_heard_of(pool: PgPool) {
         "the hole is real: the snapshot shows no methods"
     );
 
-    let report = super::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
     assert!(
         report.upserts_emitted >= 1,
         "the sweep noticed the missing row: {report:?}"
     );
 
-    let after = super::pull_core(&pool, s.org, &req(s.branch), None)
+    let after = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
         .unwrap();
     assert!(
@@ -999,7 +999,7 @@ async fn a_device_that_already_synced_the_empty_snapshot_heals_on_its_next_pull(
         .unwrap();
 
     // The device bootstraps and gets nothing, then parks on its cursor.
-    let first = super::pull_core(&pool, s.org, &req(s.branch), None)
+    let first = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
         .unwrap();
     assert!(
@@ -1021,7 +1021,7 @@ async fn a_device_that_already_synced_the_empty_snapshot_heals_on_its_next_pull(
     assert!(healed >= 1, "the backfill emitted the missing rows");
 
     // The device does nothing special — its ordinary incremental pull.
-    let next = super::pull_core(&pool, s.org, &req(s.branch), Some(cursor))
+    let next = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), Some(cursor))
         .await
         .unwrap();
     assert!(
@@ -1054,7 +1054,7 @@ async fn a_late_branch_has_its_staff_and_addons_too(pool: PgPool) {
     .await
     .unwrap();
 
-    let resp = super::pull_core(&pool, s.org, &req(later), None)
+    let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(later), None)
         .await
         .unwrap();
     for ty in [
@@ -1120,9 +1120,9 @@ async fn a_restored_branch_is_short_until_the_sweep_catches_it(pool: PgPool) {
     assert!(short >= 1, "the restored branch really is short");
 
     // The sweep closes it, with nobody touching the device.
-    let report = super::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
     assert!(report.upserts_emitted >= short, "{report:?}");
-    let resp = super::pull_core(&pool, s.org, &req(s.branch), None)
+    let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
         .unwrap();
     assert!(

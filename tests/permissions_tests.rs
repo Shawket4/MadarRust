@@ -2,20 +2,20 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::permissions::handlers::{
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::permissions::handlers::{
     Permission, PermissionMatrix, RolePermission, UpsertPermissionRequest,
     UpsertRolePermissionRequest,
 };
-use crate::permissions::routes;
+use madar_rust::permissions::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 async fn seed_org(pool: &PgPool) -> Uuid {
@@ -80,7 +80,7 @@ async fn test_get_role_permissions_success(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -122,7 +122,7 @@ async fn test_get_role_permissions_forbidden(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn test_get_permission_matrix_success(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -297,7 +297,7 @@ async fn test_get_permission_matrix_different_org(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -327,7 +327,7 @@ async fn test_get_permission_matrix_user_not_found(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -355,7 +355,7 @@ async fn test_get_user_permissions_success(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -413,7 +413,7 @@ async fn test_get_user_permissions_different_org(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -443,7 +443,7 @@ async fn test_upsert_user_permission_success(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -504,7 +504,7 @@ async fn test_upsert_user_permission_different_org(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -539,7 +539,7 @@ async fn test_upsert_user_permission_invalid_enum(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -586,7 +586,7 @@ async fn test_delete_user_permission_success(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -648,7 +648,7 @@ async fn test_delete_user_permission_different_org(pool: PgPool) {
     )
     .await;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
 
@@ -679,7 +679,7 @@ async fn test_disabled_user_token_is_rejected(pool: PgPool) {
             .configure(routes::configure),
     )
     .await;
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org_id = seed_org(&pool).await;
@@ -735,10 +735,10 @@ async fn test_disabled_user_token_is_rejected(pool: PgPool) {
 /// ring a sale, take a payment, or settle/fire a ticket.
 #[sqlx::test]
 async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
-    use crate::auth::jwt::Claims;
-    use crate::permissions::checker::check_permission;
+    use madar_rust::auth::jwt::Claims;
+    use madar_rust::permissions::checker::check_permission;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org_id = seed_org(&pool).await;
@@ -802,8 +802,8 @@ async fn resources_match_the_db_enum(pool: PgPool) {
             .unwrap();
 
     let listed: std::collections::HashSet<&str> =
-        crate::permissions::RESOURCES.iter().copied().collect();
-    let retired: std::collections::HashSet<&str> = crate::permissions::RETIRED_RESOURCES
+        madar_rust::permissions::RESOURCES.iter().copied().collect();
+    let retired: std::collections::HashSet<&str> = madar_rust::permissions::RETIRED_RESOURCES
         .iter()
         .copied()
         .collect();
@@ -838,10 +838,10 @@ async fn resources_match_the_db_enum(pool: PgPool) {
 /// teller cannot open the ticket that makes the table say it is taken.
 #[sqlx::test]
 async fn teller_can_open_a_ticket_on_a_table(pool: PgPool) {
-    use crate::auth::jwt::Claims;
-    use crate::permissions::checker::check_permission;
+    use madar_rust::auth::jwt::Claims;
+    use madar_rust::permissions::checker::check_permission;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org_id = seed_org(&pool).await;
@@ -880,10 +880,10 @@ async fn teller_can_open_a_ticket_on_a_table(pool: PgPool) {
 /// a manager must hold out of the box.
 #[sqlx::test]
 async fn a_branch_manager_holds_the_till_grants(pool: PgPool) {
-    use crate::auth::jwt::Claims;
-    use crate::permissions::checker::check_permission;
+    use madar_rust::auth::jwt::Claims;
+    use madar_rust::permissions::checker::check_permission;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org_id = seed_org(&pool).await;
@@ -933,10 +933,10 @@ async fn a_branch_manager_holds_the_till_grants(pool: PgPool) {
 /// a waiter (no drawer) and a kitchen screen never hold.
 #[sqlx::test]
 async fn voiding_and_refunding_are_separate_from_ringing_up(pool: PgPool) {
-    use crate::auth::jwt::Claims;
-    use crate::permissions::checker::check_permission;
+    use madar_rust::auth::jwt::Claims;
+    use madar_rust::permissions::checker::check_permission;
 
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org_id = seed_org(&pool).await;

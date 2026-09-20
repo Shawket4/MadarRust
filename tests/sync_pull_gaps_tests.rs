@@ -6,7 +6,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{PullRequest, pull_core};
+use madar_rust::sync::pull::{PullRequest, pull_core};
 
 struct Shop {
     org: Uuid,
@@ -64,14 +64,14 @@ fn req(branch: Uuid) -> PullRequest {
     }
 }
 
-fn row<'a>(resp: &'a super::PullResponse, ty: &str, id: Uuid) -> Option<&'a Value> {
+fn row<'a>(resp: &'a madar_rust::sync::pull::PullResponse, ty: &str, id: Uuid) -> Option<&'a Value> {
     resp.data
         .get(ty)?
         .iter()
         .find(|r| r["id"] == id.to_string())
 }
 
-fn change<'a>(resp: &'a super::PullResponse, ty: &str, id: Uuid) -> Option<&'a super::PullChange> {
+fn change<'a>(resp: &'a madar_rust::sync::pull::PullResponse, ty: &str, id: Uuid) -> Option<&'a madar_rust::sync::pull::PullChange> {
     resp.changes.iter().find(|c| c.ty == ty && c.id == id)
 }
 
@@ -171,7 +171,7 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
 #[sqlx::test]
 async fn an_addon_item_rides_the_feed_after_the_contract_shim(pool: PgPool) {
     let s = shop(&pool).await;
-    sqlx::raw_sql(include_str!("../../../deploy/menu_unification_shim.sql"))
+    sqlx::raw_sql(include_str!("../deploy/menu_unification_shim.sql"))
         .execute(&pool)
         .await
         .unwrap();
@@ -325,7 +325,7 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
     .unwrap();
     assert!(!role_granted.is_empty());
     // Plus the reads a teller always holds (core capabilities).
-    let core = crate::authz::core_set(crate::authz::RoleKind::Teller);
+    let core = madar_rust::authz::core_set(madar_rust::authz::RoleKind::Teller);
     let mut expected: Vec<String> = role_granted
         .clone()
         .into_iter()
@@ -730,9 +730,9 @@ async fn a_menu_item_lists_only_the_channel_prices_that_differ(pool: PgPool) {
 
 #[test]
 fn payment_availability_has_its_own_topic() {
-    use crate::realtime::event::Topic;
+    use madar_rust::realtime::event::Topic;
     assert_eq!(
-        crate::payment_methods::availability::AVAILABILITY_TOPIC,
+        madar_rust::payment_methods::availability::AVAILABILITY_TOPIC,
         Topic::PaymentMethods
     );
     assert_eq!(Topic::parse("payment_methods"), Some(Topic::PaymentMethods));
@@ -771,7 +771,7 @@ async fn seed_orders(pool: &PgPool, s: &Shop, till: Uuid, n: usize) -> Vec<Uuid>
     out
 }
 
-fn paged(branch: Uuid, size: i64, cursor: Option<super::SnapshotCursor>) -> PullRequest {
+fn paged(branch: Uuid, size: i64, cursor: Option<madar_rust::sync::pull::SnapshotCursor>) -> PullRequest {
     PullRequest {
         branch_id: branch,
         device_id: None,
@@ -816,7 +816,7 @@ async fn a_paged_snapshot_is_the_unpaged_snapshot(pool: PgPool) {
         "state types on page one"
     );
     assert!(!p1.checksums.is_empty() && p1.asset_bundle.is_some());
-    let ledger_on_p1: usize = super::LEDGER_TYPES
+    let ledger_on_p1: usize = madar_rust::sync::pull::LEDGER_TYPES
         .iter()
         .map(|t| p1.data.get(*t).map(Vec::len).unwrap_or(0))
         .sum();
@@ -871,7 +871,7 @@ async fn a_paged_snapshot_is_the_unpaged_snapshot(pool: PgPool) {
             "page {pages}: first-page extras only once"
         );
         assert!(
-            p.types.iter().all(|t| super::is_ledger(t)),
+            p.types.iter().all(|t| madar_rust::sync::pull::is_ledger(t)),
             "later pages carry ledger types only"
         );
         assert_eq!(
@@ -1004,8 +1004,8 @@ async fn a_role_default_reprojects_only_users_it_can_affect(pool: PgPool) {
     assert!(change(&inc2, "teller", pinned).is_none());
 }
 
-fn test_secret() -> crate::auth::jwt::JwtSecret {
-    crate::auth::jwt::JwtSecret("gaps-secret".into())
+fn test_secret() -> madar_rust::auth::jwt::JwtSecret {
+    madar_rust::auth::jwt::JwtSecret("gaps-secret".into())
 }
 
 /// The Z report names the feed horizon its figures include, and a replayed op's
@@ -1038,16 +1038,16 @@ async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(test_secret()))
-            .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-            .configure(crate::tills::routes::configure)
-            .configure(crate::sync::routes::configure),
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .configure(madar_rust::tills::routes::configure)
+            .configure(madar_rust::sync::routes::configure),
     )
     .await;
-    let token = crate::auth::jwt::create_token(
+    let token = madar_rust::auth::jwt::create_token(
         &test_secret(),
         s.teller,
         Some(s.org),
-        crate::models::UserRole::Teller,
+        madar_rust::models::UserRole::Teller,
         Some(s.branch),
         1,
     )
@@ -1086,7 +1086,7 @@ async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
         String::from_utf8_lossy(&body)
     );
     let seq: i64 = headers
-        .get(crate::sync::handlers::SYNC_SEQ_HEADER)
+        .get(madar_rust::sync::handlers::SYNC_SEQ_HEADER)
         .expect("a replay answer names its horizon")
         .to_str()
         .unwrap()

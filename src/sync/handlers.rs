@@ -1230,7 +1230,7 @@ async fn record_replay_flags(
 /// made has a seq at or below it, so a device whose cursor has reached it and
 /// whose feed still does not list the row knows the row is really gone — no
 /// time-based grace needed. Absent when the branch cannot be resolved.
-pub(crate) const SYNC_SEQ_HEADER: &str = "X-Madar-Sync-Seq";
+pub const SYNC_SEQ_HEADER: &str = "X-Madar-Sync-Seq";
 
 async fn stamp_sync_seq(
     pool: &PgPool,

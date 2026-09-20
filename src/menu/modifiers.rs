@@ -2031,5 +2031,3 @@ pub async fn get_item_cost(
     Ok(HttpResponse::Ok().json(out))
 }
 
-#[cfg(test)]
-mod tests;

@@ -67,8 +67,6 @@ pub mod uploads;
 pub mod users;
 
 #[cfg(test)]
-mod test_support;
-#[cfg(test)]
 pub mod e2e_tests;
 #[cfg(test)]
 mod pool_discipline_tests;

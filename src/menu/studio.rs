@@ -326,7 +326,7 @@ async fn fetch_item_basics(pool: &PgPool, id: Uuid) -> Result<Option<ItemBasics>
 /// Marks the bump with this transaction's id so the deferred `catalog_revision_bump`
 /// triggers skip it at commit: the revision returned here is the one that commits.
 /// Call it after the transaction's catalog writes.
-pub(crate) async fn bump_catalog_revision(
+pub async fn bump_catalog_revision(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
 ) -> Result<i64, AppError> {

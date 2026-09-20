@@ -1,26 +1,29 @@
+
 //! Tests for the reusable-modifier + pricing/availability API. These seed the NEW
 //! unified tables directly via SQL (the backfill does not run here) and exercise each
 //! endpoint end to end. They mirror the seed helpers + harness of `menu::studio::tests`.
 
 #![allow(clippy::too_many_arguments)]
 
+mod common;
+
 use actix_web::{App, test, web};
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::menu::modifiers::*;
-use crate::menu::routes;
-use crate::menu::studio::ItemOptionOut;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::menu::modifiers::*;
+use madar_rust::menu::routes;
+use madar_rust::menu::studio::ItemOptionOut;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -153,7 +156,7 @@ async fn seed_ingredient(
 }
 
 async fn seed_size(pool: &PgPool, item: Uuid, label: &str, price: i32, sort: i32) -> Uuid {
-    crate::test_support::seed_real_size(pool, item, label, price, sort).await
+    common::sizes::seed_real_size(pool, item, label, price, sort).await
 }
 
 async fn seed_recipe_line(
@@ -1162,7 +1165,7 @@ async fn handler_revision_is_the_committed_revision(pool: PgPool) {
         .execute(&mut *tx)
         .await
         .unwrap();
-    let returned = crate::menu::studio::bump_catalog_revision(&mut tx, org)
+    let returned = madar_rust::menu::studio::bump_catalog_revision(&mut tx, org)
         .await
         .unwrap();
     tx.commit().await.unwrap();

@@ -3,17 +3,17 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::refunds::handlers::{RefundIssued, till_cash_refunds};
-use crate::refunds::routes;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::refunds::handlers::{RefundIssued, till_cash_refunds};
+use madar_rust::refunds::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn teller_token(user_id: Uuid, org_id: Uuid, branch_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -25,7 +25,7 @@ fn teller_token(user_id: Uuid, org_id: Uuid, branch_id: Uuid) -> String {
 }
 
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -676,7 +676,7 @@ async fn another_orgs_order_is_not_found(pool: PgPool) {
 /// twice and both moves are real.
 #[sqlx::test]
 async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(pool: PgPool) {
-    use crate::tills::handlers::compute_system_cash;
+    use madar_rust::tills::handlers::compute_system_cash;
     let app = app!(pool);
     let t = seed_till(&pool).await;
 
@@ -720,7 +720,7 @@ async fn a_cash_refund_leaves_the_drawer_and_a_refunded_sale_still_entered_it(po
 /// alone.
 #[sqlx::test]
 async fn a_refund_from_another_shift_lightens_that_drawer_not_the_sales(pool: PgPool) {
-    use crate::tills::handlers::compute_system_cash;
+    use madar_rust::tills::handlers::compute_system_cash;
     let app = app!(pool);
     let t = seed_till(&pool).await;
     let other_teller = seed_user(&pool, t.org_id, "teller").await;
@@ -773,7 +773,7 @@ async fn the_refund_trigger_splits_tax_exactly_like_the_engine(pool: PgPool) {
         .unwrap();
         assert_eq!(
             (t as i64, s as i64),
-            crate::tax::refund_split(total, tax, sc, before, amount),
+            madar_rust::tax::refund_split(total, tax, sc, before, amount),
             "total {total} tax {tax} sc {sc} before {before} amount {amount}"
         );
     }
@@ -915,7 +915,7 @@ async fn a_money_only_refund_wastes_nothing_until_it_returns_the_rest(pool: PgPo
 async fn a_replayed_refund_logs_its_waste_once(pool: PgPool) {
     let t = seed_till(&pool).await;
     let ing = with_recipe(&pool, &t).await;
-    let actor = crate::sync::ActingContext {
+    let actor = madar_rust::sync::ActingContext {
         teller_id: t.teller_id,
         org_id: t.org_id,
         role: UserRole::Teller,
@@ -926,10 +926,10 @@ async fn a_replayed_refund_logs_its_waste_once(pool: PgPool) {
     body["till_id"] = json!(t.shift_id);
     body["client_ref"] = json!(Uuid::new_v4());
     body["issued_at"] = json!(chrono::Utc::now() - chrono::Duration::hours(2));
-    let req: crate::refunds::handlers::CreateRefundRequest = serde_json::from_value(body).unwrap();
+    let req: madar_rust::refunds::handlers::CreateRefundRequest = serde_json::from_value(body).unwrap();
     for expected in [201, 200] {
-        let resp = crate::refunds::handlers::create_refund_inner(
-            crate::db::Db::bypass(&pool),
+        let resp = madar_rust::refunds::handlers::create_refund_inner(
+            madar_rust::db::Db::bypass(&pool),
             web::Json(req.clone()),
             actor.clone(),
         )
