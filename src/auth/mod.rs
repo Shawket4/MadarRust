@@ -1,6 +1,5 @@
 pub mod guards;
 pub mod handlers;
-pub mod hashing;
 pub mod jwt;
 pub mod middleware;
 pub mod offline;

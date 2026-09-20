@@ -258,12 +258,12 @@ pub async fn provision_org(
     // Hashed before the transaction opens: bcrypt is slow and a transaction
     // should not wait on it.
     let password_hash =
-        bcrypt::hash(&b.owner.password, crate::auth::hashing::bcrypt_cost()).map_err(|_| AppError::Internal)?;
+        bcrypt::hash(&b.owner.password, bcrypt::DEFAULT_COST).map_err(|_| AppError::Internal)?;
     let pin_hash = b
         .owner
         .pin
         .as_deref()
-        .map(|p| bcrypt::hash(p, crate::auth::hashing::bcrypt_cost()))
+        .map(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST))
         .transpose()
         .map_err(|_| AppError::Internal)?;
 

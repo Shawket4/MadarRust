@@ -77,8 +77,8 @@ const DEFAULT_TENANT_MAX_CONNECTIONS: u32 = 5;
 /// 5.25 s.
 ///
 /// `MADAR_FAST_TEST_POOLS` restores the short reaping for those binaries, and
-/// like the hashing switch it is also gated on `debug_assertions`, so a release
-/// build cannot be talked into it.
+/// It is gated on `debug_assertions` as well, so a release
+/// build cannot be talked into it whatever the environment says.
 fn tenant_idle_timeout() -> Duration {
     if cfg!(test) {
         return Duration::from_secs(2);

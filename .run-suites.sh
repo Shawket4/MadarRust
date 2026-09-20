@@ -8,8 +8,6 @@ export DATABASE_URL=postgres://shawket@localhost:5433/madar
 # production reaper and every test that makes a request waits ~5s for its
 # throwaway database to become droppable. See src/db.rs.
 export MADAR_FAST_TEST_POOLS=1
-# bcrypt at its real cost is ~450ms a hash; see src/auth/hashing.rs.
-export MADAR_FAST_TEST_HASHING=1
 for m in "$@"; do
   printf "%-12s " $m
   out=$(cargo nextest run --test $m 2>&1)

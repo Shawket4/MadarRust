@@ -236,14 +236,29 @@ async fn test_open_shift_and_get_current(pool: PgPool) {
     assert_eq!(shift.opening_cash, 5000);
     assert_eq!(shift.status, "open");
 
-    // 3. Try to open another shift -> Conflict
+    // 3. Opening again from the same (device-less) client RESUMES the shift it
+    //    already has. It used to answer 409, which is what stranded v0.5 tills in
+    //    production: no device id meant the server could not recognise the
+    //    teller's own shift, so it reported it as open somewhere else and the
+    //    teller could neither resume nor close it. 200-on-replay is the legacy
+    //    contract ("Idempotent open_shift (on client id; 200 on replay)"), and
+    //    the protection that matters is unchanged — no SECOND shift is created.
     let req3 = test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&req_body)
         .to_request();
     let resp3 = test::call_service(&app, req3).await;
-    assert_eq!(resp3.status().as_u16(), 409);
+    assert_eq!(resp3.status().as_u16(), 200, "an old client resumes its own shift");
+    let resumed: Shift = test::read_body_json(resp3).await;
+    assert_eq!(resumed.id, shift.id, "the same shift, not a new one");
+    let open_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tills WHERE teller_id=$1 AND status='open'")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(open_count, 1, "still exactly one open shift");
 
     // 4. Get current shift again -> Should return the open shift
     let req4 = test::TestRequest::get()
@@ -2412,4 +2427,73 @@ async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
     assert_eq!(flagged.data[0].other_till_id, Some(first.id));
     let all_open: PaginatedTills = test::read_body_json(list("status=open").await).await;
     assert_eq!(all_open.data.len(), 2);
+}
+
+/// A till opened by a client from before device codes (POS v0.5 sends no
+/// `X-Madar-Device`) must be resumable by that same kind of client.
+///
+/// It was not: the "is this my own till?" check required the request to carry a
+/// device id, so a device-less client fell through to `TILL_OPEN_ELSEWHERE` and
+/// was told its own till was open somewhere else. The teller could then neither
+/// resume nor close it, and with no till the device could not drain its queued
+/// sales either. Two production shops were stuck like that, one for three weeks.
+#[sqlx::test]
+async fn an_old_client_with_no_device_resumes_its_own_till(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(madar_rust::tills::routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org_id).await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, teller, branch).await;
+    for a in ["create", "read", "update"] {
+        grant_permission(&pool, "teller", "tills", a).await;
+    }
+    let token = generate_teller_token(teller, org_id);
+
+    // No X-Madar-Device header at all — this is what v0.5 sends.
+    let open_legacy = || {
+        test::TestRequest::post()
+            .uri(&format!("/tills/branches/{branch}/open"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(serde_json::json!({ "opening_cash": 0 }))
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, open_legacy()).await;
+    assert_eq!(resp.status(), 201);
+    let first: serde_json::Value = test::read_body_json(resp).await;
+
+    let resp = test::call_service(&app, open_legacy()).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "an old client must resume the till it opened, not be told it is elsewhere"
+    );
+    let again: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(again["id"], first["id"]);
+
+    // And it still must not adopt a till that belongs to a real device.
+    let other_device = Uuid::new_v4();
+    sqlx::query("INSERT INTO devices (id, org_id, branch_id, code) VALUES ($1, $2, $3, 'OD1')")
+        .bind(other_device)
+        .bind(org_id)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tills SET device_id = $1 WHERE id = $2::uuid")
+        .bind(other_device)
+        .bind(first["id"].as_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = test::call_service(&app, open_legacy()).await;
+    assert_eq!(resp.status(), 409, "a till with a device id is not ours");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "TILL_OPEN_ELSEWHERE");
 }
