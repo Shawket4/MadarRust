@@ -8852,6 +8852,24 @@
             }
           },
           {
+            "name": "member",
+            "in": "query",
+            "description": "`true` = loyalty members only, `false` = non-members only.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Only customers that first came from this source (`pos`, `online`,\n`loyalty`, `booking`, `table_qr`, `aggregator`, `dashboard`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Default 100, at most 500.",
@@ -61236,7 +61254,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "DEPRECATED and ignored: a membership shares the customer's id, so there\nis nothing to link. Accepted so deployed tills keep working."
           },
           "name": {
             "type": "string"
@@ -61252,6 +61271,13 @@
               "string",
               "null"
             ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the customer came from. Defaults to `pos` when a branch is named\n(a till) and `dashboard` otherwise."
           }
         }
       },
@@ -62998,6 +63024,20 @@
           "updated_at"
         ],
         "properties": {
+          "birth_day": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "birth_month": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -63006,6 +63046,10 @@
             "type": "string",
             "format": "uuid"
           },
+          "is_member": {
+            "type": "boolean",
+            "description": "A live loyalty membership exists for this customer (same id)."
+          },
           "last_order_at": {
             "type": [
               "string",
@@ -63013,12 +63057,23 @@
             ],
             "format": "date-time"
           },
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`en` or `ar`; null when never asked."
+          },
           "loyalty_customer_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "DEPRECATED, kept for one release: a loyalty membership now shares the\ncustomer's id, so this is `id` when `is_member` and null otherwise."
+          },
+          "marketing_opt_out": {
+            "type": "boolean"
           },
           "name": {
             "type": "string"
@@ -63039,6 +63094,18 @@
               "null"
             ]
           },
+          "points_balance": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Null when not a member."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the customer first came from: `pos`, `online`, `loyalty`,\n`booking`, `table_qr`, `aggregator` or `dashboard`."
+          },
           "total_spent": {
             "type": "integer",
             "format": "int64",
@@ -63047,6 +63114,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "visits_balance": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Null when not a member."
           }
         }
       },
@@ -82507,12 +82582,26 @@
       "UpdateCustomerRequest": {
         "type": "object",
         "properties": {
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`en` or `ar`. Absent = unchanged."
+          },
           "loyalty_customer_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid",
+            "description": "DEPRECATED and ignored (see `CreateCustomerRequest`)."
+          },
+          "marketing_opt_out": {
+            "type": [
+              "boolean",
+              "null"
+            ],
             "description": "Absent = unchanged."
           },
           "name": {
@@ -82537,7 +82626,7 @@
           },
           "unlink_loyalty": {
             "type": "boolean",
-            "description": "`true` unlinks the loyalty member."
+            "description": "DEPRECATED and ignored: leaving the programme is\n`DELETE /loyalty/members/{id}`."
           }
         }
       },
