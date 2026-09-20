@@ -864,10 +864,24 @@ pub(crate) async fn open_till_inner(
                 till: serde_json::to_value(TillBrief::from(other)).unwrap_or_default(),
             });
         }
-        if let Some(here) = others
-            .iter()
-            .find(|t| device_id.is_some() && t.device_id == device_id)
-        {
+        // A till belongs to "this device" when the ids match. A client from
+        // before device codes (POS v0.5) sends none, and for it the only honest
+        // reading of a device-less till of its own teller is that it came from a
+        // device just like this one — there is nothing else it could be.
+        //
+        // Refusing instead locked those tellers out permanently: they could not
+        // resume the till, could not close it, and their queued sales could not
+        // drain, because a device with no till has nowhere to replay them. Two
+        // real shops sat like that (one for three weeks) before anyone worked out
+        // that "open on another device" meant "open on this one".
+        //
+        // A till that DOES carry a device id is still someone else's, and an old
+        // client is refused as before.
+        if let Some(here) = others.iter().find(|t| match (device_id, t.device_id) {
+            (Some(_), _) => t.device_id == device_id,
+            (None, None) => t.branch_id == branch_id,
+            (None, Some(_)) => false,
+        }) {
             return Ok((here.clone(), false));
         }
         if let Some(other) = others.first() {
