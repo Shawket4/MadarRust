@@ -1770,22 +1770,22 @@ fn status_predicates_are_unified() {
     let sources = [
         (
             "reports/handlers.rs",
-            include_str!("../reports/handlers.rs"),
+            include_str!("../src/reports/handlers.rs"),
         ),
-        ("reports/legal.rs", include_str!("../reports/legal.rs")),
-        ("orders/handlers.rs", include_str!("../orders/handlers.rs")),
-        ("tills/handlers.rs", include_str!("../tills/handlers.rs")),
+        ("reports/legal.rs", include_str!("../src/reports/legal.rs")),
+        ("orders/handlers.rs", include_str!("../src/orders/handlers.rs")),
+        ("tills/handlers.rs", include_str!("../src/tills/handlers.rs")),
         (
             "insights/handlers.rs",
-            include_str!("../insights/handlers.rs"),
+            include_str!("../src/insights/handlers.rs"),
         ),
         (
             "bundles/handlers.rs",
-            include_str!("../bundles/handlers.rs"),
+            include_str!("../src/bundles/handlers.rs"),
         ),
         (
             "integrations/handlers.rs",
-            include_str!("../integrations/handlers.rs"),
+            include_str!("../src/integrations/handlers.rs"),
         ),
     ];
     for (name, src) in sources {
