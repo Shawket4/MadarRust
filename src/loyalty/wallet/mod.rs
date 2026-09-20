@@ -18,6 +18,7 @@ pub mod google;
 pub mod i18n;
 pub mod notices;
 pub mod refresh;
+pub mod store;
 pub mod web_service;
 
 use serde::Serialize;
@@ -347,8 +348,96 @@ pub struct CardCopy {
     pub social: Vec<crate::orgs::social::SocialLink>,
 }
 
+/// Everything a pass build reads from the database, fetched once.
+pub struct PassSource {
+    pub settings: LoyaltySettings,
+    pub brand: crate::orgs::branding::OrgBrand,
+    pub locations: Vec<PassLocation>,
+    pub copy: CardCopy,
+    pub headline: String,
+}
+
+/// Gather it, in two waves instead of eleven round trips.
+///
+/// `build_pass_for` used to read the database like a shopping list: settings,
+/// then locations, then the back-of-card copy, then the branding, then the
+/// headline — each awaiting the last. Underneath that it was worse than it
+/// looked: the copy and the headline each re-read `loyalty_settings` to learn
+/// the mode and each re-read the reward catalogue, and the branding was loaded
+/// twice. Eleven sequential queries, every one of them a round trip to a
+/// Postgres sharing one vCPU with the server asking.
+///
+/// What is actually here is a dependency of DEPTH TWO. The settings are needed
+/// to interpret the rewards; nothing else depends on anything. So: one query,
+/// then four at once, then pure assembly. `try_join` rather than `join` so a
+/// real database error still fails the build instead of being papered over —
+/// the two halves that have always been allowed to come back empty (the branch
+/// names and the branding) keep doing that, because a pass without them is
+/// still a pass.
+pub async fn pass_source(pool: &PgPool, member: &MemberRow) -> Result<PassSource, AppError> {
+    use futures::TryFutureExt;
+
+    let settings = crate::loyalty::settings::load_scope(pool, member.org_id, None)
+        .await?
+        .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
+
+    let rewards = async {
+        if settings.reward_any_item {
+            // Nothing reads the catalogue in this mode — neither the list on
+            // the back nor the headline — so do not fetch it.
+            Ok(Vec::new())
+        } else {
+            crate::loyalty::settings::rewards_org_in(pool, member.org_id, &settings).await
+        }
+    };
+    let brand = crate::orgs::branding::load(pool, member.org_id).map_err(AppError::from);
+
+    let (locations, rewards, brand, branches) = futures::try_join!(
+        locations_for_member(pool, member),
+        rewards,
+        brand,
+        // Infallible by construction; wrapped so it can share the join.
+        async { Ok::<_, AppError>(branch_names(pool, member.org_id).await) },
+    )?;
+
+    Ok(PassSource {
+        copy: card_copy_from(&settings, &rewards, branches, Some(&brand)),
+        headline: headline_of(&settings, &rewards),
+        settings,
+        brand,
+        locations,
+    })
+}
+
 /// Everything the back of the card says about the shop, in one round trip each.
 pub async fn card_copy(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> CardCopy {
+    let rewards = if settings.reward_any_item {
+        Vec::new()
+    } else {
+        crate::loyalty::settings::rewards_org_in(pool, org_id, settings)
+            .await
+            .unwrap_or_default()
+    };
+    let brand = crate::orgs::branding::load(pool, org_id).await.ok();
+    card_copy_from(
+        settings,
+        &rewards,
+        branch_names(pool, org_id).await,
+        brand.as_ref(),
+    )
+}
+
+/// The same copy, assembled from rows a caller has ALREADY fetched.
+///
+/// Pure. `card_copy` is three round trips and a pass build needs every one of
+/// them for other reasons too — the settings, the branding, the reward
+/// catalogue — so a builder that has them fetches nothing again.
+pub fn card_copy_from(
+    settings: &LoyaltySettings,
+    rewards: &[crate::loyalty::settings::RewardItem],
+    branches: Vec<String>,
+    brand: Option<&crate::orgs::branding::OrgBrand>,
+) -> CardCopy {
     CardCopy {
         // One line rather than a catalogue when everything is claimable: the
         // list would be the entire menu, and keeping it in step with the menu
@@ -356,13 +445,10 @@ pub async fn card_copy(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) 
         rewards: if settings.reward_any_item {
             vec![i18n::any_item(settings.mode(), settings.default_reward_cost).en]
         } else {
-            reward_lines(pool, org_id).await
+            reward_lines_of(rewards)
         },
-        branches: branch_names(pool, org_id).await,
-        social: crate::orgs::branding::load(pool, org_id)
-            .await
-            .map(|b| b.social_links)
-            .unwrap_or_default(),
+        branches,
+        social: brand.map(|b| b.social_links.clone()).unwrap_or_default(),
     }
 }
 
@@ -387,13 +473,19 @@ async fn branch_names(pool: &PgPool, org_id: Uuid) -> Vec<String> {
 ///
 /// Shared so an espresso does not read "Espresso — 5 visits" on one card and
 /// something else on the other; the two are meant to be the same card.
-pub async fn reward_lines(pool: &PgPool, org_id: Uuid) -> Vec<String> {
-    crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
+pub fn reward_lines_of(rewards: &[crate::loyalty::settings::RewardItem]) -> Vec<String> {
+    rewards
+        .iter()
         .map(|r| format!("{} — {} {}", r.name, r.cost_amount, r.cost_currency))
         .collect()
+}
+
+pub async fn reward_lines(pool: &PgPool, org_id: Uuid) -> Vec<String> {
+    reward_lines_of(
+        &crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
+            .await
+            .unwrap_or_default(),
+    )
 }
 
 /// What the customer is working towards, in their own shop's words.
@@ -416,13 +508,24 @@ pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySett
         // The full line is in the details list — see `card_copy`.
         return i18n::any_item_short().en;
     }
-    let cheapest = crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .min_by_key(|r| r.cost_amount);
-    match cheapest {
-        Some(r) => r.name,
+    headline_of(
+        settings,
+        &crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+/// The headline, from a catalogue the caller already holds. Pure.
+pub fn headline_of(
+    settings: &LoyaltySettings,
+    rewards: &[crate::loyalty::settings::RewardItem],
+) -> String {
+    if settings.reward_any_item {
+        return i18n::any_item_short().en;
+    }
+    match rewards.iter().min_by_key(|r| r.cost_amount) {
+        Some(r) => r.name.clone(),
         // Nothing curated. The old fallback printed the COST here — "5 orders"
         // under a heading that said "Reward" — which reads as though the reward
         // IS five orders. It is not; it is the price of one, and the stepper
@@ -628,6 +731,12 @@ async fn push_update_inner(pool: &PgPool, customer_id: Uuid) -> Result<(), AppEr
     }
     if member.apple_serial.is_some() {
         apple::notify_devices(pool, &member).await?;
+        // Then build the new one NOW, off the customer's critical path. This
+        // task already runs in the background (see `push_update`), the device
+        // is about to come back for the pass, and the customer may open the
+        // link at any moment — so the expensive half happens here, between the
+        // purchase and whoever asks first, rather than under either of them.
+        apple::regenerate(pool, &member).await;
     }
     sqlx::query("UPDATE loyalty_customers SET pass_updated_at = now() WHERE id = $1")
         .bind(customer_id)

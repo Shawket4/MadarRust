@@ -26,8 +26,6 @@
 
 pub mod handlers;
 
-#[cfg(test)]
-mod tests;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -320,8 +318,8 @@ fn throttle_map() -> &'static Mutex<HashMap<String, Instant>> {
 /// Tests only: forget the throttle marks under `prefix`. The map is process
 /// wide and every `#[sqlx::test]` seeds the same org id, so under one-process
 /// `cargo test` (CI) a dashboard sighting in one test throttled the next.
-#[cfg(test)]
-pub(crate) fn forget_throttle(prefix: &str) {
+/// (Not `cfg(test)`: the suite is its own binary and links this without it.)
+pub fn forget_throttle(prefix: &str) {
     if let Ok(mut map) = throttle_map().lock() {
         map.retain(|k, _| !k.starts_with(prefix));
     }

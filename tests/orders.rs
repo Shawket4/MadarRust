@@ -1,0 +1,4634 @@
+#![allow(unused_imports, unused_variables, dead_code)]
+use actix_web::{App, test, web};
+use chrono::Utc;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use serde_json::json;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::orders::handlers::{
+    CreateOrderRequest, ExportResponse, Order, OrderFull, OrderItemInput, PaginatedOrders,
+    PaymentSplitInput, PreviewAddonInput, PreviewRecipeRequest, VoidOrderRequest,
+};
+use madar_rust::orders::routes;
+
+mod common;
+
+fn get_secret() -> JwtSecret {
+    JwtSecret("secret".to_string())
+}
+
+fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+}
+
+fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
+    generate_token(user_id, Some(org_id), UserRole::OrgAdmin)
+}
+
+fn generate_teller_token(user_id: Uuid, org_id: Uuid, branch_id: Uuid) -> String {
+    madar_rust::auth::jwt::create_token(
+        &get_secret(),
+        user_id,
+        Some(org_id),
+        UserRole::Teller,
+        Some(branch_id),
+        24,
+    )
+    .unwrap()
+}
+
+async fn seed_org(pool: &PgPool) -> Uuid {
+    let org_id = Uuid::new_v4();
+    let slug = format!("test-org-{}", org_id);
+    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', $2)")
+        .bind(org_id)
+        .bind(slug)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active) VALUES
+        ($1, 'cash', '{}', 'emerald', 'payments_outlined', true, true),
+        ($1, 'card', '{}', 'blue', 'credit_card_rounded', false, true)"
+    )
+    .bind(org_id)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    org_id
+}
+
+async fn seed_branch(pool: &PgPool, org_id: Uuid) -> Uuid {
+    let branch_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'Test Branch')")
+        .bind(branch_id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    branch_id
+}
+
+async fn seed_user(pool: &PgPool, org_id: Uuid, role: &str) -> Uuid {
+    let user_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1, $2, 'Test User', $3, 'hash', $4::user_role)"
+    )
+    .bind(user_id)
+    .bind(org_id)
+    .bind(format!("user-{}@test.com", user_id))
+    .bind(role)
+    .execute(pool)
+    .await
+    .unwrap();
+    user_id
+}
+
+async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &str) {
+    sqlx::query(
+        "INSERT INTO role_permissions (role, resource, action, granted) VALUES ($1::user_role, $2::permission_resource, $3::permission_action, true) ON CONFLICT DO NOTHING"
+    )
+    .bind(role)
+    .bind(resource)
+    .bind(action)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn seed_shift(pool: &PgPool, branch_id: Uuid, user_id: Uuid) -> Uuid {
+    let shift_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tills (id, branch_id, teller_id, status, opening_cash) VALUES ($1, $2, $3, 'open', 10000)")
+        .bind(shift_id)
+        .bind(branch_id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    shift_id
+}
+
+async fn assign_user_to_branch(pool: &PgPool, user_id: Uuid, branch_id: Uuid) {
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(user_id)
+        .bind(branch_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn seed_category(pool: &PgPool, org_id: Uuid) -> Uuid {
+    let cat_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Cat')")
+        .bind(cat_id)
+        .bind(org_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    cat_id
+}
+
+async fn seed_menu_item(pool: &PgPool, org_id: Uuid, cat_id: Uuid) -> Uuid {
+    let item_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, 'Coffee', 500, true)")
+        .bind(item_id)
+        .bind(org_id)
+        .bind(cat_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    item_id
+}
+
+async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, $4::inventory_unit, 100, ingredient_category_id($2, 'general'))")
+        .bind(id)
+        .bind(org_id)
+        .bind(name)
+        .bind(unit)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn seed_branch_inventory(pool: &PgPool, branch_id: Uuid, ing_id: Uuid, stock: f64) {
+    sqlx::query(
+        "INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand) VALUES ($1, $2, $3)",
+    )
+    .bind(branch_id)
+    .bind(ing_id)
+    .bind(stock)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn add_menu_item_recipe(pool: &PgPool, menu_item_id: Uuid, ing_id: Uuid, qty: f64) {
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, 'one_size', 'Test Ing', 'g')")
+        .bind(menu_item_id)
+        .bind(ing_id)
+        .bind(qty)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn seed_addon_item(pool: &PgPool, org_id: Uuid, name: &str, ptype: &str, price: i32) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
+        .bind(id)
+        .bind(org_id)
+        .bind(name)
+        .bind(ptype)
+        .bind(price)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn add_addon_ingredient(pool: &PgPool, addon_item_id: Uuid, ing_id: Uuid, qty: f64) {
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, 'Test Ing', 'ml')")
+        .bind(addon_item_id)
+        .bind(ing_id)
+        .bind(qty)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
+async fn test_create_order_success(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let ing_id = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, ing_id, 20.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: Some("John Doe".to_string()),
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: Some(600),
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.status().is_success(),
+        "Expected success, got {:?}",
+        resp.status()
+    );
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(order_full.order.subtotal, 500); // Coffee base price
+    assert_eq!(order_full.order.tax_amount, 70);
+    assert_eq!(order_full.order.status, "completed");
+
+    // Verify inventory deduction
+    let new_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id = $1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(new_stock, 980.0); // 1000 - 20
+}
+
+/// V31: order_ref is minted as <BRANCHCODE>-<YYMMDD>-<NNNN>, increments per
+/// (branch, business-day), and round-trips through every decode path
+/// (create RETURNING, the shared ORDER_SELECT read, and the void RETURNING).
+#[sqlx::test]
+async fn test_order_ref_generated_and_decoded(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await; // name "Test Branch" -> code "TESTBR"
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let make_body = || CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+
+    let create = |body: CreateOrderRequest| {
+        let app = &app;
+        let token = token.clone();
+        async move {
+            let req = test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&body)
+                .to_request();
+            let resp = test::call_service(app, req).await;
+            assert!(
+                resp.status().is_success(),
+                "create failed: {:?}",
+                resp.status()
+            );
+            test::read_body_json::<OrderFull, _>(resp).await
+        }
+    };
+
+    // First order in the shift -> ...-001 (create RETURNING decode path). The
+    // server-minted fallback is <BRANCH>-<YYMMDD>-<SHIFT6>-<NNN>: NNN is the
+    // per-shift order_number and SHIFT6 disambiguates concurrent offline devices.
+    let o1 = create(make_body()).await;
+    let ref1 = o1
+        .order
+        .order_ref
+        .clone()
+        .expect("order_ref present on create");
+    let parts: Vec<&str> = ref1.split('-').collect();
+    let shift6 = shift_id.simple().to_string()[..6].to_uppercase();
+    assert_eq!(
+        parts.len(),
+        4,
+        "order_ref should be CODE-YYMMDD-SHIFT6-NNN, got {ref1}"
+    );
+    assert_eq!(parts[0], "TESTBR", "branch code prefix");
+    assert_eq!(parts[1].len(), 6, "YYMMDD segment");
+    assert!(
+        parts[1].chars().all(|c| c.is_ascii_digit()),
+        "date digits in {ref1}"
+    );
+    assert_eq!(parts[2], shift6, "shift6 segment derived from shift_id");
+    assert_eq!(parts[3], "001", "first order of the shift");
+
+    // Second order increments the per-shift counter -> ...-002.
+    let o2 = create(make_body()).await;
+    let ref2 = o2.order.order_ref.clone().expect("order_ref present");
+    assert!(
+        ref2.ends_with("-002"),
+        "second order should be -002, got {ref2}"
+    );
+    assert_ne!(ref1, ref2, "refs must be unique");
+
+    // Read-back via GET /orders/{id} (shared ORDER_SELECT decode path).
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders/{}", o1.order.id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.status().is_success(),
+        "get failed: {:?}",
+        resp.status()
+    );
+    let fetched: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(
+        fetched.order.order_ref.as_deref(),
+        Some(ref1.as_str()),
+        "ref stable on read"
+    );
+    // The order carries the zone it is shown in (create response and read).
+    assert!(o1.order.timezone.is_some(), "timezone on create");
+    assert_eq!(
+        fetched.order.timezone, o1.order.timezone,
+        "timezone on read"
+    );
+
+    // Void (void RETURNING decode path) — ref preserved on the voided row.
+    let void_req = VoidOrderRequest {
+        reason: "customer_request".to_string(),
+        note: None,
+        voided_at: None,
+        restore_inventory: Some(false),
+        live_approval: None,
+    };
+    let req = test::TestRequest::post()
+        .uri(&format!("/orders/{}/void", o1.order.id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&void_req)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(
+        resp.status().is_success(),
+        "void failed: {:?}",
+        resp.status()
+    );
+    let voided: Order = test::read_body_json(resp).await; // void returns a bare Order
+    assert_eq!(
+        voided.order_ref.as_deref(),
+        Some(ref1.as_str()),
+        "ref preserved on void"
+    );
+    assert_eq!(voided.status, "voided");
+}
+
+#[sqlx::test]
+async fn test_create_order_with_addons_and_discount(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await; // 500
+
+    let addon_id = seed_addon_item(&pool, org_id, "Extra Shot", "extra", 100).await;
+    let ing_id = seed_ingredient(&pool, org_id, "Espresso", "ml").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_addon_ingredient(&pool, addon_id, ing_id, 30.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "card".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: Some("fixed".to_string()),
+        discount_value: Some(dec!(50)),
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 2, // 2 items = 1000
+            addons: vec![madar_rust::orders::component_resolve::AddonInput {
+                addon_item_id: addon_id,
+                quantity: 1, // 1 per item = 2 addons total = 200
+                unit_price: None,
+            }],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    if !status.is_success() {
+        panic!("Status {:?}", status);
+    }
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(order_full.order.subtotal, 1200); // (500 + 100) * 2
+    assert_eq!(order_full.order.discount_amount, 50);
+
+    // Verify inventory deduction
+    let new_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id = $1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(new_stock, 940.0); // 1000 - (30 * 2)
+}
+
+#[sqlx::test]
+async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Milk is stocked in GRAMS, almond milk in KILOGRAMS — both category 'milk'.
+    let milk = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, 5, ingredient_category_id($2, 'milk'))")
+        .bind(milk).bind(org_id).execute(&pool).await.unwrap();
+    let almond = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Almond Milk', 'kg'::inventory_unit, 8000, ingredient_category_id($2, 'milk'))")
+        .bind(almond).bind(org_id).execute(&pool).await.unwrap();
+    seed_branch_inventory(&pool, branch_id, milk, 5000.0).await; // 5000 g
+    seed_branch_inventory(&pool, branch_id, almond, 10.0).await; // 10 kg
+
+    // Recipe uses 250 g of milk (stored in milk's base unit).
+    add_menu_item_recipe(&pool, menu_item_id, milk, 250.0).await; // ingredient_unit 'g'
+
+    // A milk_type addon that swaps in almond milk (its ingredient is in kg).
+    let almond_addon = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 0).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond Milk','kg')")
+        .bind(almond_addon).bind(almond).execute(&pool).await.unwrap();
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![madar_rust::orders::component_resolve::AddonInput {
+                addon_item_id: almond_addon,
+                quantity: 1,
+                unit_price: None,
+            }],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+
+    // The 250 g the recipe called for is converted to the almond-milk base unit:
+    // 0.25 kg deducted — NOT 250 (which would be a 1000× over-deduction).
+    let almond_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
+            .bind(almond)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(almond_stock, 9.75);
+    // Milk was swapped out → its stock is untouched.
+    let milk_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
+            .bind(milk)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(milk_stock, 5000.0);
+}
+
+/// Locks the standalone→shared-resolver de-dup: one order exercising all three
+/// deduction branches at once — a milk SWAP (unit-converted), an ADDITIVE addon
+/// with its own ingredient, and an OPTIONAL ingredient — must deduct each
+/// correctly through the single shared resolver.
+#[sqlx::test]
+async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Base recipe: 200 g milk (category 'milk'); a milk_type addon swaps to almond (kg).
+    let milk = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, 5, ingredient_category_id($2, 'milk'))")
+        .bind(milk).bind(org_id).execute(&pool).await.unwrap();
+    let almond = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Almond', 'kg'::inventory_unit, 8000, ingredient_category_id($2, 'milk'))")
+        .bind(almond).bind(org_id).execute(&pool).await.unwrap();
+    // Additive addon ingredient (cream) + optional ingredient (syrup).
+    let cream = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Cream', 'g'::inventory_unit, 3, ingredient_category_id($2, 'general'))")
+        .bind(cream).bind(org_id).execute(&pool).await.unwrap();
+    let syrup = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Syrup', 'ml'::inventory_unit, 2, ingredient_category_id($2, 'general'))")
+        .bind(syrup).bind(org_id).execute(&pool).await.unwrap();
+    seed_branch_inventory(&pool, branch_id, milk, 5000.0).await;
+    seed_branch_inventory(&pool, branch_id, almond, 10.0).await;
+    seed_branch_inventory(&pool, branch_id, cream, 1000.0).await;
+    seed_branch_inventory(&pool, branch_id, syrup, 1000.0).await;
+
+    add_menu_item_recipe(&pool, menu_item_id, milk, 200.0).await;
+
+    let swap_addon = seed_addon_item(&pool, org_id, "Almond", "milk_type", 0).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond','kg')")
+        .bind(swap_addon).bind(almond).execute(&pool).await.unwrap();
+    let whip_addon = seed_addon_item(&pool, org_id, "Whip", "other", 100).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,15,'Cream','g')")
+        .bind(whip_addon).bind(cream).execute(&pool).await.unwrap();
+    let vanilla_field = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_item_optional_fields (id, menu_item_id, name, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, is_active) \
+                 VALUES ($1,$2,'Vanilla',50,$3,'Syrup','ml',5,true)")
+        .bind(vanilla_field).bind(menu_item_id).bind(syrup).execute(&pool).await.unwrap();
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![
+                madar_rust::orders::component_resolve::AddonInput {
+                    addon_item_id: swap_addon,
+                    quantity: 1,
+                    unit_price: None,
+                },
+                madar_rust::orders::component_resolve::AddonInput {
+                    addon_item_id: whip_addon,
+                    quantity: 1,
+                    unit_price: None,
+                },
+            ],
+            optional_field_ids: vec![vanilla_field],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+
+    let stock = |ing: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1",
+            )
+            .bind(ing)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        stock(almond).await,
+        9.80,
+        "swap: 200 g milk → 0.20 kg almond"
+    );
+    assert_eq!(stock(milk).await, 5000.0, "swapped-out base milk untouched");
+    assert_eq!(
+        stock(cream).await,
+        985.0,
+        "additive addon deducts its ingredient (15 g)"
+    );
+    assert_eq!(
+        stock(syrup).await,
+        995.0,
+        "optional deducts its ingredient (5 ml)"
+    );
+}
+
+#[sqlx::test]
+async fn test_list_orders(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Create 2 orders
+    for _ in 0..2 {
+        let req_body = CreateOrderRequest {
+            branch_id,
+            till_id: shift_id,
+            payment_method: "cash".to_string(),
+            customer_name: None,
+            notes: None,
+            discount_type: None,
+            discount_value: None,
+            discount_id: None,
+            amount_tendered: None,
+            tip_amount: None,
+            tip_payment_method: None,
+            payment_splits: None,
+            items: vec![OrderItemInput {
+                menu_item_id: Some(menu_item_id),
+                bundle_id: None,
+                size_label: None,
+                quantity: 1,
+                addons: vec![],
+                optional_field_ids: vec![],
+                bundle_components: vec![],
+                unit_price: None,
+                notes: None,
+            }],
+            created_at: None,
+            ..Default::default()
+        };
+
+        let req = test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        if !status.is_success() {
+            panic!("Status {:?}", status);
+        }
+    }
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders?branch_id={}", branch_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    if !status.is_success() {
+        panic!("Status {:?}", status);
+    }
+
+    let list: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(list.data.len(), 2);
+    assert_eq!(list.total, 2);
+    assert_eq!(list.summary.completed, 2);
+    assert_eq!(list.summary.line_items, 2);
+
+    // exclude_items drops units from the summary count only — combined with
+    // another filter to exercise the dynamic bind indexing (exclude binds last).
+    let req = test::TestRequest::get()
+        .uri(&format!(
+            "/orders?branch_id={}&status=completed&exclude_items={}",
+            branch_id, menu_item_id
+        ))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+    let excluded: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(excluded.summary.line_items, 0);
+    assert_eq!(excluded.summary.completed, 2, "counts must be untouched");
+    assert_eq!(excluded.data.len(), 2, "order rows must be untouched");
+}
+
+#[sqlx::test]
+async fn test_list_orders_all_branches(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_a = seed_branch(&pool, org_id).await;
+    // Second branch in the same org (seed_branch hard-codes one name).
+    let branch_b = {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1,$2,'Branch B')")
+            .bind(id)
+            .bind(org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        id
+    };
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(admin, org_id);
+
+    // Two OPEN shifts need two different tellers (one open shift per teller).
+    let teller_b = seed_user(&pool, org_id, "teller").await;
+    let shift_a = seed_shift(&pool, branch_a, admin).await;
+    let shift_b = seed_shift(&pool, branch_b, teller_b).await;
+
+    let cat = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat).await;
+
+    // One order in each branch (org-admin may post to any open shift).
+    for (branch_id, shift_id) in [(branch_a, shift_a), (branch_b, shift_b)] {
+        let body = CreateOrderRequest {
+            branch_id,
+            till_id: shift_id,
+            payment_method: "cash".to_string(),
+            customer_name: None,
+            notes: None,
+            discount_type: None,
+            discount_value: None,
+            discount_id: None,
+            amount_tendered: None,
+            tip_amount: None,
+            tip_payment_method: None,
+            payment_splits: None,
+            items: vec![OrderItemInput {
+                menu_item_id: Some(item),
+                bundle_id: None,
+                size_label: None,
+                quantity: 1,
+                addons: vec![],
+                optional_field_ids: vec![],
+                bundle_components: vec![],
+                unit_price: None,
+                notes: None,
+            }],
+            created_at: None,
+            ..Default::default()
+        };
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(&body)
+                .to_request(),
+        )
+        .await;
+        assert!(
+            resp.status().is_success(),
+            "create order failed: {:?}",
+            resp.status()
+        );
+    }
+
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // "All branches" via absent branch_id → both branches' orders, summed.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/orders")
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let all: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(
+        all.total, 2,
+        "all-branches (absent branch_id) sees both branches"
+    );
+    assert_eq!(
+        all.summary.completed, 2,
+        "summary aggregates across branches"
+    );
+
+    // "All branches" via the nil-UUID sentinel → same.
+    let nil = Uuid::nil();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orders?branch_id={nil}"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let all_nil: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(
+        all_nil.total, 2,
+        "all-branches (nil UUID) sees both branches"
+    );
+
+    // A specific branch still scopes to that one branch only.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orders?branch_id={branch_a}"))
+            .insert_header(auth.clone())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let just_a: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(just_a.total, 1, "single branch sees only its own orders");
+    assert_eq!(just_a.data[0].branch_id, branch_a);
+}
+
+#[sqlx::test]
+async fn test_void_order(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let ing_id = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, ing_id, 20.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    let order_id = order_full.order.id;
+
+    // Void the order
+    let void_req = VoidOrderRequest {
+        reason: "customer_request".to_string(),
+        note: None,
+        voided_at: None,
+        restore_inventory: Some(true),
+        live_approval: None,
+    };
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/orders/{}/void", order_id))
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&void_req)
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    if !status.is_success() {
+        panic!("Status {:?}", status);
+    }
+
+    // Verify inventory restored
+    let new_stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id = $1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(new_stock, 1000.0); // Restored 20
+}
+
+/// A VOID ALWAYS RESTORES STOCK: even a till that still sends
+/// `restore_inventory: false` (clients <= 0.7.8) gets the sale's deductions put
+/// back, and no waste is logged — a voided sale was never made or handed over.
+/// Live, then replayed (the `/sync/replay` VoidOrder path), both restock.
+#[sqlx::test]
+async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    let ing_id = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, ing_id, 20.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+    let order_full: OrderFull = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(&req_body)
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+    let order_id = order_full.order.id;
+
+    // Void WITHOUT restock (food was made).
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/orders/{order_id}/void"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&VoidOrderRequest {
+                reason: "customer_request".into(),
+                note: None,
+                voided_at: None,
+                restore_inventory: Some(false),
+                live_approval: None,
+            })
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    let stock = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, f64>(
+            "SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1",
+        )
+        .bind(ing_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        stock(pool.clone()).await,
+        1000.0,
+        "the void put the 20 back"
+    );
+    let waste: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_movements WHERE source_id=$1 AND type='waste'",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(waste, 0, "a void logs no waste");
+
+    // Replayed: a second sale voided through the replay core with the old
+    // flag also restocks.
+    let second: OrderFull = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(&CreateOrderRequest {
+                    idempotency_key: Some(Uuid::new_v4()),
+                    ..req_body
+                })
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(stock(pool.clone()).await, 980.0);
+    let actor = madar_rust::sync::ActingContext {
+        teller_id: user_id,
+        org_id,
+        role: UserRole::OrgAdmin,
+        replay: true,
+        own_till_only: false,
+    };
+    let body = || {
+        web::Json(VoidOrderRequest {
+            reason: "customer_request".into(),
+            note: None,
+            voided_at: None,
+            restore_inventory: Some(false),
+            live_approval: None,
+        })
+    };
+    let pool_data = madar_rust::db::Db::bypass(&pool);
+    madar_rust::orders::handlers::void_order_inner(
+        pool_data.clone(),
+        second.order.id,
+        body(),
+        actor.clone(),
+    )
+    .await
+    .unwrap();
+    // A re-flushed queue voids once.
+    madar_rust::orders::handlers::void_order_inner(pool_data, second.order.id, body(), actor)
+        .await
+        .unwrap();
+    assert_eq!(
+        stock(pool.clone()).await,
+        1000.0,
+        "the replayed void put it back, once"
+    );
+}
+
+#[sqlx::test]
+async fn test_preview_recipe(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let req = test::TestRequest::post()
+        .uri("/orders/preview-recipe")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&PreviewRecipeRequest {
+            menu_item_id,
+            size_label: None,
+            addons: vec![],
+            optional_field_ids: vec![],
+        })
+        .to_request();
+
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    if !status.is_success() {
+        panic!("Status {:?}", status);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Cost engine — sale-time snapshots
+// ═══════════════════════════════════════════════════════════════════
+
+#[sqlx::test]
+async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // 20 g coffee @ 100 piastres/g → recipe cost 2 000 piastres
+    let coffee = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, coffee, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, coffee, 20.0).await;
+
+    // Additive addon: 5 ml syrup @ 100 piastres/ml → 500 piastres
+    let syrup = seed_ingredient(&pool, org_id, "Syrup", "ml").await;
+    seed_branch_inventory(&pool, branch_id, syrup, 1000.0).await;
+    let addon_id = seed_addon_item(&pool, org_id, "Vanilla Syrup", "extra", 100).await;
+    add_addon_ingredient(&pool, addon_id, syrup, 5.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 2,
+            addons: vec![madar_rust::orders::component_resolve::AddonInput {
+                addon_item_id: addon_id,
+                quantity: 1,
+                unit_price: None,
+            }],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    let item = &order_full.items[0].item;
+
+    // Recipe scope per unit: 20 g × 100 piastres = 2 000 piastres / unit.
+    assert_eq!(item.unit_cost, Some(2_000));
+    // Full line: recipe 2 units (4 000) + addon 5 ml × 2 units (1 000).
+    assert_eq!(item.line_cost, Some(5_000));
+    assert!(!item.cost_missing);
+
+    // Addon line cost: 5 ml × 100 piastres × qty 1 × item qty 2 = 1 000.
+    let addon_row = &order_full.items[0].addons[0];
+    assert_eq!(addon_row.line_cost, Some(1_000));
+
+    // Snapshot entries carry per-entry costs for audit.
+    let entries = item.deductions_snapshot.as_array().unwrap();
+    assert!(entries.iter().all(|e| e.get("cost_per_unit").is_some()));
+    assert!(entries.iter().all(|e| e.get("line_cost").is_some()));
+}
+
+#[sqlx::test]
+async fn test_order_cost_missing_without_recipe(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+
+    let cat_id = seed_category(&pool, org_id).await;
+    // No recipe rows at all → cost unknown, never zero.
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    };
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(&req_body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success());
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    let item = &order_full.items[0].item;
+    assert_eq!(item.line_cost, None);
+    assert_eq!(item.unit_cost, None);
+    assert!(item.cost_missing);
+}
+
+// ── Audit regression tests ───────────────────────────────────────────────
+
+macro_rules! order_app {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(get_secret()))
+                .configure(routes::configure),
+        )
+        .await
+    };
+}
+
+/// One menu item (price 500), no recipe — minimal order request.
+fn simple_order(branch_id: Uuid, shift_id: Uuid, menu_item_id: Uuid) -> CreateOrderRequest {
+    CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        customer_name: None,
+        notes: None,
+        discount_type: None,
+        discount_value: None,
+        discount_id: None,
+        amount_tendered: None,
+        tip_amount: None,
+        tip_payment_method: None,
+        payment_splits: None,
+        items: vec![OrderItemInput {
+            menu_item_id: Some(menu_item_id),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        created_at: None,
+        ..Default::default()
+    }
+}
+
+async fn seed_discount(
+    pool: &PgPool,
+    org_id: Uuid,
+    dtype: &str,
+    value: rust_decimal::Decimal,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO discounts (id, org_id, name, type, value, is_active) VALUES ($1,$2,'D',$3::discount_type,$4,true)")
+        .bind(id).bind(org_id).bind(dtype).bind(value).execute(pool).await.unwrap();
+    id
+}
+
+/// A percentage above 1 is READ as the old convention, not refused.
+///
+/// This used to be a 400, on the reasoning that `14` is what a till still
+/// speaking the old "14 means 14%" convention sends and clamping it would hand
+/// over the whole bill. Both halves of that are true; the conclusion was not.
+/// Shops were still running the previous build, and refusing the value stopped
+/// them selling a discounted item at all while stranding every such order
+/// already queued in a till's outbox.
+///
+/// So it is converted. A value above 1 cannot be a fraction, so the reading is
+/// not a guess — and the till's own `total_amount` is checked against the
+/// server's arithmetic afterwards, which is what makes it safe rather than
+/// merely convenient. The clamp stays as the engine's floor underneath.
+#[sqlx::test]
+async fn test_discount_percentage_over_one_is_read_as_the_old_convention(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await; // 500
+
+    let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
+    req_body.discount_type = Some("percentage".to_string());
+    // The old convention's "14%".
+    req_body.discount_value = Some(dec!(14));
+    // 500 less 14% is 430, and 14% tax on top makes 490 — what that till
+    // computed, and what it sends.
+    req_body.total_amount = Some(490);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 201);
+    let of: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(
+        of.order.discount_rate,
+        dec!(0.14),
+        "recorded in today's convention, so a report can read it beside a new row"
+    );
+    assert_eq!(
+        of.order.discount_value,
+        dec!(14),
+        "and handed back in the spelling every shipped till was built for — \
+         an old client sent 14, and 14 is what it reads back"
+    );
+    assert_eq!((of.order.discount_amount, of.order.total_amount), (70, 490));
+}
+
+/// V15: a negative discount_value must clamp to 0 (no inflated total).
+#[sqlx::test]
+async fn test_discount_negative_value_is_clamped(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await; // 500
+
+    let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
+    req_body.discount_type = Some("fixed".to_string());
+    req_body.discount_value = Some(dec!(-100));
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let o: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(o.order.discount_amount, 0, "negative discount clamps to 0");
+    assert_eq!(o.order.total_amount, 570, "no inflation: 500 + 70 tax");
+}
+
+/// V2: an order may not reference a discount_id from a different org.
+#[sqlx::test]
+async fn test_discount_id_must_belong_to_caller_org(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_a = seed_org(&pool).await;
+    let org_b = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_a).await;
+    let user_id = seed_user(&pool, org_a, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_a);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_a).await;
+    let menu_item_id = seed_menu_item(&pool, org_a, cat_id).await;
+
+    // A discount belonging to ORG B.
+    let other_discount = seed_discount(&pool, org_b, "fixed", dec!(100)).await;
+
+    let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
+    req_body.discount_id = Some(other_discount);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "cross-org discount must be rejected");
+}
+
+/// V14: split-payment amounts must be positive.
+#[sqlx::test]
+async fn test_split_payment_rejects_nonpositive_amount(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
+    req_body.payment_splits = Some(vec![
+        PaymentSplitInput {
+            method: "cash".to_string(),
+            amount: 570,
+            reference: None,
+        },
+        PaymentSplitInput {
+            method: "card".to_string(),
+            amount: -10,
+            reference: None,
+        },
+    ]);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "negative split amount must be rejected");
+}
+
+/// V33: split-payment amounts must SUM to the order total. They are the sole
+/// source of drawer cash in compute_system_cash, so a mismatch would silently
+/// leave the teller over/short. (Seeded menu item is priced 570.)
+#[sqlx::test]
+async fn test_split_payment_must_sum_to_total(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await; // seeds cash + card
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // 300 + 200 = 500 ≠ 570 → rejected.
+    let mut req_body = simple_order(branch_id, shift_id, menu_item_id);
+    req_body.payment_splits = Some(vec![
+        PaymentSplitInput {
+            method: "cash".to_string(),
+            amount: 300,
+            reference: None,
+        },
+        PaymentSplitInput {
+            method: "card".to_string(),
+            amount: 200,
+            reference: None,
+        },
+    ]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        400,
+        "splits not summing to the total must be rejected"
+    );
+
+    // 300 + 270 = 570 → accepted.
+    req_body.payment_splits = Some(vec![
+        PaymentSplitInput {
+            method: "cash".to_string(),
+            amount: 300,
+            reference: None,
+        },
+        PaymentSplitInput {
+            method: "card".to_string(),
+            amount: 270,
+            reference: None,
+        },
+    ]);
+    let resp_ok = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert!(
+        resp_ok.status().is_success(),
+        "splits summing to the total are accepted"
+    );
+}
+
+/// A split sale's answer carries its legs, and no tender of 0.00: the create
+/// response used to return `payment_legs: []`, a till sending 0 tendered stored
+/// a "Cash 0.00", and change was measured against the whole bill. A tip with no
+/// method of its own keeps the order's method, not the 'mixed' label.
+#[sqlx::test]
+async fn split_sale_answers_with_its_legs_and_no_zero_tender(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await; // seeds cash + card
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await; // 570
+
+    let legs = |cash: i32, card: i32| {
+        Some(vec![
+            PaymentSplitInput {
+                method: "cash".into(),
+                amount: cash,
+                reference: None,
+            },
+            PaymentSplitInput {
+                method: "card".into(),
+                amount: card,
+                reference: None,
+            },
+        ])
+    };
+    let post = |body: CreateOrderRequest| {
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(body)
+            .to_request()
+    };
+
+    // Two legs, the till's "0 tendered", and a tip with no method.
+    let mut body = simple_order(branch_id, shift_id, menu_item_id);
+    body.payment_splits = legs(300, 270);
+    body.amount_tendered = Some(0);
+    body.tip_amount = Some(50);
+    let resp = test::call_service(&app, post(body)).await;
+    assert!(resp.status().is_success(), "{:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    let mut got: Vec<(String, i32)> = full
+        .order
+        .payment_legs
+        .iter()
+        .map(|l| (l.method.clone(), l.amount))
+        .collect();
+    got.sort();
+    assert_eq!(got, vec![("card".into(), 270), ("cash".into(), 300)]);
+    assert_eq!(full.order.payment_method, "mixed");
+    assert_eq!(
+        (full.order.amount_tendered, full.order.change_given),
+        (None, None)
+    );
+    assert_eq!(full.order.tip_payment_method.as_deref(), Some("cash"));
+    let lines = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orders/{}", full.order.id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    let read: OrderFull = test::read_body_json(lines).await;
+    assert_eq!(
+        read.order.payment_legs.len(),
+        2,
+        "the read agrees with the answer"
+    );
+
+    // Notes handed over for the cash leg: the change is against that leg.
+    let mut body = simple_order(branch_id, shift_id, menu_item_id);
+    body.payment_splits = legs(300, 270);
+    body.amount_tendered = Some(500);
+    let full: OrderFull = test::read_body_json(test::call_service(&app, post(body)).await).await;
+    assert_eq!(
+        (full.order.amount_tendered, full.order.change_given),
+        (Some(500), Some(200))
+    );
+}
+
+/// V6: voiding is idempotent — a second void does not double-restock inventory.
+#[sqlx::test]
+async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    let ing_id = seed_ingredient(&pool, org_id, "Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, ing_id, 20.0).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&simple_order(branch_id, shift_id, menu_item_id))
+            .to_request(),
+    )
+    .await;
+    let created: OrderFull = test::read_body_json(resp).await;
+    let order_id = created.order.id;
+
+    let void = VoidOrderRequest {
+        reason: "customer_request".into(),
+        note: None,
+        voided_at: None,
+        restore_inventory: Some(true),
+        live_approval: None,
+    };
+    for _ in 0..2 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(&format!("/orders/{}/void", order_id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&void)
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success());
+    }
+    let stock: f64 =
+        sqlx::query_scalar("SELECT on_hand::float8 FROM branch_stock WHERE org_ingredient_id=$1")
+            .bind(ing_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stock, 1000.0,
+        "double void must restore stock only once (1000, not 1020)"
+    );
+}
+
+/// V27: replaying with the same Idempotency-Key returns the SAME order.
+#[sqlx::test]
+async fn test_idempotency_key_replays_same_order(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    let key = Uuid::new_v4().to_string();
+    let body = simple_order(branch_id, shift_id, menu_item_id);
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .insert_header(("Idempotency-Key", key.clone()))
+                .set_json(&body)
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success());
+        let of: OrderFull = test::read_body_json(resp).await;
+        ids.push(of.order.id);
+    }
+    assert_eq!(
+        ids[0], ids[1],
+        "same idempotency key must return the same order"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE till_id=$1")
+        .bind(shift_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "no duplicate order created");
+}
+
+/// A replayed order whose CLIENT-MINTED `order_ref` collides — but whose idempotency
+/// key does NOT match (a device whose ref_seq counter rewound after a restore) —
+/// must return the existing order (200), NOT a 409 the offline client would
+/// dead-letter into a lost sale.
+#[sqlx::test]
+async fn test_order_ref_collision_replays_same_order(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        // Same order_ref, DIFFERENT idempotency key each attempt.
+        let mut body = simple_order(branch_id, shift_id, menu_item_id);
+        body.order_ref = Some("BR1-260620-T1-0001".to_string());
+        body.idempotency_key = Some(Uuid::new_v4());
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&body)
+                .to_request(),
+        )
+        .await;
+        assert!(
+            resp.status().is_success(),
+            "attempt {i}: order_ref replay must be 200, not 409"
+        );
+        let of: OrderFull = test::read_body_json(resp).await;
+        ids.push(of.order.id);
+    }
+    assert_eq!(ids[0], ids[1], "same order_ref must return the SAME order");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE order_ref=$1")
+        .bind("BR1-260620-T1-0001")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "no duplicate order persisted");
+}
+
+/// V13: an order cannot attach to a shift that is no longer open.
+#[sqlx::test]
+async fn test_order_rejected_on_closed_shift(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    sqlx::query("UPDATE tills SET status='closed', closed_at=now() WHERE id=$1")
+        .bind(shift_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&simple_order(branch_id, shift_id, menu_item_id))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        !resp.status().is_success(),
+        "order on a closed shift must be rejected"
+    );
+}
+
+/// V31: voided orders' discounts/tips must not inflate the order summary.
+#[sqlx::test]
+async fn test_summary_excludes_voided_discounts(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Two orders each with a fixed 100 discount; one will be voided.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let mut body = simple_order(branch_id, shift_id, menu_item_id);
+        body.discount_type = Some("fixed".to_string());
+        body.discount_value = Some(dec!(100));
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(&body)
+                .to_request(),
+        )
+        .await;
+        let of: OrderFull = test::read_body_json(resp).await;
+        ids.push(of.order.id);
+    }
+    // Void the second one.
+    let void = VoidOrderRequest {
+        reason: "customer_request".into(),
+        note: None,
+        voided_at: None,
+        restore_inventory: Some(false),
+        live_approval: None,
+    };
+    test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/orders/{}/void", ids[1]))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&void)
+            .to_request(),
+    )
+    .await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orders?branch_id={}", branch_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request(),
+    )
+    .await;
+    let list: PaginatedOrders = test::read_body_json(resp).await;
+    assert_eq!(list.summary.completed, 1);
+    assert_eq!(list.summary.voided, 1);
+    assert_eq!(
+        list.summary.discounts, 100,
+        "voided order's discount must be excluded from the summary"
+    );
+}
+
+/// V19: the bundle-COMPONENT swap path (resolve_menu_item_configuration) must
+/// convert the recipe quantity into the replacement ingredient's base unit just
+/// like the direct-item path — otherwise a g↔kg component swap mis-deducts 1000×.
+#[sqlx::test]
+async fn test_bundle_component_swap_converts_units(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // Milk in GRAMS, almond milk in KILOGRAMS — both category 'milk'.
+    let milk = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, 5, ingredient_category_id($2, 'milk'))")
+        .bind(milk).bind(org_id).execute(&pool).await.unwrap();
+    let almond = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Almond Milk', 'kg'::inventory_unit, 8000, ingredient_category_id($2, 'milk'))")
+        .bind(almond).bind(org_id).execute(&pool).await.unwrap();
+
+    add_menu_item_recipe(&pool, menu_item_id, milk, 250.0).await; // 250 g milk
+    let almond_addon = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 0).await;
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond Milk','kg')")
+        .bind(almond_addon).bind(almond).execute(&pool).await.unwrap();
+
+    let config = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
+        &pool,
+        menu_item_id,
+        None,
+        1,
+        &[madar_rust::orders::component_resolve::AddonInput {
+            addon_item_id: almond_addon,
+            quantity: 1,
+            unit_price: None,
+        }],
+        &[],
+        Uuid::new_v4(), // branch with no overrides — pricing unaffected
+    )
+    .await
+    .unwrap();
+
+    let swap = config
+        .deductions
+        .iter()
+        .find(|d| d.org_ingredient_id == Some(almond))
+        .expect("almond swap deduction must be present");
+    assert_eq!(swap.unit, "kg");
+    assert!(
+        (swap.quantity - 0.25).abs() < 1e-9,
+        "250 g must convert to 0.25 kg, got {}",
+        swap.quantity
+    );
+    // Milk was swapped out — no milk deduction remains.
+    assert!(
+        config
+            .deductions
+            .iter()
+            .all(|d| d.org_ingredient_id != Some(milk))
+    );
+}
+
+/// V30: order_payments snapshot is_cash at sale time (cash → true, card → false),
+/// so a later method rename / is_cash flip can't rewrite shift cash history.
+#[sqlx::test]
+async fn test_order_payment_snapshots_is_cash(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await; // seeds cash (is_cash true) + card (is_cash false)
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let mut body = simple_order(branch_id, shift_id, menu_item_id);
+    body.payment_splits = Some(vec![
+        PaymentSplitInput {
+            method: "cash".into(),
+            amount: 300,
+            reference: None,
+        },
+        PaymentSplitInput {
+            method: "card".into(),
+            amount: 270,
+            reference: None,
+        },
+    ]);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let of: OrderFull = test::read_body_json(resp).await;
+
+    let cash_is_cash: bool = sqlx::query_scalar(
+        "SELECT is_cash FROM order_payments WHERE order_id=$1 AND method='cash'",
+    )
+    .bind(of.order.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let card_is_cash: bool = sqlx::query_scalar(
+        "SELECT is_cash FROM order_payments WHERE order_id=$1 AND method='card'",
+    )
+    .bind(of.order.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(cash_is_cash, "cash payment must snapshot is_cash=true");
+    assert!(!card_is_cash, "card payment must snapshot is_cash=false");
+}
+
+/// Alignment: a percentage discount is ROUNDED (matching the POS preview), not
+/// truncated — 10% of 2995 = 299.5 must round to 300, not 299.
+#[sqlx::test]
+async fn test_percentage_discount_is_rounded_not_truncated(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1,$2,$3,'P',2995,true)")
+        .bind(item).bind(org_id).bind(cat_id).execute(&pool).await.unwrap();
+
+    let mut body = simple_order(branch_id, shift_id, item);
+    body.discount_type = Some("percentage".to_string());
+    body.discount_value = Some(dec!(0.10));
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let o: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(o.order.subtotal, 2995);
+    assert_eq!(
+        o.order.discount_amount, 300,
+        "0.10 of 2995 = 299.5 must round to 300"
+    );
+}
+
+/// Pricing integrity: the POS's charged prices are recorded VERBATIM and deviations
+/// from the catalog are flagged (never rejected). A branch override feeds both the
+/// "expected" price used for flagging and the legacy (no-client-price) fallback.
+#[sqlx::test]
+async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await; // base_price 500
+
+    let post = |body: CreateOrderRequest, t: String| {
+        let app = &app;
+        async move {
+            let resp = test::call_service(
+                app,
+                test::TestRequest::post()
+                    .uri("/orders")
+                    .insert_header(("Authorization", format!("Bearer {}", t)))
+                    .set_json(&body)
+                    .to_request(),
+            )
+            .await;
+            assert!(
+                resp.status().is_success(),
+                "order create failed: {:?}",
+                resp.status()
+            );
+            test::read_body_json::<OrderFull, _>(resp).await
+        }
+    };
+
+    // (1) A LIVE sale sends 600 for a 500-catalog item → the catalogue wins.
+    //
+    // This used to record 600 and flag it. A till that believes it charged a
+    // different price than the menu says is a till running a stale menu, and
+    // the answer to that is to refuse the figure, not to file it. The charged
+    // price is still honoured where it is HISTORY rather than a claim about
+    // now — see the replay test below.
+    let of = post(
+        CreateOrderRequest {
+            branch_id,
+            till_id: shift_id,
+            payment_method: "cash".to_string(),
+            items: vec![OrderItemInput {
+                menu_item_id: Some(item),
+                quantity: 1,
+                unit_price: Some(600),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        token.clone(),
+    )
+    .await;
+    assert_eq!(of.order.subtotal, 500, "the menu's price, not the till's");
+    assert_eq!(of.items[0].item.unit_price, 500);
+
+    let (flagged, expected_total): (bool, Option<i32>) =
+        sqlx::query_as("SELECT price_flagged, price_expected_total FROM orders WHERE id = $1")
+            .bind(of.order.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(
+        !flagged,
+        "nothing deviated — the server priced it, so it cannot have"
+    );
+    assert_eq!(expected_total, Some(570), "expected = 500 + 14% tax");
+
+    // (2) Branch override sets the price to 700. POS sends NO price → the branch-effective
+    // expected (700) is recorded (NOT the 500 catalog) and the order is not flagged.
+    sqlx::query(
+        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available)
+         VALUES ($1, $2, 700, true)",
+    )
+    .bind(branch_id)
+    .bind(item)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let of2 = post(
+        CreateOrderRequest {
+            branch_id,
+            till_id: shift_id,
+            payment_method: "cash".to_string(),
+            items: vec![OrderItemInput {
+                menu_item_id: Some(item),
+                quantity: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        token.clone(),
+    )
+    .await;
+    assert_eq!(
+        of2.items[0].item.unit_price, 700,
+        "branch override feeds the fallback price"
+    );
+    assert_eq!(of2.order.subtotal, 700);
+    let flagged2: bool = sqlx::query_scalar("SELECT price_flagged FROM orders WHERE id = $1")
+        .bind(of2.order.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !flagged2,
+        "charged == branch-effective expected → not flagged"
+    );
+}
+
+// ── Pricing integrity — intensive coverage ────────────────────
+
+macro_rules! create_order_ok {
+    ($app:expr, $tok:expr, $body:expr) => {{
+        let resp = test::call_service(
+            &$app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {}", $tok)))
+                .set_json(&$body)
+                .to_request(),
+        )
+        .await;
+        assert!(
+            resp.status().is_success(),
+            "order create failed: {:?}",
+            resp.status()
+        );
+        test::read_body_json::<OrderFull, _>(resp).await
+    }};
+}
+
+async fn pricing_ctx(pool: &PgPool) -> (Uuid, Uuid, String, Uuid, Uuid) {
+    let org = seed_org(pool).await;
+    let branch = seed_branch(pool, org).await;
+    let user = seed_user(pool, org, "org_admin").await;
+    grant_permission(pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user, org);
+    let shift = seed_shift(pool, branch, user).await;
+    let cat = seed_category(pool, org).await;
+    (org, branch, token, shift, cat)
+}
+
+async fn pricing_app(
+    pool: PgPool,
+) -> impl actix_web::dev::Service<
+    actix_http::Request,
+    Response = actix_web::dev::ServiceResponse,
+    Error = actix_web::Error,
+> {
+    test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await
+}
+
+async fn order_flagged(pool: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT price_flagged FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+async fn order_expected_total(pool: &PgPool, id: Uuid) -> Option<i32> {
+    sqlx::query_scalar("SELECT price_expected_total FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+async fn line_flagged(pool: &PgPool, order_id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT price_flagged FROM order_items WHERE order_id = $1 LIMIT 1")
+        .bind(order_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+async fn set_branch_override(
+    pool: &PgPool,
+    branch: Uuid,
+    item: Uuid,
+    price: Option<i32>,
+    available: bool,
+) {
+    sqlx::query(
+        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (branch_id, menu_item_id)
+         DO UPDATE SET price_override = EXCLUDED.price_override, is_available = EXCLUDED.is_available",
+    )
+    .bind(branch).bind(item).bind(price).bind(available).execute(pool).await.unwrap();
+}
+async fn add_size(pool: &PgPool, item: Uuid, label: &str, price: i32) {
+    // Written to `menu_item_sizes`: `item_sizes` is the old-client view over it
+    // now, so there is one table, not two. Giving an item its first REAL size
+    // also retires the `one_size` row it was born with — the sentinel is not a
+    // size anyone chooses, and leaving it behind would make every such item
+    // multi-size and drag its "from" price down to the sentinel's. This is what
+    // the editor's replace-set does; done in one transaction, because an item is
+    // never allowed to COMMIT with no active size.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES ($1, $2, $3)
+         ON CONFLICT (menu_item_id, label)
+         DO UPDATE SET price = EXCLUDED.price, is_active = true",
+    )
+    .bind(item)
+    .bind(label)
+    .bind(price)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+async fn seed_item_priced(pool: &PgPool, org: Uuid, cat: Uuid, name: &str, price: i32) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, $4, $5, true)")
+        .bind(id).bind(org).bind(cat).bind(name).bind(price).execute(pool).await.unwrap();
+    id
+}
+
+/// A charged price BELOW the catalog is recorded verbatim and flagged.
+#[sqlx::test]
+async fn test_create_order_charged_below_catalog_flags(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].unit_price = Some(400);
+    let of = create_order_ok!(app, token, body);
+
+    // Below the catalogue is the interesting direction: an undercharge is what
+    // a manual discount would look like if one were possible. It is not.
+    assert_eq!(of.order.subtotal, 500, "the menu's price, not the till's");
+    assert_eq!(of.items[0].item.unit_price, 500);
+    assert!(
+        !order_flagged(&pool, of.order.id).await,
+        "the server priced it, so nothing deviated"
+    );
+    assert!(!line_flagged(&pool, of.order.id).await);
+    assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
+}
+
+/// A plain order (no client prices, no override) behaves exactly as before and is not flagged.
+#[sqlx::test]
+async fn test_create_order_legacy_no_price_not_flagged(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+
+    let of = create_order_ok!(app, token, simple_order(branch, shift, item));
+    assert_eq!(of.order.subtotal, 500);
+    assert_eq!(of.order.tax_amount, 70);
+    assert_eq!(of.order.total_amount, 570);
+    assert!(
+        !order_flagged(&pool, of.order.id).await,
+        "no deviation → not flagged"
+    );
+    assert!(!line_flagged(&pool, of.order.id).await);
+    assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
+}
+
+/// The full money breakdown is recorded verbatim even when it diverges from a server recompute.
+#[sqlx::test]
+async fn test_create_order_full_breakdown_recorded_verbatim(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].unit_price = Some(500); // matches catalog → line itself not flagged
+    body.amount_tendered = Some(1000);
+    body.subtotal = Some(500);
+    body.discount_amount = Some(50);
+    body.tax_amount = Some(63);
+    body.total_amount = Some(513);
+    body.change_given = Some(480); // deliberately NOT 1000-513=487, to prove verbatim
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(of.order.subtotal, 500);
+    assert_eq!(of.order.discount_amount, 50);
+    assert_eq!(of.order.tax_amount, 63);
+    assert_eq!(of.order.total_amount, 513);
+    assert_eq!(
+        of.order.change_given,
+        Some(480),
+        "client change recorded verbatim, not recomputed"
+    );
+    assert!(
+        order_flagged(&pool, of.order.id).await,
+        "recorded total != expected 570 → flagged"
+    );
+    assert_eq!(order_expected_total(&pool, of.order.id).await, Some(570));
+}
+
+/// A till that prices a bill under a tax policy the branch no longer has is
+/// refused, and told why.
+///
+/// This is the point of making tax server-authoritative: the alternative — the
+/// one that shipped — was recording whatever the till sent, so a till with a
+/// stale rate quietly wrote the tax line of the accounts.
+#[sqlx::test]
+async fn a_total_that_ignores_the_branch_tax_policy_is_refused(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.14 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A till that still thinks the shop is tax-free.
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = Some(500); // the server makes it 570
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("570"),
+        "the refusal names the real total: {msg}"
+    );
+    assert!(
+        msg.contains("sign in again"),
+        "and says how to fix it: {msg}"
+    );
+}
+
+/// One piastre of rounding is not a disagreement.
+///
+/// A build that rounded with `f64` can differ from the decimal engine by a
+/// single minor unit on a half-piastre. Refusing a sale over that would be an
+/// outage on deploy day, so the server takes its own figure and proceeds.
+#[sqlx::test]
+async fn a_single_piastre_of_rounding_drift_is_tolerated(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.14 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = Some(569); // server says 570
+
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(
+        of.order.total_amount, 570,
+        "the server's figure is what is recorded, not the till's"
+    );
+    assert_eq!(of.order.tax_amount, 70);
+}
+
+/// The rate is written onto the order, so changing it later cannot restate the
+/// books.
+#[sqlx::test]
+async fn the_applied_rate_is_recorded_on_the_order(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.10 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = None;
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(of.order.tax_amount, 50);
+
+    // The shop puts its rate up tomorrow.
+    sqlx::query("UPDATE organizations SET tax_rate = 0.20 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (rate, tax): (rust_decimal::Decimal, i32) =
+        sqlx::query_as("SELECT tax_rate_applied, tax_amount FROM orders WHERE id = $1")
+            .bind(of.order.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tax, 50, "yesterday's sale keeps yesterday's tax");
+    assert_eq!(
+        rate.to_string(),
+        "0.1000",
+        "and says which rate produced it"
+    );
+}
+
+/// A branch may tax differently from its organisation.
+#[sqlx::test]
+async fn a_branch_override_beats_the_org_rate(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.14 WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE branches SET tax_rate = 0 WHERE id = $1")
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = None;
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(
+        of.order.tax_amount, 0,
+        "an explicit branch 0 is not 'inherit'"
+    );
+    assert_eq!(of.order.total_amount, 500);
+}
+
+/// Tax-inclusive pricing: the menu price is what the customer pays.
+#[sqlx::test]
+async fn an_inclusive_bill_charges_the_menu_price_and_breaks_the_tax_out(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    sqlx::query("UPDATE organizations SET tax_rate = 0.25, tax_inclusive = true WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.subtotal = Some(500);
+    body.total_amount = None;
+    let of = create_order_ok!(app, token, body);
+    assert_eq!(
+        of.order.total_amount, 500,
+        "the customer pays the price on the board"
+    );
+    assert_eq!(of.order.tax_amount, 100, "which already contained 25% tax");
+}
+
+/// A shop can insist every dine-in sale belongs to a table.
+#[sqlx::test]
+async fn a_till_sale_is_refused_where_the_shop_puts_everyone_on_a_table(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await;
+    sqlx::query("UPDATE organizations SET require_table_for_orders = true WHERE id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // No floor yet: a shop cannot be made to seat somebody in a room with no
+    // seats, so the rule does not bite.
+    let mut body = simple_order(branch, shift, item);
+    body.total_amount = None;
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    assert!(
+        test::call_service(&app, req).await.status().is_success(),
+        "a branch with no tables is exempt"
+    );
+
+    // Author a floor, and the same sale is refused.
+    sqlx::query("INSERT INTO branch_tables (org_id, branch_id, label) VALUES ($1, $2, 'T1')")
+        .bind(org)
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.total_amount = None;
+    body.idempotency_key = Some(Uuid::new_v4());
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), actix_web::http::StatusCode::CONFLICT);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let msg = body["error"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("Seat the party"),
+        "the refusal says what to do instead: {msg}"
+    );
+}
+
+/// A live sale ignores a charged ADDON price, exactly as it ignores the item's.
+#[sqlx::test]
+async fn test_create_order_addon_charged_price_recorded_and_flags(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    let addon = seed_addon_item(&pool, org, "Extra Shot", "extra", 100).await;
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].addons = vec![madar_rust::orders::component_resolve::AddonInput {
+        addon_item_id: addon,
+        quantity: 1,
+        unit_price: Some(150),
+    }];
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(
+        of.items[0].addons[0].unit_price, 100,
+        "the catalogue's addon price, not the till's"
+    );
+    assert_eq!(of.order.subtotal, 600, "500 item + 100 catalogue addon");
+    assert!(
+        !order_flagged(&pool, of.order.id).await,
+        "the server priced it, so nothing deviated"
+    );
+    assert_eq!(
+        order_expected_total(&pool, of.order.id).await,
+        Some(684),
+        "expected 600 + 14% tax"
+    );
+}
+
+/// A branch override replaces the base price only — explicit size prices are untouched.
+#[sqlx::test]
+async fn test_create_order_branch_override_replaces_base_not_size(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // base 500
+    add_size(&pool, item, "large", 800).await;
+    set_branch_override(&pool, branch, item, Some(600), true).await;
+
+    // Sized variant: the absolute size price (800) stands.
+    let mut sized = simple_order(branch, shift, item);
+    sized.items[0].size_label = Some("large".to_string());
+    let of = create_order_ok!(app, token, sized);
+    assert_eq!(
+        of.items[0].item.unit_price, 800,
+        "size price unchanged by a base override"
+    );
+    assert!(!order_flagged(&pool, of.order.id).await);
+
+    // Sizeless: the branch base override (600) applies, NOT the catalog 500.
+    let of2 = create_order_ok!(app, token, simple_order(branch, shift, item));
+    assert_eq!(
+        of2.items[0].item.unit_price, 600,
+        "branch base override applies to the sizeless line"
+    );
+    assert!(!order_flagged(&pool, of2.order.id).await);
+}
+
+/// A branch-disabled item that an (offline/stale) POS still sells is flagged, never rejected.
+#[sqlx::test]
+async fn test_create_order_branch_disabled_item_flagged_not_rejected(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    set_branch_override(&pool, branch, item, None, false).await; // disabled at this branch
+
+    let of = create_order_ok!(app, token, simple_order(branch, shift, item));
+    assert_eq!(
+        of.order.subtotal, 500,
+        "still priced from the (inherited) catalog"
+    );
+    assert!(
+        order_flagged(&pool, of.order.id).await,
+        "selling a branch-disabled item flags the order"
+    );
+    assert!(line_flagged(&pool, of.order.id).await);
+}
+
+/// In a multi-line order, one deviating line flags the order but not the compliant line.
+#[sqlx::test]
+async fn test_create_order_multiline_only_deviating_line_flagged(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item1 = seed_item_priced(&pool, org, cat, "Espresso", 500).await;
+    let item2 = seed_item_priced(&pool, org, cat, "Mocha", 700).await;
+
+    let mut body = simple_order(branch, shift, item1);
+    body.items[0].unit_price = Some(600); // a price the till has no business sending
+    body.items.push(OrderItemInput {
+        menu_item_id: Some(item2),
+        quantity: 1,
+        ..Default::default()
+    });
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(of.order.subtotal, 1200, "500 + 700, both from the menu");
+    assert!(
+        !order_flagged(&pool, of.order.id).await,
+        "no line could deviate: the server priced every one of them"
+    );
+
+    let rows: Vec<(i32, bool)> = sqlx::query_as(
+        "SELECT unit_price, price_flagged FROM order_items WHERE order_id = $1 ORDER BY unit_price",
+    )
+    .bind(of.order.id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![(500, false), (700, false)],
+        "only the deviating line is flagged"
+    );
+}
+
+/// A per-(branch, item, size) override is the price for that size — winning over the catalog
+/// size price and the branch base override.
+#[sqlx::test]
+async fn test_create_order_branch_size_override_applied(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // base 500
+    add_size(&pool, item, "large", 800).await;
+    set_branch_override(&pool, branch, item, Some(600), true).await; // branch base 600
+    sqlx::query(
+        "INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override)
+         VALUES ($1, $2, 'large', 950)",
+    )
+    .bind(branch).bind(item).execute(&pool).await.unwrap();
+
+    // No client price → the branch size override (950) is used, not the catalog 800 or base 600.
+    let mut sized = simple_order(branch, shift, item);
+    sized.items[0].size_label = Some("large".to_string());
+    let of = create_order_ok!(app, token, sized);
+    assert_eq!(
+        of.items[0].item.unit_price, 950,
+        "branch size override is the size price"
+    );
+    assert!(
+        !order_flagged(&pool, of.order.id).await,
+        "charged matches expected → not flagged"
+    );
+
+    // Sending something else for that size changes nothing: the branch size
+    // override is the price, whoever asks and whatever they send.
+    let mut sized = simple_order(branch, shift, item);
+    sized.items[0].size_label = Some("large".to_string());
+    sized.items[0].unit_price = Some(1000);
+    let of2 = create_order_ok!(app, token, sized);
+    assert_eq!(of2.items[0].item.unit_price, 950);
+    assert!(!order_flagged(&pool, of2.order.id).await);
+}
+
+/// A branch addon override feeds the expected addon price, so an order charging that
+/// branch price is recorded at it and not flagged.
+#[sqlx::test]
+async fn test_create_order_branch_addon_override_applied(pool: PgPool) {
+    let app = pricing_app(pool.clone()).await;
+    let (org, branch, token, shift, cat) = pricing_ctx(&pool).await;
+    let item = seed_menu_item(&pool, org, cat).await; // 500
+    let addon = seed_addon_item(&pool, org, "Extra Shot", "extra", 100).await;
+    // Branch reprices the addon to 150.
+    sqlx::query(
+        "INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available)
+         VALUES ($1, $2, 150, true)",
+    )
+    .bind(branch).bind(addon).execute(&pool).await.unwrap();
+
+    let mut body = simple_order(branch, shift, item);
+    body.items[0].addons = vec![madar_rust::orders::component_resolve::AddonInput {
+        addon_item_id: addon,
+        quantity: 1,
+        unit_price: None,
+    }];
+    let of = create_order_ok!(app, token, body);
+
+    assert_eq!(
+        of.items[0].addons[0].unit_price, 150,
+        "branch addon override feeds the addon price"
+    );
+    assert_eq!(of.order.subtotal, 650, "500 item + 150 branch addon");
+    assert!(
+        !order_flagged(&pool, of.order.id).await,
+        "charged == branch-effective expected → not flagged"
+    );
+}
+
+// ── Order ↔ shift/branch binding (defense in depth) ───────────────────────────
+//
+// The guarantee under test: an order is ALWAYS filed onto exactly the shift it
+// names, on that shift's OWN branch (resolved server-side under the per-shift
+// advisory lock), and a teller can only attach to their own shift. A wrong /
+// stale / cross-branch / cross-teller / cross-org shift_id is rejected and
+// NOTHING is filed — even if the one-open-per-branch / per-teller invariants
+// were somehow bypassed.
+
+async fn total_orders(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM orders")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+/// A second branch in the same org — `seed_branch` hardcodes the name and would
+/// collide on the unique (org_id, name) constraint.
+async fn seed_branch2(pool: &PgPool, org_id: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(org_id)
+        .bind(format!("Branch {id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+async fn orders_on_shift(pool: &PgPool, shift_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE till_id=$1")
+        .bind(shift_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The recorded branch is the SHIFT's branch (resolved server-side), not merely
+/// echoed from the request — confirmed against the persisted row.
+#[sqlx::test]
+async fn test_order_records_shift_branch_authoritatively(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let of = create_order_ok!(app, token, simple_order(branch_id, shift_id, item));
+    assert_eq!(of.order.shift_id, shift_id);
+    assert_eq!(of.order.branch_id, branch_id);
+
+    let (db_branch, db_shift): (Uuid, Uuid) =
+        sqlx::query_as("SELECT branch_id, till_id FROM orders WHERE id=$1")
+            .bind(of.order.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        db_shift, shift_id,
+        "order is filed under the shift it named"
+    );
+    assert_eq!(db_branch, branch_id, "order's branch IS the shift's branch");
+}
+
+/// A request whose branch_id disagrees with the target shift's branch is
+/// rejected — never silently filed under either branch.
+#[sqlx::test]
+async fn test_order_rejected_when_body_branch_mismatches_shift(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_1 = seed_branch(&pool, org_id).await;
+    let branch_2 = seed_branch2(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_1 = seed_shift(&pool, branch_1, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // shift_1 lives at branch_1, but the request claims branch_2.
+    let mut body = simple_order(branch_1, shift_1, item);
+    body.branch_id = branch_2;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
+    assert!(
+        !resp.status().is_success(),
+        "branch/shift disagreement must be rejected"
+    );
+    assert_eq!(
+        total_orders(&pool).await,
+        0,
+        "nothing filed when branch and shift disagree"
+    );
+}
+
+/// A request naming a shift that does not exist is rejected; nothing is filed.
+#[sqlx::test]
+async fn test_order_rejected_for_unknown_shift(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let body = simple_order(branch_id, Uuid::new_v4(), item); // shift that was never created
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&body)
+            .to_request(),
+    )
+    .await;
+    assert!(
+        !resp.status().is_success(),
+        "unknown shift must be rejected"
+    );
+    assert_eq!(total_orders(&pool).await, 0);
+}
+
+/// A stale shift_id pointing at a CLOSED shift is rejected and nothing is filed
+/// (cash on that shift is already settled).
+#[sqlx::test]
+async fn test_order_on_closed_shift_files_nothing(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    sqlx::query("UPDATE tills SET status='closed', closed_at=now() WHERE id=$1")
+        .bind(shift_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&simple_order(branch_id, shift_id, item))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        !resp.status().is_success(),
+        "order on a closed shift must be rejected"
+    );
+    assert_eq!(
+        orders_on_shift(&pool, shift_id).await,
+        0,
+        "nothing filed onto the closed shift"
+    );
+}
+
+/// THE key invariant: with TWO shifts open at once, each order lands on exactly
+/// the shift + branch it names — no cross-contamination — and a mismatched
+/// (branch_1, shift_2) pairing is rejected.
+#[sqlx::test]
+async fn test_two_open_shifts_route_orders_correctly(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_1 = seed_branch(&pool, org_id).await;
+    let branch_2 = seed_branch2(&pool, org_id).await;
+    let caller = seed_user(&pool, org_id, "org_admin").await;
+    // Distinct shift owners — the per-teller unique index forbids one user
+    // holding two open shifts, so two coexisting open shifts need two owners.
+    let owner_1 = seed_user(&pool, org_id, "org_admin").await;
+    let owner_2 = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(caller, org_id);
+    let shift_1 = seed_shift(&pool, branch_1, owner_1).await;
+    let shift_2 = seed_shift(&pool, branch_2, owner_2).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let a = create_order_ok!(app, token, simple_order(branch_1, shift_1, item));
+    let b = create_order_ok!(app, token, simple_order(branch_2, shift_2, item));
+
+    assert_eq!((a.order.shift_id, a.order.branch_id), (shift_1, branch_1));
+    assert_eq!((b.order.shift_id, b.order.branch_id), (shift_2, branch_2));
+
+    let in_1: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE till_id=$1")
+        .bind(shift_1)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let in_2: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM orders WHERE till_id=$1")
+        .bind(shift_2)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(in_1, vec![a.order.id], "shift_1 holds only its own order");
+    assert_eq!(in_2, vec![b.order.id], "shift_2 holds only its own order");
+
+    // A crossed pairing (branch_1 + shift_2) is rejected; counts stay 1 each.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&simple_order(branch_1, shift_2, item))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        !resp.status().is_success(),
+        "branch_1 + shift_2 must be rejected"
+    );
+    assert_eq!(orders_on_shift(&pool, shift_1).await, 1);
+    assert_eq!(orders_on_shift(&pool, shift_2).await, 1);
+}
+
+/// Defense in depth: even if a SECOND teller somehow holds a valid token bound
+/// to a branch where ANOTHER teller's shift is open (login normally blocks
+/// this), create_order refuses to attach their order to a shift that is not
+/// theirs — nothing is filed — while the shift's owner can still post.
+#[sqlx::test]
+async fn test_teller_cannot_post_order_to_another_tellers_shift(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    // Two tellers need distinct names (unique teller name per org).
+    let teller_1 = Uuid::new_v4();
+    let teller_2 = Uuid::new_v4();
+    for (id, nm) in [(teller_1, "Teller One"), (teller_2, "Teller Two")] {
+        sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,$3,$4,'hash','teller'::user_role)")
+            .bind(id).bind(org_id).bind(nm).bind(format!("{}@t.com", id))
+            .execute(&pool).await.unwrap();
+    }
+    assign_user_to_branch(&pool, teller_1, branch_id).await;
+    assign_user_to_branch(&pool, teller_2, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+
+    let shift_1 = seed_shift(&pool, branch_id, teller_1).await; // teller_1's open shift
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    // teller_2's token is bound to the SAME branch — the "somehow it happened" case.
+    let token_2 = generate_teller_token(teller_2, org_id, branch_id);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token_2)))
+            .set_json(&simple_order(branch_id, shift_1, item))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        !resp.status().is_success(),
+        "a teller cannot post onto another teller's shift"
+    );
+    assert_eq!(
+        orders_on_shift(&pool, shift_1).await,
+        0,
+        "nothing filed onto the other teller's shift"
+    );
+
+    // The shift's own teller CAN post, and it is attributed to them.
+    let token_1 = generate_teller_token(teller_1, org_id, branch_id);
+    let of = create_order_ok!(app, token_1, simple_order(branch_id, shift_1, item));
+    assert_eq!(of.order.shift_id, shift_1);
+    assert_eq!(
+        of.order.teller_id, teller_1,
+        "order attributed to the posting teller"
+    );
+    assert_eq!(orders_on_shift(&pool, shift_1).await, 1);
+}
+
+/// An order cannot target a shift in ANOTHER org — branch access is denied and
+/// nothing is filed.
+#[sqlx::test]
+async fn test_order_cannot_target_shift_in_another_org(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_a = seed_org(&pool).await;
+    let org_b = seed_org(&pool).await;
+    let branch_b = seed_branch(&pool, org_b).await;
+    let admin_a = seed_user(&pool, org_a, "org_admin").await;
+    let owner_b = seed_user(&pool, org_b, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token_a = generate_org_admin_token(admin_a, org_a);
+    let shift_b = seed_shift(&pool, branch_b, owner_b).await;
+    let cat_a = seed_category(&pool, org_a).await;
+    let item_a = seed_menu_item(&pool, org_a, cat_a).await;
+
+    // org-A admin tries to file an order onto org-B's branch + shift.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token_a)))
+            .set_json(&simple_order(branch_b, shift_b, item_a))
+            .to_request(),
+    )
+    .await;
+    assert!(
+        !resp.status().is_success(),
+        "cross-org order must be rejected"
+    );
+    assert_eq!(orders_on_shift(&pool, shift_b).await, 0);
+}
+
+/// Client `created_at` contract: server-stamps when omitted, accepts a near-future
+/// instant within the skew tolerance, rejects a far-future one, and honors a PAST
+/// instant — bucketing the order_ref business-day in the BRANCH timezone, not UTC.
+#[sqlx::test]
+async fn test_order_created_at_contract(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await; // "Test Branch" -> code TESTBR
+    // Tokyo (UTC+9): a UTC-evening instant is the NEXT calendar day locally.
+    sqlx::query("UPDATE branches SET timezone='Asia/Tokyo' WHERE id=$1")
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let post = |created_at: Option<chrono::DateTime<Utc>>| {
+        let mut b = simple_order(branch_id, shift_id, item_id);
+        b.created_at = created_at;
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&b)
+            .to_request()
+    };
+
+    // (a) Omitted -> server-stamped near now.
+    let resp = test::call_service(&app, post(None)).await;
+    assert!(
+        resp.status().is_success(),
+        "omit must succeed: {:?}",
+        resp.status()
+    );
+    let o: OrderFull = test::read_body_json(resp).await;
+    assert!(
+        (Utc::now() - o.order.created_at).num_seconds().abs() < 120,
+        "server-stamped near now"
+    );
+
+    // (b) Far-future -> rejected.
+    let resp =
+        test::call_service(&app, post(Some(Utc::now() + chrono::Duration::minutes(30)))).await;
+    assert_eq!(resp.status(), 400, "far-future created_at must be rejected");
+
+    // (c) Near-future within skew -> accepted.
+    let resp =
+        test::call_service(&app, post(Some(Utc::now() + chrono::Duration::minutes(2)))).await;
+    assert!(
+        resp.status().is_success(),
+        "near-future within skew must be accepted: {:?}",
+        resp.status()
+    );
+
+    // (d) Past -> honored; business-day in BRANCH tz. 2026-06-12T16:30Z = Tokyo 2026-06-13.
+    let past = chrono::DateTime::parse_from_rfc3339("2026-06-12T16:30:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let resp = test::call_service(&app, post(Some(past))).await;
+    assert!(
+        resp.status().is_success(),
+        "past created_at must be honored: {:?}",
+        resp.status()
+    );
+    let o: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(
+        o.order.created_at.timestamp(),
+        past.timestamp(),
+        "created_at must round-trip"
+    );
+    let r = o.order.order_ref.expect("order_ref present");
+    let parts: Vec<&str> = r.split('-').collect();
+    assert_eq!(
+        parts[1], "260613",
+        "business-day must be the Tokyo date (260613), not UTC (260612): {r}"
+    );
+}
+
+/// Void honors a past voided_at (offline) and rejects a future one (clock guard).
+#[sqlx::test]
+async fn test_void_voided_at_guard(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    grant_permission(&pool, "org_admin", "orders", "update").await;
+    grant_permission(&pool, "org_admin", "orders", "delete").await; // void
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id).await;
+
+    let void = |oid: Uuid, voided_at: Option<chrono::DateTime<Utc>>| {
+        test::TestRequest::post()
+            .uri(&format!("/orders/{}/void", oid))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&VoidOrderRequest {
+                reason: "customer_request".into(),
+                note: None,
+                voided_at,
+                restore_inventory: Some(false),
+                live_approval: None,
+            })
+            .to_request()
+    };
+
+    // Future voided_at -> rejected.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&simple_order(branch_id, shift_id, item_id))
+            .to_request(),
+    )
+    .await;
+    let id1 = {
+        let o: OrderFull = test::read_body_json(resp).await;
+        o.order.id
+    };
+    let resp = test::call_service(
+        &app,
+        void(id1, Some(Utc::now() + chrono::Duration::minutes(30))),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "future voided_at must be rejected");
+
+    // Past voided_at -> honored & stored.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .set_json(&simple_order(branch_id, shift_id, item_id))
+            .to_request(),
+    )
+    .await;
+    let id2 = {
+        let o: OrderFull = test::read_body_json(resp).await;
+        o.order.id
+    };
+    let past = Utc::now() - chrono::Duration::hours(2);
+    let resp = test::call_service(&app, void(id2, Some(past))).await;
+    assert!(
+        resp.status().is_success(),
+        "past voided_at must be honored: {:?}",
+        resp.status()
+    );
+    let voided: Order = test::read_body_json(resp).await;
+    assert_eq!(
+        voided.voided_at.unwrap().timestamp(),
+        past.timestamp(),
+        "voided_at round-trips"
+    );
+}
+
+// ── Split payments are visible by their real legs ─────────────
+
+/// A split sale is stored as `orders.payment_method = 'mixed'` with the real
+/// tenders in `order_payments`. Every money report buckets by the tenders, so
+/// filtering the orders list by the nominal label alone hid the card half of a
+/// split sale here while the sales report counted it — the "card is sometimes
+/// off" gap. Filtering on a leg must find the order, and the row must carry the
+/// legs so the UI can show them.
+#[sqlx::test]
+async fn split_payment_orders_filter_and_display_by_real_legs(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    grant_permission(&pool, "teller", "orders", "read").await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    // The nominal label a real POS sends for a split tender.
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, label_translations, color, icon, is_cash, is_active)
+         VALUES ($1, 'mixed', '{}', 'slate', 'call_split', false, true)",
+    )
+    .bind(org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // This test is about payment LEGS, so the bill is kept tax-free and the
+    // legs sum to it exactly. (A seeded org inherits the 0.14 column default;
+    // leaving it would make the server price this bill at 684 and refuse a
+    // 600 total, which is a different test — see
+    // `a_total_that_ignores_the_branch_tax_policy_is_refused`.)
+    sqlx::query("UPDATE organizations SET tax_rate = 0 WHERE id = $1")
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // One split sale: card 400 + cash 200.
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({
+            "branch_id": branch_id,
+            "shift_id": shift_id,
+            "payment_method": "mixed",
+            "items": [{ "menu_item_id": item_id, "quantity": 1 }],
+            "subtotal": 600, "discount_amount": 0, "tax_amount": 0, "total_amount": 600,
+            "payment_splits": [
+                { "method": "card", "amount": 400 },
+                { "method": "cash", "amount": 200 }
+            ]
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 201, "split order should be created");
+
+    let list = |q: &str| {
+        let uri = format!("/orders?branch_id={branch_id}&{q}");
+        test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+
+    // Filtering by a LEG finds the split order — this is what makes the orders
+    // list agree with the sales report's card bucket.
+    let by_card: PaginatedOrders =
+        test::read_body_json(test::call_service(&app, list("payment_method=card")).await).await;
+    assert_eq!(
+        by_card.total, 1,
+        "filtering by 'card' must find the split sale"
+    );
+
+    let by_cash: PaginatedOrders =
+        test::read_body_json(test::call_service(&app, list("payment_method=cash")).await).await;
+    assert_eq!(by_cash.total, 1, "the same split sale also tendered cash");
+
+    // The nominal label still works, so "show me split sales" is expressible.
+    let by_mixed: PaginatedOrders =
+        test::read_body_json(test::call_service(&app, list("payment_method=mixed")).await).await;
+    assert_eq!(by_mixed.total, 1);
+
+    // And the row carries the legs, so the UI need not guess what 'mixed' means.
+    let order = &by_card.data[0];
+    assert_eq!(order.payment_method, "mixed");
+    let mut legs: Vec<(String, i32)> = order
+        .payment_legs
+        .iter()
+        .map(|l| (l.method.clone(), l.amount))
+        .collect();
+    legs.sort();
+    assert_eq!(
+        legs,
+        vec![("card".to_string(), 400), ("cash".to_string(), 200)]
+    );
+}
+
+/// `order_payments.method` stores the method's NAME as free text and every money
+/// report groups by that string, so a rename has to carry the history with it —
+/// otherwise yesterday's "card" and today's "Credit Card" become two buckets and
+/// the totals stop matching.
+#[sqlx::test]
+async fn renaming_a_payment_method_carries_history(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure)
+            .configure(madar_rust::payment_methods::routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    grant_permission(&pool, "org_admin", "payment_methods", "update").await;
+
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, subtotal,
+             discount_amount, tax_amount, total_amount, status, order_number, payment_method,
+             tip_amount, tip_payment_method, tip_is_cash, order_ref)
+         VALUES (gen_random_uuid(), $1, $2, $3, gen_random_uuid(), 1000, 0, 0, 1000,
+                 'completed', 1, 'card', 50, 'card', false, gen_random_uuid()::text)",
+    )
+    .bind(branch_id)
+    .bind(user_id)
+    .bind(shift_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO order_payments (order_id, method, amount, is_cash)
+         SELECT id, 'card', 1000, false FROM orders WHERE till_id = $1",
+    )
+    .bind(shift_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let card_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM org_payment_methods WHERE org_id = $1 AND name = 'card'",
+    )
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/payment-methods/{card_id}"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "name": "credit_card" }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 200);
+
+    let orphans: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM order_payments WHERE method = 'card')
+              + (SELECT COUNT(*) FROM orders WHERE payment_method = 'card')
+              + (SELECT COUNT(*) FROM orders WHERE tip_payment_method = 'card')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        orphans, 0,
+        "a rename must leave no history pointing at the old name, or reports \
+         silently split into two buckets"
+    );
+
+    let renamed: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)::bigint FROM order_payments WHERE method = 'credit_card'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(renamed, 1000, "the money must follow the rename intact");
+
+    // is_cash is snapshotted per row and must NOT be restated by a rename.
+    let is_cash: Option<bool> =
+        sqlx::query_scalar("SELECT is_cash FROM order_payments WHERE method = 'credit_card'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(is_cash, Some(false));
+}
+
+// ── A void is one transaction ─────────────────────────────────────────────────
+
+/// The counter sale the void tests tear up: one item with a recipe, so the
+/// void has stock to put back, rung by an org admin on their own shift.
+async fn ring_up_a_sale(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid, Uuid, String) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(pool).await;
+    let branch_id = seed_branch(pool, org_id).await;
+    let user_id = seed_user(pool, org_id, "org_admin").await;
+    grant_permission(pool, "org_admin", "orders", "create").await;
+    grant_permission(pool, "org_admin", "orders", "delete").await; // void
+    grant_permission(pool, "org_admin", "orders", "update").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(pool, branch_id, user_id).await;
+    let cat_id = seed_category(pool, org_id).await;
+    let menu_item_id = seed_menu_item(pool, org_id, cat_id).await;
+    let ing_id = seed_ingredient(pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(pool, menu_item_id, ing_id, 20.0).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&simple_order(branch_id, shift_id, menu_item_id))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let created: OrderFull = test::read_body_json(resp).await;
+    (
+        org_id,
+        branch_id,
+        user_id,
+        shift_id,
+        created.order.id,
+        token,
+    )
+}
+
+/// A void is ONE transaction that writes every dependent state — asserted on
+/// every table it touches, because "the status flipped" was all the old void
+/// could promise. The loyalty reversal is the ledger trigger's
+/// (`orders_reverse_loyalty_on_void`), fired by the same UPDATE and committed
+/// with it; the kitchen close and the inventory reversal are the handler's.
+/// The delivery row is asserted UNCHANGED, on purpose: see the comment at the
+/// end of `void_order_inner`.
+#[sqlx::test]
+async fn a_void_is_one_transaction_across_every_ledger(pool: PgPool) {
+    let (org_id, branch_id, user_id, _shift_id, order_id, token) = ring_up_a_sale(&pool).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    // The sale earned the customer 50 points (the award endpoint's row, seeded
+    // the way the loyalty tests seed it; the ledger trigger books the balance).
+    let member: Uuid = common::members::seed_loyalty_member(
+        &pool,
+        org_id,
+        "+201000000001",
+        "Ali",
+        &format!("tok-{order_id}"),
+    )
+    .await;
+    let earn: Uuid = sqlx::query_scalar(
+        "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, source) \
+         VALUES ($1, $2, $3, 'earn', 'points', 50, $4, 'sale') RETURNING id",
+    )
+    .bind(org_id)
+    .bind(member)
+    .bind(branch_id)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let balance = |pool: &PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT points_balance FROM loyalty_customers WHERE id = $1",
+            )
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(balance(&pool).await, 50);
+
+    // The sale also finalized a delivery order (linked both ways, as finalize
+    // leaves them).
+    let delivery: Uuid = sqlx::query_scalar(
+        "INSERT INTO delivery_orders (org_id, branch_id, channel, status, customer_name, customer_phone, \
+             cart, subtotal, delivery_fee, total, tax_amount, tax_rate_applied, tax_inclusive, \
+             payment_method, delivered_at, order_id) \
+         VALUES ($1, $2, 'outside', 'delivered', 'Ali', '+201000000001', '{}'::jsonb, 0, 0, 0, 0, 0, false, \
+                 'cash', now(), $3) RETURNING id",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE orders SET delivery_order_id = $2 WHERE id = $1")
+        .bind(order_id)
+        .bind(delivery)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // What the void has to undo: a kitchen ticket still firing, 20g of beans gone.
+    let (k_status, k_closed): (String, bool) = sqlx::query_as(
+        "SELECT status::text, closed_at IS NOT NULL FROM kitchen_tickets WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((k_status.as_str(), k_closed), ("firing", false));
+    let on_hand = |pool: &PgPool| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, f64>(
+                "SELECT on_hand::float8 FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = \
+                 (SELECT org_ingredient_id FROM inventory_movements WHERE source_id = $2 LIMIT 1)",
+            )
+            .bind(branch_id)
+            .bind(order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(on_hand(&pool).await, 980.0);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/orders/{order_id}/void"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&VoidOrderRequest {
+                reason: "wrong_order".into(),
+                note: Some("rang twice".into()),
+                voided_at: None,
+                restore_inventory: Some(true),
+                live_approval: None,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // The order: an event with an actor, a reason and a note.
+    let (status, voided_by, reason, note, voided): (
+        String,
+        Option<Uuid>,
+        Option<String>,
+        Option<String>,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT status::text, voided_by, void_reason::text, void_note, voided_at IS NOT NULL \
+             FROM orders WHERE id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "voided");
+    assert_eq!(voided_by, Some(user_id));
+    assert_eq!(reason.as_deref(), Some("wrong_order"));
+    assert_eq!(note.as_deref(), Some("rang twice"));
+    assert!(voided);
+
+    // Loyalty: the earn is reversed, by the void, and the balance is back.
+    let reversal: Option<(String, String, i32, Option<Uuid>)> = sqlx::query_as(
+        "SELECT kind::text, source, points, created_by FROM loyalty_transactions \
+         WHERE reverses_id = $1",
+    )
+    .bind(earn)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        reversal,
+        Some(("reverse_earn".into(), "void".into(), -50, Some(user_id))),
+        "the ledger says the void took the points back"
+    );
+    assert_eq!(balance(&pool).await, 0);
+
+    // The kitchen: voided, closed `voided`, by the voider, lines off the queue.
+    let (k_status, k_reason, k_by): (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT status::text, close_reason::text, closed_by FROM kitchen_tickets WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (k_status.as_str(), k_reason.as_deref(), k_by),
+        ("voided", Some("voided"), Some(user_id))
+    );
+    let live_lines: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM kitchen_ticket_items i JOIN kitchen_tickets kt ON kt.id = i.kitchen_ticket_id \
+         WHERE kt.order_id = $1 AND i.voided_at IS NULL",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live_lines, 0);
+
+    // Inventory: the sale deduction is reversed through the ledger, stock is back.
+    let movements: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT type::text, quantity::float8 FROM inventory_movements \
+         WHERE source_type = 'order' AND source_id = $1 ORDER BY created_at, type",
+    )
+    .bind(order_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        movements,
+        vec![("sale".into(), -20.0), ("void_restock".into(), 20.0)]
+    );
+    assert_eq!(on_hand(&pool).await, 1000.0);
+
+    // The delivery row is the delivery, not the sale: it stays `delivered`
+    // and linked, as `delivery_orders_sale_means_delivered` requires. "Was
+    // its sale voided" is the join through `orders.status` above.
+    let (d_status, d_order): (String, Option<Uuid>) =
+        sqlx::query_as("SELECT status::text, order_id FROM delivery_orders WHERE id = $1")
+            .bind(delivery)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((d_status.as_str(), d_order), ("delivered", Some(order_id)));
+}
+
+/// Owner ruling 4: a void corrects a mistake on an unpaid bill; a refund
+/// returns money already taken. A sale that has given money back cannot be
+/// voided — the books already say it happened. Refund the remainder instead.
+#[sqlx::test]
+async fn a_sale_that_has_refunded_money_cannot_be_voided(pool: PgPool) {
+    let (_org_id, _branch_id, user_id, shift_id, order_id, token) = ring_up_a_sale(&pool).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by) \
+         VALUES ($1, $2, 100, 'cash', true, 'goodwill', $3)",
+    )
+    .bind(order_id)
+    .bind(shift_id)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/orders/{order_id}/void"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&VoidOrderRequest {
+                reason: "customer_request".into(),
+                note: None,
+                voided_at: None,
+                restore_inventory: Some(true),
+                live_approval: None,
+            })
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 409, "the sale stands; refund the rest");
+    let status: String = sqlx::query_scalar("SELECT status::text FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        status, "completed",
+        "a partial refund leaves the status alone"
+    );
+}
+
+/// An old till's void reason is READ, not refused.
+///
+/// The same break as the discount convention, on the next field along. Void
+/// reasons became an enum; the TICKET void has read the old picker's labels
+/// leniently since that landed, and the ORDER void validated strictly — so a
+/// till still on the previous build could not void a counter sale at all.
+///
+/// Nothing a person typed is thrown away: an unrecognised reason lands as
+/// `other` carrying the whole string as the note.
+#[sqlx::test]
+async fn test_void_reason_from_an_old_till_is_read_not_refused(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    for a in ["create", "read", "update", "delete"] {
+        grant_permission(&pool, "org_admin", "orders", a).await;
+    }
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+
+    async fn void_with(
+        app: &impl actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+        pool: &PgPool,
+        token: &str,
+        order_id: Uuid,
+        reason: &str,
+    ) -> (Option<String>, Option<String>) {
+        let resp = test::call_service(
+            app,
+            test::TestRequest::post()
+                .uri(&format!("/orders/{order_id}/void"))
+                .insert_header(("Authorization", format!("Bearer {token}")))
+                .set_json(&serde_json::json!({ "reason": reason }))
+                .to_request(),
+        )
+        .await;
+        assert!(resp.status().is_success(), "{:?}", resp.status());
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT void_reason::text, void_note FROM orders WHERE id = $1",
+        )
+        .bind(order_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    let fresh = async || {
+        create_order_ok!(app, token, simple_order(branch_id, shift_id, item))
+            .order
+            .id
+    };
+
+    // The old picker's own label.
+    let (reason, note) = void_with(&app, &pool, &token, fresh().await, "Order mistake").await;
+    assert_eq!(reason.as_deref(), Some("wrong_order"));
+    assert_eq!(note, None);
+
+    // Label and note, the way the old picker composed them.
+    let (reason, note) =
+        void_with(&app, &pool, &token, fresh().await, "Quality issue — cold").await;
+    assert_eq!(reason.as_deref(), Some("quality_issue"));
+    assert_eq!(note.as_deref(), Some("cold"));
+
+    // Something nobody anticipated: kept verbatim rather than dropped.
+    let (reason, note) = void_with(
+        &app,
+        &pool,
+        &token,
+        fresh().await,
+        "cat walked across the till",
+    )
+    .await;
+    assert_eq!(reason.as_deref(), Some("other"));
+    assert_eq!(note.as_deref(), Some("cat walked across the till"));
+
+    // And today's spelling still means what it says.
+    let (reason, note) = void_with(&app, &pool, &token, fresh().await, "customer_request").await;
+    assert_eq!(reason.as_deref(), Some("customer_request"));
+    assert_eq!(note, None);
+}
+
+/// A line with two milks (or two coffees) cannot be made: each swap replaces
+/// the recipe's ingredient. Refused with a 400 naming the family; one milk plus
+/// one coffee is fine.
+#[sqlx::test]
+async fn a_line_with_two_milks_keeps_the_last(pool: PgPool) {
+    use madar_rust::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
+    let org_id = seed_org(&pool).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    let oat = seed_addon_item(&pool, org_id, "Oat Milk", "milk_type", 1000).await;
+    let almond = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 1000).await;
+    let decaf = seed_addon_item(&pool, org_id, "Decaf", "coffee_type", 0).await;
+    let input = |id| AddonInput {
+        addon_item_id: id,
+        quantity: 1,
+        unit_price: None,
+    };
+
+    // An old till in the field (or its outbox) still sends two: not refused,
+    // the last pick wins at quantity 1.
+    let two = AddonInput {
+        quantity: 2,
+        ..input(almond)
+    };
+    let res = resolve_menu_item_configuration(
+        &pool,
+        menu_item_id,
+        None,
+        1,
+        &[input(oat), two],
+        &[],
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("a line from an old till still syncs");
+    let kept: Vec<(Uuid, i32)> = res
+        .addons
+        .iter()
+        .map(|a| (a.addon_item_id, a.quantity))
+        .collect();
+    assert_eq!(kept, vec![(almond, 1)]);
+
+    resolve_menu_item_configuration(
+        &pool,
+        menu_item_id,
+        None,
+        1,
+        &[input(oat), input(decaf)],
+        &[],
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("one milk and one coffee is a normal drink");
+
+    // And no writer can make a milk group multi-select again.
+    let gid: Uuid = sqlx::query_scalar(
+        "INSERT INTO modifier_groups (org_id, name, selection_type, min_selections, legacy_addon_type) \
+         VALUES ($1, 'Milk', 'multi', 0, 'milk_type') RETURNING id",
+    )
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (sel, max): (String, Option<i32>) =
+        sqlx::query_as("SELECT selection_type, max_selections FROM modifier_groups WHERE id = $1")
+            .bind(gid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((sel.as_str(), max), ("single", Some(1)));
+}
+
+// ════════════════════════════════════════════════════════════════════
+// B4: deterministic picks (size fallback, swap replacement, swap base price)
+// ════════════════════════════════════════════════════════════════════
+
+async fn seed_cat_ingredient(pool: &PgPool, org_id: Uuid, name: &str, slug: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, 'g'::inventory_unit, 1, ingredient_category_id($2, $4))")
+        .bind(id).bind(org_id).bind(name).bind(slug).execute(pool).await.unwrap();
+    id
+}
+
+async fn legacy_recipe_line(
+    pool: &PgPool,
+    item: Uuid,
+    size: &str,
+    ing: Uuid,
+    name: &str,
+    qty: f64,
+) {
+    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, $4, $5, 'g')")
+        .bind(item).bind(ing).bind(qty).bind(size).bind(name).execute(pool).await.unwrap();
+}
+
+async fn legacy_addon_line(pool: &PgPool, addon: Uuid, ing: Uuid, name: &str) {
+    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, $2, 1, $3, 'g')")
+        .bind(addon).bind(ing).bind(name).execute(pool).await.unwrap();
+}
+
+#[sqlx::test]
+async fn resolver_size_fallback_uses_display_order_not_label(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+    for (label, sort) in [("Cup", 0), ("Can", 1)] {
+        sqlx::query("INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, $2, 100, $3)")
+            .bind(item).bind(label).bind(sort).execute(&pool).await.unwrap();
+    }
+    let cup_milk = seed_cat_ingredient(&pool, org_id, "Cup milk", "milk").await;
+    let can_milk = seed_cat_ingredient(&pool, org_id, "Can milk", "milk").await;
+    legacy_recipe_line(&pool, item, "Can", can_milk, "Can milk", 250.0).await;
+    legacy_recipe_line(&pool, item, "Cup", cup_milk, "Cup milk", 180.0).await;
+
+    let r = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
+        &pool,
+        item,
+        None,
+        1,
+        &[],
+        &[],
+        branch_id,
+    )
+    .await
+    .unwrap();
+    let ids: Vec<Option<Uuid>> = r.deductions.iter().map(|d| d.org_ingredient_id).collect();
+    assert_eq!(
+        ids,
+        vec![Some(cup_milk)],
+        "Cup (sort 0) wins over alphabetical Can"
+    );
+}
+
+#[sqlx::test]
+async fn resolver_swap_picks_are_deterministic(pool: PgPool) {
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let item = seed_menu_item(&pool, org_id, cat_id).await;
+    let whole = seed_cat_ingredient(&pool, org_id, "Whole milk", "milk").await;
+    let oat_a = seed_cat_ingredient(&pool, org_id, "Alpha oat", "milk").await;
+    let oat_z = seed_cat_ingredient(&pool, org_id, "Zeta oat", "milk").await;
+    legacy_recipe_line(&pool, item, "one_size", whole, "Whole milk", 200.0).await;
+
+    // Two options carry the base milk: "Whole" (sort 0, free) and "Barista" (sort 1,
+    // +20). By name Barista is first and MAX picked 20; the default is Whole.
+    let whole_addon = seed_addon_item(&pool, org_id, "Whole", "milk_type", 0).await;
+    let barista = seed_addon_item(&pool, org_id, "Barista", "milk_type", 20).await;
+    let oat = seed_addon_item(&pool, org_id, "Oat", "milk_type", 55).await;
+    legacy_addon_line(&pool, whole_addon, whole, "Whole milk").await;
+    legacy_addon_line(&pool, barista, whole, "Whole milk").await;
+    // Oat has two lines (lint F7); inserted Zeta first — Alpha must still win.
+    legacy_addon_line(&pool, oat, oat_z, "Zeta oat").await;
+    legacy_addon_line(&pool, oat, oat_a, "Alpha oat").await;
+    let group: Uuid = sqlx::query_scalar("INSERT INTO modifier_groups (org_id, name, legacy_addon_type) VALUES ($1, 'Milk', 'milk_type') RETURNING id")
+        .bind(org_id).fetch_one(&pool).await.unwrap();
+    for (id, name, sort) in [
+        (whole_addon, "Whole", 0),
+        (barista, "Barista", 1),
+        (oat, "Oat", 2),
+    ] {
+        sqlx::query(
+            "INSERT INTO modifier_options (id, group_id, name, sort) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(group)
+        .bind(name)
+        .bind(sort)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let addons = [madar_rust::orders::component_resolve::AddonInput {
+        addon_item_id: oat,
+        quantity: 1,
+        unit_price: None,
+    }];
+    let r = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
+        &pool,
+        item,
+        None,
+        1,
+        &addons,
+        &[],
+        branch_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        r.addons[0].unit_price, 55,
+        "charged above the default (Whole, 0), not MAX (20)"
+    );
+    let swapped: Vec<Option<Uuid>> = r.deductions.iter().map(|d| d.org_ingredient_id).collect();
+    assert_eq!(
+        swapped,
+        vec![Some(oat_a)],
+        "replacement = first line by ingredient name"
+    );
+
+    // default_milk_addon_id (GET /menu-items) follows the same display order.
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(madar_rust::menu::routes::configure),
+    )
+    .await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu-items?org_id={org_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let row = body
+        .as_array()
+        .or_else(|| body["data"].as_array())
+        .or_else(|| body["items"].as_array())
+        .expect("list body")
+        .iter()
+        .find(|m| m["id"] == item.to_string())
+        .cloned()
+        .unwrap();
+    assert_eq!(row["default_milk_addon_id"], whole_addon.to_string());
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// No order may be negative (owner, 2026-09-18)
+//
+// The rule is split: a DISCOUNT is capped, and every other negative figure is
+// REFUSED. These pin both halves on the live route. `sync::tests` pins the
+// replay half, which is where a negative can actually arrive from a till.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Org + branch + teller + till + a 5.00 menu item, ready to ring a sale.
+async fn negative_money_fixture(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid, Uuid, String) {
+    let org_id = seed_org(pool).await;
+    let branch_id = seed_branch(pool, org_id).await;
+    let user_id = seed_user(pool, org_id, "teller").await;
+    assign_user_to_branch(pool, user_id, branch_id).await;
+    grant_permission(pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let till_id = seed_shift(pool, branch_id, user_id).await;
+    let cat_id = seed_category(pool, org_id).await;
+    let item_id = seed_menu_item(pool, org_id, cat_id).await;
+    (org_id, branch_id, user_id, till_id, item_id, token)
+}
+
+fn one_item_order(branch_id: Uuid, till_id: Uuid, item_id: Uuid) -> CreateOrderRequest {
+    CreateOrderRequest {
+        branch_id,
+        till_id,
+        payment_method: "cash".to_string(),
+        items: vec![OrderItemInput {
+            menu_item_id: Some(item_id),
+            quantity: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+macro_rules! neg_app {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(get_secret()))
+                .configure(routes::configure),
+        )
+        .await
+    };
+}
+
+async fn post_order(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    body: &CreateOrderRequest,
+) -> actix_web::http::StatusCode {
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(body)
+        .to_request();
+    test::call_service(app, req).await.status()
+}
+
+/// A till stating a subtotal below zero is told no — and, crucially, is told
+/// no rather than taking the request thread down. `clamp(0, subtotal)` panics
+/// when `subtotal` is negative (`min > max`), so this used to be a 500.
+#[sqlx::test]
+async fn a_negative_subtotal_is_refused_rather_than_panicking(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.subtotal = Some(-1);
+    let status = post_order(&app, &token, &body).await;
+    assert_eq!(
+        status, 400,
+        "a negative subtotal must be a refusal, not a 500"
+    );
+
+    // And nothing was written.
+    let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE branch_id = $1")
+        .bind(branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(orders, 0);
+}
+
+/// A split leg below zero. It used to reconcile perfectly against the total
+/// when paired with a larger positive leg, and then be refused row by row
+/// halfway through the write.
+#[sqlx::test]
+async fn a_negative_split_leg_is_refused_even_when_the_legs_add_up(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    // 500 + 70 tax = 570. The legs sum to 570 exactly — and one of them is
+    // less than nothing.
+    body.payment_splits = Some(vec![
+        PaymentSplitInput {
+            method: "cash".into(),
+            amount: 1070,
+            reference: None,
+        },
+        PaymentSplitInput {
+            method: "cash".into(),
+            amount: -500,
+            reference: None,
+        },
+    ]);
+    assert_eq!(post_order(&app, &token, &body).await, 400);
+}
+
+#[sqlx::test]
+async fn negative_cash_taken_or_change_given_is_refused(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.amount_tendered = Some(-100);
+    assert_eq!(post_order(&app, &token, &body).await, 400);
+
+    let mut body = one_item_order(branch, till, item);
+    body.change_given = Some(-100);
+    assert_eq!(post_order(&app, &token, &body).await, 400);
+}
+
+/// The OTHER half of the rule, and the one that must not become a refusal: a
+/// discount bigger than the bill is CAPPED and the sale goes through at zero.
+/// A teller with a customer in front of them is never stuck over this.
+#[sqlx::test]
+async fn a_fixed_discount_larger_than_the_bill_sells_at_zero_rather_than_refusing(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.discount_type = Some("fixed".into());
+    body.discount_value = Some(dec!(999999));
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.subtotal, 500);
+    assert_eq!(full.order.discount_amount, 500, "capped at the subtotal");
+    assert_eq!(full.order.tax_amount, 0);
+    assert_eq!(full.order.total_amount, 0);
+}
+
+/// A percentage above 100 takes the whole bill and no more — never a rebate.
+///
+/// Written in the LEGACY spelling (`150` = 150%) on purpose. Under today's
+/// convention a percentage is a fraction and cannot exceed `1`, so
+/// `resolve_discount_value` reads anything above `1` as the pre-2026-09
+/// spelling and divides by 100 — which means an over-100% percentage can only
+/// reach the engine this way. The cap has to hold on that path too, and this
+/// is the path a stale till actually uses.
+#[sqlx::test]
+async fn a_percentage_over_a_hundred_sells_at_zero_and_never_pays_the_customer(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.discount_type = Some("percentage".into());
+    body.discount_value = Some(dec!(150)); // legacy spelling for 150%
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.discount_amount, 500);
+    assert_eq!(full.order.total_amount, 0);
+}
+
+/// Exactly 100% in today's spelling: the whole bill off, tax and service
+/// charge included, and a total of zero rather than anything below it.
+#[sqlx::test]
+async fn a_hundred_percent_off_lands_on_zero_with_no_tax_left_behind(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (_org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+
+    let mut body = one_item_order(branch, till, item);
+    body.discount_type = Some("percentage".into());
+    body.discount_value = Some(dec!(1));
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.discount_amount, 500);
+    assert_eq!(full.order.tax_amount, 0);
+    assert_eq!(full.order.total_amount, 0);
+}
+
+/// An order of nothing but zero-priced items is a zero bill, not a negative
+/// one — and a discount on it takes nothing rather than going under.
+#[sqlx::test]
+async fn an_order_of_only_zero_priced_items_is_zero_not_negative(pool: PgPool) {
+    let app = neg_app!(pool);
+    let (org, branch, _user, till, item, token) = negative_money_fixture(&pool).await;
+    // Reuse the fixture's category (its name is unique per org).
+    let cat: Uuid = sqlx::query_scalar("SELECT category_id FROM menu_items WHERE id = $1")
+        .bind(item)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let free = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) \
+         VALUES ($1, $2, $3, 'Tap water', 0, true)",
+    )
+    .bind(free)
+    .bind(org)
+    .bind(cat)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut body = one_item_order(branch, till, free);
+    body.discount_type = Some("fixed".into());
+    body.discount_value = Some(dec!(5000));
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let full: OrderFull = test::read_body_json(resp).await;
+    assert_eq!(full.order.subtotal, 0);
+    assert_eq!(full.order.discount_amount, 0);
+    assert_eq!(full.order.total_amount, 0);
+}
+
+/// A ZERO-PRICED line still takes its recipe off the stock.
+///
+/// This is the fact the staff drinks pool rests on (STAFF_POOL.md, owner
+/// decision 7: "Stock still deducts — the drink was made"). A staff drink is
+/// the REAL menu item rung at zero, so the deduction it causes is the ordinary
+/// one every sale causes; the loop in `create_order` walks `resolved.deductions`,
+/// which comes from the recipe and never looks at price.
+///
+/// It is worth pinning because the thing the pool REPLACES got this wrong. The
+/// duplicate zero-priced "… staff" items Drops rang until now carry no recipe
+/// at all — all 16 of them, confirmed against the 2026-09-15 prod dump — so
+/// staff consumption was never coming off the books. Ringing the real item is
+/// what fixes that, and this test is the reason we can say so.
+#[sqlx::test]
+async fn a_zero_priced_line_still_takes_its_recipe_off_the_stock(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "teller").await;
+    assign_user_to_branch(&pool, user_id, branch_id).await;
+    grant_permission(&pool, "teller", "orders", "create").await;
+    let token = generate_teller_token(user_id, org_id, branch_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+
+    // A drink that costs the customer nothing, and the shop a real 18g of beans.
+    let free_item = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) \
+         VALUES ($1, $2, $3, 'Staff latte', 0, true)",
+    )
+    .bind(free_item)
+    .bind(org_id)
+    .bind(cat_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let ing_id = seed_ingredient(&pool, org_id, "Coffee Beans", "g").await;
+    seed_branch_inventory(&pool, branch_id, ing_id, 1000.0).await;
+    add_menu_item_recipe(&pool, free_item, ing_id, 18.0).await;
+
+    let req_body = CreateOrderRequest {
+        branch_id,
+        till_id: shift_id,
+        payment_method: "cash".to_string(),
+        amount_tendered: Some(0),
+        items: vec![OrderItemInput {
+            menu_item_id: Some(free_item),
+            bundle_id: None,
+            size_label: None,
+            quantity: 1,
+            addons: vec![],
+            optional_field_ids: vec![],
+            bundle_components: vec![],
+            unit_price: None,
+            notes: None,
+        }],
+        ..Default::default()
+    };
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(&req_body)
+            .to_request(),
+    )
+    .await;
+    assert!(
+        resp.status().is_success(),
+        "a free drink is still a sale: {:?}",
+        resp.status()
+    );
+
+    let order_full: OrderFull = test::read_body_json(resp).await;
+    // It rang at zero and it is STILL A SALE — it does not vanish from the books.
+    assert_eq!(order_full.order.subtotal, 0);
+    assert_eq!(order_full.order.total_amount, 0);
+    assert_eq!(order_full.order.status, "completed");
+
+    // And the beans are gone.
+    let on_hand: f64 = sqlx::query_scalar(
+        "SELECT on_hand::float8 FROM branch_stock WHERE branch_id = $1 AND org_ingredient_id = $2",
+    )
+    .bind(branch_id)
+    .bind(ing_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        on_hand, 982.0,
+        "18g of beans must come off a drink that was made"
+    );
+
+    // Recorded as a real sale movement against this order, not a special case.
+    let moves: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_movements \
+          WHERE source_type = 'order' AND source_id = $1 AND type = 'sale'",
+    )
+    .bind(order_full.order.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(moves, 1);
+}

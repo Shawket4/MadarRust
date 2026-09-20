@@ -179,6 +179,84 @@ fn pin_verifies(u: &User, pin: &str) -> bool {
         .is_some_and(|h| bcrypt::verify(pin, h).unwrap_or(false))
 }
 
+/// Scan candidates for the PIN's holder, OFF the async executor.
+///
+/// One bcrypt verify measures ~2.4 s on the production box (1 vCPU), and this
+/// scans until it finds a match — so on the reactor it did not merely make
+/// sign-in slow, it stopped the entire API for the duration: tills syncing, the
+/// dashboard, every other customer. `web::block` moves it to the blocking pool,
+/// where being slow costs only the person signing in.
+///
+/// Returns the first two matches so the caller can tell "nobody" from "one
+/// person" from "this PIN is shared", which is a thing it must refuse.
+/// Re-make a hash that was created at a different cost, now that the plaintext
+/// is in hand and has just been proved correct.
+///
+/// A bcrypt hash carries its own cost, so lowering `BCRYPT_COST` speeds up
+/// nothing on its own — every existing user would keep paying the 2.4 s their
+/// hash was born with, for ever. This upgrades each one at its owner's next
+/// successful sign-in, which is the only moment the plaintext is available and
+/// known good.
+///
+/// Deliberately best-effort: the sign-in has already succeeded, and failing it
+/// because a background tidy-up could not write would be a worse outcome than
+/// staying slow. A failure is logged and the next sign-in tries again.
+async fn rehash_if_stale(
+    pool: &PgPool,
+    user_id: Uuid,
+    column: PasswordColumn,
+    plaintext: &str,
+    current: &str,
+) {
+    if !crate::secrets::needs_rehash(current) {
+        return;
+    }
+    let plaintext = plaintext.to_owned();
+    let made = web::block(move || bcrypt::hash(&plaintext, crate::secrets::BCRYPT_COST)).await;
+    let Ok(Ok(fresh)) = made else {
+        tracing::warn!(target: "madar.authz", %user_id, "could not re-hash at the current cost");
+        return;
+    };
+    // `column` is an enum, not caller text — there is no string from the
+    // request anywhere near this SQL.
+    let sql = match column {
+        PasswordColumn::Password => "UPDATE users SET password_hash = $1 WHERE id = $2",
+        PasswordColumn::Pin => "UPDATE users SET pin_hash = $1 WHERE id = $2",
+    };
+    if let Err(e) = sqlx::query(sql)
+        .bind(&fresh)
+        .bind(user_id)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(target: "madar.authz", %user_id, error = %e, "re-hash write failed");
+    }
+}
+
+/// Which credential is being re-hashed. An enum rather than a `&str` so no
+/// column name can ever be assembled from a request.
+#[derive(Clone, Copy)]
+enum PasswordColumn {
+    Password,
+    Pin,
+}
+
+async fn scan_pin_holders(
+    rows: Vec<User>,
+    pin: &str,
+) -> Result<(Option<User>, Option<User>), AppError> {
+    if rows.is_empty() {
+        return Ok((None, None));
+    }
+    let pin = pin.to_owned();
+    web::block(move || {
+        let mut hits = rows.into_iter().filter(|u| pin_verifies(u, &pin));
+        (hits.next(), hits.next())
+    })
+    .await
+    .map_err(|_| AppError::Internal)
+}
+
 /// The name-narrowed path old tablets use: names are unique per org.
 async fn find_pin_holder_by_name(
     pool: &PgPool,
@@ -194,7 +272,7 @@ async fn find_pin_holder_by_name(
     .bind(name)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().find(|u| pin_verifies(u, pin)))
+    Ok(scan_pin_holders(rows, pin).await?.0)
 }
 
 /// PIN-only (§2, §6): FIND the holder by the keyed fingerprint — one indexed
@@ -215,7 +293,7 @@ async fn find_pin_holder_by_pin(
     .bind(&fingerprints)
     .fetch_all(pool)
     .await?;
-    if let Some(u) = by_fingerprint.into_iter().find(|u| pin_verifies(u, pin)) {
+    if let Some(u) = scan_pin_holders(by_fingerprint, pin).await?.0 {
         return Ok(Some(Ok(u)));
     }
     let unstamped = sqlx::query_as::<_, User>(&format!(
@@ -225,8 +303,7 @@ async fn find_pin_holder_by_pin(
     .bind(org)
     .fetch_all(pool)
     .await?;
-    let mut hits = unstamped.into_iter().filter(|u| pin_verifies(u, pin));
-    Ok(match (hits.next(), hits.next()) {
+    Ok(match scan_pin_holders(unstamped, pin).await? {
         (Some(u), None) => Some(Ok(u)),
         (Some(first), Some(second)) => {
             tracing::warn!(
@@ -286,8 +363,19 @@ pub async fn login(
                 .password_hash
                 .as_deref()
                 .ok_or_else(|| AppError::Unauthorized("No password set for this account".into()))?;
-            if !bcrypt::verify(password, hash).unwrap_or(false) {
+            // Off the reactor: bcrypt measures ~2.4 s on the production box,
+            // and on a single-vCPU host that is 2.4 s in which nothing else in
+            // the system is served. See `scan_pin_holders`.
+            let plain = password.to_owned();
+            let (password, hash) = (plain.clone(), hash.to_owned());
+            let ok = web::block(move || bcrypt::verify(&password, &hash).unwrap_or(false))
+                .await
+                .map_err(|_| AppError::Internal)?;
+            if !ok {
                 return Err(AppError::Unauthorized("Invalid credentials".into()));
+            }
+            if let Some(h) = u.password_hash.as_deref() {
+                rehash_if_stale(pool.get_ref(), u.id, PasswordColumn::Password, &plain, h).await;
             }
             u
         }
@@ -370,6 +458,13 @@ pub async fn login(
                     return Err(AppError::Unauthorized("Invalid credentials".into()));
                 }
             };
+
+            // The PIN just verified, so this is the moment to upgrade a hash
+            // still carrying the old cost. Tellers sign in many times a day,
+            // which makes this the path where the 2.4 s mattered most.
+            if let Some(h) = matched.pin_hash.as_deref() {
+                rehash_if_stale(pool.get_ref(), matched.id, PasswordColumn::Pin, pin, h).await;
+            }
 
             // Architecture E: signing in at a till is the `pos.sign_in` capability
             // at this branch (tellers and waiters always hold it; owners hold it;

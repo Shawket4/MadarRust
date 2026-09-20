@@ -13,8 +13,6 @@
 pub mod floor;
 pub mod routes;
 
-#[cfg(test)]
-mod tests;
 
 /// Resolve a branch's org id (and confirm it's live).
 pub(crate) async fn resolve_branch_org(

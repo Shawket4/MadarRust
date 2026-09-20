@@ -45,6 +45,28 @@ tracing-actix-web  = "0.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures            = "0.3"
 image              = { version = "0.25", features = ["jpeg", "png", "gif", "webp", "bmp"] }
+# Wallet strip images (src/loyalty/wallet/apple.rs). Apple Wallet takes PNG and
+# nothing else, and the strip is a PHOTOGRAPH — the one thing PNG is worst at.
+# Three strips were 93% of a 832 KB pass.
+#
+# `png` is the encoder `image` already uses; naming it directly buys the palette
+# (PNG8) colour type and the compression/filter knobs `image`'s convenience
+# `write_to` does not expose. Already in the tree via `image` — no new code
+# compiled, no new transitive dependency.
+#
+# `exoquant` is the quantiser. It IS new: ~1.4k lines of pure Rust, MIT, ZERO
+# dependencies of its own (its only optional one, `rand`, stays off), no
+# `unsafe`, no I/O — a pure function from pixels to a palette. It is unmaintained
+# (last release 2018), which is affordable precisely because it is pure and
+# vendorable if it ever breaks. It was chosen over `imagequant` (libimagequant /
+# pngquant), which is the better-known quantiser but is GPL-3.0-or-commercial —
+# a licensing decision for the owner, not a dependency bump. Measured: exoquant
+# at 256 colours with Floyd-Steinberg is visually indistinguishable from the
+# lossless strip at 2.9x smaller; NeuQuant (`color_quant`, already in the tree
+# and therefore free) was tried first and REJECTED on looking at the output —
+# visible posterisation in the highlights.
+png                = "0.18"
+exoquant           = { version = "0.2", default-features = false }
 rustls             = "0.23"
 rustls-pemfile     = "2"
 # sqlx HELD at 0.8: 0.9 gates every dynamic SQL string behind AssertSqlSafe

@@ -12,10 +12,6 @@ pub mod activation;
 pub mod handlers;
 pub mod routes;
 
-#[cfg(test)]
-mod activation_tests;
-#[cfg(test)]
-mod tests;
 
 use std::future::{Ready, ready};
 

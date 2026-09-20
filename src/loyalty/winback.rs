@@ -346,14 +346,26 @@ mod tests {
         .unwrap();
 
         let member = async |phone: &str, token: &str, opted_out: bool| -> Uuid {
-            let id: Uuid =
-                crate::test_support::seed_loyalty_member(&pool, org, phone, "Ali", token).await;
-            sqlx::query("UPDATE customers SET marketing_opt_out = $2 WHERE id = $1")
-                .bind(id)
-                .bind(opted_out)
-                .execute(&pool)
-                .await
-                .unwrap();
+            // The person, then the card under the same id.
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO customers (org_id, name, phone, phone_key, source, marketing_opt_out) \
+                 VALUES ($1, 'Ali', $2, phone_canonical($2), 'loyalty', $3) RETURNING id",
+            )
+            .bind(org)
+            .bind(phone)
+            .bind(opted_out)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO loyalty_customers (id, org_id, member_token) VALUES ($1, $2, $3)",
+            )
+            .bind(id)
+            .bind(org)
+            .bind(token)
+            .execute(&pool)
+            .await
+            .unwrap();
             // Their last visit: ten days ago, so past the seven-day window and
             // well inside the sixty-day one. An `adjust` rather than an `earn`
             // because the ledger now insists an earn names its sale, and the

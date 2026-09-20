@@ -18,8 +18,6 @@ pub mod kds;
 pub mod routes;
 pub mod stations;
 
-#[cfg(test)]
-mod tests;
 
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgExecutor, Postgres, Transaction};
@@ -224,7 +222,7 @@ pub struct EmitKitchen<'a> {
 
 /// Resolve the station a line routes to, frozen at fire time:
 /// item override → category rule → branch default station → `None` (unrouted).
-pub(crate) async fn resolve_station(
+pub async fn resolve_station(
     tx: &mut Transaction<'_, Postgres>,
     branch_id: Uuid,
     menu_item_id: Option<Uuid>,

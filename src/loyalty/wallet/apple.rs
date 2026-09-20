@@ -11,8 +11,12 @@
 //! With any of them unset there is no Apple button at all — signup still works
 //! and the member still has a token and a QR.
 
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+
 use serde_json::json;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::errors::AppError;
 use crate::loyalty::model::MemberRow;
@@ -67,6 +71,7 @@ const PASS_IMAGES: &[(&str, &[u8])] = &[
 /// colours cannot come from `loyalty_settings` — that is where they used to
 /// live, before branding moved to the organisation, which is exactly why a
 /// freshly downloaded pass kept coming back in Apple's default grey.
+#[derive(Clone)]
 pub struct PassBrand {
     pub org_name: String,
     pub background: String,
@@ -230,13 +235,261 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
     }
 }
 
+/// The shop's photograph, sized for the pass's strip — cached per org.
+///
+/// These bytes depend ONLY on the org's picture and its foreground colour, not
+/// on the member, so every customer of a shop gets byte-identical strips. They
+/// were being regenerated on every "Add to Wallet" press: three
+/// `resize_to_fill`s up to 1125x432 plus a PNG encode each, on a 1 vCPU box
+/// with Postgres beside it. That was the bulk of a ~20 s wait for a file that
+/// is otherwise a zip and a signature.
+///
+/// The key carries the picture's URL and the colour, so changing either in the
+/// dashboard yields a different key and the next press rebuilds. The TTL is the
+/// backstop for a picture replaced at the same URL.
+static STRIP_CACHE: LazyLock<
+    moka::future::Cache<(Uuid, String, String), Arc<Vec<(String, Vec<u8>)>>>,
+> = LazyLock::new(|| {
+    moka::future::Cache::builder()
+        // Each entry is three PNGs — a few hundred KB. A few dozen orgs is the
+        // whole tenancy, so this is small and bounded either way.
+        .max_capacity(64)
+        .time_to_live(Duration::from_secs(3600))
+        .build()
+});
+
+/// Cached strips for this org, building them off the runtime on a miss.
+///
+/// Two things happen here, and both matter on a 1 vCPU box:
+///
+/// * the result is cached, so only the first press of a shop pays for it; and
+/// * the build runs on `spawn_blocking`, because resizing and PNG-encoding
+///   three images is CPU-bound work that otherwise occupies an async worker
+///   and stalls every other request sharing it.
+pub async fn strip_images_cached(
+    org_id: Uuid,
+    brand: &crate::orgs::branding::OrgBrand,
+    foreground: &str,
+) -> Arc<Vec<(String, Vec<u8>)>> {
+    // Caching is bypassed under test for the reason in `crate::cache`: one
+    // process runs many isolated databases and a shared cache leaks across them.
+    if cfg!(test) {
+        return Arc::new(strip_images(brand, foreground));
+    }
+    let key = (
+        org_id,
+        brand.card_image_url.clone().unwrap_or_default(),
+        foreground.to_string(),
+    );
+    let brand = brand.clone();
+    let fg = foreground.to_string();
+    STRIP_CACHE
+        .get_with(key, async move {
+            tokio::task::spawn_blocking(move || Arc::new(strip_images(&brand, &fg)))
+                .await
+                // The only way this fails is a panic inside the resize; an
+                // empty strip set is a valid pass, so the card still installs.
+                .unwrap_or_else(|_| Arc::new(Vec::new()))
+        })
+        .await
+}
+
+/// Which way to trade CPU against bytes when writing a PNG.
+///
+/// The two halves of the pass pull in opposite directions and the choice is
+/// made per call site rather than globally, because getting it backwards is
+/// invisible until someone times it:
+///
+/// * [`Squeeze::Small`] is for an image that is CACHED — built once per shop
+///   per hour and then handed to every customer of that shop. The encode cost
+///   is amortised to nothing; the bytes are paid by every single download, over
+///   a phone connection. Spend the CPU.
+/// * [`Squeeze::Fast`] is for an image built while somebody waits. Here the
+///   encode is on the critical path and the extra kilobytes are not, so it
+///   takes the cheapest settings that still produce a valid PNG.
+/// * [`Squeeze::Exact`] is for an image whose COLOURS are the point. Cached
+///   like `Small`, spending the same CPU, but it never quantises.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Squeeze {
+    Small,
+    Fast,
+    /// Lossless. Quantising a photograph is invisible; quantising a brand mark
+    /// is not. The icon's ground IS the shop's colour — `on_ground` paints it
+    /// deliberately — and iOS draws that icon in notifications at 29px, where
+    /// nobody can check it by eye. A palette that lands two shades away has
+    /// quietly changed the shop's colour. Measured: #0D6273 came back #0D6577.
+    Exact,
+}
+
+/// Write an image as PNG — the only format Apple Wallet reads.
+///
+/// PNG is not negotiable here. A `.pkpass` is a signed bundle of named files
+/// and PassKit decodes `strip.png` and friends as PNG; a JPEG or WebP with a
+/// `.png` name is a pass that installs and shows nothing, which is the worst
+/// failure available. So the saving has to come from inside PNG, and it does:
+///
+/// * **an opaque image loses its alpha channel.** A photograph has no
+///   transparency to carry and a 4-channel PNG of it is a quarter larger for
+///   nothing. Checked rather than assumed — a card image that really is
+///   transparent keeps RGBA.
+/// * **an opaque image is PALETTISED** when we are optimising for size. PNG
+///   compresses a photograph badly because DEFLATE has nothing to repeat;
+///   quantising to 256 colours with Floyd–Steinberg dithering first turns each
+///   pixel into one byte that does repeat. Measured at 2.9x smaller on the
+///   worst photograph to hand, and indistinguishable from the lossless strip
+///   when looked at side by side. 128 colours was tried too and REJECTED:
+///   visible dither speckle in the highlights.
+fn encode_png(img: &image::RgbaImage, squeeze: Squeeze) -> Option<Vec<u8>> {
+    let opaque = img.pixels().all(|p| p.0[3] == u8::MAX);
+    match (opaque, squeeze) {
+        (true, Squeeze::Small) => palette_png(img).or_else(|| {
+            // Quantising can only fail on a degenerate image (zero pixels).
+            // A slightly larger strip beats no strip at all.
+            rgb_png(img, png::Compression::High, png::Filter::Adaptive)
+        }),
+        (true, Squeeze::Fast) => rgb_png(img, png::Compression::Fast, png::Filter::NoFilter),
+        (true, Squeeze::Exact) => rgb_png(img, png::Compression::High, png::Filter::Adaptive),
+        (false, Squeeze::Small | Squeeze::Exact) => {
+            rgba_png(img, png::Compression::High, png::Filter::Adaptive)
+        }
+        (false, Squeeze::Fast) => rgba_png(img, png::Compression::Fast, png::Filter::NoFilter),
+    }
+}
+
+fn write_png(
+    w: u32,
+    h: u32,
+    color: png::ColorType,
+    palette: Option<Vec<u8>>,
+    data: &[u8],
+    compression: png::Compression,
+    filter: png::Filter,
+) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(color);
+        enc.set_depth(png::BitDepth::Eight);
+        if let Some(p) = palette {
+            enc.set_palette(p);
+        }
+        enc.set_compression(compression);
+        enc.set_filter(filter);
+        let mut writer = enc.write_header().ok()?;
+        writer.write_image_data(data).ok()?;
+    }
+    Some(out)
+}
+
+fn rgba_png(
+    img: &image::RgbaImage,
+    compression: png::Compression,
+    filter: png::Filter,
+) -> Option<Vec<u8>> {
+    write_png(
+        img.width(),
+        img.height(),
+        png::ColorType::Rgba,
+        None,
+        img.as_raw(),
+        compression,
+        filter,
+    )
+}
+
+fn rgb_png(
+    img: &image::RgbaImage,
+    compression: png::Compression,
+    filter: png::Filter,
+) -> Option<Vec<u8>> {
+    let rgb: Vec<u8> = img
+        .pixels()
+        .flat_map(|p| [p.0[0], p.0[1], p.0[2]])
+        .collect();
+    write_png(
+        img.width(),
+        img.height(),
+        png::ColorType::Rgb,
+        None,
+        &rgb,
+        compression,
+        filter,
+    )
+}
+
+/// A 256-colour indexed PNG of an opaque image.
+///
+/// The palette is chosen by exoquant and then refined by k-means, and the remap
+/// dithers — all three matter. Without the k-means pass the flat highlights of
+/// a photograph pick up a green cast; without the dither they band. Both were
+/// looked at, not reasoned about.
+///
+/// Row filtering is turned OFF. On palette indices a filter subtracts one
+/// arbitrary colour NUMBER from another, which destroys the repetition DEFLATE
+/// is there to find — this is the one case where the expensive filter setting
+/// makes the file bigger.
+fn palette_png(img: &image::RgbaImage) -> Option<Vec<u8>> {
+    use exoquant::optimizer::Optimizer;
+
+    if img.width() == 0 || img.height() == 0 {
+        return None;
+    }
+    let pixels: Vec<exoquant::Color> = img
+        .pixels()
+        .map(|p| exoquant::Color::new(p.0[0], p.0[1], p.0[2], u8::MAX))
+        .collect();
+    let histogram = exoquant::Histogram::from_iter(pixels.iter().cloned());
+    let space = exoquant::SimpleColorSpace::default();
+    let mut quantizer = exoquant::Quantizer::new(&histogram, &space);
+    while quantizer.num_colors() < 256 {
+        quantizer.step();
+    }
+    let palette = quantizer.colors(&space);
+    let palette = exoquant::optimizer::KMeans.optimize_palette(&space, &palette, &histogram, 8);
+    let indices = exoquant::Remapper::new(
+        &palette,
+        &space,
+        &exoquant::ditherer::FloydSteinberg::vanilla(),
+    )
+    .remap(&pixels, img.width() as usize);
+
+    write_png(
+        img.width(),
+        img.height(),
+        png::ColorType::Indexed,
+        Some(palette.iter().flat_map(|c| [c.r, c.g, c.b]).collect()),
+        &indices,
+        png::Compression::High,
+        png::Filter::NoFilter,
+    )
+}
+
 /// The shop's photograph, sized for the pass's strip.
 ///
 /// Empty when there is no picture, which is the ordinary case and a finished
 /// card — every pass looked like that until now.
+///
+/// **All three scales are kept.** Apple's own guidance is to "provide the
+/// original, @2x, and @3x versions of your art", and nothing in it promises
+/// that a missing @3x is scaled up from @2x — it documents scaling to FILL the
+/// slot, not scaling between the variants a bundle happens to ship. Dropping
+/// `strip@3x.png` would have removed 55% of the pass in one move, and it was
+/// considered and rejected on exactly that: the strip is the largest thing on
+/// the card, every current iPhone Pro is a 3x display, and betting the most
+/// visible image on the card on undocumented fallback behaviour is not the
+/// trade to take when palettising gets the whole pass under target with the
+/// @3x still in it.
 pub fn strip_images(
     brand: &crate::orgs::branding::OrgBrand,
     foreground: &str,
+) -> Vec<(String, Vec<u8>)> {
+    strip_images_squeezed(brand, foreground, Squeeze::Small)
+}
+
+pub fn strip_images_squeezed(
+    brand: &crate::orgs::branding::OrgBrand,
+    foreground: &str,
+    squeeze: Squeeze,
 ) -> Vec<(String, Vec<u8>)> {
     let Some(img) = brand
         .card_image_url
@@ -248,16 +501,15 @@ pub fn strip_images(
     STRIP_SIZES
         .iter()
         .filter_map(|(name, w, h)| {
+            // CatmullRom, not Lanczos3: at strip sizes the two are visually
+            // indistinguishable and Lanczos3 costs several times more CPU —
+            // which is paid on the customer's tap.
             let mut scaled = img
-                .resize_to_fill(*w, *h, image::imageops::FilterType::Lanczos3)
+                .resize_to_fill(*w, *h, image::imageops::FilterType::CatmullRom)
                 .to_rgba8();
             // Apple writes the balance across this. Make it safe to write on.
             scrim(&mut scaled, foreground);
-            let mut buf = std::io::Cursor::new(Vec::new());
-            image::DynamicImage::ImageRgba8(scaled)
-                .write_to(&mut buf, image::ImageFormat::Png)
-                .ok()
-                .map(|_| ((*name).to_string(), buf.into_inner()))
+            encode_png(&scaled, squeeze).map(|b| ((*name).to_string(), b))
         })
         .collect()
 }
@@ -304,11 +556,11 @@ fn images_from_logo(
     tint: Option<&str>,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let mut out = Vec::with_capacity(6);
-    let encode = |im: image::DynamicImage| -> Option<Vec<u8>> {
-        let mut buf = std::io::Cursor::new(Vec::new());
-        im.write_to(&mut buf, image::ImageFormat::Png).ok()?;
-        Some(buf.into_inner())
-    };
+    // `Squeeze::Small`: this whole set lives in `BRAND_CACHE`, so the encode is
+    // paid once per shop per hour and the bytes are paid by every download.
+    // A logo keeps its transparency, so it stays RGBA — no palette here.
+    let encode =
+        |im: image::DynamicImage| -> Option<Vec<u8>> { encode_png(&im.to_rgba8(), Squeeze::Exact) };
 
     // 0.82 rather than Google's 0.70: Apple rounds the corners of this slot but
     // does not mask it to a circle, so there is more of the square to use.
@@ -351,6 +603,51 @@ fn images_from_logo(
 /// The logo is read from DISK, not fetched: uploads are written locally, so the
 /// file is already there — no network call while a customer waits, and no
 /// server-side request to an address someone else supplied.
+/// [`pass_brand`], cached per org.
+///
+/// Six images — three icons and three logos — each a Lanczos3 resize plus a PNG
+/// encode, plus the tint/ground compositing, were being rebuilt on every "Add
+/// to Wallet" tap. With the strips already cached this was the whole remaining
+/// cost: measured on production at ~12 s per tap, and identical for every
+/// customer of a shop, because none of it depends on the member.
+///
+/// Keyed on everything the output depends on — the logo's URL, the palette and
+/// whether the logo is a mark — so changing any of them in the dashboard yields
+/// a new key and the next tap rebuilds.
+static BRAND_CACHE: LazyLock<moka::future::Cache<String, Arc<PassBrand>>> = LazyLock::new(|| {
+    moka::future::Cache::builder()
+        .max_capacity(64)
+        .time_to_live(Duration::from_secs(3600))
+        .build()
+});
+
+pub async fn pass_brand_cached(
+    org_id: Uuid,
+    brand: &crate::orgs::branding::OrgBrand,
+) -> Arc<PassBrand> {
+    if cfg!(test) {
+        return Arc::new(pass_brand(brand));
+    }
+    let key = format!(
+        "{org_id}|{}|{}|{}|{}|{}",
+        brand.logo_url.clone().unwrap_or_default(),
+        brand.palette.background,
+        brand.palette.foreground,
+        brand.palette.accent,
+        brand.logo_is_mark,
+    );
+    let b = brand.clone();
+    BRAND_CACHE
+        .get_with(key, async move {
+            tokio::task::spawn_blocking(move || Arc::new(pass_brand(&b)))
+                .await
+                // A panic in the resize must not cost the customer their card;
+                // the default brand is a complete, installable pass.
+                .unwrap_or_else(|_| Arc::new(PassBrand::default()))
+        })
+        .await
+}
+
 pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
     let d = PassBrand::default();
     let images = brand
@@ -783,21 +1080,25 @@ fn hex(bytes: &[u8]) -> String {
 /// after an update are byte-identical in structure — a device that got a
 /// different shape from the two paths would show a pass that never settles.
 pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>, AppError> {
-    let settings = crate::loyalty::settings::load_scope(pool, member.org_id, None)
-        .await?
-        .unwrap_or_else(|| LoyaltySettings::defaults(member.org_id, None));
-    let locations = super::locations_for_member(pool, member).await?;
-    let copy = super::card_copy(pool, member.org_id, &settings).await;
-    let org = crate::orgs::branding::load(pool, member.org_id).await?;
-    let brand = pass_brand(&org);
-    let strip = strip_images(&org, &brand.foreground);
-    let headline = super::reward_headline(pool, member.org_id, &settings).await;
+    let super::PassSource {
+        settings,
+        brand: org,
+        locations,
+        copy,
+        headline,
+    } = super::pass_source(pool, member).await?;
+    let brand = pass_brand_cached(member.org_id, &org).await;
+    // `strip_images_CACHED`, not `strip_images`. The cache landed with its own
+    // accessor and the builder went on calling the uncooked one, so every tap
+    // still resized and encoded three images up to 1125x432 — the cache existed
+    // and was never consulted. This line is the whole of that fix.
+    let strip = strip_images_cached(member.org_id, &org, &brand.foreground).await;
     let pass = pass_json(member, &settings, &locations, &copy, &headline, &brand)?;
     // One list for the archive AND the manifest, so an image cannot end up in
     // the zip unhashed — which invalidates the signature and makes iOS refuse
     // the pass with no explanation at all.
     let mut images = brand.images.clone();
-    images.extend(strip);
+    images.extend(strip.iter().cloned());
     // BOTH languages, as files inside the pass — and the English one is not
     // redundant.
     //
@@ -818,7 +1119,82 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
         "ar.lproj/pass.strings".to_string(),
         super::i18n::strings_file(&pairs).into_bytes(),
     ));
-    build_pkpass(&pass, &images)
+    // OFF the reactor, like the images above it.
+    //
+    // What is left here is not cheap and not async: a SHA-1 over every file in
+    // the archive, an RSA PKCS#7 signature via OpenSSL, and zipping it all
+    // together. The strip and brand encoding were already on `spawn_blocking`,
+    // so this was the remaining CPU on the async thread — and `prebuild` hands
+    // this very work to `tokio::spawn`, which on Actix means the SAME worker
+    // thread that serves requests. The "background" pre-build was therefore
+    // competing with the page that asked for it, which is the opposite of what
+    // pre-building is for.
+    tokio::task::spawn_blocking(move || build_pkpass(&pass, &images))
+        .await
+        .map_err(|_| AppError::Internal)?
+}
+
+/// The bytes to SERVE: stored if they are still right, built if they are not.
+///
+/// This is what every customer-facing path should call. `build_pass_for` stays
+/// public because the tests and the regenerator want the unconditional build,
+/// but nothing that a human is waiting on should reach for it directly.
+///
+/// It degrades to exactly the old behaviour: no row, a stale row, an expired
+/// row, a database that will not answer — all of them fall through to building
+/// the pass here and now.
+pub async fn pass_bytes_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>, AppError> {
+    if let Some(bytes) = super::store::load(pool, member).await {
+        return Ok(bytes);
+    }
+    let bytes = build_pass_for(pool, member).await?;
+    // Store it even though this request has already paid: the next tap — the
+    // customer opening the link again, or their device coming back for it —
+    // is the one this saves, and a first tap has to happen sometime.
+    super::store::save(pool, member, &bytes).await;
+    Ok(bytes)
+}
+
+/// The card page just rendered the "Add to Apple Wallet" button. Get ahead of
+/// the tap.
+///
+/// Fire-and-forget, copying `wallet::push_update`: the page must not wait on
+/// this, and if it fails the tap builds the pass exactly as it always did.
+///
+/// It checks the store FIRST and does nothing when there are fresh bytes, so
+/// reloading the card page is not a way to make a 1 vCPU box re-encode three
+/// strip images. In the ordinary case there is nothing to do here at all —
+/// `push_update` rebuilt the pass at the last purchase.
+pub fn prebuild(pool: &PgPool, member: &MemberRow) {
+    if cfg!(test) || !is_configured() {
+        return;
+    }
+    let pool = pool.clone();
+    let member = member.clone();
+    tokio::spawn(async move {
+        if super::store::load(&pool, &member).await.is_some() {
+            return;
+        }
+        regenerate(&pool, &member).await;
+    });
+}
+
+/// Build this member's pass ahead of anybody asking, and keep it.
+///
+/// Called from `wallet::push_update_inner`, which already runs detached after a
+/// balance change. Errors are logged, never propagated: failing to PRE-build a
+/// pass must not fail the thing that changed the balance.
+pub async fn regenerate(pool: &PgPool, member: &MemberRow) {
+    if !is_configured() {
+        return;
+    }
+    match build_pass_for(pool, member).await {
+        Ok(bytes) => super::store::save(pool, member, &bytes).await,
+        Err(e) => tracing::warn!(
+            customer_id = %member.id, error = %e,
+            "loyalty: could not pre-build the pass; it will be built on the next tap"
+        ),
+    }
 }
 
 /// Tell every device holding this member's pass to come back for a new copy.
@@ -827,6 +1203,12 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
 /// then calls the pass web service for the changed pass. Skipped when Apple is
 /// not configured, so an org on Google only costs nothing here.
 pub async fn notify_devices(pool: &PgPool, member: &MemberRow) -> Result<(), AppError> {
+    // Whatever else happens below, the pass we last built is now out of date.
+    // Dropping it FIRST, before any push goes out, is what makes it impossible
+    // for a device to be told "come and get the new one" and then be handed
+    // the old one. Every caller of this function is by definition saying the
+    // pass changed, so this is the one hook the invalidation needs.
+    super::store::invalidate(pool, member.id).await;
     if !is_configured() {
         return Ok(());
     }

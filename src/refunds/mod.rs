@@ -58,5 +58,3 @@ impl RefundReason {
     }
 }
 
-#[cfg(test)]
-mod tests;

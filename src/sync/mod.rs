@@ -36,9 +36,6 @@ pub mod handlers;
 pub mod pull;
 pub mod routes;
 
-#[cfg(test)]
-mod tests;
-
 use uuid::Uuid;
 
 use crate::auth::jwt::Claims;

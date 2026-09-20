@@ -1466,7 +1466,7 @@ pub(crate) async fn resolve_order_line(
 /// trigger-maintained mirror of that same lowest price, so clients at or below
 /// v0.7.11 — which read an item price from the API — still charge the right
 /// thing. Branch and branch-size overrides layer on top exactly as before.
-pub(crate) async fn catalog_unit_price(
+pub async fn catalog_unit_price(
     pool: &PgPool,
     m_item_id: Uuid,
     size_label: Option<&str>,
@@ -1542,7 +1542,7 @@ pub(crate) async fn catalog_unit_price(
 /// Ingredients a dine-in sale does not deduct: every ingredient whose category is
 /// flagged `is_packaging`, or (legacy fallback) has the slug `packaging`. Shared by
 /// order creation and the menu-item preview.
-pub(crate) async fn packaging_ingredient_ids(
+pub async fn packaging_ingredient_ids(
     pool: &PgPool,
     org_id: Uuid,
 ) -> Result<std::collections::HashSet<Uuid>, AppError> {
@@ -3621,7 +3621,7 @@ pub async fn void_order(
 /// teller from voiding into a SETTLED (closed) shift; REPLAY attributes it to the
 /// queued op's teller and skips that guard — a queued void was rung while the
 /// shift was still open and is recorded history. Idempotent (guarded CAS).
-pub(crate) async fn void_order_inner(
+pub async fn void_order_inner(
     pool: crate::db::Db,
     order_id: Uuid,
     body: web::Json<VoidOrderRequest>,

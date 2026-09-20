@@ -586,7 +586,7 @@ async fn a_join_over_an_existing_manual_customer_gives_that_person_the_card(pool
 
 // ── Customers unification: the seeded data migration ────────────────────────
 
-const PRE_CUSTOMERS_UNIFICATION: i64 = 20260924000000;
+const PRE_CUSTOMERS_UNIFICATION: i64 = 20260925010000;
 
 /// The old world, seeded, then the six unification migrations over it:
 /// * two manual customers that are one phone typed two ways fold together;

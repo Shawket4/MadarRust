@@ -293,7 +293,7 @@ struct RefundableOrder {
 ///
 /// Everything that follows the money — the status flip at the ceiling, the
 /// loyalty clawback — is the table's trigger; this function writes the row.
-pub(crate) async fn create_refund_inner(
+pub async fn create_refund_inner(
     pool: crate::db::Db,
     body: web::Json<CreateRefundRequest>,
     actor: ActingContext,

@@ -522,7 +522,7 @@ pub(crate) async fn fetch_till<'e, E: sqlx::PgExecutor<'e>>(
     .await
 }
 
-pub(crate) async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Till, AppError> {
+pub async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Till, AppError> {
     fetch_till(pool, till_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Till not found".into()))
@@ -578,7 +578,7 @@ async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
 /// voided) + movements − cash refunds issued from this till.
-pub(crate) async fn compute_system_cash<'e, E>(
+pub async fn compute_system_cash<'e, E>(
     executor: E,
     till_id: Uuid,
 ) -> Result<i64, sqlx::Error>
@@ -807,7 +807,7 @@ pub struct OpenMeta {
 /// Live: one-open-per-person check (409 `TILL_OPEN_AT_OTHER_BRANCH` /
 /// `TILL_OPEN_ELSEWHERE`, resume on the same device), carryover reason.
 /// Replay: always accepts; a second open till of the same person is flagged.
-pub(crate) async fn open_till_inner(
+pub async fn open_till_inner(
     pool: &PgPool,
     hub: Option<&BranchEventHub>,
     branch_id: Uuid,
@@ -1198,7 +1198,7 @@ pub async fn get_till_report(
     }))
 }
 
-pub(crate) async fn report_figures(
+pub async fn report_figures(
     pool: &PgPool,
     till: &Till,
 ) -> Result<TillReportFigures, AppError> {

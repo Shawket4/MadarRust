@@ -257,7 +257,7 @@ async fn explicit_replacement(
 /// ingredient, and a sized line for an ingredient with no generic line is added.
 /// The generic lines come from `addon_item_ingredients` (which only ever shows NULL-
 /// size rows), so with no sized lines — every old catalog — nothing changes.
-pub(crate) fn merge_sized_option_lines(
+pub fn merge_sized_option_lines(
     generic: Vec<(Option<Uuid>, f64, String, String)>,
     sized: Vec<(Option<Uuid>, f64, String, String)>,
 ) -> Vec<(Option<Uuid>, f64, String, String)> {

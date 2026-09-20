@@ -54,6 +54,7 @@ pub mod recipes;
 pub mod refunds;
 pub mod reports;
 pub mod reservations;
+pub mod secrets;
 pub mod staff;
 pub mod staff_pool;
 pub mod stocktakes;
@@ -66,19 +67,3 @@ pub mod tz;
 pub mod units;
 pub mod uploads;
 pub mod users;
-
-#[cfg(test)]
-pub mod e2e_tests;
-#[cfg(test)]
-mod pool_discipline_tests;
-#[cfg(test)]
-mod test_support;
-
-#[cfg(test)]
-pub mod rls_tests;
-
-#[cfg(test)]
-mod tills_migration_tests;
-
-#[cfg(test)]
-mod route_guard_tests;

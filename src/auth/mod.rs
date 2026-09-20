@@ -8,5 +8,3 @@ pub mod pin_fingerprint;
 pub mod pin_throttle;
 pub mod routes;
 
-#[cfg(test)]
-mod tests;

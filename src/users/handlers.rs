@@ -325,14 +325,14 @@ pub async fn create_user(
     let password_hash = body
         .password
         .as_deref()
-        .map(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST))
+        .map(|p| bcrypt::hash(p, crate::secrets::BCRYPT_COST))
         .transpose()
         .map_err(|_| AppError::Internal)?;
 
     let pin_hash = body
         .pin
         .as_deref()
-        .map(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST))
+        .map(|p| bcrypt::hash(p, crate::secrets::BCRYPT_COST))
         .transpose()
         .map_err(|_| AppError::Internal)?;
 
@@ -643,14 +643,14 @@ pub async fn update_user(
     let password_hash = body
         .password
         .as_deref()
-        .map(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST))
+        .map(|p| bcrypt::hash(p, crate::secrets::BCRYPT_COST))
         .transpose()
         .map_err(|_| AppError::Internal)?;
 
     let pin_hash = body
         .pin
         .as_deref()
-        .map(|p| bcrypt::hash(p, bcrypt::DEFAULT_COST))
+        .map(|p| bcrypt::hash(p, crate::secrets::BCRYPT_COST))
         .transpose()
         .map_err(|_| AppError::Internal)?;
 

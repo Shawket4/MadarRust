@@ -30,5 +30,3 @@ pub mod scope;
 pub mod spec;
 pub mod types;
 
-#[cfg(test)]
-pub(crate) mod tests;

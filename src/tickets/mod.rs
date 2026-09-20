@@ -13,9 +13,6 @@ pub mod handlers;
 pub mod public;
 pub mod routes;
 
-#[cfg(test)]
-mod tests;
-
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
