@@ -1,0 +1,35 @@
+{
+  "_doc": "Canonical phone = E.164 digits without '+'. SHARED VERBATIM by MadarRust (Rust + SQL phone_canonical), madar rust-core, and MadarDashboard src/lib/phone.ts. Never edit one copy alone. Rule, in order: (1) raw longer than 32 chars -> invalid; (2) map Arabic-Indic (U+0660-0669) and Extended Arabic-Indic (U+06F0-06F9) digits to ASCII; (3) keep ASCII digits only; (4) strip a leading '00'; else keep if it starts with '20'; else a leading '0' becomes '20'; else exactly 10 digits starting with '1' gets '20' prefixed; else unchanged; (5) result length outside [10,15] -> invalid.",
+  "valid": [
+    ["01001234567", "201001234567"],
+    ["0100 123 4567", "201001234567"],
+    ["0100-123-4567", "201001234567"],
+    ["+201001234567", "201001234567"],
+    ["+20 100 123 4567", "201001234567"],
+    ["201001234567", "201001234567"],
+    ["00201001234567", "201001234567"],
+    ["1001234567", "201001234567"],
+    ["(010) 0123-4567", "201001234567"],
+    ["٠١٠٠١٢٣٤٥٦٧", "201001234567"],
+    ["۰۱۰۰۱۲۳۴۵۶۷", "201001234567"],
+    ["+2٠١٠٠١٢٣٤٥٦٧", "201001234567"],
+    ["01112345678", "201112345678"],
+    ["01212345678", "201212345678"],
+    ["01512345678", "201512345678"],
+    ["0221234567", "20221234567"],
+    ["+966512345678", "966512345678"],
+    ["00966512345678", "966512345678"],
+    ["+14155552671", "14155552671"],
+    ["+447911123456", "447911123456"]
+  ],
+  "invalid": [
+    "",
+    "   ",
+    "abc",
+    "12345",
+    "010012345",
+    "+20",
+    "0000000000000000000",
+    "01001234567890123456789012345678901234567890"
+  ]
+}
