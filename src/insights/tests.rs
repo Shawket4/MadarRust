@@ -332,7 +332,7 @@ async fn test_ledger_ranking_signals_and_honesty(pool: PgPool) {
     // null (never 0) + recipe_incomplete.
     let mystery = seed_item(&pool, org, cat, "Mystery", 500).await;
     // Sleeper: on the menu, zero sales ⇒ removal_candidate.
-    let sleeper = seed_item(&pool, org, cat, "Sleeper", 800).await;
+    let _sleeper = seed_item(&pool, org, cat, "Sleeper", 800).await;
 
     let order = seed_order(&pool, branch, org).await;
     seed_line(&pool, order, star, "Star", 1000, 10, Some(200)).await;

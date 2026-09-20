@@ -3619,7 +3619,7 @@ pub async fn void_order(
 /// teller from voiding into a SETTLED (closed) shift; REPLAY attributes it to the
 /// queued op's teller and skips that guard — a queued void was rung while the
 /// shift was still open and is recorded history. Idempotent (guarded CAS).
-pub(crate) async fn void_order_inner(
+pub async fn void_order_inner(
     pool: crate::db::Db,
     order_id: Uuid,
     body: web::Json<VoidOrderRequest>,

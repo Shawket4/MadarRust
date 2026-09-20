@@ -7,20 +7,20 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::orders::handlers::{
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::orders::handlers::{
     CreateOrderRequest, ExportResponse, Order, OrderFull, OrderItemInput, PaginatedOrders,
     PaymentSplitInput, PreviewAddonInput, PreviewRecipeRequest, VoidOrderRequest,
 };
-use crate::orders::routes;
+use madar_rust::orders::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -28,7 +28,7 @@ fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
 }
 
 fn generate_teller_token(user_id: Uuid, org_id: Uuid, branch_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -486,7 +486,7 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
             bundle_id: None,
             size_label: None,
             quantity: 2, // 2 items = 1000
-            addons: vec![crate::orders::component_resolve::AddonInput {
+            addons: vec![madar_rust::orders::component_resolve::AddonInput {
                 addon_item_id: addon_id,
                 quantity: 1, // 1 per item = 2 addons total = 200
                 unit_price: None,
@@ -582,7 +582,7 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
             bundle_id: None,
             size_label: None,
             quantity: 1,
-            addons: vec![crate::orders::component_resolve::AddonInput {
+            addons: vec![madar_rust::orders::component_resolve::AddonInput {
                 addon_item_id: almond_addon,
                 quantity: 1,
                 unit_price: None,
@@ -699,12 +699,12 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
             size_label: None,
             quantity: 1,
             addons: vec![
-                crate::orders::component_resolve::AddonInput {
+                madar_rust::orders::component_resolve::AddonInput {
                     addon_item_id: swap_addon,
                     quantity: 1,
                     unit_price: None,
                 },
-                crate::orders::component_resolve::AddonInput {
+                madar_rust::orders::component_resolve::AddonInput {
                     addon_item_id: whip_addon,
                     quantity: 1,
                     unit_price: None,
@@ -1215,7 +1215,7 @@ async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
     )
     .await;
     assert_eq!(stock(pool.clone()).await, 980.0);
-    let actor = crate::sync::ActingContext {
+    let actor = madar_rust::sync::ActingContext {
         teller_id: user_id,
         org_id,
         role: UserRole::OrgAdmin,
@@ -1231,8 +1231,8 @@ async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
             live_approval: None,
         })
     };
-    let pool_data = crate::db::Db::bypass(&pool);
-    crate::orders::handlers::void_order_inner(
+    let pool_data = madar_rust::db::Db::bypass(&pool);
+    madar_rust::orders::handlers::void_order_inner(
         pool_data.clone(),
         second.order.id,
         body(),
@@ -1241,7 +1241,7 @@ async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
     .await
     .unwrap();
     // A re-flushed queue voids once.
-    crate::orders::handlers::void_order_inner(pool_data, second.order.id, body(), actor)
+    madar_rust::orders::handlers::void_order_inner(pool_data, second.order.id, body(), actor)
         .await
         .unwrap();
     assert_eq!(
@@ -1341,7 +1341,7 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
             bundle_id: None,
             size_label: None,
             quantity: 2,
-            addons: vec![crate::orders::component_resolve::AddonInput {
+            addons: vec![madar_rust::orders::component_resolve::AddonInput {
                 addon_item_id: addon_id,
                 quantity: 1,
                 unit_price: None,
@@ -2100,12 +2100,12 @@ async fn test_bundle_component_swap_converts_units(pool: PgPool) {
     sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond Milk','kg')")
         .bind(almond_addon).bind(almond).execute(&pool).await.unwrap();
 
-    let config = crate::orders::component_resolve::resolve_menu_item_configuration(
+    let config = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
         &pool,
         menu_item_id,
         None,
         1,
-        &[crate::orders::component_resolve::AddonInput {
+        &[madar_rust::orders::component_resolve::AddonInput {
             addon_item_id: almond_addon,
             quantity: 1,
             unit_price: None,
@@ -2765,7 +2765,7 @@ async fn test_create_order_addon_charged_price_recorded_and_flags(pool: PgPool) 
     let addon = seed_addon_item(&pool, org, "Extra Shot", "extra", 100).await;
 
     let mut body = simple_order(branch, shift, item);
-    body.items[0].addons = vec![crate::orders::component_resolve::AddonInput {
+    body.items[0].addons = vec![madar_rust::orders::component_resolve::AddonInput {
         addon_item_id: addon,
         quantity: 1,
         unit_price: Some(150),
@@ -2927,7 +2927,7 @@ async fn test_create_order_branch_addon_override_applied(pool: PgPool) {
     .bind(branch).bind(addon).execute(&pool).await.unwrap();
 
     let mut body = simple_order(branch, shift, item);
-    body.items[0].addons = vec![crate::orders::component_resolve::AddonInput {
+    body.items[0].addons = vec![madar_rust::orders::component_resolve::AddonInput {
         addon_item_id: addon,
         quantity: 1,
         unit_price: None,
@@ -3562,7 +3562,7 @@ async fn renaming_a_payment_method_carries_history(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
-            .configure(crate::payment_methods::routes::configure),
+            .configure(madar_rust::payment_methods::routes::configure),
     )
     .await;
 
@@ -3997,7 +3997,7 @@ async fn test_void_reason_from_an_old_till_is_read_not_refused(pool: PgPool) {
         .unwrap()
     }
 
-    let mut fresh = async || {
+    let fresh = async || {
         create_order_ok!(app, token, simple_order(branch_id, shift_id, item))
             .order
             .id
@@ -4037,7 +4037,7 @@ async fn test_void_reason_from_an_old_till_is_read_not_refused(pool: PgPool) {
 /// one coffee is fine.
 #[sqlx::test]
 async fn a_line_with_two_milks_keeps_the_last(pool: PgPool) {
-    use crate::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
+    use madar_rust::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
     let org_id = seed_org(&pool).await;
     let cat_id = seed_category(&pool, org_id).await;
     let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
@@ -4147,7 +4147,7 @@ async fn resolver_size_fallback_uses_display_order_not_label(pool: PgPool) {
     legacy_recipe_line(&pool, item, "Can", can_milk, "Can milk", 250.0).await;
     legacy_recipe_line(&pool, item, "Cup", cup_milk, "Cup milk", 180.0).await;
 
-    let r = crate::orders::component_resolve::resolve_menu_item_configuration(
+    let r = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
         &pool,
         item,
         None,
@@ -4206,12 +4206,12 @@ async fn resolver_swap_picks_are_deterministic(pool: PgPool) {
         .unwrap();
     }
 
-    let addons = [crate::orders::component_resolve::AddonInput {
+    let addons = [madar_rust::orders::component_resolve::AddonInput {
         addon_item_id: oat,
         quantity: 1,
         unit_price: None,
     }];
-    let r = crate::orders::component_resolve::resolve_menu_item_configuration(
+    let r = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
         &pool,
         item,
         None,
@@ -4241,7 +4241,7 @@ async fn resolver_swap_picks_are_deterministic(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::menu::routes::configure),
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
     let resp = test::call_service(
