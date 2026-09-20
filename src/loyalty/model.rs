@@ -9,7 +9,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::earn::{self, EarnRule, Mode, OrderAmounts};
+use super::earn::{self, EarnRule, Mode, OrderAmounts, OrderLine};
 use super::settings::{LoyaltySettings, RewardItem, load_effective, load_effective_rewards};
 use crate::errors::AppError;
 
@@ -283,6 +283,12 @@ pub async fn member_with_context(
 /// Idempotency is the database's: `loyalty_transactions_earn_order_key` allows
 /// one earn per order, so a replayed order cannot award twice however many times
 /// it is flushed.
+///
+/// `lines` and `eligible_item_ids` are what per-item stamps needs; both are
+/// ignored in points mode and in a per-order stamps programme. They come from
+/// the ORDER's own rows and the ORDER's branch settings — never from the
+/// request — for the same reason the amounts do: a till sends who, never how
+/// many, and that is what makes every path agree.
 #[allow(clippy::too_many_arguments)]
 pub async fn award_for_order(
     tx: &mut Transaction<'_, Postgres>,
@@ -291,6 +297,8 @@ pub async fn award_for_order(
     customer_id: Uuid,
     order_id: Uuid,
     amounts: OrderAmounts,
+    lines: &[OrderLine],
+    eligible_item_ids: &[Uuid],
     rule: EarnRule,
     enabled: bool,
     balance_cap: Option<i32>,
@@ -299,7 +307,7 @@ pub async fn award_for_order(
     if !enabled {
         return Ok(0);
     }
-    let points = earn::points_for(amounts, rule);
+    let points = earn::points_for_order(amounts, lines, eligible_item_ids, rule);
     if points <= 0 {
         // A sale below one point still attaches the member to the order (the
         // caller sets `orders.loyalty_customer_id`); it just buys nothing.
