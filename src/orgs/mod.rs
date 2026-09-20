@@ -7,5 +7,3 @@ pub mod routes;
 pub mod slugs;
 pub mod social;
 
-#[cfg(test)]
-mod provision_tests;

@@ -6,7 +6,3 @@ pub mod reconcile;
 pub mod routes;
 pub mod spot_views;
 
-#[cfg(test)]
-mod figures_guard_tests;
-#[cfg(test)]
-mod report_vectors_tests;

@@ -1508,5 +1508,3 @@ async fn clone_overrides(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests;

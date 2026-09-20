@@ -2,9 +2,9 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::kitchen::stations::KitchenStation;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::kitchen::stations::KitchenStation;
+use madar_rust::models::UserRole;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -102,7 +102,7 @@ async fn resolve_station_precedence(pool: PgPool) {
 
     let mut tx = pool.begin().await.unwrap();
     // Category rule applies (no item override yet).
-    let s = crate::kitchen::resolve_station(&mut tx, branch, Some(item))
+    let s = madar_rust::kitchen::resolve_station(&mut tx, branch, Some(item))
         .await
         .unwrap();
     assert_eq!(s, Some(grill), "category rule routes to Grill");
@@ -110,14 +110,14 @@ async fn resolve_station_precedence(pool: PgPool) {
     // Item override wins.
     sqlx::query("INSERT INTO menu_item_station_routes (branch_id, menu_item_id, station_id) VALUES ($1,$2,$3)")
         .bind(branch).bind(item).bind(bar).execute(&mut *tx).await.unwrap();
-    let s = crate::kitchen::resolve_station(&mut tx, branch, Some(item))
+    let s = madar_rust::kitchen::resolve_station(&mut tx, branch, Some(item))
         .await
         .unwrap();
     assert_eq!(s, Some(bar), "item override beats the category rule");
 
     // An uncategorised, unrouted item falls to the branch default station.
     let other = seed_item(&pool, org, None).await;
-    let s = crate::kitchen::resolve_station(&mut tx, branch, Some(other))
+    let s = madar_rust::kitchen::resolve_station(&mut tx, branch, Some(other))
         .await
         .unwrap();
     assert_eq!(s, Some(grill), "default station catches unrouted items");
@@ -131,7 +131,7 @@ async fn station_crud_and_single_default(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
-            .configure(crate::kitchen::routes::configure),
+            .configure(madar_rust::kitchen::routes::configure),
     )
     .await;
     let org = seed_org(&pool).await;

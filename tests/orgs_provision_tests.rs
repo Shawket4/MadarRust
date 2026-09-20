@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::authz::{Cap, Decision, Request, decide};
-use crate::models::UserRole;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::authz::{Cap, Decision, Request, decide};
+use madar_rust::models::UserRole;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -32,7 +32,7 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
-                .configure(crate::orgs::routes::configure),
+                .configure(madar_rust::orgs::routes::configure),
         )
         .await
     };
@@ -120,13 +120,13 @@ async fn a_cafe_is_provisioned_whole_with_the_new_org_limits(pool: PgPool) {
     .unwrap();
     assert_eq!(cats, vec!["coffee_bean", "general", "milk"]);
 
-    let owner_eff = crate::authz::require::effective(&pool, owner, None)
+    let owner_eff = madar_rust::authz::require::effective(&pool, owner, None)
         .await
         .unwrap();
     assert!(owner_eff.owner);
 
     let teller = add_user(&pool, org, "teller").await;
-    let t = crate::authz::require::effective(&pool, teller, None)
+    let t = madar_rust::authz::require::effective(&pool, teller, None)
         .await
         .unwrap();
     let void = t.limits_of(Cap::OrdersVoid);
@@ -147,7 +147,7 @@ async fn a_cafe_is_provisioned_whole_with_the_new_org_limits(pool: PgPool) {
     assert!(!t.can(Cap::BookingsRead), "a café teller has no bookings");
 
     let waiter = add_user(&pool, org, "waiter").await;
-    let w = crate::authz::require::effective(&pool, waiter, None)
+    let w = madar_rust::authz::require::effective(&pool, waiter, None)
         .await
         .unwrap();
     assert!(matches!(
@@ -163,7 +163,7 @@ async fn a_cafe_is_provisioned_whole_with_the_new_org_limits(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let t = crate::authz::require::effective(&pool, teller, None)
+    let t = madar_rust::authz::require::effective(&pool, teller, None)
         .await
         .unwrap();
     assert!(!t.can(Cap::BookingsRead));
@@ -206,15 +206,15 @@ async fn an_existing_org_keeps_unlimited_voids(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let teller = add_user(&pool, org, "teller").await;
-    let t = crate::authz::require::effective(&pool, teller, None)
+    let t = madar_rust::authz::require::effective(&pool, teller, None)
         .await
         .unwrap();
     assert_eq!(
         t.limits_of(Cap::OrdersVoid),
-        crate::authz::Limits::UNLIMITED
+        madar_rust::authz::Limits::UNLIMITED
     );
 }

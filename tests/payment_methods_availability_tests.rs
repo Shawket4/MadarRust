@@ -3,9 +3,9 @@ use actix_web::{App, http::StatusCode, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
-use crate::payment_methods::{availability::*, routes};
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
+use madar_rust::payment_methods::{availability::*, routes};
 
 struct Fx {
     org: Uuid,
@@ -223,11 +223,11 @@ async fn cross_org_ids_rejected(pool: PgPool) {
     )
     .await
     .unwrap_err();
-    assert!(matches!(e, crate::errors::AppError::BadRequest(_)));
+    assert!(matches!(e, madar_rust::errors::AppError::BadRequest(_)));
     let e = replace_list(&pool, fx.org, Owner::User, other.teller, &list(&[fx.card]))
         .await
         .unwrap_err();
-    assert!(matches!(e, crate::errors::AppError::NotFound(_)));
+    assert!(matches!(e, madar_rust::errors::AppError::NotFound(_)));
 }
 
 fn token(user: Uuid, org: Uuid, role: UserRole) -> String {

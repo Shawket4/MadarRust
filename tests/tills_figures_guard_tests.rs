@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
-use crate::tills::figures_guard::APPROVAL_HEADER;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
+use madar_rust::tills::figures_guard::APPROVAL_HEADER;
 
 const SECRET: &str = "test_secret";
 const ORG: &str = "10000000-0000-4000-8000-000000000001";
@@ -45,7 +45,7 @@ fn bearer(user: &str, role: UserRole) -> (&'static str, String) {
 }
 
 async fn seeded(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
     let seed = std::fs::read_to_string(concat!(
@@ -78,9 +78,9 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(JwtSecret(SECRET.into())))
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                .configure(crate::tills::routes::configure)
-                .configure(crate::orders::routes::configure),
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .configure(madar_rust::tills::routes::configure)
+                .configure(madar_rust::orders::routes::configure),
         )
         .await
     };
@@ -252,7 +252,7 @@ async fn a_one_time_manager_pin_unlock_opens_the_live_figures_and_is_recorded(po
     .fetch_one(&pool)
     .await
     .expect("the read was recorded");
-    assert_eq!(row.0, crate::tills::figures_guard::OP_REPORT);
+    assert_eq!(row.0, madar_rust::tills::figures_guard::OP_REPORT);
     assert_eq!(row.1, uid(TELLER_A));
     assert_eq!(row.2, uid(MANAGER));
     assert!(row.3);
@@ -372,7 +372,7 @@ async fn old_clients_and_the_dashboard_are_untouched(pool: PgPool) {
 
 #[actix_web::test]
 async fn only_a_pos_or_kds_build_at_0_7_11_or_later_is_held_to_the_rule() {
-    use crate::tills::figures_guard::enforced_client;
+    use madar_rust::tills::figures_guard::enforced_client;
     let h = |v: &str| {
         let mut m = actix_web::http::header::HeaderMap::new();
         m.insert(

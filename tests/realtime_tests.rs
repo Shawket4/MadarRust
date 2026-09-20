@@ -10,10 +10,10 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::event::{BranchEvent, Topic};
-use super::hub::BranchEventHub;
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::realtime::event::{BranchEvent, Topic};
+use madar_rust::realtime::hub::BranchEventHub;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -58,7 +58,7 @@ async fn seed_user(pool: &PgPool, org: Uuid, role: &str) -> Uuid {
     id
 }
 async fn perms(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
 }
@@ -70,7 +70,7 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new($hub.clone()))
-                .configure(crate::realtime::routes::configure),
+                .configure(madar_rust::realtime::routes::configure),
         )
         .await
     };

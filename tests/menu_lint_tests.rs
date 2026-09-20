@@ -1,13 +1,15 @@
 //! Lint rule fixtures: each test builds the smallest broken menu for one rule on the
 //! unified tables and asserts the finding (and that a clean twin produces none).
 
+mod common;
+
 use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{LintIssue, LintSeverity, lint_org};
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
+use madar_rust::menu::lint::{LintIssue, LintSeverity, lint_org};
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
 
 async fn org(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
@@ -40,7 +42,7 @@ async fn item(pool: &PgPool, org: Uuid, name: &str) -> Uuid {
 }
 
 async fn size(pool: &PgPool, item: Uuid, label: &str, sort: i32) -> Uuid {
-    crate::test_support::seed_real_size(pool, item, label, 100, sort).await
+    common::sizes::seed_real_size(pool, item, label, 100, sort).await
 }
 
 async fn ingredient(pool: &PgPool, org: Uuid, name: &str, unit: &str, slug: &str) -> Uuid {
@@ -282,13 +284,13 @@ async fn lint_endpoint_shape_and_auth(pool: PgPool) {
     .unwrap();
     let secret = JwtSecret("secret".to_string());
     let token =
-        crate::auth::jwt::create_token(&secret, user, Some(org), UserRole::OrgAdmin, None, 24)
+        madar_rust::auth::jwt::create_token(&secret, user, Some(org), UserRole::OrgAdmin, None, 24)
             .unwrap();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret))
-            .configure(crate::menu::routes::configure),
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
 
@@ -372,7 +374,7 @@ async fn staff_token(
         .await
         .unwrap();
     }
-    crate::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
+    madar_rust::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
         .unwrap()
 }
 
@@ -388,7 +390,7 @@ async fn lint_is_refused_without_menu_read_and_served_to_a_teller(pool: PgPool) 
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(JwtSecret("secret".to_string())))
-            .configure(crate::menu::routes::configure),
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
     for (who, token, want) in [("denied", &denied, 403), ("teller", &teller, 200)] {

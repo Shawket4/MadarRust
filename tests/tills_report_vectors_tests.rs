@@ -276,7 +276,7 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
         .await
         .unwrap_or_else(|e| panic!("{}: {e}", sc.name));
 
-    let body = crate::sync::pull::PullRequest {
+    let body = madar_rust::sync::pull::PullRequest {
         branch_id: branch,
         device_id: None,
         types: None,
@@ -284,7 +284,7 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
         ledger_page_size: None,
         snapshot_cursor: None,
     };
-    let full = crate::sync::pull::pull_core(pool, org, &body, None)
+    let full = madar_rust::sync::pull::pull_core(pool, org, &body, None)
         .await
         .unwrap();
     // Rows exactly as the device receives them, minus the per-database `seq`.
@@ -302,18 +302,18 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
     let mut tills = serde_json::Map::new();
     for label in sc.tills {
         let till_id = id(&format!("{}:{label}", sc.name));
-        let till = crate::tills::handlers::fetch_till_or_404(pool, till_id)
+        let till = madar_rust::tills::handlers::fetch_till_or_404(pool, till_id)
             .await
             .unwrap();
-        let system_cash = crate::tills::handlers::compute_system_cash(pool, till_id)
+        let system_cash = madar_rust::tills::handlers::compute_system_cash(pool, till_id)
             .await
             .unwrap();
-        let f = crate::tills::handlers::report_figures(pool, &till)
+        let f = madar_rust::tills::handlers::report_figures(pool, &till)
             .await
             .unwrap();
         let mut conn = pool.acquire().await.unwrap();
         let methods =
-            crate::tills::reconcile::system_totals_by_method(&mut conn, till_id, f.expected_cash)
+            madar_rust::tills::reconcile::system_totals_by_method(&mut conn, till_id, f.expected_cash)
                 .await
                 .unwrap();
         tills.insert(

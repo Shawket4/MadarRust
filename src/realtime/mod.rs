@@ -8,5 +8,3 @@ pub mod hub;
 pub mod routes;
 pub mod stream;
 
-#[cfg(test)]
-mod tests;

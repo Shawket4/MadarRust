@@ -1,3 +1,4 @@
+
 mod common;
 
 use madar_rust::client_seen::forget_throttle;
@@ -874,3 +875,5 @@ async fn mirror_lists_and_catalog_sync_are_recorded_for_native_clients(pool: PgP
     let dash = wait_for(&pool, org, "c:-:dashboard", |_| true).await;
     assert!(dash.7.is_empty(), "{:?}", dash.7);
 }
+
+// (Layout nudge: see CLAUDE.md on XProtect and large test binaries.)

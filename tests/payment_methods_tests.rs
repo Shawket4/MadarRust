@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::translation::ensure_translations;
+    use madar_rust::translation::ensure_translations;
     use std::collections::HashMap;
 
     /// A complete set of translations is left exactly as given, and asks

@@ -522,7 +522,7 @@ pub(crate) async fn fetch_till<'e, E: sqlx::PgExecutor<'e>>(
     .await
 }
 
-pub(crate) async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Till, AppError> {
+pub async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Till, AppError> {
     fetch_till(pool, till_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Till not found".into()))
@@ -1184,7 +1184,7 @@ pub async fn get_till_report(
     }))
 }
 
-pub(crate) async fn report_figures(
+pub async fn report_figures(
     pool: &PgPool,
     till: &Till,
 ) -> Result<TillReportFigures, AppError> {

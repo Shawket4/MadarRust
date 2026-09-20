@@ -526,5 +526,3 @@ pub async fn get_menu_lint(
     Ok(HttpResponse::Ok().json(issues))
 }
 
-#[cfg(test)]
-mod tests;

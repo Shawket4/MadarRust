@@ -6,15 +6,15 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn token(user: Uuid, org: Uuid, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&secret(), user, Some(org), role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&secret(), user, Some(org), role, None, 24).unwrap()
 }
 
 async fn org(pool: &PgPool, name: &str) -> Uuid {
@@ -64,8 +64,8 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
-                .configure(crate::devices::routes::configure)
-                .configure(crate::auth::routes::configure),
+                .configure(madar_rust::devices::routes::configure)
+                .configure(madar_rust::auth::routes::configure),
         )
         .await
     };
@@ -91,7 +91,7 @@ async fn call(
 }
 
 async fn seed(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
 }
@@ -139,7 +139,7 @@ async fn an_owner_issues_a_code_and_a_tablet_binds_itself_once(pool: PgPool) {
     assert_eq!(act["device"]["label"], "Front counter");
     let dev_token = act["device_token"].as_str().unwrap().to_string();
     assert!(
-        crate::devices::activation::verify_credential(&pool, device, &dev_token)
+        madar_rust::devices::activation::verify_credential(&pool, device, &dev_token)
             .await
             .unwrap()
     );
@@ -197,7 +197,7 @@ async fn an_owner_issues_a_code_and_a_tablet_binds_itself_once(pool: PgPool) {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert!(
-        !crate::devices::activation::verify_credential(&pool, device, &dev_token)
+        !madar_rust::devices::activation::verify_credential(&pool, device, &dev_token)
             .await
             .unwrap()
     );

@@ -3,8 +3,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::shadow::{Mode, compare_all, observe_in};
-use crate::errors::AppError;
+use madar_rust::authz::shadow::{Mode, compare_all, observe_in};
+use madar_rust::errors::AppError;
 
 async fn org(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
@@ -47,7 +47,7 @@ async fn user(pool: &PgPool, org: Uuid, role: &str) -> Uuid {
 }
 
 async fn seed(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
 }

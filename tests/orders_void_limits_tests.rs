@@ -11,9 +11,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::orders::routes;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::orders::routes;
 
 const CAP_ORDERS_VOID: i32 = 64;
 
@@ -22,7 +22,7 @@ fn secret() -> JwtSecret {
 }
 
 fn token(user_id: Uuid, org_id: Uuid, branch_id: Uuid, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&secret(), user_id, Some(org_id), role, Some(branch_id), 24)
+    madar_rust::auth::jwt::create_token(&secret(), user_id, Some(org_id), role, Some(branch_id), 24)
         .unwrap()
 }
 
@@ -164,7 +164,7 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
                 .configure(routes::configure),
         )
         .await

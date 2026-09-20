@@ -2,17 +2,17 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::realtime::hub::BranchEventHub;
-use crate::reservations::floor::{FloorSection, FloorTable};
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::realtime::hub::BranchEventHub;
+use madar_rust::reservations::floor::{FloorSection, FloorTable};
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -96,8 +96,8 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(get_secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::reservations::routes::configure)
-                .configure(crate::tickets::routes::configure),
+                .configure(madar_rust::reservations::routes::configure)
+                .configure(madar_rust::tickets::routes::configure),
         )
         .await
     };

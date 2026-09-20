@@ -111,5 +111,3 @@ impl VoidReason {
     }
 }
 
-#[cfg(test)]
-mod void_limits_tests;

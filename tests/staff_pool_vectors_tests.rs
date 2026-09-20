@@ -8,11 +8,11 @@
 //! `tax_vectors.json` gives the bill. Change the rule, change the fixture, and
 //! let both sides fail until they agree.
 
-use super::engine::{self, StaffPoolSettings};
+use madar_rust::staff_pool::engine::{self, StaffPoolSettings};
 use serde_json::Value;
 
 fn vectors() -> Value {
-    let raw = include_str!("../../tests/fixtures/staff_pool_vectors.json");
+    let raw = include_str!("fixtures/staff_pool_vectors.json");
     serde_json::from_str(raw).expect("staff_pool_vectors.json is valid JSON")
 }
 
@@ -98,7 +98,7 @@ fn no_vector_ever_refuses_a_drink_for_being_over_the_allowance() {
 /// A vectors file that has drifted pins nothing.
 #[test]
 fn both_repos_carry_the_same_fixture() {
-    let here = include_str!("../../tests/fixtures/staff_pool_vectors.json");
+    let here = include_str!("fixtures/staff_pool_vectors.json");
     let pos = std::path::Path::new("../madar/rust-core/crates/madar-core/tests/fixtures/staff_pool_vectors.json");
     // The POS checkout is not always beside this one (CI clones this repo
     // alone), so this is a check when it is there and a silent pass when not.
