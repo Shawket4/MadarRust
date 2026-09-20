@@ -2034,8 +2034,8 @@ group = "customers"
 tier = "configurable"
 risk = "pii"
 defaults = "om"
-en = "Edit and merge customers"
-ar = "تعديل العملاء ودمجهم"
+en = "Edit customers"
+ar = "تعديل العملاء"
 
 [[cap]]
 id = 212
@@ -2168,6 +2168,22 @@ en = "Record a staff drink"
 ar = "تسجيل مشروب موظفين"
 hint_en = "Off for tellers by default. Turn it on to let the till put a drink on the branch's daily staff pool. A note saying who it is for is always required."
 hint_ar = "مقفول للكاشير في الأصل. افتحه عشان الكاشير يحسب المشروب على رصيد الموظفين اليومي بتاع الفرع. لازم دايمًا يكتب ملاحظة بالمشروب ده لمين."
+
+# ── one customer (CUSTOMERS_UNIFICATION_DESIGN.md §7) ───────────────────────
+# Split from customers.edit (211) 2026-09-20: a merge moves loyalty balances and
+# retires a wallet card, which is more than correcting a name.
+[[cap]]
+id = 224
+key = "customers.merge"
+group = "customers"
+tier = "configurable"
+risk = "pii"
+defaults = "om"
+en = "Merge duplicate customers"
+# AR draft (2026-09-20), pending owner review.
+ar = "دمج العملاء المكررين"
+hint_en = "Merging cannot be undone. When both are loyalty members, the points move to the customer that stays and the other card stops working."
+hint_ar = "الدمج لا يمكن التراجع عنه. لو الاتنين أعضاء في برنامج الولاء، النقاط بتتنقل للعميل اللي هيفضل والكارت التاني بيتوقف."
 
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
