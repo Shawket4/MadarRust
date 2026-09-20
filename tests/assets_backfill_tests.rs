@@ -1,11 +1,14 @@
 //! Backfill tests on a fixture uploads dir (contract §11.8).
 
+mod common;
+
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::AssetStore;
-use super::backfill::{BackfillOptions, prune, run};
-use super::tests::{photo_png, schema, seed_item, seed_org, tmp_store};
+use madar_rust::assets::AssetStore;
+use madar_rust::assets::backfill::{BackfillOptions, prune, run};
+use common::assets::{schema, seed_item, seed_org};
+use common::{photo_png, tmp_store};
 
 struct Fx {
     _d: tempfile::TempDir,
@@ -205,13 +208,13 @@ async fn backfill_never_clobbers_newer_upload(pool: PgPool) {
     o.limit = Some(0); // discover only
     run(&pool, &o).await.unwrap();
     // A new upload lands through the live pipeline before the backfill runs.
-    let newer = super::ingest::ingest_bytes(
+    let newer = madar_rust::assets::ingest::ingest_bytes(
         &pool,
         &fx.store,
         Some(fx.org),
-        super::ingest::AssetPurpose::MenuItemPhoto,
+        madar_rust::assets::ingest::AssetPurpose::MenuItemPhoto,
         photo_png(50, 50, 99),
-        super::ingest::SourceKind::Upload,
+        madar_rust::assets::ingest::SourceKind::Upload,
         None,
         None,
     )
@@ -548,7 +551,7 @@ async fn backfill_same_file_as_menu_photo_and_logo_gets_two_profiles(pool: PgPoo
 
 #[sqlx::test]
 async fn ingest_different_images_with_byte_identical_thumbnails(pool: PgPool) {
-    use super::ingest::{AssetPurpose, SourceKind, ingest_bytes};
+    use madar_rust::assets::ingest::{AssetPurpose, SourceKind, ingest_bytes};
     let (_d, store) = tmp_store();
     let org = seed_org(&pool).await;
     let make = |dot: bool| {
@@ -610,7 +613,7 @@ async fn ingest_different_images_with_byte_identical_thumbnails(pool: PgPool) {
 
 #[sqlx::test]
 async fn failed_ingest_attempt_leaves_no_orphan_and_keeps_shared_files(pool: PgPool) {
-    use super::ingest::{AssetPurpose, FAIL_BEFORE_COMMIT, SourceKind, ingest_bytes};
+    use madar_rust::assets::ingest::{AssetPurpose, FAIL_BEFORE_COMMIT, SourceKind, ingest_bytes};
     let (_d, store) = tmp_store();
     let org = seed_org(&pool).await;
     let photo = photo_png(600, 400, 23);
@@ -722,7 +725,7 @@ async fn backfill_with_shared_files_rerun_is_noop(pool: PgPool) {
     assert_eq!(snapshot(pool.clone()).await, before);
     assert_eq!(files_vs_rows(&pool, &store, org).await, files_before);
     // The no-op run verified nothing; the first run is the one to prune with.
-    let runs = super::backfill::verified_runs(&pool, Some(org))
+    let runs = madar_rust::assets::backfill::verified_runs(&pool, Some(org))
         .await
         .unwrap();
     let first_id = sqlx::query_scalar::<_, Uuid>(
@@ -766,7 +769,7 @@ async fn prune_keeps_a_legacy_file_another_unverified_item_uses(pool: PgPool) {
 
 #[sqlx::test]
 async fn small_transparent_logo_keeps_an_original_row_sharing_the_full_file(pool: PgPool) {
-    use super::ingest::{AssetPurpose, SourceKind, ingest_bytes};
+    use madar_rust::assets::ingest::{AssetPurpose, SourceKind, ingest_bytes};
     let (_d, store) = tmp_store();
     let org = seed_org(&pool).await;
     let mut img = image::RgbaImage::from_pixel(200, 100, image::Rgba([0, 0, 0, 0]));

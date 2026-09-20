@@ -2,17 +2,17 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::{UserPublic, UserRole};
-use crate::users::handlers::{CreateUserResponse, UserBranch};
-use crate::users::routes;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::{UserPublic, UserRole};
+use madar_rust::users::handlers::{CreateUserResponse, UserBranch};
+use madar_rust::users::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -66,7 +66,7 @@ async fn grant_permission(pool: &PgPool, role: &str, resource: &str, action: &st
 /// with no `users` row now holds nothing at all, and a hand-granted single cell
 /// is no longer enough to dominate the person being written (G2/G4).
 async fn seed_admin(pool: &PgPool, org_id: Uuid) -> (Uuid, String) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
     let id = Uuid::new_v4();

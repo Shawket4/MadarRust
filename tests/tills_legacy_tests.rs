@@ -20,8 +20,8 @@ use actix_web::{App, test, web};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 const ROOT: &str = env!("CARGO_MANIFEST_DIR");
 const SECRET: &str = "test_secret";
@@ -192,27 +192,27 @@ fn dig<'a>(v: &'a Value, path: &str) -> &'a Value {
 
 #[sqlx::test]
 async fn legacy_goldens_match_value_for_value(pool: PgPool) {
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let seed =
         std::fs::read_to_string(format!("{ROOT}/scripts/legacy_till_golden/seed.sql")).unwrap();
     sqlx::raw_sql(&seed).execute(&pool).await.expect("seed.sql");
 
-    let hub = web::Data::new(crate::realtime::hub::BranchEventHub::new());
+    let hub = web::Data::new(madar_rust::realtime::hub::BranchEventHub::new());
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(JwtSecret(SECRET.into())))
             .app_data(hub.clone())
-            .configure(crate::tills::legacy_routes::configure)
-            .configure(crate::tills::routes::configure)
-            .configure(crate::tickets::routes::configure)
-            .configure(crate::sync::routes::configure)
-            .configure(crate::orders::routes::configure)
-            .configure(crate::refunds::routes::configure)
-            .configure(|c| crate::reports::routes::configure(c, web::Data::new(pool.clone())))
-            .configure(crate::delivery::routes::configure),
+            .configure(madar_rust::tills::legacy_routes::configure)
+            .configure(madar_rust::tills::routes::configure)
+            .configure(madar_rust::tickets::routes::configure)
+            .configure(madar_rust::sync::routes::configure)
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::refunds::routes::configure)
+            .configure(|c| madar_rust::reports::routes::configure(c, web::Data::new(pool.clone())))
+            .configure(madar_rust::delivery::routes::configure),
     )
     .await;
 
@@ -246,10 +246,10 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
         fwd: HashMap::new(),
         back: HashMap::new(),
     };
-    let phone = crate::delivery::normalize_phone("01000000000").unwrap();
+    let phone = madar_rust::delivery::normalize_phone("01000000000").unwrap();
     vars.insert(
         "device_token".into(),
-        Value::String(crate::delivery::whatsapp::issue_device_token(SECRET, &phone).unwrap()),
+        Value::String(madar_rust::delivery::whatsapp::issue_device_token(SECRET, &phone).unwrap()),
     );
     let org = uuid::Uuid::parse_str(vars["org"].as_str().unwrap()).unwrap();
     let mut tokens = HashMap::new();
@@ -347,7 +347,7 @@ async fn legacy_goldens_match_value_for_value(pool: PgPool) {
 /// till is deleted (204) and is gone afterwards; a till with sales is not.
 #[sqlx::test]
 async fn legacy_delete_shift_route(pool: PgPool) {
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let seed =
@@ -357,9 +357,9 @@ async fn legacy_delete_shift_route(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(JwtSecret(SECRET.into())))
-            .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-            .configure(crate::tills::legacy_routes::configure)
-            .configure(crate::orders::routes::configure),
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .configure(madar_rust::tills::legacy_routes::configure)
+            .configure(madar_rust::orders::routes::configure),
     )
     .await;
     let org = uuid::Uuid::parse_str("10000000-0000-4000-8000-000000000001").unwrap();

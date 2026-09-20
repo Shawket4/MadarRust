@@ -2,8 +2,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::errors::AppError;
-use crate::tills::reconcile::*;
+use madar_rust::errors::AppError;
+use madar_rust::tills::reconcile::*;
 
 // ── pure planning ────────────────────────────────────────────────
 

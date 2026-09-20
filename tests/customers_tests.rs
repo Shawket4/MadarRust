@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
-use crate::realtime::hub::BranchEventHub;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
+use madar_rust::realtime::hub::BranchEventHub;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -60,8 +60,8 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::customers::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::customers::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };
@@ -112,7 +112,7 @@ async fn order_row(pool: &PgPool, branch: Uuid, teller: Uuid, total: i32) -> Uui
 
 #[::core::prelude::v1::test]
 fn phone_keys_fold_the_country_code() {
-    use super::handlers::phone_key;
+    use madar_rust::customers::handlers::phone_key;
     assert_eq!(
         phone_key("+20 100 123 4567").as_deref(),
         Some("01001234567")
@@ -322,7 +322,7 @@ async fn queued_customers_dedupe_by_phone_and_merges_move_history(pool: PgPool) 
     .await;
     let o2 = order_row(&pool, branch, teller, 3000).await;
     let mut conn = pool.acquire().await.unwrap();
-    super::handlers::attach_to_order(&mut conn, org, o2, Some(c))
+    madar_rust::customers::handlers::attach_to_order(&mut conn, org, o2, Some(c))
         .await
         .unwrap();
     drop(conn);
@@ -370,7 +370,7 @@ async fn queued_customers_dedupe_by_phone_and_merges_move_history(pool: PgPool) 
 #[sqlx::test]
 async fn a_queued_sale_carries_its_customer(pool: PgPool) {
     let app = app!(pool);
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org = seed_org(&pool).await;

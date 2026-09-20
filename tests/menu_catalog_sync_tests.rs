@@ -5,21 +5,23 @@
 
 #![allow(clippy::too_many_arguments)]
 
+mod common;
+
 use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::menu::catalog_sync::*;
-use crate::menu::routes;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::menu::catalog_sync::*;
+use madar_rust::menu::routes;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -144,7 +146,7 @@ async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) ->
 }
 
 async fn seed_size(pool: &PgPool, item: Uuid, label: &str, price: i32, sort: i32) -> Uuid {
-    crate::test_support::seed_real_size(pool, item, label, price, sort).await
+    common::sizes::seed_real_size(pool, item, label, price, sort).await
 }
 
 async fn seed_group(

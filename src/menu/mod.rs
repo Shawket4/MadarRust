@@ -11,7 +11,3 @@ pub mod recipe_expand;
 pub mod routes;
 pub mod studio;
 
-#[cfg(test)]
-mod modeling_f_tests;
-#[cfg(test)]
-mod price_model_tests;

@@ -3,17 +3,17 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
 
-use super::service::{AddonCost, SkuCost};
+use madar_rust::costing::service::{AddonCost, SkuCost};
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -61,7 +61,7 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(super::routes::configure),
+            .configure(madar_rust::costing::routes::configure),
     )
     .await;
     let (org_id, _user, token) = seed_basics(&pool).await;
@@ -137,7 +137,7 @@ async fn test_addon_costs_rollup(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(super::routes::configure),
+            .configure(madar_rust::costing::routes::configure),
     )
     .await;
     let (org_id, _user, token) = seed_basics(&pool).await;
@@ -169,7 +169,7 @@ async fn test_addon_costs_rollup(pool: PgPool) {
 // ─────────────────────────────────────────────────────────────────────
 
 mod backfill_tests {
-    use super::super::backfill::{BackfillScope, backfill_cost_snapshots};
+    use madar_rust::costing::backfill::{BackfillScope, backfill_cost_snapshots};
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -563,6 +563,6 @@ mod backfill_tests {
 
         // Unknown org → NotFound.
         let err = backfill_cost_snapshots(&pool, BackfillScope::Org(Uuid::new_v4()), true).await;
-        assert!(matches!(err, Err(crate::errors::AppError::NotFound(_))));
+        assert!(matches!(err, Err(madar_rust::errors::AppError::NotFound(_))));
     }
 }

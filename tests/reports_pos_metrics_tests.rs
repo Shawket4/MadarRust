@@ -7,17 +7,17 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::reports::pos_metrics::{PosMetricsReport, average_ticket};
-use crate::reports::routes;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::reports::pos_metrics::{PosMetricsReport, average_ticket};
+use madar_rust::reports::routes;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn token(user: Uuid, org: Uuid, role: UserRole, branch: Option<Uuid>) -> String {
-    crate::auth::jwt::create_token(&secret(), user, Some(org), role, branch, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&secret(), user, Some(org), role, branch, 24).unwrap()
 }
 
 macro_rules! app {
@@ -619,7 +619,7 @@ async fn pos_metrics_vectors(pool: PgPool) {
     sqlx::raw_sql(&sql).execute(&pool).await.expect("seed");
     let (org, branch) = (vid("org"), vid("branch"));
 
-    let body = crate::sync::pull::PullRequest {
+    let body = madar_rust::sync::pull::PullRequest {
         branch_id: branch,
         device_id: None,
         types: None,
@@ -627,7 +627,7 @@ async fn pos_metrics_vectors(pool: PgPool) {
         ledger_page_size: None,
         snapshot_cursor: None,
     };
-    let full = crate::sync::pull::pull_core(&pool, org, &body, None)
+    let full = madar_rust::sync::pull::pull_core(&pool, org, &body, None)
         .await
         .unwrap();
     let rows = |ty: &str| -> Vec<Value> {
@@ -641,7 +641,7 @@ async fn pos_metrics_vectors(pool: PgPool) {
     let mut expected = Vec::new();
     for (from, to) in VECTOR_WINDOWS {
         let (from, to) = (from.parse().unwrap(), to.parse().unwrap());
-        let r = crate::reports::pos_metrics::compute(&pool, branch, from, to)
+        let r = madar_rust::reports::pos_metrics::compute(&pool, branch, from, to)
             .await
             .unwrap();
         expected.push(serde_json::to_value(r).unwrap());

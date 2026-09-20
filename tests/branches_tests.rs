@@ -2,17 +2,17 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::branches::handlers::{Branch, PrinterBrand};
-use crate::branches::routes;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::branches::handlers::{Branch, PrinterBrand};
+use madar_rust::branches::routes;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_super_admin_token() -> String {
@@ -758,7 +758,7 @@ async fn the_table_rule_resolves_branch_first_and_null_inherits(pool: PgPool) {
     );
 
     let resolved = || async {
-        crate::branches::policy::require_table_for_orders(&pool, branch_uuid)
+        madar_rust::branches::policy::require_table_for_orders(&pool, branch_uuid)
             .await
             .unwrap()
     };

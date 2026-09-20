@@ -6,15 +6,15 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn token(user: Uuid, org: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&secret(), user, org, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&secret(), user, org, role, None, 24).unwrap()
 }
 
 async fn org(pool: &PgPool) -> Uuid {
@@ -80,7 +80,7 @@ async fn override_grant(pool: &PgPool, user: Uuid, resource: &str, action: &str)
 }
 
 async fn seed(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
 }
@@ -91,11 +91,11 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
-                .configure(crate::users::routes::configure)
-                .configure(crate::permissions::routes::configure)
-                .configure(crate::orgs::routes::configure)
-                .configure(crate::devices::routes::configure)
-                .configure(crate::payment_methods::routes::configure),
+                .configure(madar_rust::users::routes::configure)
+                .configure(madar_rust::permissions::routes::configure)
+                .configure(madar_rust::orgs::routes::configure)
+                .configure(madar_rust::devices::routes::configure)
+                .configure(madar_rust::payment_methods::routes::configure),
         )
         .await
     };

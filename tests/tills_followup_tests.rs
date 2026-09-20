@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 const SECRET: &str = "test_secret";
 const ORG: &str = "10000000-0000-4000-8000-000000000001";
@@ -33,7 +33,7 @@ fn bearer(user: &str, role: UserRole) -> (&'static str, String) {
 }
 
 async fn seeded(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
     let seed = std::fs::read_to_string(concat!(
@@ -50,14 +50,14 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(JwtSecret(SECRET.into())))
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                .configure(crate::tills::legacy_routes::configure)
-                .configure(crate::tills::routes::configure)
-                .configure(crate::orders::routes::configure)
-                .configure(crate::branches::routes::configure)
-                .configure(crate::payment_methods::routes::configure)
-                .configure(crate::sync::routes::configure)
-                .configure(|c| crate::reports::routes::configure(c, web::Data::new($pool.clone()))),
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .configure(madar_rust::tills::legacy_routes::configure)
+                .configure(madar_rust::tills::routes::configure)
+                .configure(madar_rust::orders::routes::configure)
+                .configure(madar_rust::branches::routes::configure)
+                .configure(madar_rust::payment_methods::routes::configure)
+                .configure(madar_rust::sync::routes::configure)
+                .configure(|c| madar_rust::reports::routes::configure(c, web::Data::new($pool.clone()))),
         )
         .await
     };
@@ -202,7 +202,7 @@ async fn legacy_force_close_shape_unchanged(pool: PgPool) {
 
 #[core::prelude::v1::test]
 fn force_close_lines_clear_every_count() {
-    use crate::tills::reconcile::*;
+    use madar_rust::tills::reconcile::*;
     let totals = vec![
         MethodTotal {
             method: "cash".into(),
@@ -325,7 +325,7 @@ async fn empty_restricted_allow_list_has_a_structured_code(pool: PgPool) {
 
 #[core::prelude::v1::test]
 fn reconciliation_refusals_carry_codes() {
-    use crate::tills::reconcile::*;
+    use madar_rust::tills::reconcile::*;
     let totals = vec![
         MethodTotal {
             method: "cash".into(),
@@ -350,7 +350,7 @@ fn reconciliation_refusals_carry_codes() {
     };
     let e = plan_lines(&totals, 0, 0, None, &[input(None, Some("x"))], false).unwrap_err();
     assert!(
-        matches!(&e, crate::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_AMOUNT_REQUIRED)
+        matches!(&e, madar_rust::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_AMOUNT_REQUIRED)
     );
     assert!(
         e.to_string()
@@ -358,7 +358,7 @@ fn reconciliation_refusals_carry_codes() {
     );
     let e = plan_lines(&totals, 0, 0, None, &[input(Some(800), None)], false).unwrap_err();
     assert!(
-        matches!(&e, crate::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_NOTE_REQUIRED)
+        matches!(&e, madar_rust::errors::AppError::Coded { status: 400, code, .. } if *code == CODE_NOTE_REQUIRED)
     );
 }
 
@@ -401,15 +401,15 @@ async fn legacy_entity_id_reads_the_archive_as_the_tenant(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let tenant = crate::db::tenant_pool(&pool, uid(ORG)).await;
+    let tenant = madar_rust::db::tenant_pool(&pool, uid(ORG)).await;
     assert_eq!(
-        crate::tills::legacy::legacy_till_entity_id(&tenant, uid(BRANCH_A)).await,
+        madar_rust::tills::legacy::legacy_till_entity_id(&tenant, uid(BRANCH_A)).await,
         archived
     );
-    let other = crate::db::tenant_pool(&pool, Uuid::new_v4()).await;
+    let other = madar_rust::db::tenant_pool(&pool, Uuid::new_v4()).await;
     assert_eq!(
-        crate::tills::legacy::legacy_till_entity_id(&other, uid(BRANCH_A)).await,
-        crate::tills::legacy::synthesized_till_id(uid(BRANCH_A)),
+        madar_rust::tills::legacy::legacy_till_entity_id(&other, uid(BRANCH_A)).await,
+        madar_rust::tills::legacy::synthesized_till_id(uid(BRANCH_A)),
         "another org never sees the row"
     );
 }

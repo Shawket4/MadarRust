@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::inventory::handlers::StockMovement;
-use crate::inventory::waste::WasteRecorded;
-use crate::models::UserRole;
-use crate::realtime::hub::BranchEventHub;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::inventory::handlers::StockMovement;
+use madar_rust::inventory::waste::WasteRecorded;
+use madar_rust::models::UserRole;
+use madar_rust::realtime::hub::BranchEventHub;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -150,8 +150,8 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::inventory::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::inventory::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };

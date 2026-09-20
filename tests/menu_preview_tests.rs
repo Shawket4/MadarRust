@@ -8,9 +8,9 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{PreviewDeduction, PreviewRequest, PreviewResponse, preview};
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
+use madar_rust::menu::preview::{PreviewDeduction, PreviewRequest, PreviewResponse, preview};
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
 
 struct Fx {
     org: Uuid,
@@ -374,13 +374,13 @@ async fn preview_endpoint_is_org_scoped(pool: PgPool) {
         .bind(user).bind(fx.org).bind(format!("u-{user}@t.com")).execute(&pool).await.unwrap();
     let secret = JwtSecret("secret".to_string());
     let token =
-        crate::auth::jwt::create_token(&secret, user, Some(fx.org), UserRole::OrgAdmin, None, 24)
+        madar_rust::auth::jwt::create_token(&secret, user, Some(fx.org), UserRole::OrgAdmin, None, 24)
             .unwrap();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret))
-            .configure(crate::menu::routes::configure),
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
     let call = || {
@@ -393,7 +393,7 @@ async fn preview_endpoint_is_org_scoped(pool: PgPool) {
     sqlx::query("INSERT INTO role_permissions (role, resource, action, granted) VALUES ('org_admin', 'menu_items', 'read', true) ON CONFLICT DO NOTHING")
         .execute(&pool).await.unwrap();
     // Another org's admin cannot preview this item.
-    let other = crate::auth::jwt::create_token(
+    let other = madar_rust::auth::jwt::create_token(
         &JwtSecret("secret".to_string()),
         user,
         Some(Uuid::new_v4()),
@@ -454,7 +454,7 @@ async fn preview_is_refused_without_menu_read_and_served_to_a_teller(pool: PgPoo
             .unwrap();
         }
         tokens.push(
-            crate::auth::jwt::create_token(
+            madar_rust::auth::jwt::create_token(
                 &JwtSecret("secret".into()),
                 user,
                 Some(fx.org),
@@ -469,7 +469,7 @@ async fn preview_is_refused_without_menu_read_and_served_to_a_teller(pool: PgPoo
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(JwtSecret("secret".to_string())))
-            .configure(crate::menu::routes::configure),
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
     for (who, token, want) in [("denied", &tokens[0], 403), ("teller", &tokens[1], 200)] {

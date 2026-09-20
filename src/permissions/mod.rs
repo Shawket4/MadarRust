@@ -4,8 +4,6 @@ pub mod handlers;
 pub mod routes;
 pub mod seeder;
 
-#[cfg(test)]
-mod phase0_tests;
 
 /// Single source of truth for every permission resource the system knows about.
 ///

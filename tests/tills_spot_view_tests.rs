@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 const SECRET: &str = "test_secret";
 const ORG: &str = "10000000-0000-4000-8000-000000000001";
@@ -37,7 +37,7 @@ fn bearer(user: &str, role: UserRole) -> (&'static str, String) {
 }
 
 async fn seeded(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
     let seed = std::fs::read_to_string(concat!(
@@ -62,11 +62,11 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(JwtSecret(SECRET.into())))
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                .configure(crate::tills::legacy_routes::configure)
-                .configure(crate::tills::routes::configure)
-                .configure(crate::orders::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .configure(madar_rust::tills::legacy_routes::configure)
+                .configure(madar_rust::tills::routes::configure)
+                .configure(madar_rust::orders::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };

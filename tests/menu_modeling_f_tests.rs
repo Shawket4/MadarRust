@@ -2,14 +2,16 @@
 //! linked copies. Everything expands into plain `recipe_lines`, so most assertions
 //! read that table directly.
 
+mod common;
+
 use actix_web::{App, test, web};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::menu::routes;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::menu::routes;
+use madar_rust::models::UserRole;
 
 struct Org {
     org: Uuid,
@@ -54,7 +56,7 @@ async fn setup(pool: &PgPool) -> Org {
         .unwrap();
     }
     let cat = category(pool, org, "Iced coffee").await;
-    let token = crate::auth::jwt::create_token(
+    let token = madar_rust::auth::jwt::create_token(
         &JwtSecret("secret".into()),
         user,
         Some(org),
@@ -115,7 +117,7 @@ async fn item(
         // Authored sizes: each gets a fresh id and displaces the `one_size` row
         // the item was born with, so a size LABELLED `one_size` here is a real
         // size a customer picks rather than the sentinel.
-        sizes.push(crate::test_support::seed_real_size(pool, id, l, 100, i as i32).await);
+        sizes.push(common::sizes::seed_real_size(pool, id, l, 100, i as i32).await);
     }
     (id, sizes)
 }
@@ -521,7 +523,7 @@ async fn dine_in_skips_categories_flagged_as_packaging(pool: PgPool) {
     .unwrap();
     let _ = backfilled; // created after the backfill: the slug fallback covers it.
 
-    let set = crate::orders::handlers::packaging_ingredient_ids(&pool, o.org)
+    let set = madar_rust::orders::handlers::packaging_ingredient_ids(&pool, o.org)
         .await
         .unwrap();
     assert!(set.contains(&legacy) && !set.contains(&flagged) && !set.contains(&milk));
@@ -531,7 +533,7 @@ async fn dine_in_skips_categories_flagged_as_packaging(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let set = crate::orders::handlers::packaging_ingredient_ids(&pool, o.org)
+    let set = madar_rust::orders::handlers::packaging_ingredient_ids(&pool, o.org)
         .await
         .unwrap();
     assert!(set.contains(&legacy) && set.contains(&flagged) && !set.contains(&milk));
@@ -542,7 +544,7 @@ async fn dine_in_skips_categories_flagged_as_packaging(pool: PgPool) {
 
 #[::core::prelude::v1::test]
 fn sized_option_lines_replace_generic_ones_per_ingredient() {
-    use crate::orders::component_resolve::merge_sized_option_lines;
+    use madar_rust::orders::component_resolve::merge_sized_option_lines;
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
     let c = Uuid::new_v4();
@@ -566,7 +568,7 @@ fn sized_option_lines_replace_generic_ones_per_ingredient() {
 #[sqlx::test]
 async fn the_resolver_prefers_the_sized_option_amount_and_the_shim_hides_it(pool: PgPool) {
     let o = setup(&pool).await;
-    sqlx::raw_sql(include_str!("../../deploy/menu_unification_shim.sql"))
+    sqlx::raw_sql(include_str!("../deploy/menu_unification_shim.sql"))
         .execute(&pool)
         .await
         .unwrap();
@@ -624,19 +626,19 @@ async fn the_resolver_prefers_the_sized_option_amount_and_the_shim_hides_it(pool
             .unwrap();
     assert_eq!(legacy_rows, 1, "old tills see only the generic amount");
 
-    let addon = crate::orders::component_resolve::AddonInput {
+    let addon = madar_rust::orders::component_resolve::AddonInput {
         addon_item_id: opt,
         quantity: 1,
         unit_price: None,
     };
-    let qty = |res: crate::orders::component_resolve::MenuItemResolution| {
+    let qty = |res: madar_rust::orders::component_resolve::MenuItemResolution| {
         res.deductions
             .iter()
             .filter(|d| d.org_ingredient_id == Some(sauce))
             .map(|d| d.quantity)
             .sum::<f64>()
     };
-    let can = crate::orders::component_resolve::resolve_menu_item_configuration(
+    let can = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
         &pool,
         it,
         Some("Can".into()),
@@ -648,7 +650,7 @@ async fn the_resolver_prefers_the_sized_option_amount_and_the_shim_hides_it(pool
     .await
     .unwrap();
     assert_eq!(qty(can), 40.0);
-    let cup = crate::orders::component_resolve::resolve_menu_item_configuration(
+    let cup = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
         &pool,
         it,
         Some("Cup".into()),
@@ -827,7 +829,7 @@ async fn staff_token(pool: &PgPool, org: Uuid, role: &str, kind: UserRole) -> St
     .fetch_one(pool)
     .await
     .unwrap();
-    crate::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
+    madar_rust::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
         .unwrap()
 }
 

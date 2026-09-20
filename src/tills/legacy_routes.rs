@@ -274,7 +274,7 @@ pub async fn add_cash_movement(
 }
 
 /// Old clients read prose, not codes: keep 400 bodies they used to get.
-pub(crate) fn legacy_error(e: AppError) -> AppError {
+pub fn legacy_error(e: AppError) -> AppError {
     match e {
         AppError::Coded {
             status: 400,

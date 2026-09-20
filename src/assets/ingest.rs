@@ -1211,7 +1211,11 @@ async fn store_group_tx(
             Err(e) => return Err(StoreError::Io(e)),
         }
     }
-    #[cfg(test)]
+    // `debug_assertions`, not `test`: the assets suite is its own binary and
+    // links this library without `cfg(test)`, so the hook has to exist for it.
+    // Release builds -- the ones that reach production -- compile it out, and
+    // the list is empty unless a test puts an org in it.
+    #[cfg(debug_assertions)]
     if g.org_id
         .is_some_and(|o| FAIL_BEFORE_COMMIT.lock().unwrap().contains(&o))
     {
@@ -1224,8 +1228,9 @@ async fn store_group_tx(
 }
 
 /// Test hook: `store_group` for these orgs fails after writing its files.
-#[cfg(test)]
-pub(crate) static FAIL_BEFORE_COMMIT: std::sync::Mutex<Vec<Uuid>> =
+/// Compiled only with `debug_assertions` -- never in a release build.
+#[cfg(debug_assertions)]
+pub static FAIL_BEFORE_COMMIT: std::sync::Mutex<Vec<Uuid>> =
     std::sync::Mutex::new(Vec::new());
 
 async fn find_group_by_source(

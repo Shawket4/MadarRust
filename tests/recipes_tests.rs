@@ -2,17 +2,17 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::recipes::handlers::*;
-use crate::recipes::routes;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::recipes::handlers::*;
+use madar_rust::recipes::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -502,7 +502,7 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
 // ── Preparation steps + the preset library
 // ──────────────────────────────────────────────────────────────
 
-use crate::recipes::steps::{self, RecipeStep, RecipeStepPreset};
+use madar_rust::recipes::steps::{self, RecipeStep, RecipeStepPreset};
 
 const SHIPPED: &str = "static/step-animations";
 
@@ -583,7 +583,7 @@ async fn steps_are_presets_or_typed_names_and_ride_the_menu_payload(pool: PgPool
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
-            .configure(crate::menu::routes::configure),
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
     load_library(&pool).await;

@@ -1,3 +1,7 @@
+mod common;
+
+use madar_rust::client_seen::forget_throttle;
+
 use std::time::{Duration, Instant};
 
 use actix_web::http::Method;
@@ -7,9 +11,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::*;
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::client_seen::*;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 const SECRET: &str = "test_secret";
 const ORG: &str = "10000000-0000-4000-8000-000000000001";
@@ -237,9 +241,9 @@ fn throttle_lets_one_through_per_minute() {
 #[tokio::test]
 async fn deep_sites_report_through_the_task_local() {
     let ((), hits) = collect_hits(async {
-        assert!(crate::analytics::schema::dataset("shifts").is_some());
-        assert!(crate::analytics::schema::dataset("tills").is_some());
-        assert!(crate::analytics::presets::preset("shift_cash_summary").is_some());
+        assert!(madar_rust::analytics::schema::dataset("shifts").is_some());
+        assert!(madar_rust::analytics::schema::dataset("tills").is_some());
+        assert!(madar_rust::analytics::presets::preset("shift_cash_summary").is_some());
     })
     .await;
     let kinds: Vec<_> = hits.iter().map(|h| (h.kind, h.site)).collect();
@@ -256,7 +260,7 @@ async fn deep_sites_report_through_the_task_local() {
 
 #[core::prelude::v1::test]
 fn replay_shift_id_detection() {
-    use crate::sync::handlers::replay_names_shift_id;
+    use madar_rust::sync::handlers::replay_names_shift_id;
     assert!(replay_names_shift_id(
         &json!({"op": "close_shift", "shift_id": "x", "request": {}})
     ));
@@ -271,7 +275,7 @@ fn replay_shift_id_detection() {
 // ── DB ───────────────────────────────────────────────────────────────────────
 
 async fn seeded(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
     let seed = std::fs::read_to_string(concat!(
@@ -419,8 +423,8 @@ async fn client_seen_is_tenant_isolated(pool: PgPool) {
     )
     .await
     .unwrap();
-    let mine = crate::db::tenant_pool(&pool, org).await;
-    let other = crate::db::tenant_pool(&pool, Uuid::new_v4()).await;
+    let mine = madar_rust::db::tenant_pool(&pool, org).await;
+    let other = madar_rust::db::tenant_pool(&pool, Uuid::new_v4()).await;
     let n = |p: PgPool| async move {
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM client_seen")
             .fetch_one(&p)
@@ -438,16 +442,16 @@ macro_rules! telemetry_app {
                 .wrap(actix_web::middleware::from_fn(record))
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(JwtSecret(SECRET.into())))
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                .configure(crate::auth::routes::configure)
-                .configure(crate::tills::legacy_routes::configure)
-                .configure(crate::devices::routes::configure)
-                .configure(crate::tills::routes::configure)
-                .configure(crate::sync::routes::configure)
-                .configure(crate::orders::routes::configure)
-                .configure(crate::refunds::routes::configure)
-                .configure(crate::menu::routes::configure)
-                .configure(|c| crate::reports::routes::configure(c, web::Data::new($pool.clone()))),
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .configure(madar_rust::auth::routes::configure)
+                .configure(madar_rust::tills::legacy_routes::configure)
+                .configure(madar_rust::devices::routes::configure)
+                .configure(madar_rust::tills::routes::configure)
+                .configure(madar_rust::sync::routes::configure)
+                .configure(madar_rust::orders::routes::configure)
+                .configure(madar_rust::refunds::routes::configure)
+                .configure(madar_rust::menu::routes::configure)
+                .configure(|c| madar_rust::reports::routes::configure(c, web::Data::new($pool.clone()))),
         )
         .await
     };
@@ -686,10 +690,10 @@ async fn unauthenticated_requests_are_not_recorded(pool: PgPool) {
 
 #[tokio::test]
 async fn handler_sites_report_their_kind() {
-    let (res, hits) = collect_hits(crate::tills::legacy_routes::till_entity_gone()).await;
+    let (res, hits) = collect_hits(madar_rust::tills::legacy_routes::till_entity_gone()).await;
     assert!(res.is_err());
     let (_, wording) = collect_hits(async {
-        crate::tills::legacy_routes::legacy_error(crate::errors::AppError::Coded {
+        madar_rust::tills::legacy_routes::legacy_error(madar_rust::errors::AppError::Coded {
             status: 400,
             code: "X",
             reason: "till".into(),
@@ -697,7 +701,7 @@ async fn handler_sites_report_their_kind() {
     })
     .await;
     let (_, untouched) = collect_hits(async {
-        crate::tills::legacy_routes::legacy_error(crate::errors::AppError::NotFound("x".into()))
+        madar_rust::tills::legacy_routes::legacy_error(madar_rust::errors::AppError::NotFound("x".into()))
     })
     .await;
     assert_eq!(

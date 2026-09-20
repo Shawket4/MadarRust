@@ -49,3 +49,4 @@ pub fn tmp_store() -> (tempfile::TempDir, AssetStore) {
 }
 pub mod analytics;
 pub mod sizes;
+pub mod assets;

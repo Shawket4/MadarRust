@@ -9,12 +9,4 @@ pub mod spot_views;
 #[cfg(test)]
 mod figures_guard_tests;
 #[cfg(test)]
-mod followup_tests;
-#[cfg(test)]
-mod legacy_tests;
-#[cfg(test)]
-mod reconcile_tests;
-#[cfg(test)]
 mod report_vectors_tests;
-#[cfg(test)]
-mod spot_view_tests;

@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
-use crate::realtime::hub::BranchEventHub;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
+use madar_rust::realtime::hub::BranchEventHub;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -25,8 +25,8 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::staff_pool::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::staff_pool::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };
@@ -560,7 +560,13 @@ async fn the_report_lists_the_drinks_with_their_notes_newest_first(pool: PgPool)
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri(&format!("/staff-pool/drinks?branch_id={branch}&overspent_only=true"))
+            // The same explicit range as the read above. These drinks are
+            // recorded at a pinned till timestamp, so their business date is
+            // 2026-09-19 for ever; without the range this read falls back to
+            // "today" and finds nothing on any day but the one it was written.
+            .uri(&format!(
+                "/staff-pool/drinks?branch_id={branch}&from=2026-09-19&to=2026-09-19&overspent_only=true"
+            ))
             .insert_header(("Authorization", format!("Bearer {bearer}")))
             .to_request(),
     )
@@ -618,7 +624,7 @@ async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) 
     let mut conn = pool.acquire().await.unwrap();
 
     // The allowance rides the projection the tablet already reads.
-    let settings = crate::sync::pull::projection::project(
+    let settings = madar_rust::sync::pull::projection::project(
         &mut conn, org, branch, "branch_settings", &[branch],
     )
     .await
@@ -629,7 +635,7 @@ async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) 
     assert_eq!(sp["eligible_item_ids"][0], item.to_string());
 
     // And the drink itself reaches every device of the branch.
-    let drinks = crate::sync::pull::projection::project(
+    let drinks = madar_rust::sync::pull::projection::project(
         &mut conn, org, branch, "staff_drink", &[drink_id],
     )
     .await
@@ -647,9 +653,9 @@ async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) 
     // type has to be on the wire list too — and on the LEDGER list, because
     // these rows are dated and grow for ever and must be windowed rather than
     // checksummed in full.
-    assert!(crate::sync::pull::ALL_TYPES.contains(&"staff_drink"));
+    assert!(madar_rust::sync::pull::ALL_TYPES.contains(&"staff_drink"));
     assert!(
-        crate::sync::pull::is_ledger("staff_drink"),
+        madar_rust::sync::pull::is_ledger("staff_drink"),
         "an ever-growing dated table must not be checksummed in full"
     );
 }
@@ -665,7 +671,7 @@ async fn the_projection_prefers_the_branch_override(pool: PgPool) {
     set_pool(&pool, org, Some(branch), 2, &[item]).await;
 
     let mut conn = pool.acquire().await.unwrap();
-    let settings = crate::sync::pull::projection::project(
+    let settings = madar_rust::sync::pull::projection::project(
         &mut conn, org, branch, "branch_settings", &[branch],
     )
     .await

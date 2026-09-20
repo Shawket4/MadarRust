@@ -9,7 +9,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::orders::handlers::catalog_unit_price;
+use madar_rust::orders::handlers::catalog_unit_price;
 
 async fn seed_org(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();

@@ -21,8 +21,6 @@ pub mod tarball;
 pub mod worker;
 
 #[cfg(test)]
-mod backfill_tests;
-#[cfg(test)]
 pub(crate) mod tests;
 
 use std::path::{Path, PathBuf};
