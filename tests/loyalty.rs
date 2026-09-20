@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -122,7 +122,7 @@ async fn seed_order(pool: &PgPool, branch: Uuid, teller: Uuid, order_number: i32
 }
 
 async fn perms(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
 }
@@ -239,7 +239,7 @@ async fn a_super_admin_reads_the_shop_they_pinned(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = super_admin_token();
@@ -293,7 +293,7 @@ async fn a_branch_inherits_the_org_default_until_it_overrides_it(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(admin, org, UserRole::OrgAdmin, None);
@@ -372,7 +372,7 @@ async fn the_reward_catalogue_refuses_another_tenants_menu_item(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(admin, org, UserRole::OrgAdmin, None);
@@ -428,7 +428,7 @@ async fn a_catalogue_priced_before_the_mode_changed_is_still_claimable(pool: PgP
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -487,7 +487,7 @@ async fn a_shop_wears_madar_until_it_is_on_the_branding_tier(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
 
@@ -540,7 +540,7 @@ async fn a_shop_can_hand_out_one_code_for_the_whole_organisation(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
 
@@ -693,7 +693,7 @@ async fn a_leap_day_birthday_is_greeted_every_year(pool: PgPool) {
 /// the SQL and every tick failed with a syntax error — which no test ran.
 #[sqlx::test]
 async fn the_birthday_sweep_query_runs_and_finds_who_is_due(pool: PgPool) {
-    use crate::loyalty::birthdays::{due_greetings, run_tick};
+    use madar_rust::loyalty::birthdays::{due_greetings, run_tick};
     // The tick itself runs its query cleanly (no one is due yet).
     run_tick(&pool).await.expect("birthday tick runs");
 
@@ -778,7 +778,7 @@ async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
 
@@ -894,7 +894,7 @@ async fn signup_without_otp_mints_a_member_and_a_token(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
 
@@ -931,8 +931,8 @@ async fn signup_without_otp_mints_a_member_and_a_token(pool: PgPool) {
     assert_eq!(body["card_link_sent"], false, "no gateway configured here");
 
     // A device that HAS verified this phone gets the same card back.
-    let phone = crate::delivery::normalize_phone("01000000001").unwrap();
-    let device = crate::delivery::whatsapp::issue_device_token(&secret().0, &phone).unwrap();
+    let phone = madar_rust::delivery::normalize_phone("01000000001").unwrap();
+    let device = madar_rust::delivery::whatsapp::issue_device_token(&secret().0, &phone).unwrap();
     let req = test::TestRequest::post()
         .uri("/public/loyalty/join")
         .set_json(json!({
@@ -947,8 +947,8 @@ async fn signup_without_otp_mints_a_member_and_a_token(pool: PgPool) {
     assert!(body["passes"].is_object());
 
     // And a token verified for a DIFFERENT phone proves nothing about this one.
-    let other = crate::delivery::normalize_phone("01000000002").unwrap();
-    let wrong = crate::delivery::whatsapp::issue_device_token(&secret().0, &other).unwrap();
+    let other = madar_rust::delivery::normalize_phone("01000000002").unwrap();
+    let wrong = madar_rust::delivery::whatsapp::issue_device_token(&secret().0, &other).unwrap();
     let req = test::TestRequest::post()
         .uri("/public/loyalty/join")
         .set_json(json!({
@@ -980,7 +980,7 @@ async fn signup_demands_the_otp_device_token_when_the_branch_asks_for_one(pool: 
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
 
@@ -994,8 +994,8 @@ async fn signup_demands_the_otp_device_token_when_the_branch_asks_for_one(pool: 
     );
 
     // The very same device token the ordering flow issues is what unlocks it.
-    let phone = crate::delivery::normalize_phone("01000000001").unwrap();
-    let device = crate::delivery::whatsapp::issue_device_token(&secret().0, &phone).unwrap();
+    let phone = madar_rust::delivery::normalize_phone("01000000001").unwrap();
+    let device = madar_rust::delivery::whatsapp::issue_device_token(&secret().0, &phone).unwrap();
     let req = test::TestRequest::post()
         .uri("/public/loyalty/join")
         .set_json(json!({
@@ -1018,7 +1018,7 @@ async fn signup_is_refused_where_the_program_is_off(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let req = test::TestRequest::post()
@@ -1049,7 +1049,7 @@ async fn a_scan_finds_the_member_and_hides_rewards_until_they_are_earned(pool: P
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1112,7 +1112,7 @@ async fn one_tenants_card_is_invisible_to_another(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1146,7 +1146,7 @@ async fn a_teller_cannot_hand_out_points_by_hand(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
 
@@ -1263,8 +1263,8 @@ async fn a_sale_earns_nothing_until_the_button_is_pressed(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1324,8 +1324,8 @@ async fn a_card_scanned_at_the_till_needs_no_second_scan_to_collect(pool: PgPool
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1380,8 +1380,8 @@ async fn a_sale_with_no_card_scanned_still_asks_for_one(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1415,8 +1415,8 @@ async fn the_server_refuses_an_award_after_the_window_even_if_the_client_asks(po
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1476,8 +1476,8 @@ async fn an_award_pressed_in_time_survives_a_long_offline_drain(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1528,8 +1528,8 @@ async fn an_offline_sale_can_be_awarded_by_its_client_minted_key(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1566,8 +1566,8 @@ async fn a_voided_sale_earns_nothing(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1620,8 +1620,8 @@ async fn an_award_for_another_tenants_sale_is_refused(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let their_jwt = token(their_teller, other, UserRole::Teller, Some(other_branch));
@@ -1711,8 +1711,8 @@ async fn a_redemption_cap_counts_items_not_lines(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1800,8 +1800,8 @@ async fn an_unset_ceiling_is_the_dearest_reward_and_follows_the_catalogue(pool: 
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -1886,14 +1886,14 @@ async fn a_typed_ceiling_overrides_the_dearest_reward(pool: PgPool) {
     let cake = seed_menu_item(&pool, org, "Cake", 9_000).await;
     seed_reward(&pool, org, cake, "visits", 8).await;
 
-    let settings = crate::loyalty::settings::load_effective(&pool, org, branch)
+    let settings = madar_rust::loyalty::settings::load_effective(&pool, org, branch)
         .await
         .unwrap();
-    let (rewards, _) = crate::loyalty::settings::load_effective_rewards(&pool, org, branch)
+    let (rewards, _) = madar_rust::loyalty::settings::load_effective_rewards(&pool, org, branch)
         .await
         .unwrap();
     assert_eq!(
-        crate::loyalty::settings::effective_balance_cap(&settings, &rewards),
+        madar_rust::loyalty::settings::effective_balance_cap(&settings, &rewards),
         Some(3),
         "a typed figure wins over the catalogue"
     );
@@ -1904,11 +1904,11 @@ async fn a_typed_ceiling_overrides_the_dearest_reward(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let settings = crate::loyalty::settings::load_effective(&pool, org, branch)
+    let settings = madar_rust::loyalty::settings::load_effective(&pool, org, branch)
         .await
         .unwrap();
     assert_eq!(
-        crate::loyalty::settings::effective_balance_cap(&settings, &rewards),
+        madar_rust::loyalty::settings::effective_balance_cap(&settings, &rewards),
         None,
         "the switch decides whether there is a ceiling at all"
     );
@@ -1945,8 +1945,8 @@ async fn earning_stops_at_the_balance_cap_without_failing_the_sale(pool: PgPool)
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2040,8 +2040,8 @@ async fn a_till_cannot_charge_for_what_a_reward_covered(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2103,8 +2103,8 @@ async fn a_reward_covers_one_line_of_a_mixed_basket(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2180,8 +2180,8 @@ async fn two_rewards_on_one_basket_are_both_recorded(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2234,8 +2234,8 @@ async fn a_basket_that_outruns_the_balance_is_refused_whole(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2284,8 +2284,8 @@ async fn an_item_that_is_not_a_reward_cannot_be_taken_as_one(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2323,8 +2323,8 @@ async fn a_reward_cannot_cover_more_units_than_the_line_holds(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2375,8 +2375,8 @@ async fn a_stamp_card_earns_one_per_order_whatever_the_bill(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2431,7 +2431,7 @@ async fn a_new_branch_makes_existing_cards_stale(pool: PgPool) {
     .unwrap();
 
     let stale = |pool: PgPool| async move {
-        crate::loyalty::wallet::refresh::stale_passes(&pool, 50)
+        madar_rust::loyalty::wallet::refresh::stale_passes(&pool, 50)
             .await
             .unwrap()
     };
@@ -2512,11 +2512,11 @@ async fn the_card_follows_where_they_actually_shop(pool: PgPool) {
     // Joined through the shop's own code: no branch, nothing to measure from.
     let id = seed_member(&pool, org, "201000000091", "Manchortoken00000001").await;
     let load = |pool: PgPool, id: Uuid| async move {
-        let m = crate::loyalty::model::find_by_id(&pool, id)
+        let m = madar_rust::loyalty::model::find_by_id(&pool, id)
             .await
             .unwrap()
             .unwrap();
-        crate::loyalty::wallet::locations_for_member(&pool, &m)
+        madar_rust::loyalty::wallet::locations_for_member(&pool, &m)
             .await
             .unwrap()
             .into_iter()
@@ -2620,12 +2620,12 @@ async fn a_card_carries_the_branches_nearest_the_one_they_joined(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let member = crate::loyalty::model::find_by_id(&pool, member_id)
+    let member = madar_rust::loyalty::model::find_by_id(&pool, member_id)
         .await
         .unwrap()
         .unwrap();
 
-    let locs = crate::loyalty::wallet::locations_for_member(&pool, &member)
+    let locs = madar_rust::loyalty::wallet::locations_for_member(&pool, &member)
         .await
         .unwrap();
     assert_eq!(locs.len(), 10, "Apple's cap still applies");
@@ -2659,11 +2659,11 @@ async fn a_card_carries_the_branches_nearest_the_one_they_joined(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let member = crate::loyalty::model::find_by_id(&pool, member_id)
+    let member = madar_rust::loyalty::model::find_by_id(&pool, member_id)
         .await
         .unwrap()
         .unwrap();
-    let locs = crate::loyalty::wallet::locations_for_member(&pool, &member)
+    let locs = madar_rust::loyalty::wallet::locations_for_member(&pool, &member)
         .await
         .unwrap();
     assert_eq!(locs[0].name, "Aaa Cairo 00");
@@ -2687,7 +2687,7 @@ async fn pass_locations_are_scoped_to_the_org(pool: PgPool) {
             .unwrap();
     }
 
-    let locs = crate::loyalty::wallet::locations_for_org(&pool, org)
+    let locs = madar_rust::loyalty::wallet::locations_for_org(&pool, org)
         .await
         .unwrap();
     let names: Vec<&str> = locs.iter().map(|l| l.name.as_str()).collect();
@@ -2706,7 +2706,7 @@ async fn pass_locations_are_scoped_to_the_org(pool: PgPool) {
         .await
         .unwrap();
     assert!(
-        crate::loyalty::wallet::locations_for_org(&pool, org)
+        madar_rust::loyalty::wallet::locations_for_org(&pool, org)
             .await
             .unwrap()
             .is_empty(),
@@ -2788,7 +2788,7 @@ async fn a_void_claws_back_what_its_sale_earned(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2872,7 +2872,7 @@ async fn a_partial_refund_claws_back_the_earn_in_proportion(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -2975,7 +2975,7 @@ async fn a_clawback_of_spent_points_clamps_at_zero_unless_the_shop_says_otherwis
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -3108,7 +3108,7 @@ async fn the_ledger_reports_where_each_movement_came_from(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let admin_jwt = token(admin, org, UserRole::OrgAdmin, None);
@@ -3175,7 +3175,7 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let delete = |jwt: String| {
@@ -3329,12 +3329,12 @@ macro_rules! reward_app {
             App::new()
                 .app_data(p)
                 .app_data(s)
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                .configure(crate::orders::routes::configure)
-                .configure(crate::tickets::routes::configure)
-                .configure(crate::refunds::routes::configure)
-                .configure(crate::sync::routes::configure)
-                .configure(super::routes::configure),
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .configure(madar_rust::orders::routes::configure)
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::refunds::routes::configure)
+                .configure(madar_rust::sync::routes::configure)
+                .configure(madar_rust::loyalty::routes::configure),
         )
         .await
     }};
@@ -3564,11 +3564,11 @@ async fn a_redemption_remembers_its_line_its_units_and_its_teller(pool: PgPool) 
 #[sqlx::test]
 async fn the_second_till_to_spend_the_last_reward_is_told_under_the_lock(pool: PgPool) {
     let shop = reward_shop(&pool, 5).await;
-    let items: Vec<crate::orders::handlers::OrderItemInput> =
+    let items: Vec<madar_rust::orders::handlers::OrderItemInput> =
         serde_json::from_value(json!([{ "menu_item_id": shop.latte, "quantity": 1 }])).unwrap();
-    let asks: Vec<crate::orders::handlers::LoyaltyRedemptionInput> =
+    let asks: Vec<madar_rust::orders::handlers::LoyaltyRedemptionInput> =
         serde_json::from_value(json!([{ "item_index": 0 }])).unwrap();
-    let plan = super::redeem::plan(
+    let plan = madar_rust::loyalty::redeem::plan(
         &pool,
         shop.org,
         shop.branch,
@@ -3584,7 +3584,7 @@ async fn the_second_till_to_spend_the_last_reward_is_told_under_the_lock(pool: P
     grant(&pool, shop.org, shop.member, shop.branch, "visits", -5).await;
 
     let mut tx = pool.begin().await.unwrap();
-    let live = super::redeem::record(
+    let live = madar_rust::loyalty::redeem::record(
         &mut tx,
         &plan,
         shop.org,
@@ -3595,10 +3595,10 @@ async fn the_second_till_to_spend_the_last_reward_is_told_under_the_lock(pool: P
         false,
     )
     .await;
-    assert!(matches!(live, Err(crate::errors::AppError::Conflict(_))));
+    assert!(matches!(live, Err(madar_rust::errors::AppError::Conflict(_))));
     drop(tx);
     let mut tx = pool.begin().await.unwrap();
-    let replayed = super::redeem::record(
+    let replayed = madar_rust::loyalty::redeem::record(
         &mut tx,
         &plan,
         shop.org,
@@ -3624,15 +3624,15 @@ async fn a_reward_priced_at_nothing_is_refused(pool: PgPool) {
         .execute(&pool)
         .await
         .ok();
-    let items: Vec<crate::orders::handlers::OrderItemInput> =
+    let items: Vec<madar_rust::orders::handlers::OrderItemInput> =
         serde_json::from_value(json!([{ "menu_item_id": shop.latte, "quantity": 1 }])).unwrap();
-    let asks: Vec<crate::orders::handlers::LoyaltyRedemptionInput> =
+    let asks: Vec<madar_rust::orders::handlers::LoyaltyRedemptionInput> =
         serde_json::from_value(json!([{ "item_index": 0 }])).unwrap();
     let cost: i32 = sqlx::query_scalar("SELECT cost_amount FROM loyalty_reward_items")
         .fetch_one(&pool)
         .await
         .unwrap();
-    let plan = super::redeem::plan(
+    let plan = madar_rust::loyalty::redeem::plan(
         &pool,
         shop.org,
         shop.branch,
@@ -3858,7 +3858,7 @@ async fn the_birthday_preview_is_routed_and_forgetting_a_member_is_in_the_spec(p
     let admin = seed_user(&pool, shop.org, "org_admin").await;
     let app = reward_app!(pool);
     let settings =
-        serde_json::to_value(super::settings::LoyaltySettings::defaults(shop.org, None)).unwrap();
+        serde_json::to_value(madar_rust::loyalty::settings::LoyaltySettings::defaults(shop.org, None)).unwrap();
     let req = test::TestRequest::post()
         .uri("/loyalty/birthday-preview")
         .insert_header((
@@ -3872,7 +3872,7 @@ async fn the_birthday_preview_is_routed_and_forgetting_a_member_is_in_the_spec(p
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let spec = serde_json::to_value(crate::openapi::ApiDoc::openapi()).unwrap();
+    let spec = serde_json::to_value(madar_rust::openapi::ApiDoc::openapi()).unwrap();
     assert!(spec["paths"]["/loyalty/members/{id}"]["delete"].is_object());
     assert!(spec["paths"]["/loyalty/analytics"]["get"].is_object());
 }
@@ -3958,7 +3958,7 @@ async fn a_reward_sale_reads_back_in_the_order_the_ledger_and_the_report(pool: P
     assert_eq!(latte["reward_units"], 2);
     assert_eq!(latte["reward_covered"], 10_000);
 
-    let ledger = super::model::ledger(&pool, shop.member, 10).await.unwrap();
+    let ledger = madar_rust::loyalty::model::ledger(&pool, shop.member, 10).await.unwrap();
     let redeem = ledger.iter().find(|e| e.kind == "redeem").unwrap();
     assert_eq!(redeem.created_by, Some(shop.teller));
     assert!(redeem.created_by_name.is_some());
@@ -4086,7 +4086,7 @@ async fn loyalty_behavior_is_scoped_to_the_callers_branches(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let get = |jwt: String, uri: String| {
@@ -4194,7 +4194,7 @@ async fn campaign_effectiveness_counts_returns_within_30_days(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(admin, org, UserRole::OrgAdmin, None);
@@ -4269,7 +4269,7 @@ async fn liability_trend_buckets_net_change_by_week(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(admin, org, UserRole::OrgAdmin, None);
@@ -4338,7 +4338,7 @@ async fn liability_trend_cuts_weeks_in_the_scope_timezone(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(admin, org, UserRole::OrgAdmin, None);
@@ -4453,7 +4453,7 @@ async fn liability_trend_sums_to_balances_and_new_reports_are_gated(pool: PgPool
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let get = |jwt: String, uri: String| {
@@ -4615,8 +4615,8 @@ async fn a_line_counting_programme_gives_a_stamp_per_item_sold(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -4669,8 +4669,8 @@ async fn only_the_chosen_items_collect_and_quantity_multiplies(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -4713,8 +4713,8 @@ async fn a_bill_with_no_eligible_item_earns_no_stamp(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -4754,8 +4754,8 @@ async fn a_redeemed_unit_earns_nothing_but_the_paid_ones_still_do(pool: PgPool) 
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -4819,8 +4819,8 @@ async fn a_per_order_programme_still_gives_one_stamp_per_order(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -4870,8 +4870,8 @@ async fn the_balance_cap_trims_a_line_counted_award_without_failing_the_sale(poo
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(super::routes::configure),
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -4930,9 +4930,12 @@ async fn a_replayed_sale_earns_exactly_what_the_live_one_did(pool: PgPool) {
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(crate::orders::routes::configure)
-            .configure(crate::sync::routes::configure)
-            .configure(super::routes::configure),
+            // `/sync/replay` publishes to the realtime hub on its way through, so
+            // the hub has to be here or the drain 500s before any earning runs.
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::sync::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(teller, org, UserRole::Teller, Some(branch));
@@ -4959,7 +4962,14 @@ async fn a_replayed_sale_earns_exactly_what_the_live_one_did(pool: PgPool) {
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success());
+    let status = resp.status();
+    if !status.is_success() {
+        let body = test::read_body(resp).await;
+        panic!(
+            "replaying create_order failed: {status} — {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
     let replayed_order: Uuid =
         sqlx::query_scalar("SELECT id FROM orders WHERE idempotency_key = $1")
             .bind(key)
@@ -5022,7 +5032,7 @@ async fn the_counting_switch_round_trips_and_an_old_client_cannot_flip_it(pool: 
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(admin, org, UserRole::OrgAdmin, None);
@@ -5126,7 +5136,7 @@ async fn the_earning_item_list_saves_inherits_and_stays_inside_its_tenant(pool: 
         App::new()
             .app_data(p)
             .app_data(s)
-            .configure(super::routes::configure),
+            .configure(madar_rust::loyalty::routes::configure),
     )
     .await;
     let jwt = token(admin, org, UserRole::OrgAdmin, None);

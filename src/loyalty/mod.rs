@@ -30,9 +30,6 @@ pub mod settings;
 pub mod wallet;
 pub mod winback;
 
-#[cfg(test)]
-mod tests;
-
 use uuid::Uuid;
 
 use crate::errors::AppError;
