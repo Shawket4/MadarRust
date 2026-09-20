@@ -123,7 +123,7 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
                       (SELECT max(o.created_at) FROM orders o \
                         WHERE o.loyalty_customer_id = c.id) \
                     ) AS since \
-               FROM loyalty_customers c \
+               FROM loyalty_members_v c \
                JOIN loyalty_settings s \
                  ON s.org_id = c.org_id AND s.branch_id IS NULL \
               WHERE s.enabled AND s.winback_enabled \
@@ -346,18 +346,14 @@ mod tests {
         .unwrap();
 
         let member = async |phone: &str, token: &str, opted_out: bool| -> Uuid {
-            let id: Uuid = sqlx::query_scalar(
-                "INSERT INTO loyalty_customers (org_id, phone, name, member_token, \
-                     marketing_opt_out) \
-                 VALUES ($1,$2,'Ali',$3,$4) RETURNING id",
-            )
-            .bind(org)
-            .bind(phone)
-            .bind(token)
-            .bind(opted_out)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let id: Uuid =
+                crate::test_support::seed_loyalty_member(&pool, org, phone, "Ali", token).await;
+            sqlx::query("UPDATE customers SET marketing_opt_out = $2 WHERE id = $1")
+                .bind(id)
+                .bind(opted_out)
+                .execute(&pool)
+                .await
+                .unwrap();
             // Their last visit: ten days ago, so past the seven-day window and
             // well inside the sixty-day one. An `adjust` rather than an `earn`
             // because the ledger now insists an earn names its sale, and the

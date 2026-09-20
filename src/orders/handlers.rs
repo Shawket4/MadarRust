@@ -56,7 +56,7 @@ const ORDER_SELECT: &str =
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN users sw ON sw.id = o.service_charge_waived_by
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
-     LEFT JOIN loyalty_customers lc ON lc.id = o.loyalty_customer_id ";
+     LEFT JOIN customers lc ON lc.id = o.loyalty_customer_id ";
 
 // ── Shared summary aggregate columns ──────────────────────────
 /// Aggregate columns hydrating [OrderSummary] (by name, via `FromRow`). Used by
@@ -1613,7 +1613,10 @@ pub async fn create_order(
         if allowed_outright {
             body.discount_approval_id = None;
         } else {
-            let a = body.live_approval.clone().expect("checked by allow_or_approved_live");
+            let a = body
+                .live_approval
+                .clone()
+                .expect("checked by allow_or_approved_live");
             body.discount_approval_id = Some(a.id);
             crate::sync::handlers::record_approval(
                 pool.get_ref(),
@@ -1903,12 +1906,12 @@ pub(crate) async fn create_order_inner(
     let (resolved_discount_type, resolved_discount_value) = if let Some(disc_id) = body.discount_id
     {
         let row: Option<(String, Decimal, bool)> = sqlx::query_as(
-                "SELECT type::text, value, is_active FROM discounts WHERE id = $1 AND org_id = $2"
-            )
-            .bind(disc_id)
-            .bind(org_id)
-            .fetch_optional(pool.get_ref())
-            .await?;
+            "SELECT type::text, value, is_active FROM discounts WHERE id = $1 AND org_id = $2",
+        )
+        .bind(disc_id)
+        .bind(org_id)
+        .fetch_optional(pool.get_ref())
+        .await?;
         match row {
             Some((dtype, dvalue, true)) => (Some(dtype), dvalue),
             // A DEAD PRESET. Live, a till picking a rule that no longer exists
@@ -2276,8 +2279,7 @@ pub(crate) async fn create_order_inner(
     }
     if body.amount_tendered.is_some_and(|t| t < 0) || body.change_given.is_some_and(|c| c < 0) {
         return Err(AppError::BadRequest(
-            "The cash taken or the change given is negative. Neither can be less than zero."
-                .into(),
+            "The cash taken or the change given is negative. Neither can be less than zero.".into(),
         ));
     }
 

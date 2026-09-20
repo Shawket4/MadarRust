@@ -94,10 +94,11 @@ WITH today AS (
       FROM organizations o WHERE o.deleted_at IS NULL)
 SELECT c.id, c.org_id, c.name, c.locale,
        EXTRACT(YEAR FROM t.d)::int AS year
-  FROM loyalty_customers c
+  FROM loyalty_members_v c
   JOIN today t ON t.org_id = c.org_id
   JOIN loyalty_settings s ON s.org_id = c.org_id AND s.branch_id IS NULL
  WHERE c.birth_month IS NOT NULL
+   AND c.deleted_at IS NULL
    AND s.enabled AND s.birthday_enabled
    AND (
        (c.birth_month = EXTRACT(MONTH FROM t.d)::smallint

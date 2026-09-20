@@ -612,7 +612,7 @@ pub async fn list_members(
         });
 
     let rows: Vec<MemberRow> = sqlx::query_as(&format!(
-        "SELECT {} FROM loyalty_customers \
+        "SELECT {} FROM loyalty_members_v \
           WHERE org_id = $1 AND deleted_at IS NULL \
             AND ($2::text IS NULL OR name ILIKE $2 OR phone ILIKE $2) \
           ORDER BY enrolled_at DESC LIMIT $3 OFFSET $4",
@@ -626,7 +626,7 @@ pub async fn list_members(
     .await?;
 
     let total: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM loyalty_customers \
+        "SELECT count(*) FROM loyalty_members_v \
           WHERE org_id = $1 AND deleted_at IS NULL \
             AND ($2::text IS NULL OR name ILIKE $2 OR phone ILIKE $2)",
     )

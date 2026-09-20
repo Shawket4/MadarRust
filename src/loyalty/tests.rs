@@ -203,16 +203,7 @@ async fn grant(pool: &PgPool, org: Uuid, member: Uuid, branch: Uuid, currency: &
 }
 
 async fn seed_member(pool: &PgPool, org: Uuid, phone: &str, token: &str) -> Uuid {
-    sqlx::query_scalar(
-        "INSERT INTO loyalty_customers (org_id, phone, name, member_token) \
-         VALUES ($1,$2,'Ali',$3) RETURNING id",
-    )
-    .bind(org)
-    .bind(phone)
-    .bind(token)
-    .fetch_one(pool)
-    .await
-    .unwrap()
+    crate::test_support::seed_loyalty_member(pool, org, phone, "Ali", token).await
 }
 
 fn app_data(pool: &PgPool) -> (web::Data<PgPool>, web::Data<JwtSecret>) {
@@ -569,7 +560,7 @@ async fn a_shop_can_hand_out_one_code_for_the_whole_organisation(pool: PgPool) {
     assert!(resp.status().is_success());
 
     let (member_org, joined_branch): (Uuid, Option<Uuid>) =
-        sqlx::query_as("SELECT org_id, joined_branch_id FROM loyalty_customers WHERE phone = $1")
+        sqlx::query_as("SELECT org_id, joined_branch_id FROM loyalty_members_v WHERE phone = $1")
             .bind("201000000061")
             .fetch_one(&pool)
             .await
@@ -592,7 +583,7 @@ async fn a_shop_can_hand_out_one_code_for_the_whole_organisation(pool: PgPool) {
     .await;
     assert!(resp.status().is_success());
     let joined_branch: Option<Uuid> =
-        sqlx::query_scalar("SELECT joined_branch_id FROM loyalty_customers WHERE phone = $1")
+        sqlx::query_scalar("SELECT joined_branch_id FROM loyalty_members_v WHERE phone = $1")
             .bind("201000000062")
             .fetch_one(&pool)
             .await
@@ -708,15 +699,13 @@ async fn the_birthday_sweep_query_runs_and_finds_who_is_due(pool: PgPool) {
         let pool = pool.clone();
         async move {
             let id = seed_member(&pool, org, phone, token).await;
-            sqlx::query(
-                "UPDATE loyalty_customers SET birth_month = $2, birth_day = $3 WHERE id = $1",
-            )
-            .bind(id)
-            .bind(month)
-            .bind(day)
-            .execute(&pool)
-            .await
-            .unwrap();
+            sqlx::query("UPDATE customers SET birth_month = $2, birth_day = $3 WHERE id = $1")
+                .bind(id)
+                .bind(month)
+                .bind(day)
+                .execute(&pool)
+                .await
+                .unwrap();
             id
         }
     };
@@ -795,7 +784,7 @@ async fn a_birthday_is_only_kept_where_the_shop_asked_for_one(pool: PgPool) {
         let pool = pool.clone();
         async move {
             sqlx::query_as::<_, (Option<i16>, Option<i16>)>(
-                "SELECT birth_month, birth_day FROM loyalty_customers \
+                "SELECT birth_month, birth_day FROM loyalty_members_v \
                   WHERE org_id = $1 AND phone = $2",
             )
             .bind(org)
@@ -2889,13 +2878,21 @@ async fn a_partial_refund_claws_back_the_earn_in_proportion(pool: PgPool) {
 
     // A quarter of the money back takes a quarter of the points: floor(10 × 1/4).
     refund_row(&pool, branch, order, shift, teller, 2_500).await;
-    assert_eq!(balance_of(&pool, member).await, 8, "floor(10 × 2500/10000) = 2 back");
+    assert_eq!(
+        balance_of(&pool, member).await,
+        8,
+        "floor(10 × 2500/10000) = 2 back"
+    );
 
     // Another 3 EGP: the target is cumulative, not per refund. floor(10 × 2800/10000)
     // is 2, which is already reversed, so nothing moves — a rounding step the
     // customer does not pay for twice.
     refund_row(&pool, branch, order, shift, teller, 300).await;
-    assert_eq!(balance_of(&pool, member).await, 8, "cumulative, and floor still 2");
+    assert_eq!(
+        balance_of(&pool, member).await,
+        8,
+        "cumulative, and floor still 2"
+    );
 
     // Up to 60% refunded: floor(10 × 6000/10000) = 6, so four more come back.
     refund_row(&pool, branch, order, shift, teller, 3_200).await;
@@ -2903,7 +2900,11 @@ async fn a_partial_refund_claws_back_the_earn_in_proportion(pool: PgPool) {
 
     // The rest of the money: every point is gone and the sale reads refunded.
     refund_row(&pool, branch, order, shift, teller, 4_000).await;
-    assert_eq!(balance_of(&pool, member).await, 0, "all ten back, never eleven");
+    assert_eq!(
+        balance_of(&pool, member).await,
+        0,
+        "all ten back, never eleven"
+    );
     let status: String = sqlx::query_scalar("SELECT status::text FROM orders WHERE id = $1")
         .bind(order)
         .fetch_one(&pool)
@@ -2916,7 +2917,9 @@ async fn a_partial_refund_claws_back_the_earn_in_proportion(pool: PgPool) {
     let rows = ledger_rows(&pool, member).await;
     assert_eq!(rows[0].0, "earn");
     assert!(
-        rows[1..].iter().all(|r| r.0 == "reverse_earn" && r.1 == "refund"),
+        rows[1..]
+            .iter()
+            .all(|r| r.0 == "reverse_earn" && r.1 == "refund"),
         "{rows:?}"
     );
     let clawed: i32 = rows[1..].iter().map(|r| r.2).sum();
@@ -2932,14 +2935,7 @@ async fn a_partial_refund_claws_back_the_earn_in_proportion(pool: PgPool) {
 
 /// A refund written straight to the table, so the trigger under test is the one
 /// that runs. The handler is covered by its own tests; this is the ledger rule.
-async fn refund_row(
-    pool: &PgPool,
-    branch: Uuid,
-    order: Uuid,
-    shift: Uuid,
-    by: Uuid,
-    amount: i32,
-) {
+async fn refund_row(pool: &PgPool, branch: Uuid, order: Uuid, shift: Uuid, by: Uuid, amount: i32) {
     sqlx::query(
         "INSERT INTO order_refunds \
              (branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by) \
@@ -3151,14 +3147,16 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
     let admin = seed_user(&pool, org, "org_admin").await;
     enable_program(&pool, org, 1000, 100, false).await;
     let member = seed_member(&pool, org, "201000000001", "Mforgettoken000000001").await;
-    sqlx::query(
-        "UPDATE loyalty_customers SET birth_month = 3, birth_day = 17, \
-                google_object_id = 'issuer.obj' WHERE id = $1",
-    )
-    .bind(member)
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE customers SET birth_month = 3, birth_day = 17 WHERE id = $1")
+        .bind(member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE loyalty_customers SET google_object_id = 'issuer.obj' WHERE id = $1")
+        .bind(member)
+        .execute(&pool)
+        .await
+        .unwrap();
     grant(&pool, org, member, branch, "points", 10).await;
     sqlx::query(
         "INSERT INTO loyalty_pass_devices (device_library_id, customer_id, org_id, push_token) \
@@ -3230,15 +3228,16 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
     let after: After = sqlx::query_as(
         "SELECT name, phone, member_token, apple_auth_token, birth_month, marketing_opt_out, \
                 deleted_at IS NOT NULL AS deleted, points_balance \
-           FROM loyalty_customers WHERE id = $1",
+           FROM loyalty_members_v WHERE id = $1",
     )
     .bind(member)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert!(after.deleted);
-    assert_eq!(after.name, "Deleted member");
-    assert!(after.phone.starts_with("deleted:"), "{}", after.phone);
+    // The person is erased on `customers`: no name, no phone, no key.
+    assert_eq!(after.name, "");
+    assert_eq!(after.phone, "");
     assert_ne!(
         after.member_token, "Mforgettoken000000001",
         "the barcode is dead"
@@ -3310,7 +3309,7 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
     assert_eq!(body["already_member"], false, "{body}");
     assert_eq!(body["balance"], 0, "a fresh card, not the old balance");
     let fresh: Uuid = sqlx::query_scalar(
-        "SELECT id FROM loyalty_customers WHERE org_id = $1 AND phone = $2 AND deleted_at IS NULL",
+        "SELECT id FROM loyalty_members_v WHERE org_id = $1 AND phone = $2 AND deleted_at IS NULL",
     )
     .bind(org)
     .bind("201000000001")
@@ -4060,15 +4059,14 @@ async fn loyalty_behavior_is_scoped_to_the_callers_branches(pool: PgPool) {
         .await
         .unwrap();
     for (phone, branch) in [("01000000001", mine), ("01000000002", other)] {
-        let member: Uuid = sqlx::query_scalar(
-            "INSERT INTO loyalty_customers (org_id, phone, name, member_token) \
-             VALUES ($1, $2, 'Member', gen_random_uuid()::text) RETURNING id",
+        let member: Uuid = crate::test_support::seed_loyalty_member(
+            &pool,
+            org,
+            phone,
+            "Member",
+            &Uuid::new_v4().to_string(),
         )
-        .bind(org)
-        .bind(phone)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        .await;
         sqlx::query(
             "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, points, source) \
              VALUES ($1, $2, $3, 'adjust', 10, 'manual')",
@@ -4966,14 +4964,7 @@ async fn a_replayed_sale_earns_exactly_what_the_live_one_did(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    let replayed = press_award(
-        &app,
-        &jwt,
-        branch,
-        replayed_order,
-        "Mstampline000000000008",
-    )
-    .await;
+    let replayed = press_award(&app, &jwt, branch, replayed_order, "Mstampline000000000008").await;
 
     assert_eq!(live["points_awarded"], 4, "{live}");
     assert_eq!(
@@ -5154,7 +5145,11 @@ async fn the_earning_item_list_saves_inherits_and_stays_inside_its_tenant(pool: 
         put(json!({ "branch_id": null, "menu_item_ids": [latte] })),
     )
     .await;
-    assert_eq!(body["items"][0]["menu_item_id"], latte.to_string(), "{body}");
+    assert_eq!(
+        body["items"][0]["menu_item_id"],
+        latte.to_string(),
+        "{body}"
+    );
     assert_eq!(body["items"][0]["name"], "Latte");
 
     // A branch with no list of its own inherits the org's.
@@ -5181,7 +5176,11 @@ async fn the_earning_item_list_saves_inherits_and_stays_inside_its_tenant(pool: 
     assert_eq!(body["items"][0]["menu_item_id"], cake.to_string());
 
     // Clearing the branch's list puts it back on the org's.
-    test::call_service(&app, put(json!({ "branch_id": branch, "menu_item_ids": [] }))).await;
+    test::call_service(
+        &app,
+        put(json!({ "branch_id": branch, "menu_item_ids": [] })),
+    )
+    .await;
     let body: Value = test::call_and_read_body_json(
         &app,
         get(&format!("/loyalty/earning-items?branch_id={branch}")),

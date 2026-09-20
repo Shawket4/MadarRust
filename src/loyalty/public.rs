@@ -17,9 +17,9 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::model::{self, MemberRow};
+use super::resolve_branch_org;
 use super::settings::{load_effective, load_effective_rewards};
 use super::wallet::{self, PassLinks};
-use super::{mint_member_token, resolve_branch_org};
 use crate::auth::jwt::JwtSecret;
 use crate::delivery::{normalize_phone, whatsapp};
 use crate::errors::{AppError, AppErrorResponse};
@@ -493,39 +493,54 @@ pub async fn join(
     // the phone has a card and offered the OTP, and nothing else; a verified
     // one gets the card back.
     //
-    // Two people submitting the same new number at once race to the INSERT.
-    // The partial unique index on (org_id, phone) makes one of them lose, and
-    // ON CONFLICT turns that loss into a no-op rather than a 409 — the loser
-    // then finds the row the winner made and is treated as a returning member,
-    // which is what they are by the time they look.
-    let inserted: Option<MemberRow> = sqlx::query_as(&format!(
-        "INSERT INTO loyalty_customers \
-            (org_id, phone, name, member_token, joined_branch_id, locale, \
-             apple_auth_token, birth_month, birth_day) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
-         ON CONFLICT (org_id, phone) WHERE deleted_at IS NULL DO NOTHING \
-         RETURNING {}",
-        model::MEMBER_COLS
-    ))
-    .bind(org_id)
-    .bind(&phone)
-    .bind(name)
-    .bind(mint_member_token())
-    // Reporting only, and honestly null for an org-wide code: we do not know
-    // where they were, and a membership belongs to the shop rather than to a
-    // branch.
-    .bind(scope.branch_id)
-    .bind(locale)
-    // Apple authenticates pass updates with this; minted now so a pass issued
-    // later needs no second write.
-    .bind(mint_member_token())
-    // Dropped unless the shop asked for one, and only ever as a valid PAIR — a
-    // month with no day greets nobody, a day with no month greets everybody
-    // twelve times.
-    .bind(birthday.map(|(m, _)| m))
-    .bind(birthday.map(|(_, d)| d))
-    .fetch_optional(pool.get_ref())
+    // Two people submitting the same new number at once race on the customer's
+    // unique phone key and then on the membership's primary key. Both are
+    // `ON CONFLICT` no-ops, so the loser finds what the winner made and is
+    // treated as a returning member, which is what they are by then.
+    //
+    // The PERSON comes first (design §2.4): the live customer holding this
+    // phone, created if there is none, and the card is hung from that id. A
+    // customer staff typed in by hand last month joins as themselves rather
+    // than as a second person with the same number.
+    let mut tx = pool.begin().await?;
+    let (customer_id, _) = crate::customers::handlers::resolve_or_create(
+        &mut tx,
+        org_id,
+        &body.phone,
+        name,
+        crate::customers::handlers::CustomerSource::Loyalty,
+        scope.branch_id,
+        None,
+        None,
+    )
     .await?;
+    let fresh = model::enrol(&mut tx, org_id, customer_id, scope.branch_id).await?;
+    if fresh {
+        // The language they joined in, and a birthday only where the person has
+        // none on file: dropped unless the shop asked for one, and only ever as
+        // a valid PAIR — a month with no day greets nobody, a day with no month
+        // greets everybody twelve times.
+        sqlx::query(
+            "UPDATE customers \
+                SET locale = $2, \
+                    birth_month = CASE WHEN birth_month IS NULL THEN $3 ELSE birth_month END, \
+                    birth_day = CASE WHEN birth_month IS NULL THEN $4 ELSE birth_day END, \
+                    updated_at = now() \
+              WHERE id = $1",
+        )
+        .bind(customer_id)
+        .bind(locale)
+        .bind(birthday.map(|(m, _)| m))
+        .bind(birthday.map(|(_, d)| d))
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    let inserted: Option<MemberRow> = if fresh {
+        model::find_by_id(pool.get_ref(), customer_id).await?
+    } else {
+        None
+    };
 
     let (member, already_member) = match inserted {
         Some(fresh) => (fresh, false),
@@ -788,9 +803,10 @@ pub async fn set_preferences(
     // COALESCE so a page that only reports its language cannot silently switch
     // marketing back on for someone who turned it off.
     sqlx::query(
-        "UPDATE loyalty_customers \
+        "UPDATE customers \
             SET marketing_opt_out = COALESCE($2, marketing_opt_out), \
-                locale = COALESCE($3, locale) \
+                locale = COALESCE($3, locale), \
+                updated_at = now() \
           WHERE id = $1",
     )
     .bind(member.id)

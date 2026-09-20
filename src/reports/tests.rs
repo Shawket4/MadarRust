@@ -335,7 +335,12 @@ async fn branch_sales_top_items_rank_by_quantity_then_revenue_then_name(pool: Pg
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
     let sales: BranchSalesReport = test::call_and_read_body_json(&app, req).await;
-    let names = |items: &[ItemSales]| items.iter().map(|i| i.item_name.clone()).collect::<Vec<_>>();
+    let names = |items: &[ItemSales]| {
+        items
+            .iter()
+            .map(|i| i.item_name.clone())
+            .collect::<Vec<_>>()
+    };
     let expected = vec!["Espresso", "Latte", "Tea", "Cake"];
     assert_eq!(names(&sales.top_items), expected);
     assert_eq!(sales.by_category.len(), 1);
@@ -2279,7 +2284,10 @@ async fn org_tax_and_legal_audits_add_up_and_agree_with_branch_sales(pool: PgPoo
     assert_eq!(discounts["entries"][0]["flagged"], false);
     assert!(discounts["entries"][0]["applied_by_name"].is_string());
     let voids_again = get_json(&app, &format!("/reports/orgs/{org_id}/voids-audit"), &token).await;
-    assert!(voids_again.get("entries").is_none(), "other audits keep their shape");
+    assert!(
+        voids_again.get("entries").is_none(),
+        "other audits keep their shape"
+    );
 
     let waivers = get_json(
         &app,
@@ -3370,10 +3378,8 @@ async fn new_legal_audits_add_up_and_are_scoped(pool: PgPool) {
     .bind(org_id).bind(staff_other).bind(admin).execute(&pool).await.unwrap();
 
     // Loyalty: a manual +40 at mine, a manual -15 at other, a birthday reward (not audited).
-    let member: Uuid = sqlx::query_scalar(
-        "INSERT INTO loyalty_customers (org_id, phone, name, member_token) VALUES ($1, '0100', 'M', 'tok-legal') RETURNING id",
-    )
-    .bind(org_id).fetch_one(&pool).await.unwrap();
+    let member: Uuid =
+        crate::test_support::seed_loyalty_member(&pool, org_id, "0100", "M", "tok-legal").await;
     for (branch, pts, source) in [
         (mine, 40, "manual"),
         (other, -15, "manual"),

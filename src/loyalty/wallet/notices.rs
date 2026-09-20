@@ -156,7 +156,7 @@ pub async fn announce(
 /// and leaving the row would have us reconsider it every tick forever.
 pub async fn sweep_undelivered(pool: &PgPool) -> Result<(), AppError> {
     let stale: Vec<(Uuid, String, String)> = sqlx::query_as(
-        "SELECT id, phone, pass_notice_fallback FROM loyalty_customers \
+        "SELECT id, phone, pass_notice_fallback FROM loyalty_members_v \
           WHERE pass_notice_at IS NOT NULL \
             AND pass_notice_seen_at IS NULL \
             AND pass_notice_fallback IS NOT NULL \
