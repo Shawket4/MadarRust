@@ -71,6 +71,7 @@ const PASS_IMAGES: &[(&str, &[u8])] = &[
 /// colours cannot come from `loyalty_settings` — that is where they used to
 /// live, before branding moved to the organisation, which is exactly why a
 /// freshly downloaded pass kept coming back in Apple's default grey.
+#[derive(Clone)]
 pub struct PassBrand {
     pub org_name: String,
     pub background: String,
@@ -417,6 +418,51 @@ fn images_from_logo(
 /// The logo is read from DISK, not fetched: uploads are written locally, so the
 /// file is already there — no network call while a customer waits, and no
 /// server-side request to an address someone else supplied.
+/// [`pass_brand`], cached per org.
+///
+/// Six images — three icons and three logos — each a Lanczos3 resize plus a PNG
+/// encode, plus the tint/ground compositing, were being rebuilt on every "Add
+/// to Wallet" tap. With the strips already cached this was the whole remaining
+/// cost: measured on production at ~12 s per tap, and identical for every
+/// customer of a shop, because none of it depends on the member.
+///
+/// Keyed on everything the output depends on — the logo's URL, the palette and
+/// whether the logo is a mark — so changing any of them in the dashboard yields
+/// a new key and the next tap rebuilds.
+static BRAND_CACHE: LazyLock<moka::future::Cache<String, Arc<PassBrand>>> = LazyLock::new(|| {
+    moka::future::Cache::builder()
+        .max_capacity(64)
+        .time_to_live(Duration::from_secs(3600))
+        .build()
+});
+
+pub async fn pass_brand_cached(
+    org_id: Uuid,
+    brand: &crate::orgs::branding::OrgBrand,
+) -> Arc<PassBrand> {
+    if cfg!(test) {
+        return Arc::new(pass_brand(brand));
+    }
+    let key = format!(
+        "{org_id}|{}|{}|{}|{}|{}",
+        brand.logo_url.clone().unwrap_or_default(),
+        brand.palette.background,
+        brand.palette.foreground,
+        brand.palette.accent,
+        brand.logo_is_mark,
+    );
+    let b = brand.clone();
+    BRAND_CACHE
+        .get_with(key, async move {
+            tokio::task::spawn_blocking(move || Arc::new(pass_brand(&b)))
+                .await
+                // A panic in the resize must not cost the customer their card;
+                // the default brand is a complete, installable pass.
+                .unwrap_or_else(|_| Arc::new(PassBrand::default()))
+        })
+        .await
+}
+
 pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
     let d = PassBrand::default();
     let images = brand
@@ -855,7 +901,7 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     let locations = super::locations_for_member(pool, member).await?;
     let copy = super::card_copy(pool, member.org_id, &settings).await;
     let org = crate::orgs::branding::load(pool, member.org_id).await?;
-    let brand = pass_brand(&org);
+    let brand = pass_brand_cached(member.org_id, &org).await;
     let strip = strip_images(&org, &brand.foreground);
     let headline = super::reward_headline(pool, member.org_id, &settings).await;
     let pass = pass_json(member, &settings, &locations, &copy, &headline, &brand)?;
