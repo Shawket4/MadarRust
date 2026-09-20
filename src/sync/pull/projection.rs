@@ -343,10 +343,30 @@ pub async fn project(
                 .collect()
         }
         "discount" => {
+            // The SAME dual spelling `src/discounts/wire.rs` carries on the REST
+            // route, for the same reason — and this projection is why that reason
+            // came back. It emitted `type` and the STORED fraction (0.1), while
+            // every shipped till parses a discount with the generated model:
+            // `dtype`, an INTEGER `value`, plus org_id/created_at/updated_at. The
+            // row failed serde, the whole list failed with it, and the till showed
+            // no presets at all — exactly the failure wire.rs was written to end,
+            // reintroduced through the changefeed. Worse, this mirror is rewritten
+            // on EVERY pull, so it overwrote the good shape `GET /discounts` had
+            // already stored: reinstalling the app could not help.
+            //
+            // So: `value` is the legacy integer (0-100 for a percentage),
+            // `value_rate` the fraction for clients that know to ask, and `type`
+            // stays beside `dtype` because something in the field may read it.
+            // Additive in every direction; nothing that parsed before stops.
             by_sql(
                 conn,
-                "SELECT d.id, json_build_object('id', d.id, 'name', d.name, 'name_translations', d.name_translations, \
-                        'type', d.type::text, 'value', d.value, 'is_active', d.is_active) \
+                "SELECT d.id, json_build_object('id', d.id, 'org_id', d.org_id, 'name', d.name, \
+                        'name_translations', d.name_translations, \
+                        'type', d.type::text, 'dtype', d.type::text, \
+                        'value', (CASE WHEN d.value > 0 AND d.value <= 1 \
+                                       THEN round(d.value * 100) ELSE round(d.value) END)::bigint, \
+                        'value_rate', d.value, 'is_active', d.is_active, \
+                        'created_at', d.created_at, 'updated_at', d.updated_at) \
                    FROM discounts d WHERE d.id = ANY($1)",
                 ids,
             )

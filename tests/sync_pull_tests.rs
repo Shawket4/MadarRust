@@ -1133,3 +1133,39 @@ async fn a_restored_branch_is_short_until_the_sweep_catches_it(pool: PgPool) {
         "and the branch has what its org wrote while it was away"
     );
 }
+
+/// The changefeed's discount row must carry the SAME dual spelling the REST
+/// route does (`src/discounts/wire.rs`), because every shipped till parses a
+/// discount with the generated model: `dtype`, an INTEGER `value`, and the
+/// org/timestamp fields.
+///
+/// This projection emitted `type` and the stored fraction instead, so the row
+/// failed serde on the device, the whole list failed with it, and the till
+/// offered no presets at all — the exact failure `wire.rs` exists to prevent,
+/// reintroduced through the feed. It cost a live shop its discounts, and a
+/// reinstall could not help: this mirror is rewritten on every pull, so it
+/// overwrote the good shape `GET /discounts` had already stored.
+#[sqlx::test]
+async fn a_discount_on_the_feed_parses_on_a_shipped_till(pool: PgPool) {
+    let s = shop(&pool).await;
+    seed_every_type(&pool, &s).await;
+
+    let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
+        .await
+        .unwrap();
+    let rows = resp.data.get("discount").expect("discounts are in the feed");
+    let d = rows.first().expect("the seeded discount");
+
+    // Stored as the fraction 0.1; a shipped till must read the integer 10.
+    assert_eq!(d["dtype"], "percentage", "the generated model reads `dtype`");
+    assert_eq!(d["type"], "percentage", "and `type` stays for anything that read it");
+    assert_eq!(d["value"], 10, "the legacy integer a shipped till deserialises");
+    assert!(
+        (d["value_rate"].as_f64().unwrap() - 0.1).abs() < 1e-9,
+        "the fraction stays available for clients that know to ask"
+    );
+    // Required by the generated model; their absence is what failed the parse.
+    for k in ["id", "org_id", "name", "is_active", "created_at", "updated_at"] {
+        assert!(!d[k].is_null(), "`{k}` must be present for the strict model");
+    }
+}
