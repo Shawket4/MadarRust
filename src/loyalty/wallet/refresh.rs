@@ -73,6 +73,16 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     // up, and one sweep is one thing to reason about.
     notices::sweep_undelivered(pool).await?;
 
+    // And the pre-built passes that have aged out. Same argument: one sweep,
+    // one thing to reason about. A few hundred KB per member who tapped adds
+    // up on a box where Postgres shares the disk with everything else, and
+    // nothing past the TTL would be served anyway.
+    match super::store::sweep(pool).await {
+        Ok(0) => {}
+        Ok(n) => tracing::debug!(count = n, "loyalty: dropped expired pre-built passes"),
+        Err(e) => tracing::warn!(error = %e, "loyalty: pass cache sweep failed"),
+    }
+
     let stale = stale_passes(pool, BATCH).await?;
     if stale.is_empty() {
         return Ok(());

@@ -213,7 +213,7 @@ pub async fn latest_pass(
     // this feature gets. It is what makes the WhatsApp fallback evidence.
     super::notices::mark_seen(pool.get_ref(), &member).await;
 
-    let bytes = apple::build_pass_for(pool.get_ref(), &member).await?;
+    let bytes = apple::pass_bytes_for(pool.get_ref(), &member).await?;
     let mut resp = HttpResponse::Ok();
     resp.content_type("application/vnd.apple.pkpass");
     if let Some(updated) = member.pass_updated_at {

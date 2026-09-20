@@ -632,6 +632,12 @@ pub async fn put_settings(
     .execute(pool.get_ref())
     .await?;
 
+    // Every stored .pkpass of this shop was built around the settings that
+    // just changed — the programme name, the mode, the terms on the back. The
+    // hour-long TTL would get there on its own, but this is the edit an owner
+    // makes and then immediately opens their own card to look at.
+    crate::loyalty::wallet::store::purge_org(pool.get_ref(), org_id).await;
+
     Ok(HttpResponse::Ok().json(LoyaltySettings::from(row)))
 }
 
@@ -656,6 +662,7 @@ pub async fn delete_settings(
         .bind(branch_id)
         .execute(pool.get_ref())
         .await?;
+    crate::loyalty::wallet::store::purge_org(pool.get_ref(), org_id).await;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -986,6 +993,24 @@ pub async fn load_effective_rewards_org(
     Ok(in_mode(load_reward_rows(pool, org_id, None).await?, mode))
 }
 
+/// The same catalogue, for a caller that ALREADY holds the org's settings.
+///
+/// [`load_effective_rewards_org`] re-reads `loyalty_settings` purely to learn
+/// the mode. A pass build asked for the catalogue twice — once for the list on
+/// the back, once for the headline on the front — and paid three settings reads
+/// between them for a value it had loaded before it started. Same rows, same
+/// ordering, one query.
+pub async fn rewards_org_in(
+    pool: &PgPool,
+    org_id: Uuid,
+    settings: &LoyaltySettings,
+) -> Result<Vec<RewardItem>, AppError> {
+    Ok(in_mode(
+        load_reward_rows(pool, org_id, None).await?,
+        settings.mode(),
+    ))
+}
+
 // ── The items that collect a stamp ───────────────────────────────────────────
 // The other half of per-item stamps. Scoped and shaped exactly like the reward
 // catalogue above so an admin learns one idea and a branch overrides one way,
@@ -1112,7 +1137,10 @@ pub async fn get_earning_items(
             require_branch_access(pool.get_ref(), &claims, b).await?;
             load_effective_earning_items(pool.get_ref(), org_id, b).await?
         }
-        None => (load_earning_rows(pool.get_ref(), org_id, None).await?, false),
+        None => (
+            load_earning_rows(pool.get_ref(), org_id, None).await?,
+            false,
+        ),
     };
     Ok(HttpResponse::Ok().json(EarningItemList {
         org_id,

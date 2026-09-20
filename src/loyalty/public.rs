@@ -554,6 +554,9 @@ pub async fn join(
 
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
     let passes = wallet::links_for(pool.get_ref(), &member, &settings, &org, &locations).await;
+    // The Apple button is about to be on screen. Build the pass behind it now,
+    // in the background, rather than when a thumb lands on it.
+    wallet::apple::prebuild(pool.get_ref(), &member);
     Ok(HttpResponse::Ok().json(JoinResult {
         member_token: Some(member.member_token.clone()),
         name: member.name.clone(),
@@ -824,6 +827,9 @@ pub async fn card(
     let brand = card_brand(&org, &settings);
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
     let passes = wallet::links_for(pool.get_ref(), &member, &settings, &org, &locations).await;
+    // The Apple button is about to be on screen. Build the pass behind it now,
+    // in the background, rather than when a thumb lands on it.
+    wallet::apple::prebuild(pool.get_ref(), &member);
     let marketing_opt_out = member.marketing_opt_out;
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
@@ -866,8 +872,10 @@ pub async fn apple_pass(
         .await?
         .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
     // The same builder the device's own refetch uses, so the pass a customer
-    // downloads and the pass their phone later pulls are the same shape.
-    let bytes = wallet::apple::build_pass_for(pool.get_ref(), &member).await?;
+    // downloads and the pass their phone later pulls are the same shape — and
+    // the same STORE, so both get the bytes that were built after the last
+    // balance change rather than making them again here.
+    let bytes = wallet::apple::pass_bytes_for(pool.get_ref(), &member).await?;
 
     // Record the serial so pass updates can find this member later.
     sqlx::query(
