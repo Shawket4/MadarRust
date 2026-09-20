@@ -66,10 +66,31 @@ const DEFAULT_TENANT_MAX_CONNECTIONS: u32 = 5;
 /// Idle connections are reaped this fast so a finished tenant's connections
 /// don't linger. Very short under test (throwaway DBs churn in milliseconds),
 /// relaxed in production (avoid needless reconnect churn).
-#[cfg(test)]
-const TENANT_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
-const TENANT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// `cfg(test)` alone is NOT enough any more. The suites are integration tests
+/// now, each its own binary, and they link this library the way production does
+/// — without `cfg(test)`. They were silently getting the 30 s production value,
+/// and it cost 5 s of wall time PER TEST: a tenant connection opened by a
+/// request outlives the test, so `#[sqlx::test]`'s teardown cannot drop the
+/// throwaway database ("is being accessed by other users") until the reaper
+/// lets go. Measured 2026-09-20: an orders test whose body takes 75 ms reported
+/// 5.25 s.
+///
+/// `MADAR_FAST_TEST_POOLS` restores the short reaping for those binaries, and
+/// like the hashing switch it is also gated on `debug_assertions`, so a release
+/// build cannot be talked into it.
+fn tenant_idle_timeout() -> Duration {
+    if cfg!(test) {
+        return Duration::from_secs(2);
+    }
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var_os("MADAR_FAST_TEST_POOLS").is_some() {
+            return Duration::from_millis(200);
+        }
+    }
+    Duration::from_secs(30)
+}
 
 /// Per-org pool sizing.
 fn tenant_max_connections() -> u32 {
@@ -167,7 +188,7 @@ pub async fn tenant_pool(base: &PgPool, org_id: Uuid) -> PgPool {
                 // mid-suite. min=0 + a short idle timeout keeps the resident
                 // connection count proportional to *active* tenants, not total.
                 .min_connections(0)
-                .idle_timeout(TENANT_IDLE_TIMEOUT)
+                .idle_timeout(tenant_idle_timeout())
                 .max_lifetime(Duration::from_secs(1800))
                 .after_connect(move |conn, _meta| {
                     let org = org.clone();

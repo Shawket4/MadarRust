@@ -1,5 +1,13 @@
 # cargo nextest run — per-test process isolation, real parallelism, and no
 # silent hangs: a test slower than 60s is reported, and killed at 3 min.
+
+# NOTE: bcrypt at its real cost (~450ms per hash) is the single biggest cost in
+# this suite — an empty #[sqlx::test] is 0.23s, an orders test 6.5s (measured
+# 2026-09-20). Export MADAR_FAST_TEST_HASHING=1 when running tests to drop it to
+# bcrypt's minimum; scripts/preflight.sh and tool/run_tests.sh do this for you.
+# It cannot be set here: nextest 0.9.144 ignores an [env] table. See
+# src/auth/hashing.rs — the cheap branch also needs `debug_assertions`, so no
+# release binary can reach it whatever the environment says.
 [profile.default]
 # These tests are database-bound: each waits on Postgres far more than it uses a
 # CPU, so 12 (one per core) leaves the machine idle. The :5433 cluster allows 500

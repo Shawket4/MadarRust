@@ -3,6 +3,13 @@
 # the 12 GiB RAM cluster cannot fill mid-run (a full volume kills the server and
 # every later suite fails with PoolTimedOut, which looks like a code failure).
 export DATABASE_URL=postgres://shawket@localhost:5433/madar
+# Tenant pools reap idle connections after 30s in production. An integration
+# test binary links the library WITHOUT cfg(test), so without this it gets the
+# production reaper and every test that makes a request waits ~5s for its
+# throwaway database to become droppable. See src/db.rs.
+export MADAR_FAST_TEST_POOLS=1
+# bcrypt at its real cost is ~450ms a hash; see src/auth/hashing.rs.
+export MADAR_FAST_TEST_HASHING=1
 for m in "$@"; do
   printf "%-12s " $m
   out=$(cargo nextest run --test $m 2>&1)
