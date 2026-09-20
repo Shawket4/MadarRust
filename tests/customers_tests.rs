@@ -112,13 +112,14 @@ async fn order_row(pool: &PgPool, branch: Uuid, teller: Uuid, total: i32) -> Uui
 
 #[::core::prelude::v1::test]
 fn phone_keys_fold_the_country_code() {
+    // The key is the canonical form now (`crate::phone`): E.164 digits, no plus.
     use madar_rust::customers::handlers::phone_key;
     assert_eq!(
         phone_key("+20 100 123 4567").as_deref(),
-        Some("01001234567")
+        Some("201001234567")
     );
-    assert_eq!(phone_key("00201001234567").as_deref(), Some("01001234567"));
-    assert_eq!(phone_key("0100-123-4567").as_deref(), Some("01001234567"));
+    assert_eq!(phone_key("00201001234567").as_deref(), Some("201001234567"));
+    assert_eq!(phone_key("0100-123-4567").as_deref(), Some("201001234567"));
     assert_eq!(phone_key(" - "), None);
 }
 
