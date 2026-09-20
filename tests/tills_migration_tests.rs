@@ -870,7 +870,7 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
     // The full pull: the closed till's old history is out of the window; the
     // open till's whole history and the just-changed order are in.
     let org = u(ORG);
-    let req = crate::sync::pull::PullRequest {
+    let req = madar_rust::sync::pull::PullRequest {
         branch_id: u(B1),
         device_id: None,
         types: None,
@@ -878,7 +878,7 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
         ledger_page_size: None,
         snapshot_cursor: None,
     };
-    let resp = crate::sync::pull::pull_core(&pool, org, &req, None)
+    let resp = madar_rust::sync::pull::pull_core(&pool, org, &req, None)
         .await
         .unwrap();
     let ids = |ty: &str| -> Vec<String> {

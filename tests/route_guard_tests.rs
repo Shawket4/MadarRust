@@ -10,7 +10,7 @@
 //! - grepping `routes.rs` misses nested scopes, `configure` closures and routes
 //!   mounted elsewhere.
 //!
-//! So the guard asks the running app. It mounts [`crate::app_routes::configure_api`]
+//! So the guard asks the running app. It mounts [`madar_rust::app_routes::configure_api`]
 //! (the exact function `main.rs` mounts, plus the demo routes and static files that
 //! `main.rs` adds conditionally) and reads the app's own `ResourceMap` through
 //! its `Debug` output — the router tree actix built, so nothing registered can be
@@ -47,8 +47,8 @@ use sqlx::PgPool;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 /// Routes anyone may call without a token. Every entry says why.
 /// Paths are the mounted pattern; `*` as the method means every method.
@@ -326,7 +326,7 @@ pub const AUTHENTICATED: &[(&str, &str, &str)] = &[
 
 /// The static file services' own mount points (exact patterns, not prefixes:
 /// API routes under `/uploads/...` are still checked).
-const STATIC_PREFIXES: &[&str] = &["/uploads", crate::recipes::steps::STATIC_URL_PREFIX];
+const STATIC_PREFIXES: &[&str] = &["/uploads", madar_rust::recipes::steps::STATIC_URL_PREFIX];
 
 const METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
 
@@ -449,7 +449,7 @@ impl Spec {
         Spec {
             org,
             branch,
-            doc: serde_json::from_str(&crate::openapi::ApiDoc::openapi().to_json().unwrap())
+            doc: serde_json::from_str(&madar_rust::openapi::ApiDoc::openapi().to_json().unwrap())
                 .unwrap(),
         }
     }
@@ -712,11 +712,11 @@ async fn zero_cap_user(pool: &PgPool) -> Fixture {
             .execute(pool)
             .await
             .unwrap();
-        let eff = crate::authz::require::effective(pool, id, Some(branch))
+        let eff = madar_rust::authz::require::effective(pool, id, Some(branch))
             .await
             .unwrap();
         assert!(
-            eff.caps == crate::authz::CapSet::default() && !eff.owner,
+            eff.caps == madar_rust::authz::CapSet::default() && !eff.owner,
             "the guard's user must hold nothing: {eff:?}"
         );
         user = id;
@@ -743,10 +743,10 @@ async fn every_route_is_guarded_or_allowlisted(pool: PgPool) {
         std::env::set_var("MADAR_DISABLE_RATE_LIMIT", "1");
         std::env::set_var("MADAR_DISABLE_AUTO_TRANSLATION", "1");
     }
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
-    crate::authz::sync_catalogue(&pool).await.unwrap();
+    madar_rust::authz::sync_catalogue(&pool).await.unwrap();
     let fx = zero_cap_user(&pool).await;
     let uploads = std::env::temp_dir().join(format!("route-guard-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&uploads).unwrap();
@@ -755,26 +755,26 @@ async fn every_route_is_guarded_or_allowlisted(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(crate::menu::cache::MenuCache::from_env()))
+            .app_data(web::Data::new(madar_rust::menu::cache::MenuCache::from_env()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(
-                crate::auth::org_status::OrgStatusCache::new(),
+                madar_rust::auth::org_status::OrgStatusCache::new(),
             ))
-            .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-            .app_data(crate::qr_card::routes::make_provider())
-            .app_data(web::Data::new(crate::demo::config::DemoConfig::from_env()))
-            .app_data(web::Data::new(crate::ai::AiState::from_env()))
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .app_data(madar_rust::qr_card::routes::make_provider())
+            .app_data(web::Data::new(madar_rust::demo::config::DemoConfig::from_env()))
+            .app_data(web::Data::new(madar_rust::ai::AiState::from_env()))
             .app_data(web::PathConfig::default().error_handler(|err, _req| {
-                crate::errors::AppError::BadRequest(err.to_string()).into()
+                madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
             .app_data(web::QueryConfig::default().error_handler(|err, _req| {
-                crate::errors::AppError::BadRequest(err.to_string()).into()
+                madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
             .app_data(web::JsonConfig::default().error_handler(|err, _req| {
-                crate::errors::AppError::BadRequest(err.to_string()).into()
+                madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
-            .configure(|cfg| crate::app_routes::configure_api(cfg, read_pool.clone()))
-            .configure(crate::demo::routes::configure)
+            .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone()))
+            .configure(madar_rust::demo::routes::configure)
             .route(
                 RMAP_ROUTE,
                 web::get().to(|req: HttpRequest| async move {
@@ -783,7 +783,7 @@ async fn every_route_is_guarded_or_allowlisted(pool: PgPool) {
             )
             .service(actix_files::Files::new("/uploads", &uploads))
             .service(
-                web::scope(crate::recipes::steps::STATIC_URL_PREFIX)
+                web::scope(madar_rust::recipes::steps::STATIC_URL_PREFIX)
                     .service(actix_files::Files::new("", &uploads)),
             )
             .default_service(web::to(|| async { HttpResponse::ImATeapot().finish() })),
@@ -934,10 +934,10 @@ async fn every_route_is_guarded_or_allowlisted(pool: PgPool) {
 /// 400/404 for the same malformed request, so the order is what changed.
 #[sqlx::test]
 async fn caught_routes_decide_permission_before_validation(pool: PgPool) {
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
-    crate::authz::sync_catalogue(&pool).await.unwrap();
+    madar_rust::authz::sync_catalogue(&pool).await.unwrap();
     let fx = zero_cap_user(&pool).await;
     let owner = Uuid::new_v4();
     sqlx::query(
@@ -958,11 +958,11 @@ async fn caught_routes_decide_permission_before_validation(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
-            .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
             .app_data(web::JsonConfig::default().error_handler(|err, _req| {
-                crate::errors::AppError::BadRequest(err.to_string()).into()
+                madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
-            .configure(|cfg| crate::app_routes::configure_api(cfg, read_pool.clone())),
+            .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone())),
     )
     .await;
 

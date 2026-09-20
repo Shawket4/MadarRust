@@ -3,11 +3,11 @@
 //! These tests prove the DATABASE enforces tenant isolation independently of any
 //! application `WHERE org_id = …` filter. They seed two orgs' full data chains
 //! through the base pool (which connects as the table owner and bypasses RLS),
-//! then read and write through [`crate::db::Db`] tenant pools — the exact scoped
+//! then read and write through [`madar_rust::db::Db`] tenant pools — the exact scoped
 //! path production handlers use — and assert one tenant can neither see nor
 //! touch the other's rows.
 
-use crate::db::Db;
+use madar_rust::db::Db;
 use sqlx::PgPool;
 use uuid::Uuid;
 

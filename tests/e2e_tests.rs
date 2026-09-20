@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use uuid::Uuid;
 
-use crate::{
+use madar_rust::{
     auth::jwt::{JwtSecret, create_token},
     branches::handlers::{Branch, PrinterBrand},
     inventory::handlers::OrgIngredient,
@@ -64,7 +64,7 @@ fn to_bigdecimal(val: f64) -> BigDecimal {
 }
 
 async fn seed_default_permissions(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .expect("Failed to seed default role permissions");
 }
@@ -121,16 +121,16 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::auth::routes::configure)
-            .configure(crate::orgs::routes::configure)
-            .configure(crate::users::routes::configure)
-            .configure(crate::permissions::routes::configure)
-            .configure(crate::branches::routes::configure)
-            .configure(crate::menu::routes::configure)
-            .configure(crate::inventory::routes::configure)
-            .configure(crate::recipes::routes::configure)
-            .configure(crate::tills::legacy_routes::configure)
-            .configure(crate::orders::routes::configure),
+            .configure(madar_rust::auth::routes::configure)
+            .configure(madar_rust::orgs::routes::configure)
+            .configure(madar_rust::users::routes::configure)
+            .configure(madar_rust::permissions::routes::configure)
+            .configure(madar_rust::branches::routes::configure)
+            .configure(madar_rust::menu::routes::configure)
+            .configure(madar_rust::inventory::routes::configure)
+            .configure(madar_rust::recipes::routes::configure)
+            .configure(madar_rust::tills::legacy_routes::configure)
+            .configure(madar_rust::orders::routes::configure),
     )
     .await;
 
@@ -307,11 +307,11 @@ async fn test_e2e_tenant_and_role_isolation_security_violation_path(pool: PgPool
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::auth::routes::configure)
-            .configure(crate::orgs::routes::configure)
-            .configure(crate::users::routes::configure)
-            .configure(crate::permissions::routes::configure)
-            .configure(crate::branches::routes::configure),
+            .configure(madar_rust::auth::routes::configure)
+            .configure(madar_rust::orgs::routes::configure)
+            .configure(madar_rust::users::routes::configure)
+            .configure(madar_rust::permissions::routes::configure)
+            .configure(madar_rust::branches::routes::configure),
     )
     .await;
 
@@ -414,18 +414,18 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::auth::routes::configure)
-            .configure(crate::orgs::routes::configure)
-            .configure(crate::users::routes::configure)
-            .configure(crate::permissions::routes::configure)
-            .configure(crate::branches::routes::configure)
-            .configure(crate::menu::routes::configure)
-            .configure(crate::inventory::routes::configure)
-            .configure(crate::recipes::routes::configure)
-            .configure(crate::tills::legacy_routes::configure)
-            .configure(crate::orders::routes::configure)
-            .configure(crate::discounts::routes::configure)
-            .configure(|cfg| crate::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
+            .configure(madar_rust::auth::routes::configure)
+            .configure(madar_rust::orgs::routes::configure)
+            .configure(madar_rust::users::routes::configure)
+            .configure(madar_rust::permissions::routes::configure)
+            .configure(madar_rust::branches::routes::configure)
+            .configure(madar_rust::menu::routes::configure)
+            .configure(madar_rust::inventory::routes::configure)
+            .configure(madar_rust::recipes::routes::configure)
+            .configure(madar_rust::tills::legacy_routes::configure)
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::discounts::routes::configure)
+            .configure(|cfg| madar_rust::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
     )
     .await;
 
@@ -1023,15 +1023,15 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::auth::routes::configure)
-            .configure(crate::menu::routes::configure)
-            .configure(crate::inventory::routes::configure)
-            .configure(crate::recipes::routes::configure)
-            .configure(crate::purchasing::routes::configure)
-            .configure(crate::stocktakes::routes::configure)
-            .configure(crate::tills::legacy_routes::configure)
-            .configure(crate::orders::routes::configure)
-            .configure(|cfg| crate::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
+            .configure(madar_rust::auth::routes::configure)
+            .configure(madar_rust::menu::routes::configure)
+            .configure(madar_rust::inventory::routes::configure)
+            .configure(madar_rust::recipes::routes::configure)
+            .configure(madar_rust::purchasing::routes::configure)
+            .configure(madar_rust::stocktakes::routes::configure)
+            .configure(madar_rust::tills::legacy_routes::configure)
+            .configure(madar_rust::orders::routes::configure)
+            .configure(|cfg| madar_rust::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
     )
     .await;
 

@@ -66,16 +66,6 @@ pub mod units;
 pub mod uploads;
 pub mod users;
 
-#[cfg(test)]
-pub mod e2e_tests;
-#[cfg(test)]
-mod pool_discipline_tests;
 
-#[cfg(test)]
-pub mod rls_tests;
 
-#[cfg(test)]
-mod tills_migration_tests;
 
-#[cfg(test)]
-mod route_guard_tests;
