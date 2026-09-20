@@ -741,6 +741,11 @@ pub struct CardView {
     pub member_token: String,
     pub rewards: Vec<PublicReward>,
     pub passes: PassLinks,
+    /// "Order now": the ordering page, opened knowing who this is. Present only
+    /// when public ordering is configured and the shop takes online orders —
+    /// render the primary button when it is there, nothing when it is not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_now_url: Option<String>,
     /// Whose card this is, and how it should look.
     pub brand: CardBrand,
     /// They have asked this shop to stop sending them things.
@@ -915,6 +920,7 @@ pub async fn card(
     // The Apple button is about to be on screen. Build the pass behind it now,
     // in the background, rather than when a thumb lands on it.
     wallet::apple::prebuild(pool.get_ref(), &member);
+    let order_now_url = wallet::order_now_for(pool.get_ref(), &member).await;
     let marketing_opt_out = member.marketing_opt_out;
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
@@ -928,6 +934,7 @@ pub async fn card(
         can_redeem: view.can_redeem,
         brand,
         marketing_opt_out,
+        order_now_url,
         member_token: token.into_inner(),
         rewards: catalogue
             .into_iter()

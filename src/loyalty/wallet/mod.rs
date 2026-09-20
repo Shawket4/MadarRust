@@ -346,6 +346,11 @@ pub struct CardCopy {
     pub branches: Vec<String>,
     /// Where else to find the shop. Same list on both wallets and the web card.
     pub social: Vec<crate::orgs::social::SocialLink>,
+    /// "Order now" for THIS member ([`order_now_for`]): present only when a
+    /// public ordering base is configured and the shop takes online orders.
+    /// Member-specific, unlike the rest — it rides here because this is the one
+    /// value both wallet builders already receive.
+    pub order_now_url: Option<String>,
 }
 
 /// Everything a pass build reads from the database, fetched once.
@@ -400,8 +405,10 @@ pub async fn pass_source(pool: &PgPool, member: &MemberRow) -> Result<PassSource
         async { Ok::<_, AppError>(branch_names(pool, member.org_id).await) },
     )?;
 
+    let mut copy = card_copy_from(&settings, &rewards, branches, Some(&brand));
+    copy.order_now_url = order_now_for(pool, member).await;
     Ok(PassSource {
-        copy: card_copy_from(&settings, &rewards, branches, Some(&brand)),
+        copy,
         headline: headline_of(&settings, &rewards),
         settings,
         brand,
@@ -449,6 +456,7 @@ pub fn card_copy_from(
         },
         branches,
         social: brand.map(|b| b.social_links.clone()).unwrap_or_default(),
+        order_now_url: None,
     }
 }
 
@@ -549,6 +557,51 @@ pub fn card_link(member: &MemberRow) -> Option<String> {
     ))
 }
 
+/// "Order now": the ordering page, opened already knowing who this is (design
+/// §4.1). `None` without a public ordering base.
+///
+/// The link carries the member token and NOTHING it unlocks: the token is the
+/// QR every cashier sees, so the page it opens shows a first name and a masked
+/// phone until the device proves the phone (`customers::order_now`).
+///
+/// Whether the SHOP takes online orders is a database question —
+/// [`order_now_for`] asks it; this is only the address.
+pub fn order_now_link(member: &MemberRow) -> Option<String> {
+    let base = std::env::var("PUBLIC_ORDER_BASE_URL").ok()?;
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    Some(format!("{base}/now/{}", member.member_token))
+}
+
+/// Does this organisation take online orders at all: any live branch with any
+/// ordering channel switched on. Deliberately NOT "is a branch open right
+/// now" — a card is not reissued at closing time; the page says "closed".
+pub async fn online_ordering_enabled(pool: &PgPool, org_id: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM branch_delivery_settings s \
+                         JOIN branches b ON b.id = s.branch_id \
+                        WHERE b.org_id = $1 AND b.is_active AND b.deleted_at IS NULL \
+                          AND (s.in_mall_enabled OR s.outside_enabled \
+                               OR COALESCE(s.umbrella_enabled, false) \
+                               OR COALESCE(s.pickup_enabled, false)))",
+    )
+    .bind(org_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false)
+}
+
+/// [`order_now_link`], gated on the shop taking online orders. The env check
+/// comes first, so a deployment without public ordering never pays the query.
+pub async fn order_now_for(pool: &PgPool, member: &MemberRow) -> Option<String> {
+    let link = order_now_link(member)?;
+    online_ordering_enabled(pool, member.org_id)
+        .await
+        .then_some(link)
+}
+
 /// One line on the back of the card: a heading and what it says.
 ///
 /// Apple calls these back fields and Google calls them text modules, and both
@@ -575,7 +628,20 @@ pub fn back_of_card(
     copy: &CardCopy,
 ) -> Vec<BackLine> {
     let threshold = settings.default_reward_cost;
-    let mut out = vec![
+    let mut out = Vec::new();
+    // FIRST, when there is one (design §4.1): Apple passes have no buttons, so
+    // the top of the back is the most reachable place a link can be. The value
+    // is the bare URL — iOS makes it tappable — and the label is localised
+    // through `i18n::labels`. Google shows it as a real button instead
+    // (`linksModuleData`) and drops this row.
+    if let Some(link) = copy.order_now_url.as_deref() {
+        out.push(BackLine {
+            key: "ordernow",
+            label: "Order now".into(),
+            value: link.to_string(),
+        });
+    }
+    out.extend([
         BackLine {
             key: "howitworks",
             label: "How it works".into(),
@@ -599,7 +665,7 @@ pub fn back_of_card(
             label: "Member".into(),
             value: format!("{} · {}", member.name, member.phone),
         },
-    ];
+    ]);
     // The claimable-rewards list used to sit here and is deliberately gone
     // (owner, 2026-09-19): a wallet back field is one block of text, so a shop
     // with several rewards printed a list that ran past the field and showed
@@ -678,7 +744,8 @@ pub async fn links_for(
 ) -> PassLinks {
     let apple_url = apple_link(member);
     // The same lines Apple prints on the back of its pass.
-    let copy = card_copy(pool, member.org_id, settings).await;
+    let mut copy = card_copy(pool, member.org_id, settings).await;
+    copy.order_now_url = order_now_for(pool, member).await;
     let headline = reward_headline(pool, member.org_id, settings).await;
     // Provisioning talks to Google, so it can fail in ways a signup must
     // survive: an unlinked service account, a refused class, a network blip.
@@ -833,6 +900,7 @@ mod tests {
     fn the_back_of_the_card_lists_branches_nobody_has_located() {
         let s = LoyaltySettings::defaults(Uuid::nil(), None);
         let copy = CardCopy {
+            order_now_url: None,
             rewards: vec![],
             branches: vec!["Maadi".into(), "Zamalek".into(), "Alexandria".into()],
             social: vec![],
@@ -848,6 +916,7 @@ mod tests {
     fn a_long_list_of_branches_says_how_many_it_left_out() {
         let s = LoyaltySettings::defaults(Uuid::nil(), None);
         let copy = CardCopy {
+            order_now_url: None,
             rewards: vec![],
             branches: (1..=15).map(|i| format!("Branch {i}")).collect(),
             social: vec![],
@@ -882,6 +951,7 @@ mod tests {
             longitude: 31.0,
         }];
         let copy = CardCopy {
+            order_now_url: None,
             rewards: vec!["Espresso — 5 visits".to_string()],
             branches: vec!["Maadi".into(), "Zamalek".into()],
             social: vec![],

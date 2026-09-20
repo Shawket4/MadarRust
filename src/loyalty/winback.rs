@@ -216,13 +216,20 @@ async fn nudge(pool: &PgPool, m: &Lapsed) -> Result<(), AppError> {
         }
     }
 
-    let text = message_for(&settings, &m.name, &m.locale, &m.member_token);
     // The card first, WhatsApp only where there is no card — see
     // `wallet::notices`. A nudge that arrives as the shop's own pass is both
     // cheaper and less like being marketed at.
     let member = crate::loyalty::model::find_by_id(pool, m.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Member vanished mid-nudge".into()))?;
+    let order_now = crate::loyalty::wallet::order_now_for(pool, &member).await;
+    let text = message_for(
+        &settings,
+        &m.name,
+        &m.locale,
+        &m.member_token,
+        order_now.as_deref(),
+    );
     let line = if m.locale.starts_with("ar") {
         "وحشتنا! 🤍".to_string()
     } else {
@@ -249,6 +256,12 @@ pub fn message_for(
     name: &str,
     locale: &str,
     member_token: &str,
+    // "Order now" for this member, when the shop takes online orders
+    // (`wallet::order_now_for`). A second link, above the card's: the message
+    // is free text sent through the shop's own gateway, not a fixed template,
+    // so there is room — and the card link stays LAST because it carries the
+    // opt-out sentence.
+    order_now: Option<&str>,
 ) -> String {
     let arabic = locale.starts_with("ar");
     let program = settings
@@ -282,6 +295,13 @@ pub fn message_for(
     let mut out = body;
     if let Some(r) = reward {
         out.push_str(&r);
+    }
+    if let Some(link) = order_now {
+        out.push_str(&if arabic {
+            format!("\n\nاطلب دلوقتي: {link}")
+        } else {
+            format!("\n\nOrder now: {link}")
+        });
     }
     if let Some(link) = card_link(member_token) {
         out.push_str(&if arabic {
@@ -424,8 +444,8 @@ mod tests {
 
     #[test]
     fn each_language_is_written_rather_than_translated() {
-        let en = message_for(&settings(), "Sara", "en", "tok");
-        let ar = message_for(&settings(), "سارة", "ar", "tok");
+        let en = message_for(&settings(), "Sara", "en", "tok", None);
+        let ar = message_for(&settings(), "سارة", "ar", "tok", None);
         assert!(en.starts_with("Sara, we've missed you!"));
         assert!(ar.starts_with("سارة، وحشتنا!"));
         assert!(en.contains("Rue Rewards"));
@@ -437,7 +457,7 @@ mod tests {
         unsafe { std::env::set_var("PUBLIC_LOYALTY_BASE_URL", "https://loyalty.example") }
         let mut s = settings();
         s.winback_message = Some("{name}! Two for one this week.".into());
-        let out = message_for(&s, "Sara", "en", "tok123");
+        let out = message_for(&s, "Sara", "en", "tok123", None);
         assert!(out.starts_with("Sara! Two for one this week."));
         assert!(
             out.contains("https://loyalty.example/card/tok123"),
@@ -449,8 +469,8 @@ mod tests {
     #[test]
     fn a_gift_is_mentioned_only_when_there_is_one() {
         let mut s = settings();
-        assert!(!message_for(&s, "Sara", "en", "t").contains("added"));
+        assert!(!message_for(&s, "Sara", "en", "t", None).contains("added"));
         s.winback_reward_amount = Some(20);
-        assert!(message_for(&s, "Sara", "en", "t").contains("added 20 points"));
+        assert!(message_for(&s, "Sara", "en", "t", None).contains("added 20 points"));
     }
 }

@@ -443,14 +443,22 @@ pub fn loyalty_object(
         // details row — it renders them as buttons and they open in the app the
         // shop actually wants them opened in.
         "linksModuleData": {
-            "uris": super::card_link(member)
+            // "Order now" FIRST — Google renders these as buttons, top down.
+            "uris": copy.order_now_url.as_deref()
+                .map(|url| json!({
+                    "kind": "walletobjects#uri",
+                    "uri": url,
+                    "description": "Order now",
+                    "id": "ordernow"
+                }))
+                .into_iter()
+                .chain(super::card_link(member)
                 .map(|url| json!({
                     "kind": "walletobjects#uri",
                     "uri": url,
                     "description": "Your card online",
                     "id": "mycard"
-                }))
-                .into_iter()
+                })))
                 .chain(copy
                 .social
                 .iter()
@@ -464,7 +472,7 @@ pub fn loyalty_object(
         },
         "textModulesData": super::back_of_card(member, settings, copy)
             .into_iter()
-            .filter(|l| l.key != "member")
+            .filter(|l| l.key != "member" && l.key != "ordernow")
             .map(|l| {
                 let row = json!({ "id": l.key, "header": l.label, "body": l.value });
                 let row = with_localized(row, "localizedHeader", &l.label);
