@@ -1164,14 +1164,13 @@ pub async fn otp_request(
     }
 
     let code = generate_otp_code();
-    let code_hash = bcrypt::hash(&code, bcrypt::DEFAULT_COST).map_err(|_| AppError::Internal)?;
 
     sqlx::query(
-        "INSERT INTO delivery_otp (phone, code_hash, expires_at) \
+        "INSERT INTO delivery_otp (phone, code, expires_at) \
          VALUES ($1, $2, now() + ($3 || ' seconds')::interval)",
     )
     .bind(&phone)
-    .bind(&code_hash)
+    .bind(&code)
     .bind(OTP_TTL_SECONDS.to_string())
     .execute(pool.get_ref())
     .await?;
@@ -1206,7 +1205,7 @@ pub async fn otp_verify(
     body: web::Json<OtpVerifyInput>,
 ) -> Result<HttpResponse, AppError> {
     let phone = normalize_phone(&body.phone)?;
-    // The code is a short numeric string; reject anything else before bcrypt.
+    // The code is a short numeric string; reject anything else before touching the DB.
     if body.code.is_empty()
         || body.code.len() > MAX_OTP_CODE_LEN
         || !body.code.chars().all(|c| c.is_ascii_digit())
@@ -1215,7 +1214,7 @@ pub async fn otp_verify(
     }
 
     let row: Option<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT id, code_hash, attempts FROM delivery_otp \
+        "SELECT id, code, attempts FROM delivery_otp \
          WHERE phone = $1 AND consumed_at IS NULL AND expires_at > now() \
          ORDER BY created_at DESC LIMIT 1",
     )
@@ -1223,7 +1222,7 @@ pub async fn otp_verify(
     .fetch_optional(pool.get_ref())
     .await?;
 
-    let (id, code_hash, attempts) =
+    let (id, expected, attempts) =
         row.ok_or_else(|| AppError::BadRequest("No active code — request a new one.".into()))?;
     if attempts >= OTP_MAX_ATTEMPTS {
         return Err(AppError::BadRequest(
@@ -1231,7 +1230,10 @@ pub async fn otp_verify(
         ));
     }
 
-    let ok = bcrypt::verify(&body.code, &code_hash).unwrap_or(false);
+    // Constant-time, so a wrong code cannot be narrowed a digit at a time by
+    // timing the reply. Cheap enough not to think about — the reason this is
+    // not bcrypt is in the migration that made the column plain.
+    let ok = crate::secrets::constant_time_eq(body.code.as_bytes(), expected.as_bytes());
     if !ok {
         sqlx::query("UPDATE delivery_otp SET attempts = attempts + 1 WHERE id = $1")
             .bind(id)

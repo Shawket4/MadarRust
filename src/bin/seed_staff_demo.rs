@@ -243,7 +243,7 @@ async fn create_org(pool: &PgPool) -> Result<Uuid, sqlx::Error> {
 }
 
 fn hash() -> String {
-    bcrypt::hash(PASSWORD, bcrypt::DEFAULT_COST).expect("bcrypt")
+    bcrypt::hash(PASSWORD, madar_rust::secrets::BCRYPT_COST).expect("bcrypt")
 }
 
 async fn create_admin(pool: &PgPool, org: Uuid) -> Result<Uuid, sqlx::Error> {

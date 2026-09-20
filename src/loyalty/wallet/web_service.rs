@@ -58,17 +58,10 @@ async fn authenticated_member(
         .apple_auth_token
         .as_deref()
         .ok_or_else(|| AppError::Unauthorized("This pass has no token".into()))?;
-    if !constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+    if !crate::secrets::constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
         return Err(AppError::Unauthorized("Bad pass token".into()));
     }
     Ok(member)
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[derive(Deserialize)]
@@ -299,6 +292,7 @@ mod tests {
 
     #[test]
     fn token_comparison_does_not_leak_the_prefix_by_timing() {
+        use crate::secrets::constant_time_eq;
         assert!(constant_time_eq(b"abc123", b"abc123"));
         assert!(!constant_time_eq(b"abc123", b"abc124"));
         // A wrong length is rejected without comparing — nothing to leak.

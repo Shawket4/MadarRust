@@ -1112,10 +1112,10 @@ mod it {
     #[sqlx::test]
     async fn otp_verify_roundtrip(pool: PgPool) {
         let norm = madar_rust::delivery::normalize_phone(PHONE).unwrap();
-        let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
-        sqlx::query("INSERT INTO delivery_otp (phone, code_hash, expires_at) VALUES ($1,$2, now()+interval '5 minutes')")
+        // Stored as it is sent — see the migration that made the column plain.
+        sqlx::query("INSERT INTO delivery_otp (phone, code, expires_at) VALUES ($1,$2, now()+interval '5 minutes')")
             .bind(&norm)
-            .bind(hash)
+            .bind("1234")
             .execute(&pool)
             .await
             .unwrap();
@@ -3504,7 +3504,7 @@ mod it {
         // Seed an unconsumed OTP that was just created.
         let phone = "201000000001";
         sqlx::query(
-            "INSERT INTO delivery_otp (phone, code_hash, expires_at) \
+            "INSERT INTO delivery_otp (phone, code, expires_at) \
              VALUES ($1, 'x', now() + interval '5 minutes')",
         )
         .bind(phone)

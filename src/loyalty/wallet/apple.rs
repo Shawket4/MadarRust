@@ -1119,7 +1119,19 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
         "ar.lproj/pass.strings".to_string(),
         super::i18n::strings_file(&pairs).into_bytes(),
     ));
-    build_pkpass(&pass, &images)
+    // OFF the reactor, like the images above it.
+    //
+    // What is left here is not cheap and not async: a SHA-1 over every file in
+    // the archive, an RSA PKCS#7 signature via OpenSSL, and zipping it all
+    // together. The strip and brand encoding were already on `spawn_blocking`,
+    // so this was the remaining CPU on the async thread — and `prebuild` hands
+    // this very work to `tokio::spawn`, which on Actix means the SAME worker
+    // thread that serves requests. The "background" pre-build was therefore
+    // competing with the page that asked for it, which is the opposite of what
+    // pre-building is for.
+    tokio::task::spawn_blocking(move || build_pkpass(&pass, &images))
+        .await
+        .map_err(|_| AppError::Internal)?
 }
 
 /// The bytes to SERVE: stored if they are still right, built if they are not.

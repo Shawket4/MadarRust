@@ -53,6 +53,7 @@ pub mod recipes;
 pub mod refunds;
 pub mod reports;
 pub mod reservations;
+pub mod secrets;
 pub mod staff;
 pub mod staff_pool;
 pub mod stocktakes;
@@ -65,7 +66,3 @@ pub mod tz;
 pub mod units;
 pub mod uploads;
 pub mod users;
-
-
-
-
