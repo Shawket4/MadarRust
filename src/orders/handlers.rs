@@ -1456,7 +1456,7 @@ pub(crate) async fn resolve_order_line(
 ///
 /// **The one resolver.** An item has no price of its own: price lives in
 /// `menu_item_sizes`, and every live item always has at least one size row
-/// (enforced in the schema — see `20260922020000_price_lives_in_sizes.sql`).
+/// (enforced in the schema — see `20260923010000_price_lives_in_sizes.sql`).
 ///
 /// - with a size label → that size's price;
 /// - without one → the LOWEST active size price (the "from" price a

@@ -41,7 +41,7 @@ DROP TABLE IF EXISTS addon_item_ingredients           CASCADE;
 DROP TABLE IF EXISTS addon_items                      CASCADE;
 DROP TABLE IF EXISTS menu_item_recipes                CASCADE;
 -- item_sizes may already BE the view: the price-lives-in-sizes migration
--- (20260922020000) converges every database on that shape, so this file has to
+-- (20260923010000) converges every database on that shape, so this file has to
 -- be re-appliable rather than assume it is still a table.
 DO $shim$
 BEGIN
