@@ -11,8 +11,12 @@
 //! With any of them unset there is no Apple button at all — signup still works
 //! and the member still has a token and a QR.
 
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+
 use serde_json::json;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::errors::AppError;
 use crate::loyalty::model::MemberRow;
@@ -230,6 +234,65 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
     }
 }
 
+/// The shop's photograph, sized for the pass's strip — cached per org.
+///
+/// These bytes depend ONLY on the org's picture and its foreground colour, not
+/// on the member, so every customer of a shop gets byte-identical strips. They
+/// were being regenerated on every "Add to Wallet" press: three
+/// `resize_to_fill`s up to 1125x432 plus a PNG encode each, on a 1 vCPU box
+/// with Postgres beside it. That was the bulk of a ~20 s wait for a file that
+/// is otherwise a zip and a signature.
+///
+/// The key carries the picture's URL and the colour, so changing either in the
+/// dashboard yields a different key and the next press rebuilds. The TTL is the
+/// backstop for a picture replaced at the same URL.
+static STRIP_CACHE: LazyLock<
+    moka::future::Cache<(Uuid, String, String), Arc<Vec<(String, Vec<u8>)>>>,
+> = LazyLock::new(|| {
+    moka::future::Cache::builder()
+        // Each entry is three PNGs — a few hundred KB. A few dozen orgs is the
+        // whole tenancy, so this is small and bounded either way.
+        .max_capacity(64)
+        .time_to_live(Duration::from_secs(3600))
+        .build()
+});
+
+/// Cached strips for this org, building them off the runtime on a miss.
+///
+/// Two things happen here, and both matter on a 1 vCPU box:
+///
+/// * the result is cached, so only the first press of a shop pays for it; and
+/// * the build runs on `spawn_blocking`, because resizing and PNG-encoding
+///   three images is CPU-bound work that otherwise occupies an async worker
+///   and stalls every other request sharing it.
+pub async fn strip_images_cached(
+    org_id: Uuid,
+    brand: &crate::orgs::branding::OrgBrand,
+    foreground: &str,
+) -> Arc<Vec<(String, Vec<u8>)>> {
+    // Caching is bypassed under test for the reason in `crate::cache`: one
+    // process runs many isolated databases and a shared cache leaks across them.
+    if cfg!(test) {
+        return Arc::new(strip_images(brand, foreground));
+    }
+    let key = (
+        org_id,
+        brand.card_image_url.clone().unwrap_or_default(),
+        foreground.to_string(),
+    );
+    let brand = brand.clone();
+    let fg = foreground.to_string();
+    STRIP_CACHE
+        .get_with(key, async move {
+            tokio::task::spawn_blocking(move || Arc::new(strip_images(&brand, &fg)))
+                .await
+                // The only way this fails is a panic inside the resize; an
+                // empty strip set is a valid pass, so the card still installs.
+                .unwrap_or_else(|_| Arc::new(Vec::new()))
+        })
+        .await
+}
+
 /// The shop's photograph, sized for the pass's strip.
 ///
 /// Empty when there is no picture, which is the ordinary case and a finished
@@ -248,8 +311,11 @@ pub fn strip_images(
     STRIP_SIZES
         .iter()
         .filter_map(|(name, w, h)| {
+            // CatmullRom, not Lanczos3: at strip sizes the two are visually
+            // indistinguishable and Lanczos3 costs several times more CPU —
+            // which is paid on the customer's tap.
             let mut scaled = img
-                .resize_to_fill(*w, *h, image::imageops::FilterType::Lanczos3)
+                .resize_to_fill(*w, *h, image::imageops::FilterType::CatmullRom)
                 .to_rgba8();
             // Apple writes the balance across this. Make it safe to write on.
             scrim(&mut scaled, foreground);
