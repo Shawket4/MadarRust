@@ -2185,6 +2185,23 @@ ar = "دمج العملاء المكررين"
 hint_en = "Merging cannot be undone. When both are loyalty members, the points move to the customer that stays and the other card stops working."
 hint_ar = "الدمج لا يمكن التراجع عنه. لو الاتنين أعضاء في برنامج الولاء، النقاط بتتنقل للعميل اللي هيفضل والكارت التاني بيتوقف."
 
+# Saved delivery addresses (customers unification §2.6, §7). A phone finds a
+# person; an address finds their door, so it is not part of customers.view.
+# Whoever dispatches a delivery needs it; a waiter does not.
+[[cap]]
+id = 225
+key = "customers.addresses.view"
+group = "customers"
+tier = "configurable"
+risk = "pii"
+defaults = "omt"
+pos = true
+en = "See customers' saved addresses"
+# AR draft (2026-09-21), pending owner review.
+ar = "عرض عناوين العملاء المحفوظة"
+hint_en = "The delivery addresses a customer has ordered to. Needed to dispatch an order; not needed to take one at a table."
+hint_ar = "عناوين التوصيل اللي العميل طلب عليها قبل كده. مطلوبة لتجهيز طلب توصيل، ومش مطلوبة لأخذ طلب على ترابيزة."
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.
