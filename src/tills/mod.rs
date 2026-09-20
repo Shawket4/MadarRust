@@ -18,5 +18,3 @@ mod reconcile_tests;
 mod report_vectors_tests;
 #[cfg(test)]
 mod spot_view_tests;
-#[cfg(test)]
-mod tests;

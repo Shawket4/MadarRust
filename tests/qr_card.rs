@@ -9,7 +9,7 @@
 mod render {
     use image::GenericImageView;
 
-    use crate::qr_card::{
+    use madar_rust::qr_card::{
         PAPER, QrCardOptions, TEAL, TEAL_LIGHT, render, render_qr_card_png, render_qr_card_svg,
         render_qr_receipt_png,
     };
@@ -158,7 +158,7 @@ mod render {
 
     #[test]
     fn marketing_path_validation() {
-        use crate::qr_card::handlers::validate_marketing_path_pub;
+        use madar_rust::qr_card::handlers::validate_marketing_path_pub;
         assert!(
             validate_marketing_path_pub("http://evil.com").is_err(),
             "absolute URL rejected"
@@ -188,19 +188,19 @@ mod http {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use crate::auth::jwt::JwtSecret;
-    use crate::models::UserRole;
-    use crate::qr_card::db::BranchTable;
-    use crate::qr_card::handlers::QrResponse;
-    use crate::qr_card::shlink::ShortLinkProvider;
-    use crate::qr_card::shlink::fake::FakeShortLinkProvider;
+    use madar_rust::auth::jwt::JwtSecret;
+    use madar_rust::models::UserRole;
+    use madar_rust::qr_card::db::BranchTable;
+    use madar_rust::qr_card::handlers::QrResponse;
+    use madar_rust::qr_card::shlink::ShortLinkProvider;
+    use madar_rust::qr_card::shlink::fake::FakeShortLinkProvider;
 
     fn get_secret() -> JwtSecret {
         JwtSecret("secret".to_string())
     }
 
     fn token(user_id: Uuid, org_id: Uuid, role: UserRole) -> String {
-        crate::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), role, None, 24)
+        madar_rust::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), role, None, 24)
             .unwrap()
     }
 
@@ -264,9 +264,9 @@ mod http {
             .app_data(web::Data::new(pool))
             .app_data(web::Data::new(get_secret()))
             .app_data(web::Data::new(fake))
-            .configure(crate::qr_card::routes::configure)
-            .configure(crate::branches::routes::configure)
-            .configure(crate::orgs::routes::configure)
+            .configure(madar_rust::qr_card::routes::configure)
+            .configure(madar_rust::branches::routes::configure)
+            .configure(madar_rust::orgs::routes::configure)
     }
 
     // ── Table CRUD ────────────────────────────────────────────────────────────
@@ -942,9 +942,9 @@ mod http {
 mod branded {
     use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 
-    use crate::orgs::branding::{self, OrgBrand, Palette};
-    use crate::qr_card::brand::{CardBrand, MAX_LOGO_PX, MIN_LOGO_PX, card_brand, prepare_logo};
-    use crate::qr_card::{
+    use madar_rust::orgs::branding::{self, OrgBrand, Palette};
+    use madar_rust::qr_card::brand::{CardBrand, MAX_LOGO_PX, MIN_LOGO_PX, card_brand, prepare_logo};
+    use madar_rust::qr_card::{
         PAPER, QrCardOptions, TEAL, TEAL_LIGHT, render, render_qr_card_png, render_qr_card_svg,
     };
 
@@ -1021,7 +1021,7 @@ mod branded {
         .expect("svg");
         assert_eq!(
             svg,
-            include_str!("golden_unbranded_card.svg"),
+            include_str!("../src/qr_card/golden_unbranded_card.svg"),
             "the unbranded card changed; if that was deliberate, the golden file \
              has to be regenerated and the change justified"
         );

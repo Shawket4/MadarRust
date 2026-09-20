@@ -21,12 +21,13 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::ai::AiState;
-use crate::ai::llm::{Completion, LlmProvider, ProviderError, Turn};
-use crate::ai::mock::MockProvider;
-use crate::ai::tools;
-use crate::analytics::tests::{org_admin_token, org_admin_token_for, secret, seed};
-use crate::models::UserRole;
+use madar_rust::ai::AiState;
+use madar_rust::ai::llm::{Completion, LlmProvider, ProviderError, Turn};
+use madar_rust::ai::mock::MockProvider;
+use madar_rust::ai::tools;
+mod common;
+use common::analytics::{org_admin_token, org_admin_token_for, secret, seed};
+use madar_rust::models::UserRole;
 
 async fn app(
     pool: &PgPool,
@@ -36,7 +37,7 @@ async fn app(
     Response = actix_web::dev::ServiceResponse,
     Error = actix_web::Error,
 > {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
     test::init_service(
@@ -44,7 +45,7 @@ async fn app(
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(AiState::with_provider(provider)))
-            .configure(crate::ai::routes::configure),
+            .configure(madar_rust::ai::routes::configure),
     )
     .await
 }
@@ -130,7 +131,7 @@ async fn the_spec_comes_back_so_an_answer_can_be_pinned_as_a_widget(pool: PgPool
             .contains(&json!("branch"))
     );
     // It round-trips through the metrics endpoint unchanged.
-    let parsed: crate::analytics::spec::QuerySpec =
+    let parsed: madar_rust::analytics::spec::QuerySpec =
         serde_json::from_value(spec.clone()).expect("the echoed spec must be a valid spec");
     assert_eq!(parsed.dataset, "orders");
 }
@@ -239,7 +240,7 @@ async fn the_query_budget_stops_a_runaway_model(pool: PgPool) {
     assert_eq!(status, 200);
     // Never more than the budget, however many the model asks for.
     assert!(
-        body["results"].as_array().unwrap().len() <= crate::ai::agent::MAX_QUERIES,
+        body["results"].as_array().unwrap().len() <= madar_rust::ai::agent::MAX_QUERIES,
         "query budget was not enforced"
     );
 }
@@ -342,7 +343,7 @@ async fn a_model_cannot_exceed_the_row_cap(pool: PgPool) {
     let (status, body) = ask(&app, &org_admin_token(s.org), "daily revenue").await;
     assert!(status.is_success());
     assert!(
-        body["results"][0]["rows"].as_array().unwrap().len() <= crate::analytics::execute::MAX_ROWS
+        body["results"][0]["rows"].as_array().unwrap().len() <= madar_rust::analytics::execute::MAX_ROWS
     );
 }
 
@@ -368,7 +369,7 @@ async fn a_super_admin_token_is_refused(pool: PgPool) {
     // able to aggregate across merchants.
     seed(&pool, "a").await;
     let app = app(&pool, Arc::new(MockProvider::router())).await;
-    let token = crate::auth::jwt::create_token(
+    let token = madar_rust::auth::jwt::create_token(
         &secret(),
         Uuid::new_v4(),
         None,
@@ -404,7 +405,7 @@ async fn empty_and_oversized_questions_are_rejected(pool: PgPool) {
 #[sqlx::test]
 async fn the_feature_reports_itself_unavailable_when_unconfigured(pool: PgPool) {
     let s = seed(&pool, "a").await;
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     // No provider wired at all — the rest of the server is unaffected.
@@ -417,7 +418,7 @@ async fn the_feature_reports_itself_unavailable_when_unconfigured(pool: PgPool) 
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(state))
-            .configure(crate::ai::routes::configure),
+            .configure(madar_rust::ai::routes::configure),
     )
     .await;
     assert_eq!(ask(&app, &org_admin_token(s.org), "revenue").await.0, 503);
@@ -499,7 +500,7 @@ impl LlmProvider for FollowUp {
         if req
             .messages
             .iter()
-            .any(|m| matches!(m, crate::ai::llm::Message::ToolResult { .. }))
+            .any(|m| matches!(m, madar_rust::ai::llm::Message::ToolResult { .. }))
         {
             return Ok(MockProvider::answer(
                 "And here it is for the earlier period.",
@@ -508,7 +509,7 @@ impl LlmProvider for FollowUp {
 
         // Find the replayed spec from the previous turn.
         let replayed = req.messages.iter().find_map(|m| match m {
-            crate::ai::llm::Message::Assistant { text: Some(t), .. } if t.contains("[ran ") => {
+            madar_rust::ai::llm::Message::Assistant { text: Some(t), .. } if t.contains("[ran ") => {
                 let start = t.find('{')?;
                 let end = t.rfind('}')?;
                 Some(t[start..=end].to_string())
@@ -867,7 +868,7 @@ async fn concurrent_sends_into_one_conversation_do_not_collide(pool: PgPool) {
     let created = ask_in(&app, &token, None, "top products").await;
     let id: Uuid = serde_json::from_value(created["conversation_id"].clone()).unwrap();
 
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
 
     // Drive the store directly: the HTTP layer would serialize these.
     let owner: Uuid = sqlx::query_scalar("SELECT user_id FROM ai_conversations WHERE id = $1")
@@ -875,7 +876,7 @@ async fn concurrent_sends_into_one_conversation_do_not_collide(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let record = |q: &str| crate::ai::store::TurnRecord {
+    let record = |q: &str| madar_rust::ai::store::TurnRecord {
         question: q.to_string(),
         answer: Some("ok".into()),
         kind: "answer".into(),
@@ -884,8 +885,8 @@ async fn concurrent_sends_into_one_conversation_do_not_collide(pool: PgPool) {
     };
     let (second, third) = (record("second"), record("third"));
     let (a, b) = tokio::join!(
-        crate::ai::store::append_turn(&db, id, s.org, owner, &second),
-        crate::ai::store::append_turn(&db, id, s.org, owner, &third),
+        madar_rust::ai::store::append_turn(&db, id, s.org, owner, &second),
+        madar_rust::ai::store::append_turn(&db, id, s.org, owner, &third),
     );
     let mut seqs = vec![
         a.expect("first concurrent append"),
@@ -928,9 +929,9 @@ impl LlmProvider for AlwaysFails {
 }
 
 /// Append `n` turns straight to the store, bypassing the model.
-async fn seed_turns(db: &crate::db::Db, id: Uuid, org: Uuid, user: Uuid, n: i32) {
+async fn seed_turns(db: &madar_rust::db::Db, id: Uuid, org: Uuid, user: Uuid, n: i32) {
     for i in 1..=n {
-        let record = crate::ai::store::TurnRecord {
+        let record = madar_rust::ai::store::TurnRecord {
             question: format!("question {i}"),
             answer: Some(format!("answer {i}")),
             kind: "answer".into(),
@@ -938,25 +939,25 @@ async fn seed_turns(db: &crate::db::Db, id: Uuid, org: Uuid, user: Uuid, n: i32)
                             "spec": { "dataset": "orders" } }]),
             provider: Some("mock".into()),
         };
-        crate::ai::store::append_turn(db, id, org, user, &record)
+        madar_rust::ai::store::append_turn(db, id, org, user, &record)
             .await
             .unwrap_or_else(|e| panic!("seeding turn {i}: {e}"));
     }
 }
 
-async fn new_conversation(db: &crate::db::Db, s: &crate::analytics::tests::Seeded) -> Uuid {
-    crate::ai::store::create(db, s.org, s.admin, "en", "first question")
+async fn new_conversation(db: &madar_rust::db::Db, s: &common::analytics::Seeded) -> Uuid {
+    madar_rust::ai::store::create(db, s.org, s.admin, "en", "first question")
         .await
         .unwrap()
 }
 
 #[sqlx::test]
 async fn compaction_folds_older_turns_and_leaves_the_window_verbatim(pool: PgPool) {
-    use crate::ai::compaction::{VERBATIM_TURNS, compact};
-    use crate::ai::store;
+    use madar_rust::ai::compaction::{VERBATIM_TURNS, compact};
+    use madar_rust::ai::store;
 
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
 
     // Nine turns: three should fold, six stay verbatim.
@@ -982,10 +983,10 @@ async fn compaction_folds_older_turns_and_leaves_the_window_verbatim(pool: PgPoo
 
 #[sqlx::test]
 async fn a_short_conversation_is_never_compacted(pool: PgPool) {
-    use crate::ai::compaction::compact;
+    use madar_rust::ai::compaction::compact;
 
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
     seed_turns(&db, id, s.org, s.admin, 6).await;
 
@@ -994,7 +995,7 @@ async fn a_short_conversation_is_never_compacted(pool: PgPool) {
     let provider = MockProvider::scripted(vec![Turn::Text("should never run".into())]);
     assert!(!compact(&db, &provider, id).await.unwrap());
 
-    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+    let ctx = madar_rust::ai::store::replay_context(&db, id, s.admin, 14)
         .await
         .unwrap();
     assert!(ctx.summary.is_none());
@@ -1003,10 +1004,10 @@ async fn a_short_conversation_is_never_compacted(pool: PgPool) {
 
 #[sqlx::test]
 async fn compaction_is_cumulative_across_rounds(pool: PgPool) {
-    use crate::ai::compaction::compact;
+    use madar_rust::ai::compaction::compact;
 
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
 
     seed_turns(&db, id, s.org, s.admin, 9).await;
@@ -1018,7 +1019,7 @@ async fn compaction_is_cumulative_across_rounds(pool: PgPool) {
     let second = MockProvider::scripted(vec![Turn::Text("Round two summary.".into())]);
     assert!(compact(&db, &second, id).await.unwrap());
 
-    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+    let ctx = madar_rust::ai::store::replay_context(&db, id, s.admin, 14)
         .await
         .unwrap();
     // The second round REPLACES the first — the model was given the old summary
@@ -1034,10 +1035,10 @@ async fn the_summarizer_is_shown_the_previous_summary_and_the_new_turns(pool: Pg
     // Without the previous summary each round would only describe its own
     // slice, and everything before it would be silently lost — which is the
     // failure this whole design exists to avoid.
-    use crate::ai::compaction::compact;
+    use madar_rust::ai::compaction::compact;
 
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
     seed_turns(&db, id, s.org, s.admin, 9).await;
 
@@ -1050,7 +1051,7 @@ async fn the_summarizer_is_shown_the_previous_summary_and_the_new_turns(pool: Pg
     #[async_trait]
     impl LlmProvider for Recording {
         async fn complete(&self, req: Completion<'_>) -> Result<Turn, ProviderError> {
-            if let Some(crate::ai::llm::Message::User(t)) = req.messages.first() {
+            if let Some(madar_rust::ai::llm::Message::User(t)) = req.messages.first() {
                 *self.0.lock().unwrap() = t.clone();
             }
             // The summarizing call must offer NO tools, or the model answers
@@ -1083,16 +1084,16 @@ async fn a_failed_summary_leaves_the_conversation_intact(pool: PgPool) {
     // Nothing depends on compaction succeeding: the next turn simply replays
     // more verbatim history. An assistant that stopped answering because a
     // SUMMARY could not be written would be a far worse outcome.
-    use crate::ai::compaction::compact;
+    use madar_rust::ai::compaction::compact;
 
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
     seed_turns(&db, id, s.org, s.admin, 9).await;
 
     assert!(compact(&db, &AlwaysFails, id).await.is_err());
 
-    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+    let ctx = madar_rust::ai::store::replay_context(&db, id, s.admin, 14)
         .await
         .unwrap();
     assert!(
@@ -1105,7 +1106,7 @@ async fn a_failed_summary_leaves_the_conversation_intact(pool: PgPool) {
     // ...and a later successful pass still catches up.
     let good = MockProvider::scripted(vec![Turn::Text("Recovered summary.".into())]);
     assert!(compact(&db, &good, id).await.unwrap());
-    let ctx = crate::ai::store::replay_context(&db, id, s.admin, 14)
+    let ctx = madar_rust::ai::store::replay_context(&db, id, s.admin, 14)
         .await
         .unwrap();
     assert_eq!(ctx.summary.as_deref(), Some("Recovered summary."));
@@ -1113,10 +1114,10 @@ async fn a_failed_summary_leaves_the_conversation_intact(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_model_that_answers_with_no_summary_changes_nothing(pool: PgPool) {
-    use crate::ai::compaction::compact;
+    use madar_rust::ai::compaction::compact;
 
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
     seed_turns(&db, id, s.org, s.admin, 9).await;
 
@@ -1124,7 +1125,7 @@ async fn a_model_that_answers_with_no_summary_changes_nothing(pool: PgPool) {
     let blank = MockProvider::scripted(vec![Turn::Text("   ".into())]);
     assert!(compact(&db, &blank, id).await.is_err());
     assert!(
-        crate::ai::store::replay_context(&db, id, s.admin, 14)
+        madar_rust::ai::store::replay_context(&db, id, s.admin, 14)
             .await
             .unwrap()
             .summary
@@ -1137,10 +1138,10 @@ async fn a_losing_concurrent_pass_does_not_rewind_the_winner(pool: PgPool) {
     // Two passes can overlap — a spawned one and a retry. The conditional
     // update means the loser writes nothing rather than replacing a newer
     // summary with an older one and losing the turns it covered.
-    use crate::ai::store;
+    use madar_rust::ai::store;
 
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
     seed_turns(&db, id, s.org, s.admin, 9).await;
 
@@ -1170,14 +1171,14 @@ async fn a_long_chat_reaches_the_model_as_a_summary_plus_a_window(pool: PgPool) 
     // bounded, and the condensed head is labelled as background rather than
     // replayed as something the merchant just said.
     let s = seed(&pool, "a").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
     let id = new_conversation(&db, &s).await;
     seed_turns(&db, id, s.org, s.admin, 9).await;
 
     let summarizer = MockProvider::scripted(vec![Turn::Text(
         "Earlier the merchant compared branches for last month.".into(),
     )]);
-    crate::ai::compaction::compact(&db, &summarizer, id)
+    madar_rust::ai::compaction::compact(&db, &summarizer, id)
         .await
         .unwrap();
 
@@ -1189,7 +1190,7 @@ async fn a_long_chat_reaches_the_model_as_a_summary_plus_a_window(pool: PgPool) 
             let mut log = self.0.lock().unwrap();
             if log.is_empty() {
                 for m in req.messages {
-                    if let crate::ai::llm::Message::User(t) = m {
+                    if let madar_rust::ai::llm::Message::User(t) = m {
                         log.push(t.clone());
                     }
                 }
@@ -1246,7 +1247,7 @@ impl LlmProvider for Wiretap {
         drop(log);
 
         let shown_code = req.messages.iter().find_map(|m| match m {
-            crate::ai::llm::Message::ToolResult { content, .. } => content
+            madar_rust::ai::llm::Message::ToolResult { content, .. } => content
                 .get("rows")
                 .and_then(Value::as_array)
                 .and_then(|rows| rows.first())
@@ -1261,7 +1262,7 @@ impl LlmProvider for Wiretap {
             None if req
                 .messages
                 .iter()
-                .any(|m| matches!(m, crate::ai::llm::Message::ToolResult { .. })) =>
+                .any(|m| matches!(m, madar_rust::ai::llm::Message::ToolResult { .. })) =>
             {
                 MockProvider::answer(&self.template.replace("{code}", ""))
             }
@@ -1283,7 +1284,7 @@ impl LlmProvider for Wiretap {
 
 /// Seed a waiter and an order they took, so a `waiter` breakdown has a real
 /// person's name in it.
-async fn seed_waiter(pool: &PgPool, s: &crate::analytics::tests::Seeded, name: &str) -> Uuid {
+async fn seed_waiter(pool: &PgPool, s: &common::analytics::Seeded, name: &str) -> Uuid {
     let waiter = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, name, role, org_id, pin_hash) VALUES ($1,$2,'waiter',$3,'x')",
@@ -1387,16 +1388,16 @@ async fn a_replayed_answer_does_not_leak_what_this_turn_protects(pool: PgPool) {
     // merchant saw. Replaying them raw would undo the whole mechanism.
     let s = seed(&pool, "a").await;
     seed_waiter(&pool, &s, "Ahmed Hassan").await;
-    let db = crate::db::Db::for_org(&pool, s.org).await;
-    let id = crate::ai::store::create(&db, s.org, s.admin, "en", "who sold the most")
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
+    let id = madar_rust::ai::store::create(&db, s.org, s.admin, "en", "who sold the most")
         .await
         .unwrap();
-    crate::ai::store::append_turn(
+    madar_rust::ai::store::append_turn(
         &db,
         id,
         s.org,
         s.admin,
-        &crate::ai::store::TurnRecord {
+        &madar_rust::ai::store::TurnRecord {
             question: "who sold the most".into(),
             answer: Some("Ahmed Hassan led on revenue.".into()),
             kind: "answer".into(),

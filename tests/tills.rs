@@ -2,20 +2,20 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::tills::handlers::{
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::tills::handlers::{
     CashMovement, CashMovementRequest, CloseTillRequest as CloseShiftRequest, ForceCloseRequest,
 };
-use crate::tills::legacy::*;
-use crate::tills::legacy_routes as routes;
+use madar_rust::tills::legacy::*;
+use madar_rust::tills::legacy_routes as routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -865,7 +865,7 @@ async fn test_teller_token_org_scoped_across_branches(pool: PgPool) {
     assign_user_to_branch(&pool, teller, branch_b).await;
     grant_permission(&pool, "teller", "tills", "read").await;
     // Token minted for branch A (as login does for this device).
-    let token = crate::auth::jwt::create_token(
+    let token = madar_rust::auth::jwt::create_token(
         &get_secret(),
         teller,
         Some(org_id),
@@ -2134,7 +2134,7 @@ async fn many_tills_open_at_once_in_one_branch(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::tills::routes::configure),
+            .configure(madar_rust::tills::routes::configure),
     )
     .await;
     let org_id = seed_org(&pool).await;
@@ -2193,7 +2193,7 @@ async fn at_most_one_open_till_per_person(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::tills::routes::configure),
+            .configure(madar_rust::tills::routes::configure),
     )
     .await;
     let org_id = seed_org(&pool).await;
@@ -2253,8 +2253,8 @@ async fn at_most_one_open_till_per_person(pool: PgPool) {
 /// T3 list with `flagged=true`.
 #[sqlx::test]
 async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
-    use crate::sync::ActingContext;
-    use crate::tills::handlers::{
+    use madar_rust::sync::ActingContext;
+    use madar_rust::tills::handlers::{
         OpenMeta, OpenTillRequest, PaginatedTills, TillPreFill, open_till_inner,
     };
 
@@ -2308,7 +2308,7 @@ async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
     .await;
     assert!(matches!(
         live,
-        Err(crate::errors::AppError::RefusedWith {
+        Err(madar_rust::errors::AppError::RefusedWith {
             code: "TILL_OPEN_ELSEWHERE",
             ..
         })
@@ -2349,7 +2349,7 @@ async fn replay_open_till_duplicate_flags_and_both_are_visible(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(crate::tills::routes::configure),
+            .configure(madar_rust::tills::routes::configure),
     )
     .await;
     let token = generate_org_admin_token(user_id, org_id);

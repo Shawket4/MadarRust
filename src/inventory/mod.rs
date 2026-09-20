@@ -5,5 +5,3 @@ pub mod waste;
 #[cfg(test)]
 mod waste_tests;
 
-#[cfg(test)]
-mod tests;

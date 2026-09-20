@@ -44,9 +44,6 @@ pub mod routes;
 pub mod settings;
 pub mod whatsapp;
 
-#[cfg(test)]
-mod tests;
-
 use chrono_tz::Tz;
 use sqlx::PgExecutor;
 use uuid::Uuid;

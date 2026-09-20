@@ -1210,7 +1210,7 @@ where
 /// hook. One query for both so there is one writer of the rule. A booking
 /// with a bill still open or already paid is not touched — the void was one
 /// of several bills. Returns the bookings that moved.
-pub(crate) async fn cancel_for_voided_tickets<'e, E>(
+pub async fn cancel_for_voided_tickets<'e, E>(
     exec: E,
     ticket_id: Option<Uuid>,
 ) -> Result<Vec<Uuid>, AppError>

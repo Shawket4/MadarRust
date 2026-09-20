@@ -123,7 +123,12 @@ impl ShortLinkProvider for ShlinkClient {
 
 // ── Fake provider (tests) ─────────────────────────────────────────────────────
 
-#[cfg(test)]
+// Compiled unconditionally, not `#[cfg(test)]`: each test suite is its own
+// binary now, and an integration test links the library the way anything else
+// does — without `cfg(test)`. A fake provider that only existed under it would
+// be invisible to the tests that need it. It is inert (nothing routes to it)
+// and costs a few hundred bytes.
+#[doc(hidden)]
 pub mod fake {
     use super::{BoxFut, ShortLinkProvider, ShortUrl};
     use crate::errors::AppError;

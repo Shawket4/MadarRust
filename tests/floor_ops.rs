@@ -10,11 +10,11 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::floor_ops::TransferView;
-use crate::models::UserRole;
-use crate::realtime::hub::BranchEventHub;
-use crate::tickets::OpenTicketView;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::floor_ops::TransferView;
+use madar_rust::models::UserRole;
+use madar_rust::realtime::hub::BranchEventHub;
+use madar_rust::tickets::OpenTicketView;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -256,9 +256,9 @@ macro_rules! app {
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
                 // The real `/floor` scope, ops routes included.
-                .configure(crate::reservations::routes::configure)
-                .configure(crate::tickets::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::reservations::routes::configure)
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };
@@ -1114,7 +1114,7 @@ async fn the_whole_floor_scope_is_reachable(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(BranchEventHub::new()))
-            .configure(crate::reservations::routes::configure),
+            .configure(madar_rust::reservations::routes::configure),
     )
     .await;
 
@@ -1426,7 +1426,7 @@ async fn table_history_counts_only_what_the_table_actually_took(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(BranchEventHub::new()))
-            .configure(crate::reservations::routes::configure),
+            .configure(madar_rust::reservations::routes::configure),
     )
     .await;
 
@@ -1498,7 +1498,7 @@ async fn table_history_counts_the_covers_the_host_counted(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(BranchEventHub::new()))
-            .configure(crate::reservations::routes::configure),
+            .configure(madar_rust::reservations::routes::configure),
     )
     .await;
     let r = get_req!(app, tok, &format!("/floor/tables/{table}/history"));

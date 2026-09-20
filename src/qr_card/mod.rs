@@ -19,9 +19,6 @@ pub mod render;
 pub mod routes;
 pub mod shlink;
 
-#[cfg(test)]
-mod tests;
-
 use qrcode::EcLevel;
 
 use crate::errors::AppError;

@@ -47,3 +47,4 @@ pub fn tmp_store() -> (tempfile::TempDir, AssetStore) {
     std::fs::create_dir_all(&store.uploads_dir).unwrap();
     (dir, store)
 }
+pub mod analytics;

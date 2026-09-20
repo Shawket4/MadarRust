@@ -9,10 +9,10 @@ use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::AssetStore;
-use super::ingest::*;
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
+use madar_rust::assets::AssetStore;
+use madar_rust::assets::ingest::*;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
 
 pub(crate) async fn schema(pool: &PgPool) {
     // Schema comes from B1's migration (20260914090400_assets.sql).
@@ -132,7 +132,7 @@ async fn ing(
     org: Option<Uuid>,
     p: AssetPurpose,
     raw: &[u8],
-) -> Result<IngestOutcome, crate::errors::AppError> {
+) -> Result<IngestOutcome, madar_rust::errors::AppError> {
     ingest_bytes(
         pool,
         store,
@@ -176,7 +176,7 @@ async fn stage_rejects_non_image_by_magic_bytes_ignoring_client_mime(pool: PgPoo
         )
         .await;
         assert!(
-            matches!(r, Err(crate::errors::AppError::BadRequest(_))),
+            matches!(r, Err(madar_rust::errors::AppError::BadRequest(_))),
             "{r:?}"
         );
     }
@@ -204,7 +204,7 @@ async fn stage_rejects_non_image_by_magic_bytes_ignoring_client_mime(pool: PgPoo
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
-            .configure(crate::uploads::routes::configure),
+            .configure(madar_rust::uploads::routes::configure),
     )
     .await;
     let b = "XBOUNDARY";
@@ -256,7 +256,7 @@ async fn stage_never_uses_client_filename_in_path(pool: PgPool) {
         !label.contains('/') && !label.contains('\u{0007}'),
         "{label}"
     );
-    super::worker::run_one(&pool, &store).await.unwrap();
+    madar_rust::assets::worker::run_one(&pool, &store).await.unwrap();
     let keys: Vec<String> = sqlx::query_scalar("SELECT hash || '.' || ext FROM assets")
         .fetch_all(&pool)
         .await
@@ -429,7 +429,7 @@ async fn ingest_rejects_animated_gif(pool: PgPool) {
         &raw.into_inner(),
     )
     .await;
-    assert!(matches!(r, Err(crate::errors::AppError::BadRequest(ref m)) if m.contains("Animated")));
+    assert!(matches!(r, Err(madar_rust::errors::AppError::BadRequest(ref m)) if m.contains("Animated")));
 }
 
 #[sqlx::test]
@@ -502,11 +502,11 @@ async fn ingest_hash_is_sha256_of_final_bytes(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(source_hash, super::sha256_hex(&raw));
+    assert_eq!(source_hash, madar_rust::assets::sha256_hex(&raw));
     for v in &o.variants {
         let b = std::fs::read(store.path_for_key(&AssetStore::key(Some(org), &v.hash, &v.ext)))
             .unwrap();
-        assert_eq!(super::sha256_hex(&b), v.hash);
+        assert_eq!(madar_rust::assets::sha256_hex(&b), v.hash);
         assert_eq!(b.len() as i64, v.bytes);
         assert_ne!(v.hash, source_hash);
     }
@@ -768,7 +768,7 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
-            .configure(crate::uploads::routes::configure),
+            .configure(madar_rust::uploads::routes::configure),
     )
     .await;
     // stage_with via env store is used by the route; use the store explicitly instead:
@@ -784,7 +784,7 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
     )
     .await
     .unwrap();
-    let refs = super::refs::slot_refs(
+    let refs = madar_rust::assets::refs::slot_refs(
         &pool,
         org,
         AssetTable::MenuItems,
@@ -794,11 +794,11 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
     .await
     .unwrap();
     assert!(
-        matches!(refs.get(&item), Some(super::refs::AssetGroupRef::Processing(p)) if p.job_id == job)
+        matches!(refs.get(&item), Some(madar_rust::assets::refs::AssetGroupRef::Processing(p)) if p.job_id == job)
     );
     assert_eq!(
-        super::worker::run_one(&pool, &store).await.unwrap(),
-        Some(super::worker::JobResult::Done(job))
+        madar_rust::assets::worker::run_one(&pool, &store).await.unwrap(),
+        Some(madar_rust::assets::worker::JobResult::Done(job))
     );
     let g: Option<Uuid> = sqlx::query_scalar("SELECT image_group_id FROM menu_items WHERE id=$1")
         .bind(item)
@@ -810,7 +810,7 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
         !store.staging_dir().join(job.to_string()).exists(),
         "staged file removed"
     );
-    let refs = super::refs::slot_refs(
+    let refs = madar_rust::assets::refs::slot_refs(
         &pool,
         org,
         AssetTable::MenuItems,
@@ -835,7 +835,7 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
-            .configure(super::routes::configure),
+            .configure(madar_rust::assets::routes::configure),
     )
     .await;
     let v: serde_json::Value = test::call_and_read_body_json(&app2, req).await;
@@ -882,14 +882,14 @@ async fn worker_retries_then_fails_job(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    for attempt in 1..=super::worker::MAX_ATTEMPTS {
+    for attempt in 1..=madar_rust::assets::worker::MAX_ATTEMPTS {
         sqlx::query("UPDATE asset_jobs SET updated_at = now() - interval '1 hour' WHERE id=$1")
             .bind(job)
             .execute(&pool)
             .await
             .unwrap();
         // staged file lives in the good store; point the job at it explicitly
-        let r = super::worker::run_one(&pool, &broken).await.unwrap();
+        let r = madar_rust::assets::worker::run_one(&pool, &broken).await.unwrap();
         let (status, attempts): (String, i32) =
             sqlx::query_as("SELECT status, attempts FROM asset_jobs WHERE id=$1")
                 .bind(job)
@@ -897,8 +897,8 @@ async fn worker_retries_then_fails_job(pool: PgPool) {
                 .await
                 .unwrap();
         assert_eq!(attempts, attempt);
-        if attempt < super::worker::MAX_ATTEMPTS {
-            assert_eq!(r, Some(super::worker::JobResult::Retry(job)));
+        if attempt < madar_rust::assets::worker::MAX_ATTEMPTS {
+            assert_eq!(r, Some(madar_rust::assets::worker::JobResult::Retry(job)));
             assert_eq!(status, "queued");
             sqlx::query("UPDATE asset_jobs SET updated_at = now() WHERE id=$1")
                 .bind(job)
@@ -906,14 +906,14 @@ async fn worker_retries_then_fails_job(pool: PgPool) {
                 .await
                 .unwrap();
             assert!(
-                super::worker::run_one(&pool, &broken)
+                madar_rust::assets::worker::run_one(&pool, &broken)
                     .await
                     .unwrap()
                     .is_none(),
                 "backoff respected"
             );
         } else {
-            assert_eq!(r, Some(super::worker::JobResult::Failed(job)));
+            assert_eq!(r, Some(madar_rust::assets::worker::JobResult::Failed(job)));
             assert_eq!(status, "failed");
         }
     }
@@ -934,8 +934,8 @@ async fn asset_app(
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(store.clone()))
-            .configure(super::routes::configure)
-            .configure(crate::uploads::routes::configure),
+            .configure(madar_rust::assets::routes::configure)
+            .configure(madar_rust::uploads::routes::configure),
     )
     .await
 }
@@ -1085,10 +1085,10 @@ fn tar_is_byte_identical_for_same_inputs() {
         .into_iter()
         .enumerate()
     {
-        let hash = super::sha256_hex(&body);
+        let hash = madar_rust::assets::sha256_hex(&body);
         let p = d.path().join(format!("{i}"));
         std::fs::write(&p, &body).unwrap();
-        files.push(super::tarball::TarFile {
+        files.push(madar_rust::assets::tarball::TarFile {
             hash,
             ext: "webp".into(),
             bytes: body.len() as u64,
@@ -1097,12 +1097,12 @@ fn tar_is_byte_identical_for_same_inputs() {
     }
     let mut rev = files.clone();
     rev.reverse();
-    super::tarball::sort_files(&mut files);
-    super::tarball::sort_files(&mut rev);
+    madar_rust::assets::tarball::sort_files(&mut files);
+    madar_rust::assets::tarball::sort_files(&mut rev);
     let mut a = Vec::new();
     let mut b = Vec::new();
-    super::tarball::write_tar(&mut a, &files, None).unwrap();
-    super::tarball::write_tar(&mut b, &rev, None).unwrap();
+    madar_rust::assets::tarball::write_tar(&mut a, &files, None).unwrap();
+    madar_rust::assets::tarball::write_tar(&mut b, &rev, None).unwrap();
     assert_eq!(a, b);
     let mut ar = tar::Archive::new(&a[..]);
     let names: Vec<String> = ar
@@ -1119,7 +1119,7 @@ fn tar_is_byte_identical_for_same_inputs() {
     let mut sorted = names[1..].to_vec();
     sorted.sort();
     assert_eq!(names[1..], sorted[..]);
-    let idx = super::tarball::index_json(&files, None);
+    let idx = madar_rust::assets::tarball::index_json(&files, None);
     assert!(!idx.contains(&b' ') && idx.starts_with(b"{\"files\":[{\"bytes\":"));
 }
 
@@ -1159,19 +1159,19 @@ async fn bundle_debounced_and_contains_exactly_referenced_hashes(pool: PgPool) {
     drop(conn);
     // debounce: just dirtied → nothing built
     assert!(
-        super::bundle::run_due(&pool, &store, super::bundle::DEBOUNCE)
+        madar_rust::assets::bundle::run_due(&pool, &store, madar_rust::assets::bundle::DEBOUNCE)
             .await
             .unwrap()
             .is_empty()
     );
-    let built = super::bundle::run_due(&pool, &store, Duration::ZERO)
+    let built = madar_rust::assets::bundle::run_due(&pool, &store, Duration::ZERO)
         .await
         .unwrap();
     assert_eq!(built.len(), 1);
     let b = &built[0];
     assert_eq!((b.branch_id, b.file_count), (branch, 1));
     let bytes = std::fs::read(store.path_for_key(&b.file_key)).unwrap();
-    assert_eq!(super::sha256_hex(&bytes), b.sha256);
+    assert_eq!(madar_rust::assets::sha256_hex(&bytes), b.sha256);
     let names: Vec<String> = tar::Archive::new(&bytes[..])
         .entries()
         .unwrap()
@@ -1191,7 +1191,7 @@ async fn bundle_debounced_and_contains_exactly_referenced_hashes(pool: PgPool) {
         .await
         .unwrap();
     assert!(
-        super::bundle::run_due(&pool, &store, Duration::ZERO)
+        madar_rust::assets::bundle::run_due(&pool, &store, Duration::ZERO)
             .await
             .unwrap()
             .is_empty()
@@ -1240,7 +1240,7 @@ async fn bundle_route_range_resume_and_topup(pool: PgPool) {
     .await
     .unwrap();
     drop(conn);
-    let b = super::bundle::build_branch(&pool, &store, branch)
+    let b = madar_rust::assets::bundle::build_branch(&pool, &store, branch)
         .await
         .unwrap()
         .unwrap();
@@ -1255,7 +1255,7 @@ async fn bundle_route_range_resume_and_topup(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(super::sha256_hex(&full), b.sha256);
+    assert_eq!(madar_rust::assets::sha256_hex(&full), b.sha256);
     // resume from byte 700
     let resp = test::call_service(
         &app,
@@ -1349,7 +1349,7 @@ async fn bundle_route_range_resume_and_topup(pool: PgPool) {
         .collect();
     assert_eq!(rest.len(), 2);
     for (name, data) in rest {
-        assert_eq!(name.split('.').next().unwrap(), super::sha256_hex(&data));
+        assert_eq!(name.split('.').next().unwrap(), madar_rust::assets::sha256_hex(&data));
     }
     let too_many = serde_json::json!({"branch_id": branch, "hashes": vec!["a".repeat(64); 2001]});
     let resp = test::call_service(
@@ -1393,7 +1393,7 @@ async fn legacy_upload_path_redirects_after_prune(pool: PgPool) {
         .unwrap();
     let app = asset_app(&pool, &store).await;
     let uri = format!("/uploads/{rel}");
-    let (resp, hits) = crate::client_seen::collect_hits(test::call_service(
+    let (resp, hits) = madar_rust::client_seen::collect_hits(test::call_service(
         &app,
         test::TestRequest::get().uri(&uri).to_request(),
     ))
@@ -1401,10 +1401,10 @@ async fn legacy_upload_path_redirects_after_prune(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::OK, "original still served");
     assert_eq!(
         hits.iter().map(|h| (h.kind, h.org_id)).collect::<Vec<_>>(),
-        vec![(crate::client_seen::KIND_UPLOADS_LEGACY_PATH, Some(org))]
+        vec![(madar_rust::client_seen::KIND_UPLOADS_LEGACY_PATH, Some(org))]
     );
     std::fs::remove_file(&file).unwrap();
-    let (resp, hits) = crate::client_seen::collect_hits(test::call_service(
+    let (resp, hits) = madar_rust::client_seen::collect_hits(test::call_service(
         &app,
         test::TestRequest::get().uri(&uri).to_request(),
     ))
@@ -1412,7 +1412,7 @@ async fn legacy_upload_path_redirects_after_prune(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::FOUND);
     assert_eq!(
         hits.iter().map(|h| (h.kind, h.org_id)).collect::<Vec<_>>(),
-        vec![(crate::client_seen::KIND_UPLOADS_LEGACY_REDIRECT, Some(org))]
+        vec![(madar_rust::client_seen::KIND_UPLOADS_LEGACY_REDIRECT, Some(org))]
     );
     let loc = resp
         .headers()
@@ -1511,8 +1511,8 @@ async fn branding_reads_logo_via_asset(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let brand = crate::orgs::branding::load(&pool, org).await.unwrap();
-    let img = crate::orgs::branding::read_logo(brand.logo_url.as_deref().unwrap())
+    let brand = madar_rust::orgs::branding::load(&pool, org).await.unwrap();
+    let img = madar_rust::orgs::branding::read_logo(brand.logo_url.as_deref().unwrap())
         .expect("logo from asset store, legacy file gone");
     assert_eq!(img.width(), 64);
     for v in &o.variants {

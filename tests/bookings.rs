@@ -9,11 +9,11 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::model::BookingView;
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
-use crate::realtime::event::Topic;
-use crate::realtime::hub::BranchEventHub;
+use madar_rust::bookings::model::BookingView;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
+use madar_rust::realtime::event::Topic;
+use madar_rust::realtime::hub::BranchEventHub;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -100,7 +100,7 @@ async fn open_shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) -> Uuid {
         .bind(branch).bind(teller).fetch_one(pool).await.unwrap()
 }
 async fn perms(pool: &PgPool) {
-    crate::permissions::seeder::seed_role_permissions(pool)
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
 }
@@ -124,11 +124,11 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new($hub.clone()))
-                .configure(crate::bookings::routes::configure)
-                .configure(crate::tickets::routes::configure)
-                .configure(crate::kitchen::routes::configure)
-                .configure(crate::reservations::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::bookings::routes::configure)
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::kitchen::routes::configure)
+                .configure(madar_rust::reservations::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };
@@ -563,7 +563,7 @@ async fn public_booking_requires_a_verified_phone_when_the_branch_says_so(pool: 
     assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
     // A token for ANOTHER phone is refused; one for this phone is accepted.
     body["device_token"] =
-        json!(crate::delivery::whatsapp::issue_device_token("secret", "201099999999").unwrap());
+        json!(madar_rust::delivery::whatsapp::issue_device_token("secret", "201099999999").unwrap());
     let (st, _) = send(
         &app,
         test::TestRequest::post()
@@ -573,7 +573,7 @@ async fn public_booking_requires_a_verified_phone_when_the_branch_says_so(pool: 
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     body["device_token"] =
-        json!(crate::delivery::whatsapp::issue_device_token("secret", "201011111111").unwrap());
+        json!(madar_rust::delivery::whatsapp::issue_device_token("secret", "201011111111").unwrap());
     let (st, b) = send(
         &app,
         test::TestRequest::post()
@@ -843,7 +843,7 @@ async fn sweep_reminds_announces_arrivals_and_rolls_no_shows(pool: PgPool) {
 
     let hub = BranchEventHub::new();
     let mut rx = hub.subscribe(branch);
-    super::jobs::run_tick(&pool, &hub).await.unwrap();
+    madar_rust::bookings::jobs::run_tick(&pool, &hub).await.unwrap();
 
     let state = |id: Uuid| {
         sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
@@ -878,7 +878,7 @@ async fn sweep_reminds_announces_arrivals_and_rolls_no_shows(pool: PgPool) {
     );
 
     // A second tick is a no-op (idempotent stamps).
-    super::jobs::run_tick(&pool, &hub).await.unwrap();
+    madar_rust::bookings::jobs::run_tick(&pool, &hub).await.unwrap();
     assert!(rx.try_recv().is_err(), "nothing new to publish");
 }
 
@@ -1334,7 +1334,7 @@ async fn a_voided_ticket_cancels_its_booking(pool: PgPool) {
     // The hook is idempotent: a second application for the same ticket
     // finds nothing to move.
     assert!(
-        super::handlers::cancel_for_voided_tickets(&pool, Some(tk1))
+        madar_rust::bookings::handlers::cancel_for_voided_tickets(&pool, Some(tk1))
             .await
             .unwrap()
             .is_empty()
@@ -1361,7 +1361,7 @@ async fn a_voided_ticket_cancels_its_booking(pool: PgPool) {
     .unwrap();
     assert_eq!(booking_status(&pool, b3).await.0, "seated");
     let hub2 = BranchEventHub::new();
-    super::jobs::run_tick(&pool, &hub2).await.unwrap();
+    madar_rust::bookings::jobs::run_tick(&pool, &hub2).await.unwrap();
     assert_eq!(booking_status(&pool, b2).await.0, "seated");
     assert_eq!(booking_status(&pool, b3).await.0, "cancelled");
 }

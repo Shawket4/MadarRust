@@ -5,20 +5,20 @@ use sqlx::PgPool;
 use std::str::FromStr;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::inventory::handlers::{
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::inventory::handlers::{
     BranchStockRow, IngredientCategory, OrgIngredient, OrgInventorySettings, StockMovement,
     StockTransfer,
 };
-use crate::inventory::routes;
-use crate::models::UserRole;
+use madar_rust::inventory::routes;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -1517,7 +1517,7 @@ async fn test_teller_token_org_scoped_on_inventory(pool: PgPool) {
     let teller = seed_user(&pool, org_id, "teller").await;
     assign_branch(&pool, teller, branch_a).await;
     assign_branch(&pool, teller, branch_b).await;
-    let token = crate::auth::jwt::create_token(
+    let token = madar_rust::auth::jwt::create_token(
         &get_secret(),
         teller,
         Some(org_id),

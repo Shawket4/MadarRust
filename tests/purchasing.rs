@@ -3,16 +3,16 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::purchasing::handlers::{PurchaseOrder, PurchaseOrderFull, Supplier};
-use crate::purchasing::routes;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::purchasing::handlers::{PurchaseOrder, PurchaseOrderFull, Supplier};
+use madar_rust::purchasing::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 fn org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),

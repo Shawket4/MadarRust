@@ -807,7 +807,7 @@ pub struct OpenMeta {
 /// Live: one-open-per-person check (409 `TILL_OPEN_AT_OTHER_BRANCH` /
 /// `TILL_OPEN_ELSEWHERE`, resume on the same device), carryover reason.
 /// Replay: always accepts; a second open till of the same person is flagged.
-pub(crate) async fn open_till_inner(
+pub async fn open_till_inner(
     pool: &PgPool,
     hub: Option<&BranchEventHub>,
     branch_id: Uuid,
