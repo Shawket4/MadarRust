@@ -63,6 +63,12 @@ pub struct OpenTicketView {
     pub ready: bool,
     pub opened_by: Uuid,
     pub opened_by_name: Option<String>,
+    /// The customer this bill belongs to, when one is known (design §2.5): a
+    /// table-QR guest who gave a phone, the party's booking, or one the waiter
+    /// attached. `customer_name` is the free-text snapshot and may be set
+    /// without it. Settling carries it onto the sale.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
     pub customer_name: Option<String>,
     pub notes: Option<String>,
     pub guest_count: Option<i32>,
@@ -257,6 +263,7 @@ struct TicketRow {
     ready: bool,
     opened_by: Uuid,
     opened_by_name: Option<String>,
+    customer_id: Option<Uuid>,
     customer_name: Option<String>,
     notes: Option<String>,
     guest_count: Option<i32>,
@@ -346,7 +353,7 @@ pub(crate) async fn open_ticket_views_on(
                     JOIN kitchen_ticket_items kti ON kti.kitchen_ticket_id = kt.id \
                     WHERE kt.open_ticket_id = ot.id \
                       AND kti.voided_at IS NULL AND kti.bumped_at IS NULL) AS ready, \
-                ot.opened_by, u.name AS opened_by_name, ot.customer_name, ot.notes, ot.guest_count, \
+                ot.opened_by, u.name AS opened_by_name, ot.customer_id, ot.customer_name, ot.notes, ot.guest_count, \
                 ot.subtotal, ot.discount_id, ot.discount_type, ot.discount_value, \
                 ot.order_id, ot.booking_id, ot.opened_at, ot.ready_at, ot.settled_at, \
                 ot.voided_at, ot.void_reason::text AS void_reason, ot.void_note, \
@@ -466,6 +473,7 @@ pub(crate) async fn open_ticket_views_on(
                 ready: r.ready,
                 opened_by: r.opened_by,
                 opened_by_name: r.opened_by_name,
+                customer_id: r.customer_id,
                 customer_name: r.customer_name,
                 notes: r.notes,
                 guest_count: r.guest_count,

@@ -279,7 +279,7 @@ async fn fetch_live(
 }
 
 /// The live customer holding `key` in `org`, if any.
-async fn live_with_phone(
+pub(crate) async fn live_with_phone(
     conn: &mut PgConnection,
     org: Uuid,
     key: &str,
@@ -799,8 +799,35 @@ pub async fn update_customer(
         )
         .await?;
     }
+    // The act, beside the trail: who renamed or re-numbered whom.
+    if cur.name != name {
+        audit_identity(
+            &mut tx,
+            org,
+            id,
+            "name",
+            IdentityActor::Staff(claims.user_id()),
+            Some(&cur.name),
+            Some(&name),
+        )
+        .await?;
+    }
+    if old_key != key {
+        audit_identity(
+            &mut tx,
+            org,
+            id,
+            "phone",
+            IdentityActor::Staff(claims.user_id()),
+            old_key.as_deref(),
+            key.as_deref(),
+        )
+        .await?;
+    }
     tx.commit().await?;
-    if cur.is_member && (cur.name != name || cur.locale != locale) {
+    // The back of the card prints the number too, so a phone change refreshes
+    // the pass exactly as a rename does.
+    if cur.is_member && (cur.name != name || cur.locale != locale || old_key != key) {
         // The card carries the name and is written in the locale. The stored
         // pass is dropped HERE as well as inside `push_update`: that path is
         // skipped when no wallet is configured or the member has no Apple
@@ -859,21 +886,28 @@ pub async fn merge_customer(
     tx.commit().await?;
     // Wallet calls are network calls: after the commit, never inside it.
     if let Some(loser) = retired {
-        crate::loyalty::wallet::push_update(pool.get_ref(), body.into);
+        after_merge(pool.get_ref(), body.into, loser);
+    }
+    Ok(HttpResponse::Ok().json(detail(pool.get_ref(), org, body.into).await?))
+}
+
+/// The wallet side of a both-members merge, AFTER the commit (network calls
+/// never run inside the transaction): the survivor's card shows the combined
+/// balance; the loser's Apple pass is pushed and served `voided`, its Google
+/// object goes inactive.
+pub fn after_merge(pool: &sqlx::PgPool, survivor: Uuid, loser: crate::loyalty::model::MemberRow) {
+    crate::loyalty::wallet::push_update(pool, survivor);
+    crate::loyalty::wallet::apple::void_pass(pool, &loser);
+    {
         tokio::spawn(async move {
             // Google: the loser's object stops rendering. Its barcode still
             // scans to the survivor through `loyalty_token_aliases`.
-            // TODO(customers-unification §2.7): Apple has no equivalent hook
-            // yet. The pass builder cannot mark a pass `voided`, so the
-            // loser's Apple pass simply stops updating. Add a `voided` flag to
-            // `wallet::apple::pass_json` and push it to the loser's devices.
             if let Err(e) = crate::loyalty::wallet::google::expire_object(&loser).await {
                 use crate::observability::report::{Failure, report};
                 report(Failure::new("loyalty", "expire_google_object"), &e);
             }
         });
     }
-    Ok(HttpResponse::Ok().json(detail(pool.get_ref(), org, body.into).await?))
 }
 
 /// Fold `from` into `into`, memberships included (design §2.7). Returns the
@@ -989,12 +1023,287 @@ pub async fn merge_inner(
         .bind(into)
         .execute(&mut *tx)
         .await?;
+    // Everything else that names the duplicate (design §2.7). The snapshots on
+    // those rows are history and are not touched.
+    for table in ["delivery_orders", "bookings", "open_tickets", "customer_identity_audit"] {
+        sqlx::query(&format!(
+            "UPDATE {table} SET customer_id = $2 WHERE customer_id = $1 AND org_id = $3"
+        ))
+        .bind(from)
+        .bind(into)
+        .bind(org)
+        .execute(&mut *tx)
+        .await?;
+    }
+    repoint_addresses(tx, org, from, into).await?;
     Ok(retired)
+}
+
+/// The duplicate's saved addresses become the survivor's, folded by the same
+/// rule a write uses: an address the survivor already has absorbs the
+/// duplicate's uses; orders that were sent to the folded row follow it.
+async fn repoint_addresses(
+    tx: &mut PgConnection,
+    org: Uuid,
+    from: Uuid,
+    into: Uuid,
+) -> Result<(), AppError> {
+    let theirs: Vec<(Uuid, String, String, Option<String>, Option<f64>, Option<f64>, i32, DateTime<Utc>)> =
+        sqlx::query_as(
+            "SELECT id, channel, norm_key, unit_number, lat, lng, use_count, last_used_at
+               FROM customer_addresses
+              WHERE customer_id = $1 AND org_id = $2 AND erased_at IS NULL ORDER BY created_at",
+        )
+        .bind(from)
+        .bind(org)
+        .fetch_all(&mut *tx)
+        .await?;
+    for (id, channel, norm, unit, lat, lng, uses, used_at) in theirs {
+        let twin: Option<Uuid> = sqlx::query_scalar(
+            "SELECT a.id FROM customer_addresses a
+              WHERE a.customer_id = $1 AND a.erased_at IS NULL AND a.channel = $2
+                AND (a.norm_key = $3
+                     OR ($5::float8 IS NOT NULL AND a.lat IS NOT NULL
+                         AND lower(btrim(COALESCE(a.unit_number, ''))) = lower(btrim(COALESCE($4, '')))
+                         AND geo_distance_m(a.lat, a.lng, $5, $6) <= 30.0))
+              ORDER BY (a.norm_key = $3) DESC, a.last_used_at DESC LIMIT 1",
+        )
+        .bind(into)
+        .bind(&channel)
+        .bind(&norm)
+        .bind(&unit)
+        .bind(lat)
+        .bind(lng)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match twin {
+            Some(keep) => {
+                sqlx::query(
+                    "UPDATE customer_addresses SET use_count = use_count + $2,
+                            last_used_at = GREATEST(last_used_at, $3) WHERE id = $1",
+                )
+                .bind(keep)
+                .bind(uses)
+                .bind(used_at)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query("UPDATE delivery_orders SET address_id = $2 WHERE address_id = $1")
+                    .bind(id)
+                    .bind(keep)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM customer_addresses WHERE id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            None => {
+                sqlx::query("UPDATE customer_addresses SET customer_id = $2 WHERE id = $1")
+                    .bind(id)
+                    .bind(into)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+    }
+    // Erased rows carry no text; they simply follow.
+    sqlx::query(
+        "UPDATE customer_addresses SET customer_id = $2 WHERE customer_id = $1 AND org_id = $3",
+    )
+    .bind(from)
+    .bind(into)
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+
+// ── erase (PDPL) ────────────────────────────────────────────────────────────
+
+/// `id` plus every customer merged into it, transitively. A reference written
+/// before a merge was re-pointed at merge time, but a till that was offline can
+/// still land a row under a merged id afterwards — so everything that acts on
+/// "this person's rows" goes through the chain, not the one id.
+pub async fn chain_ids(conn: &mut PgConnection, org: Uuid, id: Uuid) -> Result<Vec<Uuid>, AppError> {
+    Ok(sqlx::query_scalar(
+        "WITH RECURSIVE chain(id, depth) AS (
+             SELECT $2::uuid, 0
+             UNION ALL
+             SELECT c.id, chain.depth + 1 FROM customers c JOIN chain ON c.merged_into = chain.id
+              WHERE c.org_id = $1 AND chain.depth < 32)
+         SELECT DISTINCT id FROM chain",
+    )
+    .bind(org)
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// Erase one person everywhere, inside the caller's transaction (design §2.8).
+/// `None` when there is no live customer under `id`. Returns the memberships
+/// as they were, so the caller can expire their Google objects after commit.
+///
+/// Goes: the customer's name, phone, notes, birthday (and those of every row
+/// merged into it); the membership (`loyalty::model::forget_in`) with its
+/// token, devices, aliases and stored pass; the contact snapshots on delivery
+/// orders, bookings, bills and sales; saved addresses; phone history; the
+/// identity audit; OTP rows for every number they held.
+/// Stays: every money figure, the order lines, the loyalty ledger — the shop's
+/// books, which now say nothing about anyone.
+pub async fn erase_inner(
+    tx: &mut PgConnection,
+    org: Uuid,
+    id: Uuid,
+) -> Result<Option<Vec<crate::loyalty::model::MemberRow>>, AppError> {
+    let live: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM customers WHERE id = $1 AND org_id = $2
+            AND erased_at IS NULL AND merged_into IS NULL FOR UPDATE",
+    )
+    .bind(id)
+    .bind(org)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if live.is_none() {
+        return Ok(None);
+    }
+    let chain = chain_ids(tx, org, id).await?;
+
+    // Every number they held, BEFORE it is blanked: the OTP table is keyed by
+    // phone alone.
+    let phones: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT k FROM (
+             SELECT phone_key AS k FROM customers WHERE id = ANY($1)
+             UNION ALL
+             SELECT phone_key FROM customer_phone_history WHERE customer_id = ANY($1)
+             UNION ALL
+             SELECT phone_canonical(customer_phone) FROM delivery_orders
+              WHERE customer_id = ANY($1) AND org_id = $2) x
+          WHERE k IS NOT NULL",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    // The card(s). A live one is forgotten the way loyalty forgets; a retired
+    // one (merge loser, or left the programme) loses what `leave` kept alive
+    // for the voided pass.
+    let mut cards = Vec::new();
+    for member in &chain {
+        if let Some(before) = crate::loyalty::model::forget_in(tx, *member).await? {
+            cards.push(before);
+        }
+    }
+    sqlx::query(
+        "UPDATE loyalty_customers SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now()
+          WHERE id = ANY($1) AND org_id = $2",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = ANY($1)")
+        .bind(&chain[..])
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)")
+        .bind(&chain[..])
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "DELETE FROM loyalty_token_aliases WHERE customer_id = ANY($1) OR was_customer_id = ANY($1)",
+    )
+    .bind(&chain[..])
+    .execute(&mut *tx)
+    .await?;
+
+    // The person — and the rows merged into them, which still carry what each
+    // duplicate was called.
+    sqlx::query(
+        "UPDATE customers SET name = '', phone = NULL, phone_key = NULL, notes = NULL,
+                birth_month = NULL, birth_day = NULL, marketing_opt_out = true,
+                erased_at = COALESCE(erased_at, now()), updated_at = now()
+          WHERE id = ANY($1) AND org_id = $2",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+
+    // What was typed on their rows. Status, money, items and timestamps stay.
+    sqlx::query(
+        "UPDATE orders o SET customer_name = NULL,
+                notes = CASE WHEN o.delivery_order_id IS NOT NULL THEN NULL ELSE o.notes END
+           FROM branches b
+          WHERE b.id = o.branch_id AND b.org_id = $2
+            AND (o.customer_id = ANY($1)
+                 OR o.delivery_order_id IN (SELECT d.id FROM delivery_orders d
+                                             WHERE d.customer_id = ANY($1) AND d.org_id = $2))",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE delivery_orders SET customer_name = '', customer_phone = '',
+                place_name = NULL, floor = NULL, unit_number = NULL, landmark = NULL,
+                address_line = NULL, delivery_notes = NULL,
+                customer_lat = NULL, customer_lng = NULL, updated_at = now()
+          WHERE customer_id = ANY($1) AND org_id = $2",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE bookings SET guest_name = '', guest_phone = '', notes = NULL, updated_at = now()
+          WHERE customer_id = ANY($1) AND org_id = $2",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE open_tickets SET customer_name = NULL, updated_at = now()
+          WHERE customer_id = ANY($1) AND org_id = $2",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE customer_addresses SET label = NULL, place_name = NULL, floor = NULL,
+                unit_number = NULL, landmark = NULL, address_line = NULL, delivery_notes = NULL,
+                lat = NULL, lng = NULL, norm_key = '', erased_at = COALESCE(erased_at, now())
+          WHERE customer_id = ANY($1) AND org_id = $2",
+    )
+    .bind(&chain[..])
+    .bind(org)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM customer_phone_history WHERE customer_id = ANY($1) AND org_id = $2")
+        .bind(&chain[..])
+        .bind(org)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM customer_identity_audit WHERE customer_id = ANY($1) AND org_id = $2")
+        .bind(&chain[..])
+        .bind(org)
+        .execute(&mut *tx)
+        .await?;
+    if !phones.is_empty() {
+        sqlx::query("DELETE FROM delivery_otp WHERE phone = ANY($1)")
+            .bind(&phones[..])
+            .execute(&mut *tx)
+            .await?;
+    }
+    Ok(Some(cards))
 }
 
 #[utoipa::path(post, path = "/customers/{id}/erase", tag = "customers",
     params(("id" = Uuid, Path, description = "Customer id")),
-    responses((status = 204, description = "Personal data erased"), AppErrorResponse),
+    responses((status = 204, description = "Personal data erased everywhere: the customer, their loyalty card and passes, the contact snapshots on their orders, delivery orders, bookings and bills, saved addresses, phone history and OTP rows. Money and ledger rows stay."), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn erase_customer(
     req: HttpRequest,
@@ -1005,52 +1314,296 @@ pub async fn erase_customer(
     let org = org_of(&req, &claims)?;
     require(pool.get_ref(), &claims, Cap::CustomersErase, None).await?;
     let id = path.into_inner();
-    // A member is erased the way loyalty forgets one (`model::forget`): the
-    // same scrub of the person, plus the card's token, devices, aliases, phone
-    // history and pre-built pass. Erasing only the `customers` row would leave
-    // a live card with no name and a stored pass that still carries it.
-    let member: Option<Uuid> = sqlx::query_scalar(
-        "SELECT m.id FROM loyalty_customers m JOIN customers c ON c.id = m.id \
-          WHERE m.id = $1 AND m.org_id = $2 AND m.deleted_at IS NULL \
-            AND c.erased_at IS NULL AND c.merged_into IS NULL",
-    )
-    .bind(id)
-    .bind(org)
-    .fetch_optional(pool.get_ref())
-    .await?;
-    if let Some(member) = member {
-        let Some(before) = crate::loyalty::model::forget(pool.get_ref(), member).await? else {
-            return Err(AppError::NotFound("Customer not found".into()));
-        };
-        // A network call: after the commit, never inside it.
+    let mut tx = pool.get_ref().begin().await?;
+    let Some(cards) = erase_inner(&mut tx, org, id).await? else {
+        return Err(AppError::NotFound("Customer not found".into()));
+    };
+    tx.commit().await?;
+    // Network calls: after the commit, never inside it.
+    for before in cards {
         tokio::spawn(async move {
             if let Err(e) = crate::loyalty::wallet::google::expire_object(&before).await {
                 use crate::observability::report::{Failure, report};
                 report(Failure::new("loyalty", "expire_google_object"), &e);
             }
         });
-        return Ok(HttpResponse::NoContent().finish());
     }
-    let mut tx = pool.get_ref().begin().await?;
-    let done = sqlx::query(
-        "UPDATE customers SET name = '', phone = NULL, phone_key = NULL, notes = NULL,
-                birth_month = NULL, birth_day = NULL, marketing_opt_out = true,
-                erased_at = now(), updated_at = now()
-          WHERE id = $1 AND org_id = $2 AND erased_at IS NULL AND merged_into IS NULL",
-    )
-    .bind(id)
+    Ok(HttpResponse::NoContent().finish())
+}
+
+// ── addresses ───────────────────────────────────────────────────────────────
+
+/// A place a customer has had an order sent to.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema, sqlx::FromRow)]
+pub struct CustomerAddress {
+    pub id: Uuid,
+    pub customer_id: Uuid,
+    pub label: Option<String>,
+    pub place_name: Option<String>,
+    pub floor: Option<String>,
+    pub unit_number: Option<String>,
+    pub landmark: Option<String>,
+    pub address_line: Option<String>,
+    pub delivery_notes: Option<String>,
+    pub lat: Option<f64>,
+    pub lng: Option<f64>,
+    pub delivery_zone_id: Option<Uuid>,
+    /// The branch it was last ordered from.
+    pub branch_id: Option<Uuid>,
+    /// The channel it was last used with: `in_mall`, `outside` or `umbrella`.
+    pub channel: String,
+    pub use_count: i32,
+    pub last_used_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+pub const ADDRESS_COLS: &str = "id, customer_id, label, place_name, floor, unit_number, landmark, \
+    address_line, delivery_notes, lat, lng, delivery_zone_id, branch_id, channel, use_count, \
+    last_used_at, created_at";
+
+/// A customer's live addresses, most recently used first.
+pub async fn addresses_of(
+    conn: &mut PgConnection,
+    org: Uuid,
+    customer: Uuid,
+) -> Result<Vec<CustomerAddress>, AppError> {
+    Ok(sqlx::query_as(&format!(
+        "SELECT {ADDRESS_COLS} FROM customer_addresses
+          WHERE customer_id = $1 AND org_id = $2 AND erased_at IS NULL
+          ORDER BY last_used_at DESC, id"
+    ))
+    .bind(customer)
     .bind(org)
-    .execute(&mut *tx)
-    .await?;
-    if done.rows_affected() == 0 {
-        return Err(AppError::NotFound("Customer not found".into()));
+    .fetch_all(&mut *conn)
+    .await?)
+}
+
+/// What an order was sent to. The fields of a delivery order, borrowed.
+pub struct AddressInput<'a> {
+    pub branch_id: Uuid,
+    pub channel: &'a str,
+    pub place_name: Option<&'a str>,
+    pub floor: Option<&'a str>,
+    pub unit_number: Option<&'a str>,
+    pub landmark: Option<&'a str>,
+    pub address_line: Option<&'a str>,
+    pub delivery_notes: Option<&'a str>,
+    pub lat: Option<f64>,
+    pub lng: Option<f64>,
+    pub zone_id: Option<Uuid>,
+}
+
+/// Remember where a PLACED order went (design §2.6, §4.3): bump the address the
+/// customer already has, or add it. The rule lives in the database
+/// (`customer_address_upsert`), so the backfill and this agree by construction.
+/// `None` when there is nothing to keep (a pickup, or no text at all).
+pub async fn save_address(
+    tx: &mut PgConnection,
+    org: Uuid,
+    customer: Uuid,
+    a: &AddressInput<'_>,
+) -> Result<Option<Uuid>, AppError> {
+    if a.channel == crate::delivery::CHANNEL_PICKUP {
+        return Ok(None);
     }
-    // The numbers they used to have are personal data too.
-    sqlx::query("DELETE FROM customer_phone_history WHERE customer_id = $1 AND org_id = $2")
-        .bind(id)
+    Ok(sqlx::query_scalar(
+        "SELECT customer_address_upsert($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())",
+    )
+    .bind(org)
+    .bind(customer)
+    .bind(a.branch_id)
+    .bind(a.channel)
+    .bind(a.place_name)
+    .bind(a.floor)
+    .bind(a.unit_number)
+    .bind(a.landmark)
+    .bind(a.address_line)
+    .bind(a.delivery_notes)
+    .bind(a.lat)
+    .bind(a.lng)
+    .bind(a.zone_id)
+    .fetch_one(&mut *tx)
+    .await?)
+}
+
+#[utoipa::path(get, path = "/customers/{id}/addresses", tag = "customers",
+    params(("id" = Uuid, Path, description = "Customer id (a merged id resolves)")),
+    responses((status = 200, description = "Saved addresses, most recently used first", body = Vec<CustomerAddress>), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn list_customer_addresses(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_of(&req)?;
+    let org = org_of(&req, &claims)?;
+    require(pool.get_ref(), &claims, Cap::CustomersAddressesView, None).await?;
+    let mut conn = pool.get_ref().acquire().await?;
+    let id: Uuid = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
         .bind(org)
+        .bind(path.into_inner())
+        .fetch_one(&mut *conn)
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
+    Ok(HttpResponse::Ok().json(addresses_of(&mut conn, org, id).await?))
+}
+
+// ── identity changes ────────────────────────────────────────────────────────
+
+/// Who is changing a customer's identity.
+#[derive(Debug, Clone, Copy)]
+pub enum IdentityActor {
+    /// The customer, from a device verified for their phone (design §4.4).
+    CustomerSelf,
+    Staff(Uuid),
+}
+
+pub async fn audit_identity(
+    conn: &mut PgConnection,
+    org: Uuid,
+    customer: Uuid,
+    kind: &str,
+    actor: IdentityActor,
+    old: Option<&str>,
+    new: Option<&str>,
+) -> Result<(), AppError> {
+    let (actor_kind, actor_user) = match actor {
+        IdentityActor::CustomerSelf => ("customer", None),
+        IdentityActor::Staff(u) => ("staff", Some(u)),
+    };
+    sqlx::query(
+        "INSERT INTO customer_identity_audit (org_id, customer_id, kind, actor_kind, actor_user, old_value, new_value)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(org)
+    .bind(customer)
+    .bind(kind)
+    .bind(actor_kind)
+    .bind(actor_user)
+    .bind(old)
+    .bind(new)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Two names are the same name: trimmed, inner whitespace collapsed,
+/// case-folded, Unicode NFC (design §4.4 — "Ali" typed as "ali " is no edit).
+pub fn same_name(a: &str, b: &str) -> bool {
+    fn fold(s: &str) -> String {
+        use unicode_normalization::UnicodeNormalization;
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .nfc()
+            .collect::<String>()
+            .to_lowercase()
+    }
+    fold(a) == fold(b)
+}
+
+/// An EXPLICIT rename — the only way a stored name changes (§2.4). Audited.
+/// The caller refreshes the passes after its commit ([`after_identity_change`]);
+/// the changefeed row is the `customers` sync trigger's.
+pub async fn rename(
+    tx: &mut PgConnection,
+    org: Uuid,
+    customer: Uuid,
+    new_name: &str,
+    actor: IdentityActor,
+) -> Result<(), AppError> {
+    let name = clean_name(new_name)?;
+    let old: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM customers WHERE id = $1 AND org_id = $2
+            AND merged_into IS NULL AND erased_at IS NULL FOR UPDATE",
+    )
+    .bind(customer)
+    .bind(org)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let old = old.ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
+    if old == name {
+        return Ok(());
+    }
+    sqlx::query("UPDATE customers SET name = $3, updated_at = now() WHERE id = $1 AND org_id = $2")
+        .bind(customer)
+        .bind(org)
+        .bind(&name)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
-    Ok(HttpResponse::NoContent().finish())
+    audit_identity(tx, org, customer, "name", actor, Some(&old), Some(&name)).await
+}
+
+/// What stopped a phone replacement.
+pub enum ReplaceRefusal {
+    /// Another live customer of the org holds the new number.
+    BelongsTo(Uuid),
+}
+
+/// Give a customer a new phone: same id, the old number goes to
+/// `customer_phone_history`, the act is audited. The unique index decides
+/// whether the number is free. `Ok(Err(..))` is a refusal the caller turns into
+/// its own error; the transaction is still usable ONLY when `Ok(Ok(()))`.
+pub async fn replace_phone(
+    tx: &mut PgConnection,
+    org: Uuid,
+    customer: Uuid,
+    new_phone: &str,
+    actor: IdentityActor,
+) -> Result<Result<(), ReplaceRefusal>, AppError> {
+    let key = crate::phone::normalize_phone(new_phone)?;
+    let typed = clean_phone(Some(new_phone));
+    let cur: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT phone, phone_key FROM customers WHERE id = $1 AND org_id = $2
+            AND merged_into IS NULL AND erased_at IS NULL FOR UPDATE",
+    )
+    .bind(customer)
+    .bind(org)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (old_phone, old_key) = cur.ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
+    if old_key.as_deref() == Some(key.as_str()) {
+        return Ok(Ok(()));
+    }
+    // Looked up first so the refusal can name the holder without poisoning the
+    // transaction; the index below still has the last word under a race.
+    if let Some(holder) = live_with_phone(tx, org, &key).await?
+        && holder != customer
+    {
+        return Ok(Err(ReplaceRefusal::BelongsTo(holder)));
+    }
+    let saved = sqlx::query(
+        "UPDATE customers SET phone = $3, phone_key = $4, updated_at = now() WHERE id = $1 AND org_id = $2",
+    )
+    .bind(customer)
+    .bind(org)
+    .bind(&typed)
+    .bind(&key)
+    .execute(&mut *tx)
+    .await;
+    if let Err(e) = saved {
+        if is_phone_taken(&e) {
+            return Err(phone_exists(None));
+        }
+        return Err(e.into());
+    }
+    if let Some(old) = &old_phone {
+        let (reason, by) = match actor {
+            IdentityActor::CustomerSelf => ("self", None),
+            IdentityActor::Staff(u) => ("edit", Some(u)),
+        };
+        remember_phone(tx, org, customer, old, old_key.as_deref(), reason, by).await?;
+    }
+    audit_identity(tx, org, customer, "phone", actor, old_key.as_deref(), Some(&key)).await?;
+    Ok(Ok(()))
+}
+
+/// After an identity change has COMMITTED: the card carries the name and the
+/// number, so the stored pass is dropped and the wallets are told. A no-op for
+/// a customer without a card.
+pub async fn after_identity_change(pool: &sqlx::PgPool, customer: Uuid) {
+    crate::loyalty::wallet::store::invalidate(pool, customer).await;
+    crate::loyalty::wallet::push_update(pool, customer);
 }

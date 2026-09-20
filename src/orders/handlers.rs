@@ -34,7 +34,7 @@ const ORDER_SELECT: &str =
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.service_charge_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
-     o.customer_name, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
+     o.customer_name, o.customer_id, o.notes, o.order_type, o.delivery_fee, o.delivery_order_id,
      d.channel::text AS delivery_channel, d.customer_lat AS delivery_lat, d.customer_lng AS delivery_lng,
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
      o.loyalty_customer_id, lc.name AS loyalty_member_name,
@@ -196,6 +196,14 @@ pub struct Order {
     pub tip_payment_method: Option<String>,
     pub discount_id: Option<Uuid>,
     pub customer_name: Option<String>,
+    /// The customer this sale belongs to (design §2.5) — the same id the sync
+    /// feed's order row carries. `customer_name` beside it is the snapshot of
+    /// what was typed or printed; this is who it was. A soft reference: `None`
+    /// for a walk-in, and it may name a customer since merged (resolve through
+    /// `GET /customers/{id}`) or erased.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub customer_id: Option<Uuid>,
     pub notes: Option<String>,
     /// What kind of sale: "dine_in" (settled from a waiter's ticket — the only
     /// kind that carries a service charge), "takeaway" (rung straight through
@@ -2704,11 +2712,25 @@ pub(crate) async fn create_order_inner(
     }
 
     if let Some(customer) = attach_customer {
-        crate::customers::handlers::attach_to_order(
+        order.customer_id = crate::customers::handlers::attach_to_order(
             &mut tx,
             actor.org_id,
             order.id,
             Some(customer),
+        )
+        .await?;
+    }
+    // A loyalty card is a card under the customer's id (design §2.1): a sale
+    // that names a member and no customer IS that customer's sale. Not gated on
+    // `customers.attach` — the till already named the person, by their card.
+    if order.customer_id.is_none()
+        && let Some(member) = body.loyalty_customer_id
+    {
+        order.customer_id = crate::customers::handlers::attach_to_order(
+            &mut tx,
+            actor.org_id,
+            order.id,
+            Some(member),
         )
         .await?;
     }
@@ -2757,6 +2779,23 @@ pub(crate) async fn create_order_inner(
         .bind(t.open_ticket_id)
         .execute(&mut *tx)
         .await?;
+        // And whose it was: the bill's own customer (a table-QR guest who gave
+        // a phone, the party's booking, the waiter's pick), unless the cashier
+        // attached someone at settle. Resolved through the merge chain; a
+        // reference that resolves to nobody is dropped, never refused.
+        if order.customer_id.is_none() {
+            order.customer_id = sqlx::query_scalar::<_, Option<Uuid>>(
+                "UPDATE orders o SET customer_id = customers_resolve(ot.org_id, ot.customer_id) \
+                   FROM open_tickets ot \
+                  WHERE o.id = $1 AND ot.id = $2 AND ot.customer_id IS NOT NULL \
+                  RETURNING o.customer_id",
+            )
+            .bind(order.id)
+            .bind(t.open_ticket_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
+        }
         crate::kitchen::close_kitchen_tickets(
             &mut tx,
             crate::kitchen::KitchenSourceRef::OpenTicket(t.open_ticket_id),

@@ -552,6 +552,9 @@ pub struct FinalizeCtx<'a> {
     pub discount_value: rust_decimal::Decimal,
     pub discount_amount: i32,
     pub customer_name: Option<&'a str>,
+    /// Whose sale this is: the delivery order's customer, resolved through the
+    /// merge chain as the row is written. Soft, like every customer reference.
+    pub customer_id: Option<Uuid>,
     pub notes: Option<&'a str>,
     /// `'delivery'` — for every online channel, pickup included: a pickup is
     /// a delivery channel, not a takeaway (see `orders.order_type`). Carried
@@ -631,14 +634,15 @@ pub async fn apply_snapshot(
              price_flagged, price_expected_total, tip_is_cash,
              order_type, delivery_fee, delivery_order_id,
              service_charge_amount, tax_rate_applied,
-             service_charge_rate_applied, tax_inclusive)
+             service_charge_rate_applied, tax_inclusive, customer_id)
         VALUES ($1, $2, $3, $4, $5, $6,
                 $15::discount_type, $16, $17, $18,
                 $7, $8, 0, 'completed',
                 $9, $10, $11, $12,
                 false, $8, NULL,
                 $19, $13, $14,
-                $20, $21, $22, $23)
+                $20, $21, $22, $23,
+                COALESCE((SELECT customers_resolve(b.org_id, $24) FROM branches b WHERE b.id = $1), $24))
         RETURNING id
         "#,
     )
@@ -665,6 +669,7 @@ pub async fn apply_snapshot(
     .bind(ctx.tax_rate_applied) // $21
     .bind(ctx.service_charge_rate_applied) // $22
     .bind(ctx.tax_inclusive) // $23
+    .bind(ctx.customer_id) // $24
     .fetch_one(&mut **tx)
     .await?;
     let order = MaterializedOrder {

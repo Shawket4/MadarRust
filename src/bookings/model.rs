@@ -21,6 +21,11 @@ pub struct BookingView {
     /// The floor shows the claimed tables as held from here (branch
     /// `hold_minutes` before the start). Clients compare with their clock.
     pub held_from: DateTime<Utc>,
+    /// The customer who booked (design §2.5); `guest_name` / `guest_phone`
+    /// beside it are the snapshot of what was typed. `None` for a booking
+    /// from before customers existed whose phone is not a valid number.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
     pub guest_name: String,
     pub guest_phone: String,
     pub phone_verified: bool,
@@ -64,6 +69,7 @@ struct Row {
     starts_at: DateTime<Utc>,
     ends_at: DateTime<Utc>,
     hold_minutes: i16,
+    customer_id: Option<Uuid>,
     guest_name: String,
     guest_phone: String,
     phone_verified: bool,
@@ -97,6 +103,7 @@ impl From<Row> for BookingView {
             starts_at: r.starts_at,
             ends_at: r.ends_at,
             held_from: r.starts_at - Duration::minutes(r.hold_minutes as i64),
+            customer_id: r.customer_id,
             guest_name: r.guest_name,
             guest_phone: r.guest_phone,
             phone_verified: r.phone_verified,
@@ -128,7 +135,7 @@ impl From<Row> for BookingView {
 // more — it goes with the next schema pass.
 const VIEW_SELECT: &str = "SELECT b.id, b.branch_id, b.status::text AS status, b.party_size, \
     b.starts_at, b.ends_at, COALESCE(s.hold_minutes, 15)::smallint AS hold_minutes, \
-    b.guest_name, b.guest_phone, b.phone_verified, b.notes, b.source, b.locale, b.section_id, \
+    b.customer_id, b.guest_name, b.guest_phone, b.phone_verified, b.notes, b.source, b.locale, b.section_id, \
     (SELECT ot.id FROM open_tickets ot WHERE ot.booking_id = b.id \
       ORDER BY (ot.status = 'open') DESC, ot.opened_at DESC LIMIT 1) AS open_ticket_id, \
     ARRAY(SELECT bt.table_id FROM booking_tables bt JOIN branch_tables t ON t.id = bt.table_id \

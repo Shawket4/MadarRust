@@ -50,9 +50,15 @@ async fn authenticated_member(
 
     // The serial IS the member id (see `apple::pass_json`).
     let id = Uuid::parse_str(serial).map_err(|_| AppError::NotFound("No such pass".into()))?;
-    let member = model::find_by_id(pool, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("No such pass".into()))?;
+    // A retired card (merge loser, or someone who left) still authenticates:
+    // its device has to be able to collect the voided copy. An erased member
+    // has no auth token left and falls out below, as before.
+    let member = match model::find_by_id(pool, id).await? {
+        Some(m) => m,
+        None => model::find_voided(pool, id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("No such pass".into()))?,
+    };
 
     let expected = member
         .apple_auth_token
@@ -156,7 +162,8 @@ pub async fn serials(
     let rows: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
         "SELECT c.id, c.pass_updated_at FROM loyalty_pass_devices d \
            JOIN loyalty_customers c ON c.id = d.customer_id \
-          WHERE d.device_library_id = $1 AND c.deleted_at IS NULL \
+          WHERE d.device_library_id = $1 \
+            AND (c.deleted_at IS NULL OR c.pass_voided_at IS NOT NULL) \
             AND ($2::timestamptz IS NULL OR c.pass_updated_at > $2)",
     )
     .bind(&device_library_id)
@@ -206,7 +213,20 @@ pub async fn latest_pass(
     // this feature gets. It is what makes the WhatsApp fallback evidence.
     super::notices::mark_seen(pool.get_ref(), &member).await;
 
-    let bytes = apple::pass_bytes_for(pool.get_ref(), &member).await?;
+    // A retired card is served voided, for as long as its device keeps asking:
+    // a 404 here would leave the last balance on screen for ever.
+    let retired: bool = sqlx::query_scalar(
+        "SELECT pass_voided_at IS NOT NULL FROM loyalty_customers WHERE id = $1",
+    )
+    .bind(member.id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .unwrap_or(false);
+    let bytes = if retired {
+        apple::build_voided_pass_for(pool.get_ref(), &member).await?
+    } else {
+        apple::pass_bytes_for(pool.get_ref(), &member).await?
+    };
     let mut resp = HttpResponse::Ok();
     resp.content_type("application/vnd.apple.pkpass");
     if let Some(updated) = member.pass_updated_at {

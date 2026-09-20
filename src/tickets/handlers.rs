@@ -30,6 +30,12 @@ pub struct CreateOpenTicketRequest {
     pub table_id: Option<Uuid>,
     #[serde(default)]
     pub customer_name: Option<String>,
+    /// The customer this bill is for, when the waiter picked one. Honoured when
+    /// the actor holds `customers.attach`; a merged id resolves and an unknown
+    /// one is ignored — a bill is never refused over its customer. Absent, a
+    /// bill opened for a booking takes the booking's customer.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -236,6 +242,12 @@ pub struct SettleOpenTicketRequest {
     /// The member spending a balance on this settle, when rewards are applied.
     #[serde(default)]
     pub loyalty_customer_id: Option<Uuid>,
+    /// The customer this sale belongs to, when the cashier attached one at
+    /// settle. Same rules as `customer_id` on an order (needs
+    /// `customers.attach`; merged ids resolve; unknown ids are ignored).
+    /// Absent, the sale takes the bill's own customer, if it has one.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
     /// Rewards covering lines of the ticket. A table-service bill redeems
     /// exactly like a counter one — the cashier scans at settle either way.
     #[serde(default)]
@@ -456,6 +468,23 @@ pub(crate) async fn create_open_ticket_inner(
             .await?
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
 
+    // A waiter's pick of customer, under the same gate a sale's has. Asked
+    // before the ticket's transaction opens (one connection at a time).
+    let attach_customer: Option<Uuid> = match body.customer_id {
+        Some(c)
+            if crate::authz::require::effective(
+                pool.get_ref(),
+                actor.teller_id,
+                Some(body.branch_id),
+            )
+            .await?
+            .can(crate::authz::Cap::CustomersAttach) =>
+        {
+            Some(c)
+        }
+        _ => None,
+    };
+
     // Resolve the round against the catalogue BEFORE taking the transaction:
     // one connection per request, never a second one while `tx` is held.
     let lines = super::resolve_ticket_lines(
@@ -497,8 +526,10 @@ pub(crate) async fn create_open_ticket_inner(
             (org_id, branch_id, table_id, ticket_ref, opened_by, customer_name, notes, guest_count, \
              idempotency_key, discount_id, discount_type, discount_value, booking_id, \
              tax_rate_applied, tax_inclusive_applied, service_charge_rate_applied, \
-             service_charge_taxable_applied) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) \
+             service_charge_taxable_applied, customer_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+                 COALESCE(customers_resolve($1, $18), \
+                          (SELECT bk.customer_id FROM bookings bk WHERE bk.id = $13 AND bk.org_id = $1))) \
          RETURNING id",
     )
     .bind(org_id)
@@ -518,6 +549,7 @@ pub(crate) async fn create_open_ticket_inner(
     .bind(policy.tax_inclusive)
     .bind(policy.service_charge_rate)
     .bind(policy.service_charge_taxable)
+    .bind(attach_customer)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -1466,7 +1498,10 @@ pub async fn settle_open_ticket_inner(
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,
-        customer_id: None,
+        // The cashier's pick, through the order's own `customers.attach` gate.
+        // Without one, `create_order_inner` carries the BILL's customer over
+        // in the transaction that links the two.
+        customer_id: body.customer_id,
         till_id: body.till_id,
         device_id: None,
         device_code: None,

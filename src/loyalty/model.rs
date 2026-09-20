@@ -538,6 +538,20 @@ pub async fn ledger(
 /// Google object to expire. `None` when the member was already gone.
 pub async fn forget(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, AppError> {
     let mut tx = pool.begin().await?;
+    let before = forget_in(&mut tx, member_id).await?;
+    if before.is_some() {
+        tx.commit().await?;
+    }
+    Ok(before)
+}
+
+/// [`forget`], inside a transaction the caller owns — `POST
+/// /customers/{id}/erase` scrubs the membership, the snapshots, the addresses
+/// and the OTP rows in ONE transaction (design §2.8).
+pub async fn forget_in(
+    tx: &mut sqlx::PgConnection,
+    member_id: Uuid,
+) -> Result<Option<MemberRow>, AppError> {
     // Locked, so two admins forgetting the same member — or a sweep messaging
     // them at the same moment — serialise on the row.
     let locked: Option<Uuid> = sqlx::query_scalar(
@@ -594,8 +608,86 @@ pub async fn forget(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>,
         .bind(member_id)
         .execute(&mut *tx)
         .await?;
+    Ok(Some(before))
+}
+
+/// Leave the programme (design §2.8): the CARD ends, the person stays.
+///
+/// `DELETE /loyalty/members/{id}` used to be `forget`, which erased the whole
+/// customer — name, phone, order history link and all — because the card was
+/// the only record of the person. It is not any more. Leaving now retires the
+/// membership and nothing else: the customer row, their orders, their addresses
+/// and their bookings are untouched, and they can join again tomorrow
+/// ([`enrol`] revives the row under the same id with a fresh token).
+///
+/// What goes: the member token is rotated so the barcode resolves to nobody,
+/// aliases pointing older cards here are dropped, any pending notice is
+/// cleared, and the stored pass is deleted. What deliberately STAYS until the
+/// device has collected it: the Apple auth token and the device registrations,
+/// with `pass_voided_at` set — the web service serves that serial a pass marked
+/// `voided` instead of a 404, so the card in the wallet greys out rather than
+/// showing its last balance for ever.
+///
+/// The ledger stays (append-only, and it is the shop's record). A balance left
+/// on the card stays on the retired row; rejoining starts from that balance,
+/// which is the honest reading of "my points are still mine".
+///
+/// Returns the row as it was, for the caller's wallet calls after commit.
+pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, AppError> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(member_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(None);
+    }
+    let Some(before) = find_by_id(&mut *tx, member_id).await? else {
+        return Ok(None);
+    };
+    sqlx::query(
+        "UPDATE loyalty_customers \
+            SET deleted_at = now(), pass_voided_at = now(), pass_updated_at = now(), \
+                member_token = $2, \
+                pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
+                pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
+                updated_at = now() \
+          WHERE id = $1",
+    )
+    .bind(member_id)
+    .bind(super::mint_member_token())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM loyalty_token_aliases WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(Some(before))
+}
+
+/// A retired membership whose pass is still to be served voided: the loser of
+/// a merge, or someone who left. `None` for a live member, an erased one, or a
+/// serial that never existed. Reads the table, not the view's live filter.
+pub async fn find_voided<'e, E>(exec: E, id: Uuid) -> Result<Option<MemberRow>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    Ok(sqlx::query_as(&format!(
+        "SELECT {MEMBER_COLS} FROM {MEMBERS} v \
+          WHERE v.id = $1 AND v.deleted_at IS NOT NULL AND v.apple_auth_token IS NOT NULL \
+            AND EXISTS (SELECT 1 FROM loyalty_customers m \
+                         WHERE m.id = v.id AND m.pass_voided_at IS NOT NULL)"
+    ))
+    .bind(id)
+    .fetch_optional(exec)
+    .await?)
 }
 
 /// Give a customer a card: the membership row, under THE CUSTOMER'S id (design
@@ -615,7 +707,7 @@ pub async fn enrol(
         "INSERT INTO loyalty_customers (id, org_id, member_token, joined_branch_id, apple_auth_token) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (id) DO UPDATE \
-            SET deleted_at = NULL, member_token = EXCLUDED.member_token, \
+            SET deleted_at = NULL, pass_voided_at = NULL, member_token = EXCLUDED.member_token, \
                 apple_auth_token = EXCLUDED.apple_auth_token, \
                 joined_branch_id = EXCLUDED.joined_branch_id, \
                 apple_serial = NULL, google_object_id = NULL, \
@@ -728,8 +820,11 @@ pub async fn merge_memberships(
     }
 
     sqlx::query(
+        // `pass_voided_at`: the card in the loser's wallet is served one last
+        // time, marked voided (see `find_voided`). `pass_updated_at` moves so
+        // the device's "what changed since" question includes this serial.
         "UPDATE loyalty_customers \
-            SET deleted_at = now(), \
+            SET deleted_at = now(), pass_voided_at = now(), pass_updated_at = now(), \
                 pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
                 pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
                 updated_at = now() \
