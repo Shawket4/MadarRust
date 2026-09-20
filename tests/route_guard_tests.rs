@@ -166,6 +166,21 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
     ),
     (
         "GET",
+        "/public/order-now/{token}",
+        "order-now from the wallet pass: masked (first name, phone hint) unless a device token proves the customer's phone",
+    ),
+    (
+        "POST",
+        "/public/order-now/{token}/replace-identity",
+        "customer replaces their own phone; device tokens for BOTH the current and the new phone REQUIRED, 401 without",
+    ),
+    (
+        "POST",
+        "/public/order-now/{token}/combine",
+        "customer combines two profiles they have proven control of; both device tokens REQUIRED, 401 without",
+    ),
+    (
+        "GET",
         "/public/delivery-orders/{id}/track",
         "guest tracking by unguessable order id",
     ),

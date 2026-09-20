@@ -3135,13 +3135,16 @@ async fn the_ledger_reports_where_each_movement_came_from(pool: PgPool) {
     assert!(row["reverses_id"].is_null());
 }
 
-// ── Forgetting a member ──────────────────────────────────────────────────────
+// ── Leaving the programme ────────────────────────────────────────────────────
 
-/// Deleting a member scrubs the person and keeps the books. The ledger is the
-/// shop's record of what it gave away; it is not the member's data, and the
-/// database would refuse to lose it anyway.
+/// `DELETE /loyalty/members/{id}` ends the CARD and keeps the person (customers
+/// unification §2.8). It used to forget the whole person, back when the card
+/// was the only record of them; erasing someone is now `POST
+/// /customers/{id}/erase` (see `customers_wave2_tests` and
+/// `customers_unification_tests`). The ledger stays either way: it is the
+/// shop's record, and the database would refuse to lose it anyway.
 #[sqlx::test]
-async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
+async fn leaving_the_programme_ends_the_card_and_keeps_the_books(pool: PgPool) {
     perms(&pool).await;
     let org = seed_org(&pool).await;
     let branch = seed_branch(&pool, org, "Maadi").await;
@@ -3223,12 +3226,11 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
         member_token: String,
         apple_auth_token: Option<String>,
         birth_month: Option<i16>,
-        marketing_opt_out: bool,
         deleted: bool,
         points_balance: i32,
     }
     let after: After = sqlx::query_as(
-        "SELECT name, phone, member_token, apple_auth_token, birth_month, marketing_opt_out, \
+        "SELECT name, phone, member_token, apple_auth_token, birth_month, \
                 deleted_at IS NOT NULL AS deleted, points_balance \
            FROM loyalty_members_v WHERE id = $1",
     )
@@ -3236,17 +3238,16 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(after.deleted);
-    // The person is erased on `customers`: no name, no phone, no key.
-    assert_eq!(after.name, "");
-    assert_eq!(after.phone, "");
+    assert!(after.deleted, "the membership is over");
+    // The PERSON is untouched: leaving a loyalty programme is not a request to
+    // be forgotten.
+    assert_eq!(after.name, "Ali");
+    assert_eq!(after.phone, "201000000001");
+    assert_eq!(after.birth_month, Some(3));
     assert_ne!(
         after.member_token, "Mforgettoken000000001",
         "the barcode is dead"
     );
-    assert!(after.apple_auth_token.is_none());
-    assert!(after.birth_month.is_none(), "nothing left to greet");
-    assert!(after.marketing_opt_out, "and nothing to be written to");
     // The books: untouched.
     assert_eq!(after.points_balance, 10);
     let ledger: i64 =
@@ -3259,13 +3260,20 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
         ledger, 1,
         "the ledger is the shop's record, not the member's data"
     );
-    let devices: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM loyalty_pass_devices WHERE customer_id = $1")
-            .bind(member)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(devices, 0, "no update is ever pushed to that phone again");
+    // The device registration and the pass's auth token are KEPT, with the
+    // pass marked voided: the phone has to be able to come back and collect
+    // the voided copy, or the wallet shows the last balance for ever.
+    let _ = after.apple_auth_token;
+    let (devices, voided): (i64, bool) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM loyalty_pass_devices WHERE customer_id = $1), \
+                (SELECT pass_voided_at IS NOT NULL FROM loyalty_customers WHERE id = $1)",
+    )
+    .bind(member)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(devices, 1);
+    assert!(voided);
 
     // The old token resolves to nobody at the till, and the member is gone
     // from the admin's list.
@@ -3289,8 +3297,7 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    // Forgetting twice is not a failure — and does not confirm a phone number
-    // used to be a member.
+    // Leaving twice is not a failure.
     assert_eq!(
         test::call_service(&app, delete(admin_jwt.clone()))
             .await
@@ -3298,8 +3305,9 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
         StatusCode::NO_CONTENT
     );
 
-    // The same phone can join again tomorrow, as a fresh member with a fresh
-    // card: the unique index only covers live rows.
+    // They can join again tomorrow: the SAME person (a membership is a card
+    // under the customer's id), a fresh barcode, and the points they left
+    // behind are still theirs.
     let body: Value = test::call_and_read_body_json(
         &app,
         test::TestRequest::post()
@@ -3309,16 +3317,19 @@ async fn forgetting_a_member_keeps_the_books_and_frees_the_phone(pool: PgPool) {
     )
     .await;
     assert_eq!(body["already_member"], false, "{body}");
-    assert_eq!(body["balance"], 0, "a fresh card, not the old balance");
-    let fresh: Uuid = sqlx::query_scalar(
-        "SELECT id FROM loyalty_members_v WHERE org_id = $1 AND phone = $2 AND deleted_at IS NULL",
+    assert_eq!(body["balance"], 10, "{body}");
+    let (again, voided): (Uuid, bool) = sqlx::query_as(
+        "SELECT v.id, m.pass_voided_at IS NOT NULL FROM loyalty_members_v v \
+           JOIN loyalty_customers m ON m.id = v.id \
+          WHERE v.org_id = $1 AND v.phone = $2 AND v.deleted_at IS NULL",
     )
     .bind(org)
     .bind("201000000001")
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_ne!(fresh, member);
+    assert_eq!(again, member, "one person, one id");
+    assert!(!voided, "a live card is not a voided one");
 }
 
 // ── Redemption, robust end to end ────────────────────────────────────────────
