@@ -8,10 +8,10 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::models::UserRole;
-use crate::realtime::hub::BranchEventHub;
-use crate::tickets::OpenTicketView;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::models::UserRole;
+use madar_rust::realtime::hub::BranchEventHub;
+use madar_rust::tickets::OpenTicketView;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -116,9 +116,9 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::tickets::routes::configure)
-                .configure(crate::kitchen::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::kitchen::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };
@@ -178,7 +178,7 @@ async fn fire_by_replay(
 #[sqlx::test]
 async fn a_branch_manager_can_work_the_till_through_the_queue(pool: PgPool) {
     let app = app!(pool);
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org = seed_org(&pool).await;
@@ -425,7 +425,7 @@ async fn a_revoked_non_money_op_is_still_rejected(pool: PgPool) {
 #[sqlx::test]
 async fn only_a_till_user_of_this_org_can_be_the_author(pool: PgPool) {
     let app = app!(pool);
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org = seed_org(&pool).await;
@@ -465,7 +465,7 @@ async fn only_a_till_user_of_this_org_can_be_the_author(pool: PgPool) {
 #[sqlx::test]
 async fn a_queued_refund_lands_once_under_its_author(pool: PgPool) {
     let app = app!(pool);
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org = seed_org(&pool).await;
@@ -646,10 +646,10 @@ macro_rules! app_with_orders {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::orders::routes::configure)
-                .configure(crate::tickets::routes::configure)
-                .configure(crate::kitchen::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::orders::routes::configure)
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::kitchen::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };
@@ -882,7 +882,7 @@ async fn a_manager_approval_carries_a_void_the_teller_does_not_hold(pool: PgPool
     let r = fire_by_replay(&app, &bearer, teller, branch, item).await;
     assert_eq!(r.status(), 201);
     let ticket_id = test::read_body_json::<OpenTicketView, _>(r).await.id;
-    let cap = crate::authz::Cap::from_legacy("open_tickets", "delete")
+    let cap = madar_rust::authz::Cap::from_legacy("open_tickets", "delete")
         .expect("a capability for the cell")
         .key();
     let void = |approver: Uuid| {
@@ -981,7 +981,7 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
     let approval = serde_json::json!({ "id": Uuid::new_v4(), "capability": "orders.held.resume_others", "approver_id": manager });
     let r = replay(&app, &bearer, &sale(ali, Some(approval))).await;
     assert!(r.status().is_success(), "{}", r.status());
-    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    let order: madar_rust::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(order.order.teller_id, badr, "settled by Badr: his drawer");
     assert_eq!(order.order.started_by, Some(ali), "started by Ali");
     assert!(order.order.started_by_name.is_some());
@@ -1017,13 +1017,13 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
         "accept, never reject: {}",
         r.status()
     );
-    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    let order: madar_rust::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(order.order.started_by, None);
 
     // Naming yourself records nothing extra.
     let r = replay(&app, &bearer, &sale(badr, None)).await;
     assert!(r.status().is_success());
-    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    let order: madar_rust::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(order.order.started_by, None);
 
     // A NEW client (v0.7.10+): a plain teller settles Ali's order with no
@@ -1031,7 +1031,7 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
     // of the owner's decision. This is the line that used to file a flag.
     let r = replay(&app, &bearer, &sale(ali, None)).await;
     assert!(r.status().is_success(), "accepted: {}", r.status());
-    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    let order: madar_rust::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(
         order.order.started_by,
         Some(ali),
@@ -1053,7 +1053,7 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
         .unwrap();
     let r = replay(&app, &bearer, &sale(manager, None)).await;
     assert!(r.status().is_success(), "{}", r.status());
-    let order: crate::orders::handlers::OrderFull = test::read_body_json(r).await;
+    let order: madar_rust::orders::handlers::OrderFull = test::read_body_json(r).await;
     assert_eq!(order.order.started_by, Some(manager));
     assert_eq!(flags_of(&pool, badr).await, 0, "still clean");
 
@@ -1087,8 +1087,8 @@ async fn a_close_records_the_held_orders_left_open(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(BranchEventHub::new()))
-            .configure(crate::tills::routes::configure)
-            .configure(crate::sync::routes::configure),
+            .configure(madar_rust::tills::routes::configure)
+            .configure(madar_rust::sync::routes::configure),
     )
     .await;
     let org = seed_org(&pool).await;
@@ -1519,9 +1519,9 @@ async fn an_allow_override_caps_a_discount_for_one_person(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let eff = crate::authz::require::effective(&pool, teller, Some(branch)).await.unwrap();
+    let eff = madar_rust::authz::require::effective(&pool, teller, Some(branch)).await.unwrap();
     assert_eq!(
-        eff.limits_of(crate::authz::Cap::OrdersDiscountManualAmount).max_amount,
+        eff.limits_of(madar_rust::authz::Cap::OrdersDiscountManualAmount).max_amount,
         Some(500)
     );
 }
@@ -1960,7 +1960,7 @@ async fn each_settle_of_a_split_bill_answers_for_its_own_discount(pool: PgPool) 
 #[sqlx::test]
 async fn the_void_and_refund_limits_hold_on_replay_too(pool: PgPool) {
     let app = app!(pool);
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let org = seed_org(&pool).await;
