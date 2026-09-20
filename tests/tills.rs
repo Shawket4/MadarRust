@@ -241,15 +241,19 @@ async fn test_open_shift_and_get_current(pool: PgPool) {
     //    production: no device id meant the server could not recognise the
     //    teller's own shift, so it reported it as open somewhere else and the
     //    teller could neither resume nor close it. 200-on-replay is the legacy
-    //    contract ("Idempotent open_shift (on client id; 200 on replay)"), and
-    //    the protection that matters is unchanged — no SECOND shift is created.
+    //    contract, and the protection that matters is unchanged — no SECOND
+    //    shift is created.
     let req3 = test::TestRequest::post()
         .uri(&format!("/shifts/branches/{}/open", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .set_json(&req_body)
         .to_request();
     let resp3 = test::call_service(&app, req3).await;
-    assert_eq!(resp3.status().as_u16(), 200, "an old client resumes its own shift");
+    assert_eq!(
+        resp3.status().as_u16(),
+        200,
+        "an old client resumes its own shift"
+    );
     let resumed: Shift = test::read_body_json(resp3).await;
     assert_eq!(resumed.id, shift.id, "the same shift, not a new one");
     let open_count: i64 =
