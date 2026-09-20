@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "89bf72580f799c41";
+pub const SPEC_HASH: &str = "768db7c58923aebf";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -191,6 +191,7 @@ pub enum Cap {
     MenuPackagingRulesApply = 221,
     OrdersStaffDrinkRecord = 223,
     CustomersMerge = 224,
+    CustomersAddressesView = 225,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -375,6 +376,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::MenuPackagingRulesApply, key: "menu.packaging_rules.apply", legacy: None, group: "menu", tier: Tier::Advanced, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Re-apply packaging rules to every menu item", ar: "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::OrdersStaffDrinkRecord, key: "orders.staff_drink.record", legacy: None, group: "selling", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: true, limits: &[], pos: true, protected: false, en: "Record a staff drink", ar: "تسجيل مشروب موظفين", hint_en: Some("Off for tellers by default. Turn it on to let the till put a drink on the branch's daily staff pool. A note saying who it is for is always required."), hint_ar: Some("مقفول للكاشير في الأصل. افتحه عشان الكاشير يحسب المشروب على رصيد الموظفين اليومي بتاع الفرع. لازم دايم\u{64b}ا يكتب ملاحظة بالمشروب ده لمين.") },
     CapMeta { cap: Cap::CustomersMerge, key: "customers.merge", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Merge duplicate customers", ar: "دمج العملاء المكررين", hint_en: Some("Merging cannot be undone. When both are loyalty members, the points move to the customer that stays and the other card stops working."), hint_ar: Some("الدمج لا يمكن التراجع عنه. لو الاتنين أعضاء في برنامج الولاء، النقاط بتتنقل للعميل اللي هيفضل والكارت التاني بيتوقف.") },
+    CapMeta { cap: Cap::CustomersAddressesView, key: "customers.addresses.view", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(7), core: Kinds(0), approval: false, limits: &[], pos: true, protected: false, en: "See customers' saved addresses", ar: "عرض عناوين العملاء المحفوظة", hint_en: Some("The delivery addresses a customer has ordered to. Needed to dispatch an order; not needed to take one at a table."), hint_ar: Some("عناوين التوصيل اللي العميل طلب عليها قبل كده. مطلوبة لتجهيز طلب توصيل، ومش مطلوبة لأخذ طلب على ترابيزة.") },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[
