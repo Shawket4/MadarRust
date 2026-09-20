@@ -1025,7 +1025,12 @@ pub async fn merge_inner(
         .await?;
     // Everything else that names the duplicate (design §2.7). The snapshots on
     // those rows are history and are not touched.
-    for table in ["delivery_orders", "bookings", "open_tickets", "customer_identity_audit"] {
+    for table in [
+        "delivery_orders",
+        "bookings",
+        "open_tickets",
+        "customer_identity_audit",
+    ] {
         sqlx::query(&format!(
             "UPDATE {table} SET customer_id = $2 WHERE customer_id = $1 AND org_id = $3"
         ))
@@ -1048,16 +1053,24 @@ async fn repoint_addresses(
     from: Uuid,
     into: Uuid,
 ) -> Result<(), AppError> {
-    let theirs: Vec<(Uuid, String, String, Option<String>, Option<f64>, Option<f64>, i32, DateTime<Utc>)> =
-        sqlx::query_as(
-            "SELECT id, channel, norm_key, unit_number, lat, lng, use_count, last_used_at
+    let theirs: Vec<(
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        Option<f64>,
+        Option<f64>,
+        i32,
+        DateTime<Utc>,
+    )> = sqlx::query_as(
+        "SELECT id, channel, norm_key, unit_number, lat, lng, use_count, last_used_at
                FROM customer_addresses
               WHERE customer_id = $1 AND org_id = $2 AND erased_at IS NULL ORDER BY created_at",
-        )
-        .bind(from)
-        .bind(org)
-        .fetch_all(&mut *tx)
-        .await?;
+    )
+    .bind(from)
+    .bind(org)
+    .fetch_all(&mut *tx)
+    .await?;
     for (id, channel, norm, unit, lat, lng, uses, used_at) in theirs {
         let twin: Option<Uuid> = sqlx::query_scalar(
             "SELECT a.id FROM customer_addresses a
@@ -1118,14 +1131,17 @@ async fn repoint_addresses(
     Ok(())
 }
 
-
 // ── erase (PDPL) ────────────────────────────────────────────────────────────
 
 /// `id` plus every customer merged into it, transitively. A reference written
 /// before a merge was re-pointed at merge time, but a till that was offline can
 /// still land a row under a merged id afterwards — so everything that acts on
 /// "this person's rows" goes through the chain, not the one id.
-pub async fn chain_ids(conn: &mut PgConnection, org: Uuid, id: Uuid) -> Result<Vec<Uuid>, AppError> {
+pub async fn chain_ids(
+    conn: &mut PgConnection,
+    org: Uuid,
+    id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
     Ok(sqlx::query_scalar(
         "WITH RECURSIVE chain(id, depth) AS (
              SELECT $2::uuid, 0
@@ -1566,7 +1582,8 @@ pub async fn replace_phone(
     .bind(org)
     .fetch_optional(&mut *tx)
     .await?;
-    let (old_phone, old_key) = cur.ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
+    let (old_phone, old_key) =
+        cur.ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
     if old_key.as_deref() == Some(key.as_str()) {
         return Ok(Ok(()));
     }
@@ -1599,7 +1616,16 @@ pub async fn replace_phone(
         };
         remember_phone(tx, org, customer, old, old_key.as_deref(), reason, by).await?;
     }
-    audit_identity(tx, org, customer, "phone", actor, old_key.as_deref(), Some(&key)).await?;
+    audit_identity(
+        tx,
+        org,
+        customer,
+        "phone",
+        actor,
+        old_key.as_deref(),
+        Some(&key),
+    )
+    .await?;
     Ok(Ok(()))
 }
 

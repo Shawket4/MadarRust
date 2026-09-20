@@ -124,7 +124,9 @@ pub struct OrderNowContext {
 }
 
 async fn member_by_token(pool: &PgPool, token: &str) -> Result<MemberRow, AppError> {
-    model::find_by_token(pool, token).await?.ok_or_else(not_found)
+    model::find_by_token(pool, token)
+        .await?
+        .ok_or_else(not_found)
 }
 
 #[derive(sqlx::FromRow)]
@@ -136,7 +138,11 @@ struct LastOrder {
     payment_method_hint: Option<String>,
 }
 
-async fn last_order(pool: &PgPool, org: Uuid, customer: Uuid) -> Result<Option<LastOrder>, AppError> {
+async fn last_order(
+    pool: &PgPool,
+    org: Uuid,
+    customer: Uuid,
+) -> Result<Option<LastOrder>, AppError> {
     Ok(sqlx::query_as(
         "SELECT d.branch_id, b.name AS branch_name,
                 (b.is_active AND b.deleted_at IS NULL) AS branch_live,
@@ -187,7 +193,9 @@ pub async fn context(
         Some(l) => {
             let reason = if !l.branch_live {
                 Some("branch_unavailable")
-            } else if !crate::delivery::public::channel_open_now(pool, l.branch_id, &l.channel).await? {
+            } else if !crate::delivery::public::channel_open_now(pool, l.branch_id, &l.channel)
+                .await?
+            {
                 Some("channel_closed")
             } else {
                 None
@@ -386,17 +394,25 @@ async fn doubly_verified(
     let member = member_by_token(pool, token).await?;
     let new_key = crate::phone::normalize_phone(&body.new_phone)?;
     if !device_ok(secret, &member.phone, Some(&body.device_token)) {
-        return Err(AppError::Unauthorized("Phone not verified on this device.".into()));
+        return Err(AppError::Unauthorized(
+            "Phone not verified on this device.".into(),
+        ));
     }
     if !device_ok(secret, &new_key, Some(&body.new_phone_device_token)) {
-        return Err(AppError::Unauthorized("The new phone is not verified.".into()));
+        return Err(AppError::Unauthorized(
+            "The new phone is not verified.".into(),
+        ));
     }
     Ok((member, new_key))
 }
 
 /// Max 2 self-service replacements per rolling 30 days, and none for 24 h
 /// after a merge (design §4.4). Counted from the trail itself.
-async fn check_limits(conn: &mut sqlx::PgConnection, org: Uuid, customer: Uuid) -> Result<(), AppError> {
+async fn check_limits(
+    conn: &mut sqlx::PgConnection,
+    org: Uuid,
+    customer: Uuid,
+) -> Result<(), AppError> {
     let merged_recently: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM customers WHERE org_id = $1 AND merged_into = $2
                           AND merged_at > now() - interval '24 hours')",
@@ -468,7 +484,14 @@ pub async fn replace_identity(
         }
     }
     if let Some(name) = body.name.as_deref().filter(|n| !n.trim().is_empty()) {
-        handlers::rename(&mut tx, member.org_id, member.id, name, IdentityActor::CustomerSelf).await?;
+        handlers::rename(
+            &mut tx,
+            member.org_id,
+            member.id,
+            name,
+            IdentityActor::CustomerSelf,
+        )
+        .await?;
     }
     tx.commit().await?;
     handlers::after_identity_change(pool, member.id).await;
@@ -531,7 +554,14 @@ pub async fn combine(
         .execute(&mut *tx)
         .await?;
     if let Some(name) = body.name.as_deref().filter(|n| !n.trim().is_empty()) {
-        handlers::rename(&mut tx, member.org_id, member.id, name, IdentityActor::CustomerSelf).await?;
+        handlers::rename(
+            &mut tx,
+            member.org_id,
+            member.id,
+            name,
+            IdentityActor::CustomerSelf,
+        )
+        .await?;
     }
     tx.commit().await?;
     if let Some(loser) = retired {
@@ -569,7 +599,10 @@ mod tests {
 
     #[test]
     fn a_different_phone_is_never_guessed_at() {
-        assert_eq!(classify("Omar", ME, "Omar", OTHER, None, None), Err(ClassifyRefusal::ChoiceRequired));
+        assert_eq!(
+            classify("Omar", ME, "Omar", OTHER, None, None),
+            Err(ClassifyRefusal::ChoiceRequired)
+        );
         assert_eq!(
             classify("Omar", ME, "Omar", OTHER, Some("update_name"), None),
             Err(ClassifyRefusal::ChoiceRequired)
@@ -583,14 +616,31 @@ mod tests {
     #[test]
     fn a_name_alone_is_one_time_unless_they_say_otherwise() {
         let c = classify("Omar", ME, "Omar Hassan", ME, None, None).unwrap();
-        assert_eq!(c, Classified { contact_override: false, save_address: false, rename: None });
+        assert_eq!(
+            c,
+            Classified {
+                contact_override: false,
+                save_address: false,
+                rename: None
+            }
+        );
         let c = classify("Omar", ME, " Omar Hassan ", ME, Some("update_name"), None).unwrap();
         assert_eq!(c.rename.as_deref(), Some("Omar Hassan"));
         assert!(c.save_address);
         // Case, spacing and composition are not an edit.
         let c = classify("Omar  Hassan", ME, "omar hassan", ME, None, None).unwrap();
-        assert_eq!(c, Classified { contact_override: false, save_address: true, rename: None });
+        assert_eq!(
+            c,
+            Classified {
+                contact_override: false,
+                save_address: true,
+                rename: None
+            }
+        );
         assert!(handlers::same_name("Cafe\u{301}", "CAFÉ"));
-        assert_eq!(classify("a", ME, "a", ME, Some("whatever"), None), Err(ClassifyRefusal::UnknownChoice));
+        assert_eq!(
+            classify("a", ME, "a", ME, Some("whatever"), None),
+            Err(ClassifyRefusal::UnknownChoice)
+        );
     }
 }

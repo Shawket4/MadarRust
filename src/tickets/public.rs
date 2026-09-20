@@ -323,7 +323,8 @@ pub async fn create_table_order(
         .map(str::trim)
         .filter(|n| !n.is_empty())
         .map(str::to_string);
-    let customer_id: Option<Uuid> = match (body.customer_phone.as_deref(), customer_name.as_deref()) {
+    let customer_id: Option<Uuid> = match (body.customer_phone.as_deref(), customer_name.as_deref())
+    {
         (Some(phone), Some(name)) if crate::phone::canonical(phone).is_some() => {
             let mut conn = base.get_ref().acquire().await?;
             match crate::customers::handlers::resolve_or_create(

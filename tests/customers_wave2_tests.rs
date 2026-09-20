@@ -32,7 +32,15 @@ fn admin_token(uid: Uuid, org: Uuid) -> String {
     create_token(&secret(), uid, Some(org), UserRole::OrgAdmin, None, 24).unwrap()
 }
 fn teller_token(uid: Uuid, org: Uuid, branch: Uuid) -> String {
-    create_token(&secret(), uid, Some(org), UserRole::Teller, Some(branch), 24).unwrap()
+    create_token(
+        &secret(),
+        uid,
+        Some(org),
+        UserRole::Teller,
+        Some(branch),
+        24,
+    )
+    .unwrap()
 }
 fn device_token(raw_phone: &str) -> String {
     let norm = madar_rust::phone::normalize_phone(raw_phone).unwrap();
@@ -69,7 +77,10 @@ where
     let resp = test::call_service(app, req.to_request()).await;
     let status = resp.status();
     let bytes = test::read_body(resp).await;
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 fn auth(req: test::TestRequest, token: &str) -> test::TestRequest {
     req.insert_header(("Authorization", format!("Bearer {token}")))
@@ -97,13 +108,15 @@ async fn seed_org(pool: &PgPool) -> Uuid {
 }
 async fn seed_branch(pool: &PgPool, org: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO branches (id, org_id, name, latitude, longitude) VALUES ($1,$2,$3,30.0,31.0)")
-        .bind(id)
-        .bind(org)
-        .bind(name)
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO branches (id, org_id, name, latitude, longitude) VALUES ($1,$2,$3,30.0,31.0)",
+    )
+    .bind(id)
+    .bind(org)
+    .bind(name)
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 async fn seed_user(pool: &PgPool, org: Uuid, role: &str) -> Uuid {
@@ -200,7 +213,14 @@ async fn shop(pool: &PgPool, otp_required: bool) -> Shop {
     let till = open_till(pool, branch, teller).await;
     seed_ordering(pool, branch, otp_required).await;
     let item = seed_item(pool, org, 5000).await;
-    Shop { org, branch, teller, till, admin, item }
+    Shop {
+        org,
+        branch,
+        teller,
+        till,
+        admin,
+        item,
+    }
 }
 
 const SARA: &str = "01000000000";
@@ -220,7 +240,13 @@ async fn place<S>(app: &S, body: &Value) -> (StatusCode, Value)
 where
     S: Service<Request, Response = ServiceResponse, Error = actix_web::Error>,
 {
-    send(app, test::TestRequest::post().uri("/public/delivery-orders").set_json(body)).await
+    send(
+        app,
+        test::TestRequest::post()
+            .uri("/public/delivery-orders")
+            .set_json(body),
+    )
+    .await
 }
 async fn customer_of_phone(pool: &PgPool, org: Uuid, key: &str) -> Option<(Uuid, String, String)> {
     sqlx::query_as(
@@ -242,28 +268,59 @@ async fn customer_of_phone(pool: &PgPool, org: Uuid, key: &str) -> Option<(Uuid,
 async fn a_delivery_order_links_its_customer_and_so_does_its_sale(pool: PgPool) {
     let s = shop(&pool, false).await;
     let app = app!(pool);
-    let (st, d) = place(&app, &outside_order(&s, "Sara", SARA, "12 Tahrir St", 30.001, 31.001)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara", SARA, "12 Tahrir St", 30.001, 31.001),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
-    let (cid, name, source) = customer_of_phone(&pool, s.org, SARA_KEY).await.expect("customer created");
+    let (cid, name, source) = customer_of_phone(&pool, s.org, SARA_KEY)
+        .await
+        .expect("customer created");
     assert_eq!((name.as_str(), source.as_str()), ("Sara", "online"));
-    assert_eq!(d["customer_id"], json!(cid), "the delivery order response names the customer");
+    assert_eq!(
+        d["customer_id"],
+        json!(cid),
+        "the delivery order response names the customer"
+    );
     assert_eq!(d["contact_override"], json!(false));
     assert!(d["address_id"].is_string(), "the address was saved: {d}");
 
     // The same person again, typing a different name: matched, NOT renamed.
-    let (st, d2) = place(&app, &outside_order(&s, "Sara Mostafa", "+20 100 000 0000", "12 Tahrir St", 30.001, 31.001)).await;
+    let (st, d2) = place(
+        &app,
+        &outside_order(
+            &s,
+            "Sara Mostafa",
+            "+20 100 000 0000",
+            "12 Tahrir St",
+            30.001,
+            31.001,
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d2}");
     assert_eq!(d2["customer_id"], json!(cid));
-    assert_eq!(d2["customer_name"], "Sara Mostafa", "the snapshot is what was typed");
-    assert_eq!(customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1, "Sara", "the stored name never moves");
+    assert_eq!(
+        d2["customer_name"], "Sara Mostafa",
+        "the snapshot is what was typed"
+    );
+    assert_eq!(
+        customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1,
+        "Sara",
+        "the stored name never moves"
+    );
     assert_eq!(i64_of(&pool, "SELECT count(*) FROM customers").await, 1);
 
     // Finalize → the sale belongs to the same customer, and says so over REST.
     let id = d["id"].as_str().unwrap();
     let (st, f) = send(
         &app,
-        auth(test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")), &teller_token(s.teller, s.org, s.branch))
-            .set_json(json!({ "shift_id": s.till, "payment_method": "cash" })),
+        auth(
+            test::TestRequest::post().uri(&format!("/delivery-orders/{id}/finalize")),
+            &teller_token(s.teller, s.org, s.branch),
+        )
+        .set_json(json!({ "shift_id": s.till, "payment_method": "cash" })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "finalize: {f}");
@@ -274,10 +331,25 @@ async fn a_delivery_order_links_its_customer_and_so_does_its_sale(pool: PgPool) 
         .await
         .unwrap();
     assert_eq!(on_row, Some(cid));
-    let (st, o) = send(&app, auth(test::TestRequest::get().uri(&format!("/orders/{order_id}")), &admin_token(s.admin, s.org))).await;
+    let (st, o) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/orders/{order_id}")),
+            &admin_token(s.admin, s.org),
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{o}");
-    let got = o.get("customer_id").or_else(|| o["order"].get("customer_id")).cloned().unwrap_or(Value::Null);
-    assert_eq!(got, json!(cid), "GET /orders/{{id}} carries customer_id: {o}");
+    let got = o
+        .get("customer_id")
+        .or_else(|| o["order"].get("customer_id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(
+        got,
+        json!(cid),
+        "GET /orders/{{id}} carries customer_id: {o}"
+    );
 }
 
 /// Two first orders from one new phone at the same moment: one customer.
@@ -292,7 +364,10 @@ async fn two_first_orders_from_one_new_phone_make_one_customer(pool: PgPool) {
     assert_eq!(rb.0, StatusCode::CREATED, "{}", rb.1);
     assert_eq!(ra.1["customer_id"], rb.1["customer_id"]);
     assert_eq!(i64_of(&pool, "SELECT count(*) FROM customers").await, 1);
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM customer_addresses").await, 2);
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM customer_addresses").await,
+        2
+    );
 }
 
 /// A host booking and a public-style booking link the customer; the stored
@@ -303,24 +378,41 @@ async fn a_booking_links_its_customer_and_never_renames_them(pool: PgPool) {
     let app = app!(pool);
     let tok = admin_token(s.admin, s.org);
     let at = chrono::Utc::now() + chrono::Duration::days(1);
-    let body = |name: &str| json!({
-        "branch_id": s.branch, "party_size": 2, "starts_at": at, "guest_name": name,
-        "guest_phone": "0100 000 0000", "force": true, "table_ids": [], "send_confirmation": false
-    });
-    let (st, b) = send(&app, auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(body("Sara"))).await;
+    let body = |name: &str| {
+        json!({
+            "branch_id": s.branch, "party_size": 2, "starts_at": at, "guest_name": name,
+            "guest_phone": "0100 000 0000", "force": true, "table_ids": [], "send_confirmation": false
+        })
+    };
+    let (st, b) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(body("Sara")),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{b}");
     let (cid, _, source) = customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap();
     assert_eq!(source, "booking");
-    assert_eq!(b["customer_id"], json!(cid), "the booking response names the customer: {b}");
+    assert_eq!(
+        b["customer_id"],
+        json!(cid),
+        "the booking response names the customer: {b}"
+    );
 
     let at2 = at + chrono::Duration::hours(3);
     let mut again = body("S. Mostafa");
     again["starts_at"] = json!(at2);
-    let (st, b2) = send(&app, auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(again)).await;
+    let (st, b2) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(again),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{b2}");
     assert_eq!(b2["customer_id"], json!(cid));
     assert_eq!(b2["guest_name"], "S. Mostafa");
-    assert_eq!(customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1, "Sara");
+    assert_eq!(
+        customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1,
+        "Sara"
+    );
 }
 
 /// A table-QR guest who gives a phone is linked; one who gives a bad phone (or
@@ -332,51 +424,84 @@ async fn a_table_order_with_a_phone_links_the_bill_and_the_sale(pool: PgPool) {
     let table = Uuid::new_v4();
     let other = Uuid::new_v4();
     for (id, label) in [(table, "T1"), (other, "T2")] {
-        sqlx::query("INSERT INTO branch_tables (id, org_id, branch_id, label) VALUES ($1,$2,$3,$4)")
-            .bind(id)
-            .bind(s.org)
-            .bind(s.branch)
-            .bind(label)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-    let order = |t: Uuid, phone: Value| json!({
-        "table_id": t, "customer_name": "Sara", "customer_phone": phone,
-        "idempotency_key": Uuid::new_v4(), "items": [{ "menu_item_id": s.item, "quantity": 1 }]
-    });
-    let (st, v) = send(&app, test::TestRequest::post().uri("/public/table-orders").set_json(order(table, json!(SARA)))).await;
-    assert!(st.is_success(), "{v}");
-    let ticket = u(v["id"].as_str().unwrap());
-    let (cid, _, source) = customer_of_phone(&pool, s.org, SARA_KEY).await.expect("customer");
-    assert_eq!(source, "table_qr");
-    let linked: Option<Uuid> = sqlx::query_scalar("SELECT customer_id FROM open_tickets WHERE id = $1")
-        .bind(ticket)
-        .fetch_one(&pool)
+        sqlx::query(
+            "INSERT INTO branch_tables (id, org_id, branch_id, label) VALUES ($1,$2,$3,$4)",
+        )
+        .bind(id)
+        .bind(s.org)
+        .bind(s.branch)
+        .bind(label)
+        .execute(&pool)
         .await
         .unwrap();
+    }
+    let order = |t: Uuid, phone: Value| {
+        json!({
+            "table_id": t, "customer_name": "Sara", "customer_phone": phone,
+            "idempotency_key": Uuid::new_v4(), "items": [{ "menu_item_id": s.item, "quantity": 1 }]
+        })
+    };
+    let (st, v) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(order(table, json!(SARA))),
+    )
+    .await;
+    assert!(st.is_success(), "{v}");
+    let ticket = u(v["id"].as_str().unwrap());
+    let (cid, _, source) = customer_of_phone(&pool, s.org, SARA_KEY)
+        .await
+        .expect("customer");
+    assert_eq!(source, "table_qr");
+    let linked: Option<Uuid> =
+        sqlx::query_scalar("SELECT customer_id FROM open_tickets WHERE id = $1")
+            .bind(ticket)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(linked, Some(cid));
 
     // A phone that is not a phone: the order goes through, unlinked.
-    let (st, v2) = send(&app, test::TestRequest::post().uri("/public/table-orders").set_json(order(other, json!("12345")))).await;
+    let (st, v2) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(order(other, json!("12345"))),
+    )
+    .await;
     assert!(st.is_success(), "a bad phone never refuses the order: {v2}");
     assert!(v2["customer_id"].is_null());
     assert_eq!(i64_of(&pool, "SELECT count(*) FROM customers").await, 1);
 
     // The ticket view (REST and therefore the sync projection) names them.
     let tok = teller_token(s.teller, s.org, s.branch);
-    let (st, view) = send(&app, auth(test::TestRequest::get().uri(&format!("/open-tickets/{ticket}")), &tok)).await;
+    let (st, view) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/open-tickets/{ticket}")),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{view}");
     assert_eq!(view["customer_id"], json!(cid));
 
     let (st, o) = send(
         &app,
-        auth(test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle")), &tok)
-            .set_json(json!({ "shift_id": s.till, "payment_method": "cash" })),
+        auth(
+            test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle")),
+            &tok,
+        )
+        .set_json(json!({ "shift_id": s.till, "payment_method": "cash" })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "settle: {o}");
-    assert_eq!(o["customer_id"], json!(cid), "the settled sale belongs to the bill's customer: {o}");
+    assert_eq!(
+        o["customer_id"],
+        json!(cid),
+        "the settled sale belongs to the bill's customer: {o}"
+    );
 }
 
 /// The source-text guard (design §3.7): a customer row is written in ONE place.
@@ -394,11 +519,16 @@ fn customers_are_inserted_only_by_the_customers_module() {
             }
         }
     }
-    let root = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
+    let root = std::env::var("CARGO_MANIFEST_DIR")
+        .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
     let src = std::path::Path::new(&root).join("src");
     let mut files = Vec::new();
     walk(&src, &mut files);
-    assert!(files.len() > 50, "the guard must actually be reading src/ ({} files at {src:?})", files.len());
+    assert!(
+        files.len() > 50,
+        "the guard must actually be reading src/ ({} files at {src:?})",
+        files.len()
+    );
     let needle = regex::Regex::new(r"(?i)insert\s+into\s+(public\.)?customers\b").unwrap();
     let offenders: Vec<String> = files
         .iter()
@@ -411,7 +541,10 @@ fn customers_are_inserted_only_by_the_customers_module() {
         })
         .map(|p| p.display().to_string())
         .collect();
-    assert!(offenders.is_empty(), "customers are created only through customers::resolve_or_create / insert_customer; found an INSERT in: {offenders:?}");
+    assert!(
+        offenders.is_empty(),
+        "customers are created only through customers::resolve_or_create / insert_customer; found an INSERT in: {offenders:?}"
+    );
     // And the guard can see the one that is allowed.
     assert!(needle.is_match(&std::fs::read_to_string(src.join("customers/handlers.rs")).unwrap()));
 }
@@ -428,10 +561,18 @@ async fn addresses_are_deduplicated_on_write_and_gated_for_staff(pool: PgPool) {
         assert_eq!(st, StatusCode::CREATED, "{d}");
     }
     // Different words, same unit, 11 m away → still the same place.
-    let (st, d) = place(&app, &outside_order(&s, "Sara", SARA, "Tahrir street twelve", 30.0011, 31.001)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara", SARA, "Tahrir street twelve", 30.0011, 31.001),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
     // Somewhere else entirely.
-    let (st, d) = place(&app, &outside_order(&s, "Sara", SARA, "9 Road 9, Maadi", 30.02, 31.02)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara", SARA, "9 Road 9, Maadi", 30.02, 31.02),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
     // An abandoned cart saves nothing: a refused order leaves no address.
     let mut bad = outside_order(&s, "Sara", SARA, "77 Nowhere", 10.0, 10.0);
@@ -439,22 +580,48 @@ async fn addresses_are_deduplicated_on_write_and_gated_for_staff(pool: PgPool) {
     let (st, _) = place(&app, &bad).await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "out of range");
 
-    let rows: Vec<(i32,)> = sqlx::query_as("SELECT use_count FROM customer_addresses ORDER BY use_count DESC")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+    let rows: Vec<(i32,)> =
+        sqlx::query_as("SELECT use_count FROM customer_addresses ORDER BY use_count DESC")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert_eq!(rows, vec![(3,), (1,)]);
 
     let (cid, ..) = customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap();
-    let (st, list) = send(&app, auth(test::TestRequest::get().uri(&format!("/customers/{cid}/addresses")), &admin_token(s.admin, s.org))).await;
+    let (st, list) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/customers/{cid}/addresses")),
+            &admin_token(s.admin, s.org),
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{list}");
     assert_eq!(list.as_array().unwrap().len(), 2);
-    assert_eq!(list[0]["address_line"], "9 Road 9, Maadi", "most recently used first");
+    assert_eq!(
+        list[0]["address_line"], "9 Road 9, Maadi",
+        "most recently used first"
+    );
 
     // A waiter does not hold customers.addresses.view.
     let waiter = seed_user(&pool, s.org, "waiter").await;
-    let wtok = create_token(&secret(), waiter, Some(s.org), UserRole::Waiter, Some(s.branch), 24).unwrap();
-    let (st, _) = send(&app, auth(test::TestRequest::get().uri(&format!("/customers/{cid}/addresses")), &wtok)).await;
+    let wtok = create_token(
+        &secret(),
+        waiter,
+        Some(s.org),
+        UserRole::Waiter,
+        Some(s.branch),
+        24,
+    )
+    .unwrap();
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/customers/{cid}/addresses")),
+            &wtok,
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
 
     // The public "past locations" reads the same rows, behind the device token.
@@ -502,35 +669,72 @@ async fn erase_leaves_no_personal_data_anywhere(pool: PgPool) {
         .await
         .unwrap();
     let member = seed_loyalty_member(&pool, s.org, SARA, NAME, "tok-erase-1").await;
-    let (st, d) = place(&app, &outside_order(&s, NAME, SARA, "12 Quillfeather Lane", 30.001, 31.001)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, NAME, SARA, "12 Quillfeather Lane", 30.001, 31.001),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
     assert_eq!(d["customer_id"], json!(member));
     let (st, f) = send(
         &app,
-        auth(test::TestRequest::post().uri(&format!("/delivery-orders/{}/finalize", d["id"].as_str().unwrap())), &teller_token(s.teller, s.org, s.branch))
-            .set_json(json!({ "shift_id": s.till, "payment_method": "cash" })),
+        auth(
+            test::TestRequest::post().uri(&format!(
+                "/delivery-orders/{}/finalize",
+                d["id"].as_str().unwrap()
+            )),
+            &teller_token(s.teller, s.org, s.branch),
+        )
+        .set_json(json!({ "shift_id": s.till, "payment_method": "cash" })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{f}");
     let at = chrono::Utc::now() + chrono::Duration::days(1);
-    let (st, b) = send(&app, auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(json!({
-        "branch_id": s.branch, "party_size": 2, "starts_at": at, "guest_name": NAME,
-        "guest_phone": SARA, "force": true, "table_ids": [], "send_confirmation": false
-    }))).await;
+    let (st, b) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/bookings"), &tok).set_json(json!({
+            "branch_id": s.branch, "party_size": 2, "starts_at": at, "guest_name": NAME,
+            "guest_phone": SARA, "force": true, "table_ids": [], "send_confirmation": false
+        })),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{b}");
 
     // A duplicate under another phone, with its own order — merged in.
-    let (st, d2) = place(&app, &outside_order(&s, DUP_NAME, DUP, "99 Duplicatus Road", 30.003, 31.003)).await;
+    let (st, d2) = place(
+        &app,
+        &outside_order(&s, DUP_NAME, DUP, "99 Duplicatus Road", 30.003, 31.003),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d2}");
     let dup_id = d2["customer_id"].as_str().unwrap().to_string();
-    let (st, m) = send(&app, auth(test::TestRequest::post().uri(&format!("/customers/{dup_id}/merge")), &tok).set_json(json!({ "into": member }))).await;
+    let (st, m) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/customers/{dup_id}/merge")),
+            &tok,
+        )
+        .set_json(json!({ "into": member })),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{m}");
     assert_eq!(
-        i64_of(&pool, &format!("SELECT count(*) FROM delivery_orders WHERE customer_id = '{member}'")).await,
+        i64_of(
+            &pool,
+            &format!("SELECT count(*) FROM delivery_orders WHERE customer_id = '{member}'")
+        )
+        .await,
         2,
         "the merge re-pointed the duplicate's delivery order"
     );
-    assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM customer_addresses WHERE customer_id = '{member}'")).await, 2);
+    assert_eq!(
+        i64_of(
+            &pool,
+            &format!("SELECT count(*) FROM customer_addresses WHERE customer_id = '{member}'")
+        )
+        .await,
+        2
+    );
     // An OTP row for their number.
     sqlx::query("INSERT INTO delivery_otp (phone, code, expires_at) VALUES ($1, '1234', now() + interval '5 minutes')")
         .bind(SARA_KEY)
@@ -545,8 +749,19 @@ async fn erase_leaves_no_personal_data_anywhere(pool: PgPool) {
         .await
         .unwrap();
 
-    let money_before = i64_of(&pool, "SELECT COALESCE(sum(total_amount),0)::bigint FROM orders").await;
-    let (st, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/customers/{member}/erase")), &tok)).await;
+    let money_before = i64_of(
+        &pool,
+        "SELECT COALESCE(sum(total_amount),0)::bigint FROM orders",
+    )
+    .await;
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/customers/{member}/erase")),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 
     // Every text-ish column of every table that carries an org_id, plus the
@@ -565,8 +780,21 @@ async fn erase_leaves_no_personal_data_anywhere(pool: PgPool) {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert!(cols.len() > 100, "the sweep must be reading the schema ({} columns)", cols.len());
-    let needles = [NAME, "Quillfeather", DUP_NAME, "Duplicatus", SARA_KEY, "1000000000", "201155566677", "1155566677"];
+    assert!(
+        cols.len() > 100,
+        "the sweep must be reading the schema ({} columns)",
+        cols.len()
+    );
+    let needles = [
+        NAME,
+        "Quillfeather",
+        DUP_NAME,
+        "Duplicatus",
+        SARA_KEY,
+        "1000000000",
+        "201155566677",
+        "1155566677",
+    ];
     let mut hits = Vec::new();
     for (table, column) in &cols {
         for n in needles {
@@ -582,13 +810,34 @@ async fn erase_leaves_no_personal_data_anywhere(pool: PgPool) {
             }
         }
     }
-    assert!(hits.is_empty(), "erase left personal data behind:\n{}", hits.join("\n"));
+    assert!(
+        hits.is_empty(),
+        "erase left personal data behind:\n{}",
+        hits.join("\n")
+    );
 
     // Money and the ledger stay.
-    assert_eq!(i64_of(&pool, "SELECT COALESCE(sum(total_amount),0)::bigint FROM orders").await, money_before);
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM delivery_orders").await, 2);
+    assert_eq!(
+        i64_of(
+            &pool,
+            "SELECT COALESCE(sum(total_amount),0)::bigint FROM orders"
+        )
+        .await,
+        money_before
+    );
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM delivery_orders").await,
+        2
+    );
     assert_eq!(i64_of(&pool, "SELECT count(*) FROM bookings").await, 1);
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM loyalty_customers WHERE deleted_at IS NULL").await, 0);
+    assert_eq!(
+        i64_of(
+            &pool,
+            "SELECT count(*) FROM loyalty_customers WHERE deleted_at IS NULL"
+        )
+        .await,
+        0
+    );
     // The number is free again.
     assert!(customer_of_phone(&pool, s.org, SARA_KEY).await.is_none());
 }
@@ -600,7 +849,11 @@ async fn leaving_the_programme_keeps_the_customer(pool: PgPool) {
     let app = app!(pool);
     let tok = admin_token(s.admin, s.org);
     let member = seed_loyalty_member(&pool, s.org, SARA, "Sara", "tok-leave-1").await;
-    let (st, d) = place(&app, &outside_order(&s, "Sara", SARA, "12 Tahrir St", 30.001, 31.001)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara", SARA, "12 Tahrir St", 30.001, 31.001),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
     sqlx::query("INSERT INTO loyalty_pass_cache (customer_id, org_id, kind, bytes, fingerprint) VALUES ($1,$2,'apple','x','f')")
         .bind(member)
@@ -609,16 +862,28 @@ async fn leaving_the_programme_keeps_the_customer(pool: PgPool) {
         .await
         .unwrap();
 
-    let (st, _) = send(&app, auth(test::TestRequest::delete().uri(&format!("/loyalty/members/{member}")), &tok)).await;
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::delete().uri(&format!("/loyalty/members/{member}")),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 
-    let (name, phone, erased): (String, Option<String>, bool) =
-        sqlx::query_as("SELECT name, phone_key, erased_at IS NOT NULL FROM customers WHERE id = $1")
-            .bind(member)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!((name.as_str(), phone.as_deref(), erased), ("Sara", Some(SARA_KEY), false), "the customer is untouched");
+    let (name, phone, erased): (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT name, phone_key, erased_at IS NOT NULL FROM customers WHERE id = $1",
+    )
+    .bind(member)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (name.as_str(), phone.as_deref(), erased),
+        ("Sara", Some(SARA_KEY), false),
+        "the customer is untouched"
+    );
     assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM delivery_orders WHERE customer_id = '{member}' AND customer_name = 'Sara'")).await, 1);
     assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM customer_addresses WHERE customer_id = '{member}' AND erased_at IS NULL")).await, 1);
     let (deleted, voided, token): (bool, bool, String) = sqlx::query_as(
@@ -630,14 +895,36 @@ async fn leaving_the_programme_keeps_the_customer(pool: PgPool) {
     .unwrap();
     assert!(deleted && voided);
     assert_ne!(token, "tok-leave-1", "the old barcode resolves to nobody");
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM loyalty_pass_cache").await, 0, "the stored pass is gone");
-    let (st, _) = send(&app, test::TestRequest::get().uri("/public/loyalty/card/tok-leave-1")).await;
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM loyalty_pass_cache").await,
+        0,
+        "the stored pass is gone"
+    );
+    let (st, _) = send(
+        &app,
+        test::TestRequest::get().uri("/public/loyalty/card/tok-leave-1"),
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    let (st, c) = send(&app, auth(test::TestRequest::get().uri(&format!("/customers/{member}")), &tok)).await;
+    let (st, c) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/customers/{member}")),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(c["customer"]["is_member"], json!(false));
     // Twice is not a failure.
-    let (st, _) = send(&app, auth(test::TestRequest::delete().uri(&format!("/loyalty/members/{member}")), &tok)).await;
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::delete().uri(&format!("/loyalty/members/{member}")),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 }
 
@@ -663,13 +950,27 @@ async fn a_retired_card_is_served_voided_not_404(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let (st, _) = send(&app, auth(test::TestRequest::delete().uri(&format!("/loyalty/members/{member}")), &admin_token(s.admin, s.org))).await;
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::delete().uri(&format!("/loyalty/members/{member}")),
+            &admin_token(s.admin, s.org),
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT);
 
     // The device registration and the auth token outlive the membership …
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM loyalty_pass_devices").await, 1);
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM loyalty_pass_devices").await,
+        1
+    );
     // … the serial is reported as changed …
-    let (st, serials) = send(&app, test::TestRequest::get().uri("/wallet/v1/devices/dev-1/registrations/pass.test")).await;
+    let (st, serials) = send(
+        &app,
+        test::TestRequest::get().uri("/wallet/v1/devices/dev-1/registrations/pass.test"),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{serials}");
     assert_eq!(serials["serialNumbers"], json!([member.to_string()]));
     // … and the pass endpoint authenticates the retired card instead of 404ing.
@@ -703,7 +1004,14 @@ async fn a_retired_card_is_served_voided_not_404(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let (st, _) = send(&app, auth(test::TestRequest::post().uri(&format!("/customers/{erased}/erase")), &admin_token(s.admin, s.org))).await;
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/customers/{erased}/erase")),
+            &admin_token(s.admin, s.org),
+        ),
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     let (st, _) = send(
         &app,
@@ -712,7 +1020,10 @@ async fn a_retired_card_is_served_voided_not_404(pool: PgPool) {
             .insert_header(("Authorization", "ApplePass other-secret")),
     )
     .await;
-    assert!(st == StatusCode::NOT_FOUND || st == StatusCode::UNAUTHORIZED, "{st}");
+    assert!(
+        st == StatusCode::NOT_FOUND || st == StatusCode::UNAUTHORIZED,
+        "{st}"
+    );
 }
 
 // ── F: order now ────────────────────────────────────────────────────────────
@@ -724,28 +1035,63 @@ async fn order_now_is_masked_without_the_device_and_full_with_it(pool: PgPool) {
     let s = shop(&pool, false).await;
     let app = app!(pool);
     let member = seed_loyalty_member(&pool, s.org, SARA, "Sara Mostafa", "tok-now-1").await;
-    let (st, d) = place(&app, &outside_order(&s, "Sara Mostafa", SARA, "12 Tahrir St", 30.001, 31.001)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara Mostafa", SARA, "12 Tahrir St", 30.001, 31.001),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
 
-    let (st, masked) = send(&app, test::TestRequest::get().uri("/public/order-now/tok-now-1")).await;
+    let (st, masked) = send(
+        &app,
+        test::TestRequest::get().uri("/public/order-now/tok-now-1"),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{masked}");
     assert_eq!(masked["verify_required"], json!(true));
     assert_eq!(masked["first_name"], "Sara");
     assert_eq!(masked["phone_hint"], "•••• 0000");
     assert_eq!(masked["last_branch_name"], "Maadi");
     let text = masked.to_string();
-    for secret_bit in [SARA_KEY, "1000000000", "Mostafa", "Tahrir", "addresses", "customer_id", &member.to_string(), &s.branch.to_string(), "30.001"] {
-        assert!(!text.contains(secret_bit), "the masked context leaks {secret_bit:?}: {text}");
+    for secret_bit in [
+        SARA_KEY,
+        "1000000000",
+        "Mostafa",
+        "Tahrir",
+        "addresses",
+        "customer_id",
+        &member.to_string(),
+        &s.branch.to_string(),
+        "30.001",
+    ] {
+        assert!(
+            !text.contains(secret_bit),
+            "the masked context leaks {secret_bit:?}: {text}"
+        );
     }
     assert!(masked.get("full").is_none());
 
     // A device token for SOMEONE ELSE's phone is no better than none.
-    let (st, other) = send(&app, test::TestRequest::get().uri(&format!("/public/order-now/tok-now-1?device_token={}", device_token("01155566677")))).await;
+    let (st, other) = send(
+        &app,
+        test::TestRequest::get().uri(&format!(
+            "/public/order-now/tok-now-1?device_token={}",
+            device_token("01155566677")
+        )),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(other["verify_required"], json!(true));
     assert!(other.get("full").is_none());
 
-    let (st, full) = send(&app, test::TestRequest::get().uri(&format!("/public/order-now/tok-now-1?device_token={}", device_token(SARA)))).await;
+    let (st, full) = send(
+        &app,
+        test::TestRequest::get().uri(&format!(
+            "/public/order-now/tok-now-1?device_token={}",
+            device_token(SARA)
+        )),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{full}");
     assert_eq!(full["verify_required"], json!(false));
     let f = &full["full"];
@@ -771,9 +1117,16 @@ async fn order_now_flags_a_stale_branch_and_a_stale_address(pool: PgPool) {
     let app = app!(pool);
     seed_loyalty_member(&pool, s.org, SARA, "Sara", "tok-now-2").await;
     // ~2.2 km from the branch.
-    let (st, d) = place(&app, &outside_order(&s, "Sara", SARA, "Far Street", 30.02, 31.0)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara", SARA, "Far Street", 30.02, 31.0),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
-    let uri = format!("/public/order-now/tok-now-2?device_token={}", device_token(SARA));
+    let uri = format!(
+        "/public/order-now/tok-now-2?device_token={}",
+        device_token(SARA)
+    );
 
     // The shop shrinks its delivery ring to 1 km and closes the channel.
     sqlx::query("UPDATE delivery_zones SET max_road_distance_meters = 1000 WHERE branch_id = $1")
@@ -784,17 +1137,25 @@ async fn order_now_flags_a_stale_branch_and_a_stale_address(pool: PgPool) {
     let (_, full) = send(&app, test::TestRequest::get().uri(&uri)).await;
     assert_eq!(full["full"]["addresses"][0]["stale"], json!(true), "{full}");
     assert_eq!(full["full"]["addresses"][0]["stale_reason"], "out_of_zone");
-    assert_eq!(full["full"]["addresses"][0]["address_line"], "Far Street", "kept, not dropped");
+    assert_eq!(
+        full["full"]["addresses"][0]["address_line"], "Far Street",
+        "kept, not dropped"
+    );
     assert_eq!(full["full"]["last_branch"]["stale"], json!(false));
 
-    sqlx::query("UPDATE branch_delivery_settings SET outside_override = 'closed' WHERE branch_id = $1")
-        .bind(s.branch)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE branch_delivery_settings SET outside_override = 'closed' WHERE branch_id = $1",
+    )
+    .bind(s.branch)
+    .execute(&pool)
+    .await
+    .unwrap();
     let (_, full) = send(&app, test::TestRequest::get().uri(&uri)).await;
     assert_eq!(full["full"]["last_branch"]["stale"], json!(true), "{full}");
-    assert_eq!(full["full"]["last_branch"]["stale_reason"], "channel_closed");
+    assert_eq!(
+        full["full"]["last_branch"]["stale_reason"],
+        "channel_closed"
+    );
 
     sqlx::query("UPDATE branches SET is_active = false WHERE id = $1")
         .bind(s.branch)
@@ -802,8 +1163,14 @@ async fn order_now_flags_a_stale_branch_and_a_stale_address(pool: PgPool) {
         .await
         .unwrap();
     let (_, full) = send(&app, test::TestRequest::get().uri(&uri)).await;
-    assert_eq!(full["full"]["last_branch"]["stale_reason"], "branch_unavailable");
-    assert_eq!(full["full"]["addresses"][0]["stale_reason"], "branch_unavailable");
+    assert_eq!(
+        full["full"]["last_branch"]["stale_reason"],
+        "branch_unavailable"
+    );
+    assert_eq!(
+        full["full"]["addresses"][0]["stale_reason"],
+        "branch_unavailable"
+    );
 }
 
 /// §4.4 at order create: the server classifies the typed contact.
@@ -837,22 +1204,42 @@ async fn ordering_from_a_card_classifies_the_typed_identity(pool: PgPool) {
     assert_eq!(st, StatusCode::CONFLICT, "{e}");
     assert_eq!(e["code"], "IDENTITY_CHOICE_REQUIRED");
     assert_eq!(e["kind"], "phone");
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM delivery_orders").await, 1, "nothing was placed");
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM delivery_orders").await,
+        1,
+        "nothing was placed"
+    );
 
     // One-time, at a branch that requires OTP: the snapshot phone needs proof.
     let mut one = card_order("Omar", FRIEND, "2 B St");
     one["identity_change"] = json!("one_time");
     let (st, _) = place(&app, &one).await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED, "the branch's OTP rule applies to the number the driver calls");
+    assert_eq!(
+        st,
+        StatusCode::UNAUTHORIZED,
+        "the branch's OTP rule applies to the number the driver calls"
+    );
     one["contact_device_token"] = json!(device_token(FRIEND));
     let (st, d) = place(&app, &one).await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
-    assert_eq!(d["customer_id"], json!(member), "the order stays the card owner's");
+    assert_eq!(
+        d["customer_id"],
+        json!(member),
+        "the order stays the card owner's"
+    );
     assert_eq!(d["customer_name"], "Omar");
     assert_eq!(d["customer_phone"], "201155566677");
     assert_eq!(d["contact_override"], json!(true));
-    assert!(d["address_id"].is_null(), "someone else's address is not saved by default");
-    assert!(customer_of_phone(&pool, s.org, "201155566677").await.is_none(), "and no customer is made of the friend");
+    assert!(
+        d["address_id"].is_null(),
+        "someone else's address is not saved by default"
+    );
+    assert!(
+        customer_of_phone(&pool, s.org, "201155566677")
+            .await
+            .is_none(),
+        "and no customer is made of the friend"
+    );
 
     // … unless they tick "save this address".
     let mut keep = card_order("Omar", FRIEND, "3 C St");
@@ -868,14 +1255,20 @@ async fn ordering_from_a_card_classifies_the_typed_identity(pool: PgPool) {
     assert_eq!(st, StatusCode::CREATED, "{d}");
     assert_eq!(d["customer_name"], "Sara Mostafa");
     assert_eq!(d["contact_override"], json!(false));
-    assert_eq!(customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1, "Sara");
+    assert_eq!(
+        customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1,
+        "Sara"
+    );
 
     // update_name: the stored name changes, audited as the customer's own act.
     let mut rename = card_order("Sara Mostafa", SARA, "1 A St");
     rename["identity_change"] = json!("update_name");
     let (st, d) = place(&app, &rename).await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
-    assert_eq!(customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1, "Sara Mostafa");
+    assert_eq!(
+        customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().1,
+        "Sara Mostafa"
+    );
     assert_eq!(
         i64_of(&pool, "SELECT count(*) FROM customer_identity_audit WHERE kind = 'name' AND actor_kind = 'customer' AND old_value = 'Sara' AND new_value = 'Sara Mostafa'").await,
         1
@@ -909,15 +1302,27 @@ async fn replacing_identity_needs_both_phones_and_is_rate_limited(pool: PgPool) 
     assert_eq!(st, StatusCode::UNAUTHORIZED);
     let (st, _) = send(&app, replace(NEW1, NEW1, &device_token(NEW1))).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
-    assert_eq!(customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().0, member);
+    assert_eq!(
+        customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().0,
+        member
+    );
 
     let (st, r) = send(&app, replace(SARA, NEW1, &device_token(NEW1))).await;
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["customer_id"], json!(member), "same id");
     assert_eq!(r["phone_hint"], "•••• 6677");
     let text = r.to_string();
-    assert!(!text.contains("201155566677") && !text.contains("device_token"), "nothing secret comes back: {text}");
-    assert_eq!(customer_of_phone(&pool, s.org, "201155566677").await.unwrap().0, member);
+    assert!(
+        !text.contains("201155566677") && !text.contains("device_token"),
+        "nothing secret comes back: {text}"
+    );
+    assert_eq!(
+        customer_of_phone(&pool, s.org, "201155566677")
+            .await
+            .unwrap()
+            .0,
+        member
+    );
     assert!(customer_of_phone(&pool, s.org, SARA_KEY).await.is_none());
     assert_eq!(
         i64_of(&pool, &format!("SELECT count(*) FROM customer_phone_history WHERE customer_id = '{member}' AND phone_key = '{SARA_KEY}' AND reason = 'self' AND replaced_by IS NULL")).await,
@@ -926,9 +1331,23 @@ async fn replacing_identity_needs_both_phones_and_is_rate_limited(pool: PgPool) 
     assert_eq!(i64_of(&pool, "SELECT count(*) FROM customer_identity_audit WHERE kind = 'phone' AND actor_kind = 'customer' AND actor_user IS NULL").await, 1);
 
     // The OLD phone's device no longer unlocks this customer.
-    let (_, ctx) = send(&app, test::TestRequest::get().uri(&format!("/public/order-now/tok-rep-1?device_token={}", device_token(SARA)))).await;
+    let (_, ctx) = send(
+        &app,
+        test::TestRequest::get().uri(&format!(
+            "/public/order-now/tok-rep-1?device_token={}",
+            device_token(SARA)
+        )),
+    )
+    .await;
     assert_eq!(ctx["verify_required"], json!(true));
-    let (_, ctx) = send(&app, test::TestRequest::get().uri(&format!("/public/order-now/tok-rep-1?device_token={}", device_token(NEW1)))).await;
+    let (_, ctx) = send(
+        &app,
+        test::TestRequest::get().uri(&format!(
+            "/public/order-now/tok-rep-1?device_token={}",
+            device_token(NEW1)
+        )),
+    )
+    .await;
     assert_eq!(ctx["verify_required"], json!(false));
 
     // A second is allowed; a third within 30 days is not.
@@ -976,55 +1395,117 @@ async fn combining_two_profiles_keeps_the_pass_holder(pool: PgPool) {
         .unwrap();
     }
     // The other profile has an order and an address of its own.
-    let (st, d) = place(&app, &outside_order(&s, "Sara M", OTHER, "5 Other St", 30.001, 31.001)).await;
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara M", OTHER, "5 Other St", 30.001, 31.001),
+    )
+    .await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
     assert_eq!(d["customer_id"], json!(other));
 
     let body = json!({ "device_token": device_token(SARA), "new_phone": OTHER, "new_phone_device_token": device_token(OTHER) });
-    let (st, e) = send(&app, test::TestRequest::post().uri("/public/order-now/tok-comb-me/replace-identity").set_json(&body)).await;
+    let (st, e) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/order-now/tok-comb-me/replace-identity")
+            .set_json(&body),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT, "{e}");
     assert_eq!(e["code"], "PHONE_BELONGS_TO_ANOTHER");
     assert_eq!(e["can_combine"], json!(true));
-    assert_eq!(customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().0, me, "declining leaves both untouched");
-    assert_eq!(customer_of_phone(&pool, s.org, OTHER_KEY).await.unwrap().0, other);
+    assert_eq!(
+        customer_of_phone(&pool, s.org, SARA_KEY).await.unwrap().0,
+        me,
+        "declining leaves both untouched"
+    );
+    assert_eq!(
+        customer_of_phone(&pool, s.org, OTHER_KEY).await.unwrap().0,
+        other
+    );
 
     // Combining needs the same two proofs.
     let mut weak = body.clone();
     weak["new_phone_device_token"] = json!("garbage");
-    let (st, _) = send(&app, test::TestRequest::post().uri("/public/order-now/tok-comb-me/combine").set_json(&weak)).await;
+    let (st, _) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/order-now/tok-comb-me/combine")
+            .set_json(&weak),
+    )
+    .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 
-    let (st, r) = send(&app, test::TestRequest::post().uri("/public/order-now/tok-comb-me/combine").set_json(&body)).await;
+    let (st, r) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/order-now/tok-comb-me/combine")
+            .set_json(&body),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["customer_id"], json!(me), "the pass holder survives");
     assert_eq!(r["combined"], json!(true));
-    let merged_into: Option<Uuid> = sqlx::query_scalar("SELECT merged_into FROM customers WHERE id = $1")
-        .bind(other)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let merged_into: Option<Uuid> =
+        sqlx::query_scalar("SELECT merged_into FROM customers WHERE id = $1")
+            .bind(other)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(merged_into, Some(me));
     // Both were members: the balance crossed, the other card is retired + aliased.
-    let balance: i32 = sqlx::query_scalar("SELECT points_balance FROM loyalty_customers WHERE id = $1")
-        .bind(me)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let balance: i32 =
+        sqlx::query_scalar("SELECT points_balance FROM loyalty_customers WHERE id = $1")
+            .bind(me)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(balance, 80);
     assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM loyalty_customers WHERE id = '{other}' AND deleted_at IS NOT NULL AND pass_voided_at IS NOT NULL")).await, 1);
-    let (st, card) = send(&app, test::TestRequest::get().uri("/public/order-now/tok-comb-other")).await;
-    assert_eq!(st, StatusCode::OK, "the retired card's token resolves to the survivor: {card}");
+    let (st, card) = send(
+        &app,
+        test::TestRequest::get().uri("/public/order-now/tok-comb-other"),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "the retired card's token resolves to the survivor: {card}"
+    );
     // "This is my new number": it is THE number now; the old one is history.
-    assert_eq!(customer_of_phone(&pool, s.org, OTHER_KEY).await.unwrap().0, me);
+    assert_eq!(
+        customer_of_phone(&pool, s.org, OTHER_KEY).await.unwrap().0,
+        me
+    );
     assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM customer_phone_history WHERE customer_id = '{me}' AND phone_key = '{SARA_KEY}'")).await, 1);
     assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM customer_phone_history WHERE customer_id = '{me}' AND phone_key = '{OTHER_KEY}'")).await, 0);
     // Orders and addresses followed.
-    assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM delivery_orders WHERE customer_id = '{me}'")).await, 1);
-    assert_eq!(i64_of(&pool, &format!("SELECT count(*) FROM customer_addresses WHERE customer_id = '{me}'")).await, 1);
+    assert_eq!(
+        i64_of(
+            &pool,
+            &format!("SELECT count(*) FROM delivery_orders WHERE customer_id = '{me}'")
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        i64_of(
+            &pool,
+            &format!("SELECT count(*) FROM customer_addresses WHERE customer_id = '{me}'")
+        )
+        .await,
+        1
+    );
 
     // Locked for 24 h after a merge.
     let again = json!({ "device_token": device_token(OTHER), "new_phone": "01222333444", "new_phone_device_token": device_token("01222333444") });
-    let (st, e) = send(&app, test::TestRequest::post().uri("/public/order-now/tok-comb-me/replace-identity").set_json(&again)).await;
+    let (st, e) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/order-now/tok-comb-me/replace-identity")
+            .set_json(&again),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT, "{e}");
     assert_eq!(e["code"], "IDENTITY_LOCKED_AFTER_MERGE");
 }
@@ -1036,14 +1517,22 @@ async fn a_double_tap_places_one_order(pool: PgPool) {
     let app = app!(pool);
     let key = Uuid::new_v4().to_string();
     let body = outside_order(&s, "Sara", SARA, "12 Tahrir St", 30.001, 31.001);
-    let req = || test::TestRequest::post().uri("/public/delivery-orders").insert_header(("Idempotency-Key", key.clone())).set_json(&body);
+    let req = || {
+        test::TestRequest::post()
+            .uri("/public/delivery-orders")
+            .insert_header(("Idempotency-Key", key.clone()))
+            .set_json(&body)
+    };
     let (a, b) = futures::join!(send(&app, req()), send(&app, req()));
     assert!(a.0.is_success() && b.0.is_success(), "{} / {}", a.1, b.1);
     assert_eq!(a.1["id"], b.1["id"]);
     let (st, c) = send(&app, req()).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(c["id"], a.1["id"]);
-    assert_eq!(i64_of(&pool, "SELECT count(*) FROM delivery_orders").await, 1);
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM delivery_orders").await,
+        1
+    );
 }
 
 /// The link on the card: only with a public ordering base AND a shop that takes
@@ -1054,18 +1543,33 @@ async fn the_order_now_link_follows_the_env_and_the_shop(pool: PgPool) {
     let quiet = seed_org(&pool).await; // no ordering channel anywhere
     let me = seed_loyalty_member(&pool, s.org, SARA, "Sara", "tok-link-1").await;
     let them = seed_loyalty_member(&pool, quiet, SARA, "Sara", "tok-link-2").await;
-    let me = madar_rust::loyalty::model::find_by_id(&pool, me).await.unwrap().unwrap();
-    let them = madar_rust::loyalty::model::find_by_id(&pool, them).await.unwrap().unwrap();
+    let me = madar_rust::loyalty::model::find_by_id(&pool, me)
+        .await
+        .unwrap()
+        .unwrap();
+    let them = madar_rust::loyalty::model::find_by_id(&pool, them)
+        .await
+        .unwrap()
+        .unwrap();
 
     // SAFETY: this suite's only test that touches the variable.
     unsafe { std::env::remove_var("PUBLIC_ORDER_BASE_URL") };
-    assert_eq!(madar_rust::loyalty::wallet::order_now_for(&pool, &me).await, None);
+    assert_eq!(
+        madar_rust::loyalty::wallet::order_now_for(&pool, &me).await,
+        None
+    );
     unsafe { std::env::set_var("PUBLIC_ORDER_BASE_URL", "https://order.example/") };
     assert_eq!(
-        madar_rust::loyalty::wallet::order_now_for(&pool, &me).await.as_deref(),
+        madar_rust::loyalty::wallet::order_now_for(&pool, &me)
+            .await
+            .as_deref(),
         Some("https://order.example/now/tok-link-1")
     );
-    assert_eq!(madar_rust::loyalty::wallet::order_now_for(&pool, &them).await, None, "a shop with no online ordering gets no link");
+    assert_eq!(
+        madar_rust::loyalty::wallet::order_now_for(&pool, &them).await,
+        None,
+        "a shop with no online ordering gets no link"
+    );
 
     // First on the back of the card; Google gets it as a button instead.
     let settings = madar_rust::loyalty::settings::LoyaltySettings::defaults(s.org, None);
@@ -1075,20 +1579,34 @@ async fn the_order_now_link_follows_the_env_and_the_shop(pool: PgPool) {
     assert_eq!(back[0].key, "ordernow");
     assert_eq!(back[0].value, "https://order.example/now/tok-link-1");
     copy.order_now_url = None;
-    assert_eq!(madar_rust::loyalty::wallet::back_of_card(&me, &settings, &copy)[0].key, "howitworks");
+    assert_eq!(
+        madar_rust::loyalty::wallet::back_of_card(&me, &settings, &copy)[0].key,
+        "howitworks"
+    );
 
     // The public card carries it.
     let app = app!(pool);
-    let (st, card) = send(&app, test::TestRequest::get().uri("/public/loyalty/card/tok-link-1")).await;
+    let (st, card) = send(
+        &app,
+        test::TestRequest::get().uri("/public/loyalty/card/tok-link-1"),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{card}");
-    assert_eq!(card["order_now_url"], "https://order.example/now/tok-link-1");
+    assert_eq!(
+        card["order_now_url"],
+        "https://order.example/now/tok-link-1"
+    );
     // Switching ordering off removes it.
     sqlx::query("UPDATE branch_delivery_settings SET in_mall_enabled = false, outside_enabled = false WHERE branch_id = $1")
         .bind(s.branch)
         .execute(&pool)
         .await
         .unwrap();
-    let (_, card) = send(&app, test::TestRequest::get().uri("/public/loyalty/card/tok-link-1")).await;
+    let (_, card) = send(
+        &app,
+        test::TestRequest::get().uri("/public/loyalty/card/tok-link-1"),
+    )
+    .await;
     assert!(card.get("order_now_url").is_none(), "{card}");
     unsafe { std::env::remove_var("PUBLIC_ORDER_BASE_URL") };
 }
@@ -1096,8 +1614,17 @@ async fn the_order_now_link_follows_the_env_and_the_shop(pool: PgPool) {
 // ── A: the seeded migration ─────────────────────────────────────────────────
 
 fn subset(pred: impl Fn(i64) -> bool) -> Migrator {
-    let migrations: Vec<_> = MIGRATOR.iter().filter(|m| pred(m.version)).cloned().collect();
-    Migrator { migrations: Cow::Owned(migrations), ignore_missing: true, locking: true, no_tx: false }
+    let migrations: Vec<_> = MIGRATOR
+        .iter()
+        .filter(|m| pred(m.version))
+        .cloned()
+        .collect();
+    Migrator {
+        migrations: Cow::Owned(migrations),
+        ignore_missing: true,
+        locking: true,
+        no_tx: false,
+    }
 }
 
 struct FreshDb {
@@ -1109,13 +1636,17 @@ impl Drop for FreshDb {
         let name = std::mem::take(&mut self.name);
         let opts = self.base.clone().database("postgres");
         let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async move {
                 use sqlx::Connection;
                 if let Ok(mut conn) = sqlx::PgConnection::connect_with(&opts).await {
-                    let _ = sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
-                        .execute(&mut conn)
-                        .await;
+                    let _ =
+                        sqlx::raw_sql(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+                            .execute(&mut conn)
+                            .await;
                 }
             });
         })
@@ -1143,9 +1674,14 @@ async fn fresh(pool: &PgPool) -> (PgPool, FreshDb) {
 async fn the_references_backfill_links_seeded_rows(pool: PgPool) {
     let (db, _guard) = fresh(&pool).await;
     for role in ["sufrix", "madar_app"] {
-        let _ = sqlx::raw_sql(&format!("CREATE ROLE {role} NOLOGIN")).execute(&db).await;
+        let _ = sqlx::raw_sql(&format!("CREATE ROLE {role} NOLOGIN"))
+            .execute(&db)
+            .await;
     }
-    subset(|v| v < REFERENCES).run(&db).await.expect("migrations before wave 2");
+    subset(|v| v < REFERENCES)
+        .run(&db)
+        .await
+        .expect("migrations before wave 2");
 
     let org = u("00000000-0000-4000-8000-0000000d0001");
     let org2 = u("00000000-0000-4000-8000-0000000d0009");
@@ -1175,12 +1711,40 @@ async fn the_references_backfill_links_seeded_rows(pool: PgPool) {
         .unwrap();
     // Delivery orders: (org, branch, name, phone, address, created days ago).
     let deliveries: [(Uuid, Uuid, &str, &str, Option<&str>, i32); 6] = [
-        (org, branch, "Omar typed differently", "201001234567", Some("1 Known St"), 9), // → known; name NOT adopted
-        (org, branch, "New Nadia", "201223334444", Some("7 Nadia St., Flat 2"), 8),      // → created, earliest name
-        (org, branch, "Nadia again", "201223334444", Some("7 nadia st flat 2"), 3),       // → same customer, same address
-        (org, branch, "Bad Phone", "12345", Some("3 Nowhere"), 5),                        // → no customer
-        (org2, branch2, "Other Org Nadia", "201223334444", Some("9 Elsewhere"), 4),       // → its own org's customer
-        (org, branch, "Pickup Pat", "201009998877", None, 2),                             // → customer, no address
+        (
+            org,
+            branch,
+            "Omar typed differently",
+            "201001234567",
+            Some("1 Known St"),
+            9,
+        ), // → known; name NOT adopted
+        (
+            org,
+            branch,
+            "New Nadia",
+            "201223334444",
+            Some("7 Nadia St., Flat 2"),
+            8,
+        ), // → created, earliest name
+        (
+            org,
+            branch,
+            "Nadia again",
+            "201223334444",
+            Some("7 nadia st flat 2"),
+            3,
+        ), // → same customer, same address
+        (org, branch, "Bad Phone", "12345", Some("3 Nowhere"), 5), // → no customer
+        (
+            org2,
+            branch2,
+            "Other Org Nadia",
+            "201223334444",
+            Some("9 Elsewhere"),
+            4,
+        ), // → its own org's customer
+        (org, branch, "Pickup Pat", "201009998877", None, 2),      // → customer, no address
     ];
     let mut ids = Vec::new();
     for (i, (o, b, name, phone, addr, days)) in deliveries.iter().enumerate() {
@@ -1238,7 +1802,10 @@ async fn the_references_backfill_links_seeded_rows(pool: PgPool) {
     .await
     .expect("seed bookings");
 
-    subset(|v| v >= REFERENCES).run(&db).await.expect("the wave-2 migrations");
+    subset(|v| v >= REFERENCES)
+        .run(&db)
+        .await
+        .expect("the wave-2 migrations");
 
     let cust = |key: &'static str, o: Uuid| {
         let db = db.clone();
@@ -1256,61 +1823,125 @@ async fn the_references_backfill_links_seeded_rows(pool: PgPool) {
     let link = |table: &'static str, col: &'static str, val: String| {
         let db = db.clone();
         async move {
-            sqlx::query_scalar::<_, Option<Uuid>>(&format!("SELECT customer_id FROM {table} WHERE {col} = $1"))
-                .bind(val)
+            sqlx::query_scalar::<_, Option<Uuid>>(&format!(
+                "SELECT customer_id FROM {table} WHERE {col} = $1"
+            ))
+            .bind(val)
+            .fetch_one(&db)
+            .await
+            .unwrap()
+        }
+    };
+
+    // An existing customer is matched and keeps their name.
+    assert_eq!(
+        link(
+            "delivery_orders",
+            "customer_name",
+            "Omar typed differently".into()
+        )
+        .await,
+        Some(known)
+    );
+    assert_eq!(cust("201001234567", org).await.unwrap().1, "Known Omar");
+    // A new phone makes ONE customer, named as on first contact, source online.
+    let (nadia, name, source) = cust("201223334444", org).await.expect("nadia");
+    assert_eq!((name.as_str(), source.as_str()), ("New Nadia", "online"));
+    assert_eq!(
+        link("delivery_orders", "customer_name", "Nadia again".into()).await,
+        Some(nadia)
+    );
+    assert_eq!(
+        link("bookings", "guest_name", "Nadia books".into()).await,
+        Some(nadia),
+        "the booking finds the online customer"
+    );
+    // Tenants do not share people.
+    let (nadia2, ..) = cust("201223334444", org2).await.expect("other org's nadia");
+    assert_ne!(nadia, nadia2);
+    assert_eq!(
+        link("delivery_orders", "customer_name", "Other Org Nadia".into()).await,
+        Some(nadia2)
+    );
+    // A phone that fails the rule makes no customer.
+    assert_eq!(
+        link("delivery_orders", "customer_name", "Bad Phone".into()).await,
+        None
+    );
+    assert_eq!(
+        link("bookings", "guest_name", "No Phone".into()).await,
+        None
+    );
+    // A booking-only guest is created with source booking.
+    let (basma, _, source) = cust("201556667777", org).await.expect("basma");
+    assert_eq!(source, "booking");
+    assert_eq!(
+        link("bookings", "guest_name", "Booker Basma".into()).await,
+        Some(basma)
+    );
+    // orders.customer_id from the delivery row, and from the loyalty member.
+    let of_order = |id: Uuid| {
+        let db = db.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Uuid>>("SELECT customer_id FROM orders WHERE id = $1")
+                .bind(id)
                 .fetch_one(&db)
                 .await
                 .unwrap()
         }
     };
-
-    // An existing customer is matched and keeps their name.
-    assert_eq!(link("delivery_orders", "customer_name", "Omar typed differently".into()).await, Some(known));
-    assert_eq!(cust("201001234567", org).await.unwrap().1, "Known Omar");
-    // A new phone makes ONE customer, named as on first contact, source online.
-    let (nadia, name, source) = cust("201223334444", org).await.expect("nadia");
-    assert_eq!((name.as_str(), source.as_str()), ("New Nadia", "online"));
-    assert_eq!(link("delivery_orders", "customer_name", "Nadia again".into()).await, Some(nadia));
-    assert_eq!(link("bookings", "guest_name", "Nadia books".into()).await, Some(nadia), "the booking finds the online customer");
-    // Tenants do not share people.
-    let (nadia2, ..) = cust("201223334444", org2).await.expect("other org's nadia");
-    assert_ne!(nadia, nadia2);
-    assert_eq!(link("delivery_orders", "customer_name", "Other Org Nadia".into()).await, Some(nadia2));
-    // A phone that fails the rule makes no customer.
-    assert_eq!(link("delivery_orders", "customer_name", "Bad Phone".into()).await, None);
-    assert_eq!(link("bookings", "guest_name", "No Phone".into()).await, None);
-    // A booking-only guest is created with source booking.
-    let (basma, _, source) = cust("201556667777", org).await.expect("basma");
-    assert_eq!(source, "booking");
-    assert_eq!(link("bookings", "guest_name", "Booker Basma".into()).await, Some(basma));
-    // orders.customer_id from the delivery row, and from the loyalty member.
-    let of_order = |id: Uuid| {
-        let db = db.clone();
-        async move { sqlx::query_scalar::<_, Option<Uuid>>("SELECT customer_id FROM orders WHERE id = $1").bind(id).fetch_one(&db).await.unwrap() }
-    };
     assert_eq!(of_order(sale_delivery).await, Some(nadia));
     assert_eq!(of_order(sale_member).await, Some(member));
     // Addresses: Nadia's two spellings are one address used twice; pickup has none.
-    let nadia_addr: Vec<(i32, String)> = sqlx::query_as("SELECT use_count, address_line FROM customer_addresses WHERE customer_id = $1")
-        .bind(nadia)
-        .fetch_all(&db)
-        .await
-        .unwrap();
+    let nadia_addr: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT use_count, address_line FROM customer_addresses WHERE customer_id = $1",
+    )
+    .bind(nadia)
+    .fetch_all(&db)
+    .await
+    .unwrap();
     assert_eq!(nadia_addr, vec![(2, "7 Nadia St., Flat 2".to_string())]);
     let (pat, ..) = cust("201009998877", org).await.expect("pat");
-    assert_eq!(i64_of(&db, &format!("SELECT count(*) FROM customer_addresses WHERE customer_id = '{pat}'")).await, 0);
-    assert_eq!(i64_of(&db, "SELECT count(*) FROM delivery_orders WHERE address_id IS NOT NULL").await, 4);
-    assert_eq!(i64_of(&db, "SELECT count(*) FROM delivery_orders WHERE contact_override").await, 0);
+    assert_eq!(
+        i64_of(
+            &db,
+            &format!("SELECT count(*) FROM customer_addresses WHERE customer_id = '{pat}'")
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        i64_of(
+            &db,
+            "SELECT count(*) FROM delivery_orders WHERE address_id IS NOT NULL"
+        )
+        .await,
+        4
+    );
+    assert_eq!(
+        i64_of(
+            &db,
+            "SELECT count(*) FROM delivery_orders WHERE contact_override"
+        )
+        .await,
+        0
+    );
     // Capability 225 landed.
     assert_eq!(i64_of(&db, "SELECT count(*) FROM capabilities WHERE id = 225 AND key = 'customers.addresses.view' AND defaults = 'omt'").await, 1);
 
     // Idempotent: running the backfill's statements again links nothing new.
     let before = i64_of(&db, "SELECT count(*) FROM customers").await;
     let sql = std::fs::read_to_string(
-        std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string()))
-            .join("migrations/20260925070000_customer_references.sql"),
+        std::path::Path::new(
+            &std::env::var("CARGO_MANIFEST_DIR")
+                .unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string()),
+        )
+        .join("migrations/20260925070000_customer_references.sql"),
     )
     .unwrap();
-    sqlx::raw_sql(&sql).execute(&db).await.expect("the references migration re-runs cleanly");
+    sqlx::raw_sql(&sql)
+        .execute(&db)
+        .await
+        .expect("the references migration re-runs cleanly");
     assert_eq!(i64_of(&db, "SELECT count(*) FROM customers").await, before);
 }

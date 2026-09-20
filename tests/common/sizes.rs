@@ -20,13 +20,7 @@ use uuid::Uuid;
 ///   * a fixture may author a size genuinely LABELLED `one_size` — it gets a
 ///     fresh id, so it is a real size a customer picks, not the sentinel, and
 ///     nothing later retires it.
-pub async fn seed_real_size(
-    pool: &PgPool,
-    item: Uuid,
-    label: &str,
-    price: i32,
-    sort: i32,
-) -> Uuid {
+pub async fn seed_real_size(pool: &PgPool, item: Uuid, label: &str, price: i32, sort: i32) -> Uuid {
     let mut tx = pool.begin().await.unwrap();
     sqlx::query(
         "DELETE FROM menu_item_sizes z
