@@ -3,7 +3,7 @@
 
 # NOTE: export MADAR_FAST_TEST_POOLS=1 when running these suites, or every test
 # that serves a request waits ~5s for its throwaway database to become
-# droppable — see src/db.rs. tool/run_tests.sh does it for you. It cannot be set
+# droppable — see src/db.rs. scripts/run_tests.sh does it for you. It cannot be set
 # here: nextest 0.9.144 ignores an [env] table.
 [profile.default]
 # These tests are database-bound: each waits on Postgres far more than it uses a
