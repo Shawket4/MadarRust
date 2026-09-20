@@ -3,20 +3,20 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::handlers::{
+use madar_rust::auth::handlers::{
     AuthPermissionsResponse, LoginResponse, MeResponse, ResolveBranchResponse,
 };
-use crate::auth::jwt::JwtSecret;
-use crate::auth::org_status::OrgStatusCache;
-use crate::auth::routes;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::auth::org_status::OrgStatusCache;
+use madar_rust::auth::routes;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 async fn seed_org(pool: &PgPool) -> Uuid {
@@ -452,7 +452,7 @@ async fn wrong_pins_earn_a_growing_delay_and_a_correct_one_clears_it(pool: PgPoo
     let attempt = |pin: &str| {
         test::TestRequest::post()
             .uri("/auth/login")
-            .insert_header((crate::tickets::DEVICE_ID_HEADER, "tablet-1"))
+            .insert_header((madar_rust::tickets::DEVICE_ID_HEADER, "tablet-1"))
             .set_json(&json!({"name": "Patient One", "pin": pin, "branch_id": branch_id}))
             .to_request()
     };
@@ -460,7 +460,7 @@ async fn wrong_pins_earn_a_growing_delay_and_a_correct_one_clears_it(pool: PgPoo
     // The free misses: an ordinary mistype costs nothing. The miss that trips
     // the delay is itself still a plain refusal — the wait is checked BEFORE the
     // lookup, so it lands on the NEXT attempt.
-    for i in 0..=crate::auth::pin_throttle::FREE_ATTEMPTS {
+    for i in 0..=madar_rust::auth::pin_throttle::FREE_ATTEMPTS {
         let resp = test::call_service(&app, attempt("000000")).await;
         assert_eq!(resp.status(), 401, "miss {i} should be a plain refusal");
     }
@@ -658,7 +658,7 @@ async fn a_successful_pin_login_backfills_the_fingerprint(pool: PgPool) {
             .unwrap();
     assert_eq!(
         after,
-        Some(crate::auth::pin_fingerprint::fingerprint(org_id, "1234")),
+        Some(madar_rust::auth::pin_fingerprint::fingerprint(org_id, "1234")),
         "the fingerprint is HMAC(key, org || pin) under the current key"
     );
     // It is a LOOKUP key, never something a client sees.
@@ -779,7 +779,7 @@ async fn test_pin_login_derives_offline_pin_hash(pool: PgPool) {
             .unwrap();
     let phc = after.expect("offline_pin_hash must be derived on PIN login");
     assert!(
-        crate::auth::offline::verify_offline_pin("1234", &phc),
+        madar_rust::auth::offline::verify_offline_pin("1234", &phc),
         "stored argon2id verifier must match the PIN"
     );
 }
@@ -938,7 +938,7 @@ async fn test_me_returns_token_branch_for_multi_branch_teller(pool: PgPool) {
     assign_teller_to_branch(&pool, teller, branch_a).await;
     assign_teller_to_branch(&pool, teller, branch_b).await;
 
-    let token = crate::auth::jwt::create_token(
+    let token = madar_rust::auth::jwt::create_token(
         &get_secret(),
         teller,
         Some(org_id),
@@ -1692,7 +1692,7 @@ async fn test_org_status_unknown_org_not_allowed(pool: PgPool) {
 /// the per-device and per-branch delay, not by this.
 #[sqlx::test(migrations = "./migrations")]
 async fn one_address_gets_sixty_login_attempts_a_minute(pool: PgPool) {
-    if !crate::rate_limit::rate_limiting_enabled() {
+    if !madar_rust::rate_limit::rate_limiting_enabled() {
         return;
     }
     let app = test::init_service(
@@ -1783,7 +1783,7 @@ async fn an_owner_pin_on_a_pre_0_8_tablet_is_refused(pool: PgPool) {
             .uri("/auth/login")
             .set_json(&json!({"name": name, "pin": pin, "branch_id": branch_id}));
         if let Some(d) = device {
-            r = r.insert_header((crate::tickets::DEVICE_ID_HEADER, d.to_string()));
+            r = r.insert_header((madar_rust::tickets::DEVICE_ID_HEADER, d.to_string()));
         }
         r.to_request()
     };

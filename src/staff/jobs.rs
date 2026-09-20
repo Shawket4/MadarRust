@@ -343,7 +343,7 @@ const COORD_RETENTION_DAYS: i32 = 90;
 /// Idempotent: rows already purged fail the `IS NOT NULL` test, so a re-run is a
 /// no-op. Bounded per tick so a first run over a large backlog cannot hold long
 /// locks — the remainder is picked up on the next tick.
-pub(super) async fn purge_stale_coordinates(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+pub async fn purge_stale_coordinates(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     let purged = sqlx::query(
         "UPDATE attendance_records SET \
              check_in_latitude = NULL, check_in_longitude = NULL, \

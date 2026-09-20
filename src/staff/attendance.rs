@@ -290,7 +290,7 @@ pub struct SettingsQuery {
 /// and for an admin's manual correction, so a corrected row is indistinguishable
 /// from one that was clocked properly.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Derived {
+pub struct Derived {
     pub late_minutes: i64,
     pub early_leave_minutes: i64,
     pub overtime_minutes: i64,
@@ -308,7 +308,7 @@ pub(crate) struct Derived {
 /// `staff_requests` migration: a late arrival is a window open at the start, an
 /// early departure one open at the end, an excuse one closed at both.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct DayAdjustments {
+pub struct DayAdjustments {
     /// Approved `late_arrival` — the grace deadline moves to this instant.
     pub excused_until: Option<DateTime<Utc>>,
     /// Approved `early_departure` — leaving after this instant is not early.
@@ -340,7 +340,7 @@ impl DayAdjustments {
     }
 }
 
-pub(crate) fn derive(
+pub fn derive(
     check_in_at: Option<DateTime<Utc>>,
     check_out_at: Option<DateTime<Utc>>,
     scheduled_start_at: Option<DateTime<Utc>>,

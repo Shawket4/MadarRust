@@ -1291,7 +1291,7 @@ pub async fn settle_open_ticket(
 /// one order; the LINK is the explicit `orders.open_ticket_id`, not that
 /// convention. Shared by the live route and `/sync/replay` (a queued offline
 /// settle).
-pub(crate) async fn settle_open_ticket_inner(
+pub async fn settle_open_ticket_inner(
     pool: crate::db::Db,
     id: Uuid,
     body: web::Json<SettleOpenTicketRequest>,

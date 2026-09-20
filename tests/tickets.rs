@@ -2,12 +2,12 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
-use crate::kitchen::KitchenTicketView;
-use crate::models::UserRole;
-use crate::orders::handlers::Order;
-use crate::realtime::hub::BranchEventHub;
-use crate::tickets::OpenTicketView;
+use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::kitchen::KitchenTicketView;
+use madar_rust::models::UserRole;
+use madar_rust::orders::handlers::Order;
+use madar_rust::realtime::hub::BranchEventHub;
+use madar_rust::tickets::OpenTicketView;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
@@ -142,9 +142,9 @@ macro_rules! app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::tickets::routes::configure)
-                .configure(crate::kitchen::routes::configure)
-                .configure(crate::sync::routes::configure),
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::kitchen::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
         )
         .await
     };
@@ -885,7 +885,7 @@ async fn fire_derives_stable_kitchen_ids_from_round_key(pool: PgPool) {
     assert_eq!(resp.status(), 201);
     let ticket_id = test::read_body_json::<OpenTicketView, _>(resp).await.id;
 
-    let kt = crate::kitchen::derive_kitchen_ticket_id(round_idem);
+    let kt = madar_rust::kitchen::derive_kitchen_ticket_id(round_idem);
     let (got_kt, got_item): (Uuid, Uuid) = sqlx::query_as(
         "SELECT kt.id, kti.id FROM kitchen_tickets kt \
          JOIN kitchen_ticket_items kti ON kti.kitchen_ticket_id = kt.id \
@@ -898,7 +898,7 @@ async fn fire_derives_stable_kitchen_ids_from_round_key(pool: PgPool) {
     assert_eq!(got_kt, kt, "kitchen ticket id derived from the round key");
     assert_eq!(
         got_item,
-        crate::kitchen::derive_kitchen_item_id(kt, 0),
+        madar_rust::kitchen::derive_kitchen_item_id(kt, 0),
         "line 0 id derived"
     );
 }
@@ -1078,9 +1078,9 @@ async fn replay_fire_publishes_realtime(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(hub.clone()))
-            .configure(crate::tickets::routes::configure)
-            .configure(crate::kitchen::routes::configure)
-            .configure(crate::sync::routes::configure),
+            .configure(madar_rust::tickets::routes::configure)
+            .configure(madar_rust::kitchen::routes::configure)
+            .configure(madar_rust::sync::routes::configure),
     )
     .await;
 
@@ -1146,9 +1146,9 @@ async fn fired_events_carry_their_origin(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(hub.clone()))
-            .configure(crate::tickets::routes::configure)
-            .configure(crate::kitchen::routes::configure)
-            .configure(crate::sync::routes::configure),
+            .configure(madar_rust::tickets::routes::configure)
+            .configure(madar_rust::kitchen::routes::configure)
+            .configure(madar_rust::sync::routes::configure),
     )
     .await;
     let waiter_t = token(waiter, org, UserRole::Waiter);
@@ -1166,7 +1166,7 @@ async fn fired_events_carry_their_origin(pool: PgPool) {
             .to_request()
     };
     let drain = |rx: &mut tokio::sync::broadcast::Receiver<_>| {
-        let mut out: Vec<crate::realtime::event::BranchEvent> = Vec::new();
+        let mut out: Vec<madar_rust::realtime::event::BranchEvent> = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             out.push(ev);
         }
@@ -1273,7 +1273,7 @@ async fn fired_events_carry_their_origin(pool: PgPool) {
                 "idempotency_key": round, "items": [{ "menu_item_id": item, "quantity": 1 }]
             }));
         if let Some(h) = header {
-            req = req.insert_header((crate::tickets::DEVICE_ID_HEADER, h));
+            req = req.insert_header((madar_rust::tickets::DEVICE_ID_HEADER, h));
         }
         let resp = test::call_service(&app, req.to_request()).await;
         assert!(resp.status().is_success(), "live round: {}", resp.status());
@@ -2294,8 +2294,8 @@ macro_rules! public_app {
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
-                .configure(crate::tickets::routes::configure)
-                .configure(crate::kitchen::routes::configure),
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::kitchen::routes::configure),
         )
         .await
     };
@@ -2840,15 +2840,15 @@ async fn waiving_the_service_charge_needs_the_permission(pool: PgPool) {
     assert_eq!(r.status(), 403);
     let why = String::from_utf8(test::read_body(r).await.to_vec()).unwrap();
     assert!(why.contains("Waive service charge"), "{why}");
-    let body: crate::tickets::handlers::SettleOpenTicketRequest =
+    let body: madar_rust::tickets::handlers::SettleOpenTicketRequest =
         serde_json::from_value(serde_json::json!({
         "till_id": shift, "payment_method": "cash", "waive_service_charge": true }))
         .unwrap();
-    let replay = crate::tickets::handlers::settle_open_ticket_inner(
-        crate::db::Db::for_org(&pool, org).await,
+    let replay = madar_rust::tickets::handlers::settle_open_ticket_inner(
+        madar_rust::db::Db::for_org(&pool, org).await,
         t2,
         web::Json(body),
-        crate::sync::ActingContext {
+        madar_rust::sync::ActingContext {
             teller_id: manager,
             org_id: org,
             role: UserRole::BranchManager,
@@ -2859,7 +2859,7 @@ async fn waiving_the_service_charge_needs_the_permission(pool: PgPool) {
     )
     .await;
     assert!(
-        matches!(replay, Err(crate::errors::AppError::Forbidden(_))),
+        matches!(replay, Err(madar_rust::errors::AppError::Forbidden(_))),
         "a queued waiver is refused too"
     );
 

@@ -5,5 +5,3 @@ pub mod routes;
 
 #[cfg(test)]
 mod pos_metrics_tests;
-#[cfg(test)]
-mod tests;

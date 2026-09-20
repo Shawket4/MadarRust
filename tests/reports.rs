@@ -6,25 +6,25 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
-use crate::reports::handlers::{
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+use madar_rust::reports::handlers::{
     AddonSalesRow, BranchComparison, BranchSalesReport, BranchStockReport, BundleSalesRow,
     CategorySales, CombinedItemSalesRow, ConsumptionRow, DeductionLogRow, InventoryValuationReport,
     ItemSales, LowStockRow, OrgComparisonReport, PeakHourPoint, ShiftSummary, ShrinkageRow,
     StockRow, TellerStats, TimeseriesPoint, WaiterStatsReport, WasteReportRow,
 };
-use crate::reports::handlers::{
+use madar_rust::reports::handlers::{
     ChannelBreakdownRow, MaterialCostTrendRow, PeakDayPoint, PoLeadTimeReport, SupplierSpendRow,
 };
-use crate::reports::routes;
+use madar_rust::reports::routes;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn generate_token(user_id: Uuid, org_id: Option<Uuid>, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, org_id, role, None, 24).unwrap()
 }
 
 fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
@@ -32,7 +32,7 @@ fn generate_org_admin_token(user_id: Uuid, org_id: Uuid) -> String {
 }
 
 fn generate_teller_token(user_id: Uuid, org_id: Uuid, branch_id: Uuid) -> String {
-    crate::auth::jwt::create_token(
+    madar_rust::auth::jwt::create_token(
         &get_secret(),
         user_id,
         Some(org_id),
@@ -1611,7 +1611,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
             .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone())))
-            .configure(crate::tills::legacy_routes::configure),
+            .configure(madar_rust::tills::legacy_routes::configure),
     )
     .await;
 
@@ -1701,7 +1701,7 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
             .to_request();
         test::read_body_json(test::call_service(&app, req).await).await
     };
-    let shift: crate::tills::legacy::ShiftReportResponse = {
+    let shift: madar_rust::tills::legacy::ShiftReportResponse = {
         let req = test::TestRequest::get()
             .uri(&format!("/shifts/{shift_id}/report"))
             .insert_header(("Authorization", format!("Bearer {token}")))
@@ -1758,10 +1758,10 @@ async fn sales_and_shift_reports_reconcile(pool: PgPool) {
 }
 
 /// Guard against a fourth revenue-status dialect appearing. Every money
-/// aggregate must scope on [`crate::orders::SOLD`]; the historical variants
+/// aggregate must scope on [`madar_rust::orders::SOLD`]; the historical variants
 /// (`= 'completed'`, `!= 'voided'`) are what let three screens drift apart.
 /// The one sanctioned exception is the DRAWER — `compute_system_cash` scopes
-/// on [`crate::orders::TENDERED`] (defined beside `SOLD`, with the reason),
+/// on [`madar_rust::orders::TENDERED`] (defined beside `SOLD`, with the reason),
 /// because a fully refunded sale's notes did enter the till.
 // Fully qualified: `actix_web::test` is imported into this module, which would
 // otherwise shadow the attribute and demand an async fn.
@@ -1810,7 +1810,7 @@ fn status_predicates_are_unified() {
             ] {
                 assert!(
                     !l.contains(stale),
-                    "{name}: `{l}`\nscopes orders on `{stale}`. Use crate::orders::SOLD \
+                    "{name}: `{l}`\nscopes orders on `{stale}`. Use madar_rust::orders::SOLD \
                      (status NOT IN ('voided', 'refunded')) so the sales report, the \
                      shift report and the orders KPI strip all count the same orders."
                 );

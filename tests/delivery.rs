@@ -1,7 +1,7 @@
 //! Delivery tests. Pure-helper unit tests live here; the heavy #[sqlx::test]
 //! integration + e2e suite is appended in `integration_tests` below.
 
-use super::*;
+use madar_rust::delivery::*;
 use chrono::NaiveTime;
 
 fn t(h: u32, m: u32) -> NaiveTime {
@@ -132,8 +132,8 @@ fn validate_field_helpers() {
 
 #[cfg(test)]
 mod zone_fee {
-    use crate::delivery::DistanceSource;
-    use crate::delivery::public::{FeeOutcome, ZoneRow, select_zone_fee};
+    use madar_rust::delivery::DistanceSource;
+    use madar_rust::delivery::public::{FeeOutcome, ZoneRow, select_zone_fee};
     use uuid::Uuid;
 
     fn zone(max: i32, fee: i32) -> ZoneRow {
@@ -216,7 +216,7 @@ mod zone_fee {
 
 #[cfg(test)]
 mod kitchen_projection {
-    use crate::delivery::snapshot::{CartSnapshot, SnapshotAddon, SnapshotLine, kitchen_lines};
+    use madar_rust::delivery::snapshot::{CartSnapshot, SnapshotAddon, SnapshotLine, kitchen_lines};
     use uuid::Uuid;
 
     fn addon(name: &str, qty: i32) -> SnapshotAddon {
@@ -274,9 +274,9 @@ mod kitchen_projection {
 
 #[cfg(test)]
 mod hub_tests {
-    use crate::delivery::staff::DeliveryOrder;
-    use crate::realtime::event::{BranchEvent, Topic};
-    use crate::realtime::hub::BranchEventHub;
+    use madar_rust::delivery::staff::DeliveryOrder;
+    use madar_rust::realtime::event::{BranchEvent, Topic};
+    use madar_rust::realtime::hub::BranchEventHub;
     use tokio::sync::broadcast;
     use uuid::Uuid;
 
@@ -365,8 +365,8 @@ mod it {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    use crate::auth::jwt::{JwtSecret, create_token};
-    use crate::models::UserRole;
+    use madar_rust::auth::jwt::{JwtSecret, create_token};
+    use madar_rust::models::UserRole;
 
     fn get_secret() -> JwtSecret {
         JwtSecret("secret".into())
@@ -386,8 +386,8 @@ mod it {
         create_token(&get_secret(), uid, Some(org), UserRole::OrgAdmin, None, 24).unwrap()
     }
     fn device_token(raw_phone: &str) -> String {
-        let norm = crate::delivery::normalize_phone(raw_phone).unwrap();
-        crate::delivery::whatsapp::issue_device_token(&get_secret().0, &norm).unwrap()
+        let norm = madar_rust::delivery::normalize_phone(raw_phone).unwrap();
+        madar_rust::delivery::whatsapp::issue_device_token(&get_secret().0, &norm).unwrap()
     }
 
     macro_rules! app {
@@ -396,8 +396,8 @@ mod it {
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
                     .app_data(web::Data::new(get_secret()))
-                    .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                    .configure(crate::delivery::routes::configure),
+                    .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                    .configure(madar_rust::delivery::routes::configure),
             )
             .await
         };
@@ -622,7 +622,7 @@ mod it {
             .unwrap();
     }
     async fn perms(pool: &PgPool) {
-        crate::permissions::seeder::seed_role_permissions(pool)
+        madar_rust::permissions::seeder::seed_role_permissions(pool)
             .await
             .unwrap();
     }
@@ -1111,7 +1111,7 @@ mod it {
 
     #[sqlx::test]
     async fn otp_verify_roundtrip(pool: PgPool) {
-        let norm = crate::delivery::normalize_phone(PHONE).unwrap();
+        let norm = madar_rust::delivery::normalize_phone(PHONE).unwrap();
         let hash = bcrypt::hash("1234", bcrypt::DEFAULT_COST).unwrap();
         sqlx::query("INSERT INTO delivery_otp (phone, code_hash, expires_at) VALUES ($1,$2, now()+interval '5 minutes')")
             .bind(&norm)
@@ -1525,7 +1525,7 @@ mod it {
         seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
         let id = place_in_mall_order(&pool, branch, item, 1).await;
 
-        use crate::delivery::staff::advance_status;
+        use madar_rust::delivery::staff::advance_status;
         assert!(
             advance_status(&pool, id, "received", "confirmed")
                 .await
@@ -1578,7 +1578,7 @@ mod it {
         let accepted = place_in_mall_order(&pool, branch, item, 1).await;
         let never = place_in_mall_order(&pool, patient, item, 1).await;
         assert!(
-            crate::delivery::staff::advance_status(&pool, accepted, "received", "confirmed")
+            madar_rust::delivery::staff::advance_status(&pool, accepted, "received", "confirmed")
                 .await
                 .unwrap()
         );
@@ -1591,7 +1591,7 @@ mod it {
         .await
         .unwrap();
 
-        let swept = crate::delivery::jobs::reject_unaccepted(&pool)
+        let swept = madar_rust::delivery::jobs::reject_unaccepted(&pool)
             .await
             .unwrap();
         assert_eq!(swept.iter().map(|r| r.id).collect::<Vec<_>>(), vec![stale]);
@@ -1623,7 +1623,7 @@ mod it {
         assert_eq!(restocked, Some(true), "nothing was made, nothing is wasted");
         assert_eq!(
             why.as_deref(),
-            Some(crate::delivery::jobs::AUTO_REJECT_REASON)
+            Some(madar_rust::delivery::jobs::AUTO_REJECT_REASON)
         );
         assert_eq!(status_of(fresh).await.0, "received");
         assert_eq!(status_of(accepted).await.0, "confirmed");
@@ -1631,7 +1631,7 @@ mod it {
 
         // Idempotent: a second tick finds nothing left to reject.
         assert!(
-            crate::delivery::jobs::reject_unaccepted(&pool)
+            madar_rust::delivery::jobs::reject_unaccepted(&pool)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1751,9 +1751,9 @@ mod it {
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                .configure(crate::delivery::routes::configure)
-                .configure(crate::orders::routes::configure),
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .configure(madar_rust::delivery::routes::configure)
+                .configure(madar_rust::orders::routes::configure),
         )
         .await;
 
@@ -1802,7 +1802,7 @@ mod it {
         let d = &o["delivery"];
         assert!(d.is_object(), "delivery block missing: {o}");
         assert_eq!(d["channel"], "in_mall");
-        let norm = crate::delivery::normalize_phone(PHONE).unwrap();
+        let norm = madar_rust::delivery::normalize_phone(PHONE).unwrap();
         assert_eq!(d["customer_phone"], norm);
         assert_eq!(d["payment_method_hint"], "cash");
         assert!(d["delivery_ref"].as_str().unwrap().starts_with("D-"));
@@ -1869,7 +1869,7 @@ mod it {
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .configure(crate::orders::routes::configure),
+                .configure(madar_rust::orders::routes::configure),
         )
         .await;
 
@@ -2028,9 +2028,9 @@ mod it {
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .app_data(web::Data::new(crate::realtime::hub::BranchEventHub::new()))
-                .configure(crate::delivery::routes::configure)
-                .configure(crate::orders::routes::configure),
+                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .configure(madar_rust::delivery::routes::configure)
+                .configure(madar_rust::orders::routes::configure),
         )
         .await;
 
@@ -3417,7 +3417,7 @@ mod it {
         let token = super_admin_token(sa);
         let app = app!(&pool);
 
-        assert!(!crate::delivery::gateway::is_paused(&pool).await);
+        assert!(!madar_rust::delivery::gateway::is_paused(&pool).await);
 
         // Pause → persisted; reflected in status and the send-path gate.
         let (st, body) = send(
@@ -3428,7 +3428,7 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["paused"], true);
-        assert!(crate::delivery::gateway::is_paused(&pool).await);
+        assert!(madar_rust::delivery::gateway::is_paused(&pool).await);
 
         // Resume.
         let (st, body) = send(
@@ -3439,7 +3439,7 @@ mod it {
         .await;
         assert_eq!(st, StatusCode::OK, "{body}");
         assert_eq!(body["paused"], false);
-        assert!(!crate::delivery::gateway::is_paused(&pool).await);
+        assert!(!madar_rust::delivery::gateway::is_paused(&pool).await);
     }
 
     // ── Public branch selector ────────────────────────────────────────────────

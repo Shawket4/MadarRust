@@ -1,6 +1,6 @@
 //! Staff module integration tests.
 //!
-//! The pure math is covered by unit tests in [`crate::staff::rules`]; these
+//! The pure math is covered by unit tests in [`madar_rust::staff::rules`]; these
 //! exercise the parts that only exist once a database and an HTTP layer are
 //! involved — geofencing, shift resolution, the status/permission machines, and
 //! the payroll generator's side effects on salary advances.
@@ -16,15 +16,15 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::JwtSecret;
-use crate::models::UserRole;
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
 
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
 
 fn token_for(user_id: Uuid, org_id: Uuid, role: UserRole) -> String {
-    crate::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), role, None, 24).unwrap()
 }
 
 macro_rules! app {
@@ -33,7 +33,7 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .configure(crate::staff::routes::configure),
+                .configure(madar_rust::staff::routes::configure),
         )
         .await
     };
@@ -1589,11 +1589,11 @@ async fn unpaid_leave_docks_pay_but_paid_leave_does_not(pool: PgPool) {
         .await
         .unwrap();
 
-        let settings = crate::staff::attendance::load_settings(&pool, f.org, None)
+        let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
             .await
             .unwrap();
         let mut conn = pool.acquire().await.unwrap();
-        crate::staff::penalties::recompute_record(&mut conn, record, &settings)
+        madar_rust::staff::penalties::recompute_record(&mut conn, record, &settings)
             .await
             .unwrap();
     }
@@ -1792,7 +1792,7 @@ async fn an_approved_late_arrival_means_there_is_no_penalty_to_waive(pool: PgPoo
 async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool) {
     // Controlled timestamps, because the point is what a SHORTENED-but-worked day
     // classifies as — not what an instant in-and-out does.
-    use crate::staff::attendance::{DayAdjustments, derive};
+    use madar_rust::staff::attendance::{DayAdjustments, derive};
     use chrono::TimeZone;
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
@@ -1833,7 +1833,7 @@ async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool
 async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool) {
     // The pure shape of the rule, without the clock: an excused window inside the
     // attendance span is credited when paid and ignored when not.
-    use crate::staff::attendance::{DayAdjustments, derive};
+    use madar_rust::staff::attendance::{DayAdjustments, derive};
     use chrono::TimeZone;
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
@@ -1907,7 +1907,7 @@ async fn a_waived_penalty_survives_the_nightly_sweep(pool: PgPool) {
     );
 
     // Recomputing is exactly what the sweep does. The waiver must hold.
-    let settings = crate::staff::attendance::load_settings(&pool, f.org, None)
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
         .await
         .unwrap();
     let record: Uuid = sqlx::query_scalar("SELECT id FROM attendance_records WHERE user_id = $1")
@@ -1916,7 +1916,7 @@ async fn a_waived_penalty_survives_the_nightly_sweep(pool: PgPool) {
         .await
         .unwrap();
     let mut conn = pool.acquire().await.unwrap();
-    crate::staff::penalties::recompute_record(&mut conn, record, &settings)
+    madar_rust::staff::penalties::recompute_record(&mut conn, record, &settings)
         .await
         .unwrap();
     drop(conn);
@@ -2186,7 +2186,7 @@ async fn attendance_coordinates_are_purged_after_the_retention_window(pool: PgPo
     let old_record = insert("120").await; // well past the 90-day window
     let recent_record = insert("10").await; // comfortably inside it
 
-    crate::staff::jobs::purge_stale_coordinates(&pool)
+    madar_rust::staff::jobs::purge_stale_coordinates(&pool)
         .await
         .expect("the purge should succeed");
 
@@ -2247,7 +2247,7 @@ async fn attendance_coordinates_are_purged_after_the_retention_window(pool: PgPo
     );
 
     // Idempotent: re-running finds nothing left to do and must not error.
-    crate::staff::jobs::purge_stale_coordinates(&pool)
+    madar_rust::staff::jobs::purge_stale_coordinates(&pool)
         .await
         .expect("a second pass should be a harmless no-op");
 }
@@ -2307,7 +2307,7 @@ async fn discipline_report_is_scoped_to_the_callers_branches(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool, "UTC").await;
     // Every role's default cells, as a real org has them.
-    crate::permissions::seeder::seed_role_permissions(&pool)
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
         .await
         .unwrap();
     let other = Uuid::new_v4();
