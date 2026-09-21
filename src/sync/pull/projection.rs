@@ -288,6 +288,7 @@ pub async fn project(
                         'size_label', s.size_label, 'note', s.note, \
                         'overspent', s.overspent, 'overspent_on_replay', s.overspent_on_replay, \
                         'cost_minor', s.cost_minor, 'order_id', s.order_id, \
+                        'comp_minor', s.comp_minor, 'extras_minor', s.extras_minor, \
                         'recorded_at', s.recorded_at, 'updated_at', s.updated_at) \
                    FROM staff_drinks s WHERE s.id = ANY($1)",
                 ids,
