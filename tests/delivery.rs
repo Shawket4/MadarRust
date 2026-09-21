@@ -1,8 +1,8 @@
 //! Delivery tests. Pure-helper unit tests live here; the heavy #[sqlx::test]
 //! integration + e2e suite is appended in `integration_tests` below.
 
-use madar_rust::delivery::*;
 use chrono::NaiveTime;
+use madar_rust::delivery::*;
 
 fn t(h: u32, m: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, m, 0).unwrap()
@@ -216,7 +216,9 @@ mod zone_fee {
 
 #[cfg(test)]
 mod kitchen_projection {
-    use madar_rust::delivery::snapshot::{CartSnapshot, SnapshotAddon, SnapshotLine, kitchen_lines};
+    use madar_rust::delivery::snapshot::{
+        CartSnapshot, SnapshotAddon, SnapshotLine, kitchen_lines,
+    };
     use uuid::Uuid;
 
     fn addon(name: &str, qty: i32) -> SnapshotAddon {
@@ -396,7 +398,9 @@ mod it {
                 App::new()
                     .app_data(web::Data::new($pool.clone()))
                     .app_data(web::Data::new(get_secret()))
-                    .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                    .app_data(web::Data::new(
+                        madar_rust::realtime::hub::BranchEventHub::new(),
+                    ))
                     .configure(madar_rust::delivery::routes::configure),
             )
             .await
@@ -1751,7 +1755,9 @@ mod it {
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
                 .configure(madar_rust::delivery::routes::configure)
                 .configure(madar_rust::orders::routes::configure),
         )
@@ -2028,7 +2034,9 @@ mod it {
             App::new()
                 .app_data(web::Data::new(pool.clone()))
                 .app_data(web::Data::new(get_secret()))
-                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
                 .configure(madar_rust::delivery::routes::configure)
                 .configure(madar_rust::orders::routes::configure),
         )
@@ -3521,6 +3529,149 @@ mod it {
         )
         .await;
         assert_eq!(st, StatusCode::CONFLICT, "rapid resend must be 409: {body}");
+    }
+
+    /// The five-attempt cap holds however many guesses arrive at once.
+    ///
+    /// The cap used to be read-compare-write across three statements, so
+    /// guesses that arrived together all read `attempts` before any of them
+    /// wrote it and all passed a check only one should have. With a FOUR-digit
+    /// code and a five-minute life, an attacker spread across enough addresses
+    /// to dodge the per-IP limiter could then cover the whole space.
+    ///
+    /// This fires far more wrong guesses than the cap allows and asserts the
+    /// database stopped counting at five — which is what makes the cap a
+    /// property of the row rather than of the request rate.
+    #[sqlx::test]
+    async fn otp_attempts_are_capped_however_many_guesses_arrive(pool: PgPool) {
+        // The per-IP limiter (three per thirty seconds) would answer 429 long
+        // before the cap is reached, and the cap is what this test is about.
+        // SAFETY: nextest runs each test in its own process; nothing else reads this.
+        unsafe {
+            std::env::set_var("MADAR_DISABLE_RATE_LIMIT", "1");
+        }
+        let phone = "201000000077";
+        sqlx::query(
+            "INSERT INTO delivery_otp (phone, code, expires_at) \
+             VALUES ($1, '1234', now() + interval '5 minutes')",
+        )
+        .bind(phone)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = app!(&pool);
+        let mut refused_for_attempts = 0;
+        for _ in 0..12 {
+            let (st, body) = send(
+                &app,
+                test::TestRequest::post()
+                    .uri("/public/otp/verify")
+                    // Never the real code: every one of these must be counted
+                    // and none may succeed.
+                    .set_json(json!({ "phone": phone, "code": "0000" })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "a wrong code is 400: {body}");
+            if body.to_string().contains("Too many attempts") {
+                refused_for_attempts += 1;
+            }
+        }
+        assert!(
+            refused_for_attempts > 0,
+            "the cap never engaged — twelve wrong guesses were all accepted for counting"
+        );
+
+        // Five counted, and not one more, whatever was sent afterwards.
+        let attempts: i32 =
+            sqlx::query_scalar("SELECT attempts FROM delivery_otp WHERE phone = $1")
+                .bind(phone)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            attempts, 5,
+            "the counter must stop at the cap, not run past it"
+        );
+
+        // And the real code is dead now: burning the attempts must not leave a
+        // window where the correct answer still works.
+        let (st, body) = send(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/otp/verify")
+                .set_json(json!({ "phone": phone, "code": "1234" })),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::BAD_REQUEST,
+            "a spent code must not verify even when the guess is right: {body}"
+        );
+    }
+
+    /// The cap survives guesses that arrive AT THE SAME TIME.
+    ///
+    /// The test above is sequential, and a sequential run never exercised the
+    /// bug: read-compare-write caps correctly as long as the three statements
+    /// never interleave. The bug was that they could. This drives the claim
+    /// statement from twenty connections at once — the shape a distributed
+    /// attacker has, and the one the per-IP limiter cannot see — and asserts
+    /// the database handed out exactly five claims.
+    ///
+    /// It exercises the SQL rather than the handler because that is where the
+    /// property lives: the predicate and the increment are one statement, so
+    /// the row itself is the arbiter.
+    #[sqlx::test]
+    async fn the_attempt_cap_cannot_be_raced(pool: PgPool) {
+        let phone = "201000000088";
+        sqlx::query(
+            "INSERT INTO delivery_otp (phone, code, expires_at) \
+             VALUES ($1, '4321', now() + interval '5 minutes')",
+        )
+        .bind(phone)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let claims = (0..20).map(|_| {
+            let pool = pool.clone();
+            let phone = phone.to_string();
+            async move {
+                sqlx::query_as::<_, (uuid::Uuid, String)>(
+                    "UPDATE delivery_otp SET attempts = attempts + 1 \
+                     WHERE id = ( \
+                         SELECT id FROM delivery_otp \
+                          WHERE phone = $1 AND consumed_at IS NULL AND expires_at > now() \
+                          ORDER BY created_at DESC LIMIT 1 \
+                     ) \
+                       AND attempts < $2 \
+                     RETURNING id, code",
+                )
+                .bind(&phone)
+                .bind(5_i32)
+                .fetch_optional(&pool)
+                .await
+                .unwrap()
+            }
+        });
+        let granted = futures::future::join_all(claims)
+            .await
+            .into_iter()
+            .filter(Option::is_some)
+            .count();
+
+        assert_eq!(
+            granted, 5,
+            "twenty simultaneous guesses must be granted exactly five claims, not {granted}"
+        );
+        let attempts: i32 =
+            sqlx::query_scalar("SELECT attempts FROM delivery_otp WHERE phone = $1")
+                .bind(phone)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(attempts, 5, "the counter must match the claims granted");
     }
 
     // ── Guest order history ───────────────────────────────────────────────────
