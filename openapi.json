@@ -9376,6 +9376,126 @@
         ]
       }
     },
+    "/customers/{id}/bookings": {
+      "get": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "A customer's bookings, newest first. A merged id answers for its survivor,\nand bookings made under any id merged into it are included.",
+        "operationId": "list_customer_bookings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Customer ID (a merged id resolves)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Default 50, at most 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bookings, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BookingView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/customers/{id}/erase": {
       "post": {
         "tags": [
@@ -25946,6 +26066,114 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OpenTicketView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/open-tickets/{id}/customer": {
+      "put": {
+        "tags": [
+          "open_tickets"
+        ],
+        "summary": "Set or clear the customer on an open bill (the dashboard / online path; a\ntill queues `set_ticket_customer` through `/sync/replay` instead).",
+        "operationId": "set_ticket_customer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Open ticket ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTicketCustomerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the bill says now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetTicketCustomerResponse"
                 }
               }
             }
@@ -78947,6 +79175,52 @@
           }
         }
       },
+      "SetTicketCustomerRequest": {
+        "type": "object",
+        "properties": {
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer this bill is for; `null` (or absent) takes the customer off."
+          }
+        }
+      },
+      "SetTicketCustomerResponse": {
+        "type": "object",
+        "required": [
+          "ticket_id",
+          "applied"
+        ],
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "False when nothing was written: unknown customer, unknown or voided bill."
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "What the bill now says, after the merge chain: the survivor of a merged\nid, `null` when the customer was taken off, and the PREVIOUS value when\nthe id was unknown (the pick is dropped, the bill is untouched)."
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The sale the change landed on instead, when the bill was already\nsettled by the time this arrived."
+          },
+          "ticket_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "SettleOpenTicketRequest": {
         "type": "object",
         "required": [
@@ -81567,6 +81841,14 @@
             ],
             "format": "date-time",
             "description": "When the bill was settled or voided; `None` while it is still open."
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer the sitting belongs to, when one is known: the sale's once\nsettled (a settle may name one the bill never had), else the bill's.\nRead through the merge chain, so it is always a live customer."
           },
           "customer_name": {
             "type": [
