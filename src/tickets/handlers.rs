@@ -84,11 +84,7 @@ fn client_prices(actor: &ActingContext) -> crate::orders::handlers::ClientPrices
 pub const DISCOUNT_NONE: &str = "none";
 
 /// The ticket's own discount, as stored by the waiter at order time.
-pub(crate) type TicketDiscount = (
-    Option<Uuid>,
-    Option<String>,
-    Option<rust_decimal::Decimal>,
-);
+pub(crate) type TicketDiscount = (Option<Uuid>, Option<String>, Option<rust_decimal::Decimal>);
 
 /// WHICH discount a settle actually charges — the one rule, in one place.
 ///
@@ -1233,6 +1229,166 @@ pub async fn move_ticket_table(
     Ok(HttpResponse::Ok().json(view))
 }
 
+// ── The bill's customer ───────────────────────────────────────
+
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct SetTicketCustomerRequest {
+    /// The customer this bill is for; `null` (or absent) takes the customer off.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct SetTicketCustomerResponse {
+    pub ticket_id: Uuid,
+    /// What the bill now says, after the merge chain: the survivor of a merged
+    /// id, `null` when the customer was taken off, and the PREVIOUS value when
+    /// the id was unknown (the pick is dropped, the bill is untouched).
+    pub customer_id: Option<Uuid>,
+    /// The sale the change landed on instead, when the bill was already
+    /// settled by the time this arrived.
+    pub order_id: Option<Uuid>,
+    /// False when nothing was written: unknown customer, unknown or voided bill.
+    pub applied: bool,
+}
+
+/// Put a customer on a bill that is ALREADY open (or take them off), so every
+/// other till sees who the table belongs to before it is settled.
+///
+/// Last write wins and the same write twice is the same row, so a re-flushed
+/// queue is harmless. Nothing here refuses: a bill is never held up over its
+/// customer, and an op that errors wedges a till's outbox.
+///   * a merged id resolves to its survivor; an unknown one is dropped;
+///   * a bill that was settled in the meantime passes the change to its sale —
+///     exactly what `AttachCustomer` would have done had the till known;
+///   * a voided or unknown bill is a clean no-op.
+pub(crate) async fn set_ticket_customer_inner(
+    pool: &PgPool,
+    org: Uuid,
+    ticket_id: Uuid,
+    customer_id: Option<Uuid>,
+    hub: Option<&BranchEventHub>,
+) -> Result<SetTicketCustomerResponse, AppError> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT status::text, order_id, customer_id FROM open_tickets \
+          WHERE id = $1 AND org_id = $2 FOR UPDATE",
+    )
+    .bind(ticket_id)
+    .bind(org)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((status, order_id, current)) = row else {
+        return Ok(SetTicketCustomerResponse {
+            ticket_id,
+            customer_id: None,
+            order_id: None,
+            applied: false,
+        });
+    };
+    let resolved: Option<Uuid> = match customer_id {
+        Some(c) => {
+            sqlx::query_scalar("SELECT customers_resolve($1, $2)")
+                .bind(org)
+                .bind(c)
+                .fetch_one(&mut *tx)
+                .await?
+        }
+        None => None,
+    };
+    if customer_id.is_some() && resolved.is_none() {
+        return Ok(SetTicketCustomerResponse {
+            ticket_id,
+            customer_id: current,
+            order_id,
+            applied: false,
+        });
+    }
+    let applied = match (status.as_str(), order_id) {
+        ("open", None) => {
+            // Skipping the no-change write keeps a re-flush off the changefeed.
+            if current != resolved {
+                sqlx::query("UPDATE open_tickets SET customer_id = $2 WHERE id = $1")
+                    .bind(ticket_id)
+                    .bind(resolved)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            true
+        }
+        (_, Some(order)) => {
+            sqlx::query("UPDATE open_tickets SET customer_id = $2 WHERE id = $1")
+                .bind(ticket_id)
+                .bind(resolved)
+                .execute(&mut *tx)
+                .await?;
+            crate::customers::handlers::attach_to_order(&mut tx, org, order, resolved).await?;
+            true
+        }
+        // Voided: there is no bill and no sale to put anyone on.
+        _ => false,
+    };
+    tx.commit().await?;
+
+    if applied
+        && order_id.is_none()
+        && let Some(hub) = hub
+        && let Some(v) = open_ticket_view(pool, ticket_id).await?
+    {
+        hub.publish(
+            v.branch_id,
+            BranchEvent::new(Topic::Tickets, "ticket.customer_changed", &v),
+        );
+    }
+    Ok(SetTicketCustomerResponse {
+        ticket_id,
+        customer_id: if applied { resolved } else { current },
+        order_id,
+        applied,
+    })
+}
+
+/// Set or clear the customer on an open bill (the dashboard / online path; a
+/// till queues `set_ticket_customer` through `/sync/replay` instead).
+#[utoipa::path(put, path = "/open-tickets/{id}/customer", tag = "open_tickets",
+    params(("id" = Uuid, Path, description = "Open ticket ID")),
+    request_body = SetTicketCustomerRequest,
+    responses((status = 200, description = "What the bill says now", body = SetTicketCustomerResponse), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn set_ticket_customer(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: web::Data<BranchEventHub>,
+    id: web::Path<Uuid>,
+    body: web::Json<SetTicketCustomerRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    let row: Option<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT branch_id, org_id FROM open_tickets WHERE id = $1")
+            .bind(*id)
+            .fetch_optional(pool.get_ref())
+            .await?;
+    let (branch_id, org_id) =
+        row.ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
+    require_branch_access(pool.get_ref(), &claims, branch_id).await?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::CustomersAttach,
+        Some(branch_id),
+    )
+    .await?;
+    let out = set_ticket_customer_inner(
+        pool.get_ref(),
+        org_id,
+        *id,
+        body.customer_id,
+        Some(hub.get_ref()),
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(out))
+}
+
 // ── Settle (materialize → paid order) ─────────────────────────
 
 #[utoipa::path(post, path = "/open-tickets/{id}/settle", tag = "open_tickets", request_body = SettleOpenTicketRequest,
@@ -1288,7 +1444,10 @@ pub async fn settle_open_ticket(
         if allowed_outright {
             body.discount_approval_id = None;
         } else {
-            let a = body.live_approval.clone().expect("checked by allow_or_approved_live");
+            let a = body
+                .live_approval
+                .clone()
+                .expect("checked by allow_or_approved_live");
             body.discount_approval_id = Some(a.id);
             crate::sync::handlers::record_approval(
                 pool.get_ref(),

@@ -19,6 +19,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::post().to(handlers::void_ticket_line),
             )
             .route("/{id}/table", web::patch().to(handlers::move_ticket_table))
+            .route(
+                "/{id}/customer",
+                web::put().to(handlers::set_ticket_customer),
+            )
             .route("/{id}/settle", web::post().to(handlers::settle_open_ticket)),
     );
     // Ordering from the code on the table. NOT under the scope above: these are
