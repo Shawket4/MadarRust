@@ -15,7 +15,8 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, auth, bookings, demo, loyalty, menu, permissions, qr_card, realtime, recipes, staff,
+    ai, auth, bookings, customers, demo, loyalty, menu, permissions, qr_card, realtime, recipes,
+    staff,
 };
 
 use utoipa::OpenApi;
@@ -146,6 +147,7 @@ async fn run() -> std::io::Result<()> {
     madar_rust::sync::pull::listener::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
     loyalty::birthdays::spawn(pool.get_ref().clone());
     loyalty::winback::spawn(pool.get_ref().clone());
+    customers::repoint::spawn(pool.get_ref().clone());
     loyalty::wallet::refresh::spawn(pool.get_ref().clone());
     // The bookings sweep: reminders, "party arriving" nudges, no-show and
     // completion roll-overs. Idempotent; publishes on the realtime bus.
