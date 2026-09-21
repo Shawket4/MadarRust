@@ -39611,6 +39611,7 @@
           {
             "name": "from",
             "in": "query",
+            "description": "Sessions OPENED at or after this instant.",
             "required": false,
             "schema": {
               "type": "string",
@@ -39620,19 +39621,11 @@
           {
             "name": "to",
             "in": "query",
+            "description": "Sessions OPENED at or before this instant.",
             "required": false,
             "schema": {
               "type": "string",
               "format": "date-time"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
             }
           },
           {
@@ -39647,7 +39640,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Till sessions, newest first",
+            "description": "Till sessions opened in the range, newest first. Every session at a branch where the caller holds `till.read.branch`; elsewhere only the caller's own.",
             "content": {
               "application/json": {
                 "schema": {
@@ -81784,11 +81777,14 @@
       },
       "TillSessionRow": {
         "type": "object",
-        "description": "One till session, the way a manager reconciles a drawer: what was in it at\nopen, what cash the shift put through it, what the teller declared at close,\nand what the system says should have been there.\n\nMoney is piastres. `null` means *not yet known* (an open till has no closing\nfigures), never zero — a till still running and a till that counted zero are\ndifferent facts.",
+        "description": "One till session, the way a manager reconciles a drawer: what was in it at\nopen, what cash the shift put through it, what the teller declared at close,\nand what the system says should have been there.\n\nMoney is piastres. `null` means *not yet known* (an open till has no closing\nfigures), never zero — a till still running and a till that counted zero are\ndifferent facts.\n\nThe cash columns add up: `opening_cash + net_cash_payment + pay_ins −\npay_outs − cash_drops + cash_adjustments` is the drawer's expected cash —\n`closing_cash_system` once the till is closed.",
         "required": [
           "till_id",
           "business_date",
+          "branch_id",
           "branch_name",
+          "branch_code",
+          "teller_id",
           "teller_name",
           "opened_at",
           "status",
@@ -81797,16 +81793,18 @@
           "pay_ins",
           "pay_outs",
           "cash_drops",
+          "cash_adjustments",
           "orders_count",
-          "gross_sales"
+          "net_sales"
         ],
         "properties": {
           "branch_code": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The branch's own reference/code, blank when the branch never set one."
+            "type": "string",
+            "description": "The branch's short code, the prefix of its order references."
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "branch_name": {
             "type": "string"
@@ -81815,6 +81813,11 @@
             "type": "string",
             "format": "date",
             "description": "The branch-local calendar day the till was OPENED on — a till opened at\n23:50 and closed at 02:10 belongs to the day it opened, which is the\nday the takings are reported under."
+          },
+          "cash_adjustments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Corrections that name no movement of the three kinds above. Signed:\npositive = cash the drawer gained. The till report's `cash_adjustments`."
           },
           "cash_discrepancy": {
             "type": [
@@ -81827,7 +81830,7 @@
           "cash_drops": {
             "type": "integer",
             "format": "int64",
-            "description": "Cash moved to the safe. Positive = the magnitude that left."
+            "description": "Cash moved to the safe, net of corrections to safe drops.\nPositive = the magnitude that left."
           },
           "closed_at": {
             "type": [
@@ -81842,7 +81845,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "What the teller counted at close. `null` while the till is open."
+            "description": "What was counted at close. `null` while the till is open, and for a\nforce-close nobody counted."
           },
           "closing_cash_system": {
             "type": [
@@ -81850,17 +81853,17 @@
               "null"
             ],
             "format": "int64",
-            "description": "What the system expected: opening + net cash + pay-ins − pay-outs −\ndrops (± corrections). `null` while the till is open."
-          },
-          "gross_sales": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Those sales' value, net of what refunds took back. The house revenue\ndefinition, so a till row and the teller report agree."
+            "description": "What the system expected at close. `null` while the till is open."
           },
           "net_cash_payment": {
             "type": "integer",
             "format": "int64",
             "description": "Cash that came in over the counter: cash payments and cash tips on\ntendered sales, less cash handed back as refunds from this drawer."
+          },
+          "net_sales": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Those sales' value, net of what refunds took back (`net_sales` in the\nPOS metrics report, `revenue` in the teller report)."
           },
           "opened_at": {
             "type": "string",
@@ -81878,16 +81881,20 @@
           "pay_ins": {
             "type": "integer",
             "format": "int64",
-            "description": "Cash added to the drawer that is not a sale (a float top-up)."
+            "description": "Cash added to the drawer that is not a sale (a float top-up), net of\ncorrections to pay-ins."
           },
           "pay_outs": {
             "type": "integer",
             "format": "int64",
-            "description": "Cash spent out of the drawer. Positive = the magnitude that left."
+            "description": "Cash spent out of the drawer, net of corrections to pay-outs.\nPositive = the magnitude that left."
           },
           "status": {
             "type": "string",
             "description": "`open` | `closed` | `force_closed`."
+          },
+          "teller_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "teller_name": {
             "type": "string"
