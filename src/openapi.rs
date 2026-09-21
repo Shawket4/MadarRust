@@ -234,7 +234,6 @@ paths(
         crate::menu::packaging::patch_rule,
         crate::menu::packaging::delete_rule,
         crate::menu::packaging::apply_rules,
-        crate::menu::linked::create_linked_copy,
         crate::menu::linked::get_recipe_link,
         crate::menu::linked::delete_recipe_link,
         // ── uploads ───────────────────────────────────────────────────

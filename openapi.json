@@ -22697,113 +22697,6 @@
         ]
       }
     },
-    "/menu-items/{id}/linked-copy": {
-      "post": {
-        "tags": [
-          "menu"
-        ],
-        "operationId": "create_linked_copy",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Source menu item ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateLinkedCopyRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Copy created with a recipe that follows the source",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LinkedCopyResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
     "/menu-items/{id}/modifier-groups": {
       "put": {
         "tags": [
@@ -62484,31 +62377,6 @@
           }
         }
       },
-      "CreateLinkedCopyRequest": {
-        "type": "object",
-        "required": [
-          "name",
-          "price"
-        ],
-        "properties": {
-          "category_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Menu category of the copy; `null` keeps the source's category."
-          },
-          "name": {
-            "type": "string"
-          },
-          "price": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Price in piastres for every size of the copy (0 for a staff drink)."
-          }
-        }
-      },
       "CreateMarketingLinkRequest": {
         "type": "object",
         "required": [
@@ -68461,27 +68329,6 @@
               "null"
             ],
             "description": "Only the person's own work. Absent means unrestricted, so a dashboard\nthat predates the field keeps meaning what it always meant."
-          }
-        }
-      },
-      "LinkedCopyResult": {
-        "type": "object",
-        "required": [
-          "menu_item_id",
-          "link",
-          "catalog_revision"
-        ],
-        "properties": {
-          "catalog_revision": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "link": {
-            "$ref": "#/components/schemas/RecipeLinkInfo"
-          },
-          "menu_item_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
