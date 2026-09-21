@@ -3604,11 +3604,76 @@ async fn rename_branch(pool: &PgPool, branch: Uuid, name: &str) {
         .unwrap();
 }
 
+// ── Till sessions ─────────────────────────────────────────────
+
+use madar_rust::reports::handlers::TillSessionRow;
+use madar_rust::tills::handlers::compute_system_cash;
+
+async fn seed_cash_movement(
+    pool: &PgPool,
+    till_id: Uuid,
+    moved_by: Uuid,
+    amount: i32,
+    kind: &str,
+    corrects: Option<Uuid>,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO till_cash_movements (id, till_id, amount, kind, corrects_id, moved_by, note)
+         VALUES ($1, $2, $3, $4, $5, $6, 'test')",
+    )
+    .bind(id)
+    .bind(till_id)
+    .bind(amount)
+    .bind(kind)
+    .bind(corrects)
+    .bind(moved_by)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+/// Open a till at a given instant (the helper above always opens "now").
+async fn seed_till_opened_at(pool: &PgPool, branch: Uuid, teller: Uuid, opened_at: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at)
+         VALUES ($1, $2, $3, 'open', 0, $4::timestamptz)",
+    )
+    .bind(id)
+    .bind(branch)
+    .bind(teller)
+    .bind(opened_at)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+async fn till_sessions(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    uri: &str,
+    token: &str,
+) -> Vec<TillSessionRow> {
+    serde_json::from_value(get_json(app, uri, token).await).unwrap()
+}
+
+/// What the row says the drawer should hold: the identity the report is for.
+fn expected_cash(r: &TillSessionRow) -> i64 {
+    r.opening_cash + r.net_cash_payment + r.pay_ins - r.pay_outs - r.cash_drops + r.cash_adjustments
+}
+
 /// The till-sessions report is a drawer reconciliation, so the columns must
-/// ADD UP: opening + net cash + pay-ins − pay-outs − drops has to land on the
-/// expected figure the close computed. This walks one till through a cash
-/// sale, a refund, and every movement kind — including a correction, which
-/// must count against the bucket it corrects rather than a bucket of its own.
+/// ADD UP to what the close computes. One till, a realistic mix: a cash sale,
+/// a split card+cash sale with a cash tip, a partial cash refund, a void, and
+/// every movement kind — a pay-out reversed by its correction (which nets off
+/// the pay-out line) and a free-standing correction (which is an adjustment,
+/// and must not vanish).
 #[sqlx::test]
 async fn till_sessions_report_reconciles_the_drawer(pool: PgPool) {
     let app = init_app!(pool);
@@ -3618,72 +3683,232 @@ async fn till_sessions_report_reconciles_the_drawer(pool: PgPool) {
     let token = generate_org_admin_token(user_id, org_id);
     grant_permission(&pool, "org_admin", "tills", "read").await;
 
-    // Opening float 10000, one 570 cash sale.
+    // Opening float 10000.
     let till_id = seed_shift(&pool, branch_id, user_id).await;
-    seed_order(&pool, branch_id, user_id, till_id).await;
+    let sale = seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        till_id,
+        1,
+        "completed",
+        &[("cash", 570)],
+        None,
+    )
+    .await;
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        till_id,
+        2,
+        "completed",
+        &[("card", 1000), ("cash", 400)],
+        Some((50, "cash", true)),
+    )
+    .await;
+    // A void never reached the drawer and is not a sale.
+    seed_paid_order(
+        &pool,
+        branch_id,
+        user_id,
+        till_id,
+        3,
+        "voided",
+        &[("cash", 9999)],
+        None,
+    )
+    .await;
+    seed_refund(&pool, sale, till_id, user_id, 70, "cash").await;
 
-    // A pay-in (+2000), a pay-out (−500), a safe drop (−3000), and a
-    // correction (−100) against the pay-in.
-    let pay_in = Uuid::new_v4();
-    for (id, amount, kind, corrects) in [
-        (pay_in, 2000_i32, "pay_in", None),
-        (Uuid::new_v4(), -500, "pay_out", None),
-        (Uuid::new_v4(), -3000, "safe_drop", None),
-        (Uuid::new_v4(), -100, "correction", Some(pay_in)),
-    ] {
-        sqlx::query(
-            "INSERT INTO till_cash_movements (id, till_id, amount, kind, corrects_id, moved_by, note)
-             VALUES ($1, $2, $3, $4, $5, $6, 'test')",
-        )
-        .bind(id)
-        .bind(till_id)
-        .bind(amount)
-        .bind(kind)
-        .bind(corrects)
-        .bind(user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    }
+    seed_cash_movement(&pool, till_id, user_id, 2000, "pay_in", None).await;
+    seed_cash_movement(&pool, till_id, user_id, -500, "pay_out", None).await;
+    let mistake = seed_cash_movement(&pool, till_id, user_id, -800, "pay_out", None).await;
+    seed_cash_movement(&pool, till_id, user_id, 800, "correction", Some(mistake)).await;
+    seed_cash_movement(&pool, till_id, user_id, -3000, "safe_drop", None).await;
+    seed_cash_movement(&pool, till_id, user_id, -120, "correction", None).await;
 
-    let req = test::TestRequest::get()
-        .uri(&format!("/reports/branches/{branch_id}/tills"))
-        .insert_header(("Authorization", format!("Bearer {token}")))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success(), "till sessions report failed");
-
-    let rows: Vec<serde_json::Value> = test::read_body_json(resp).await;
+    let uri = format!("/reports/branches/{branch_id}/tills");
+    let rows = till_sessions(&app, &uri, &token).await;
     assert_eq!(rows.len(), 1, "one till session");
     let r = &rows[0];
 
-    assert_eq!(r["opening_cash"], json!(10000));
-    assert_eq!(r["orders_count"], json!(1), "one sale rung on this till");
-    assert_eq!(r["gross_sales"], json!(570), "net of refunds");
-    assert_eq!(r["net_cash_payment"], json!(570), "the one cash sale");
-    // The correction rides with the pay-in it corrects: 2000 − 100.
-    assert_eq!(r["pay_ins"], json!(1900), "correction folds into pay_in");
-    assert_eq!(r["pay_outs"], json!(500), "reported as a magnitude");
-    assert_eq!(r["cash_drops"], json!(3000), "reported as a magnitude");
-    assert_eq!(r["branch_name"], json!("Test Branch"));
-    assert!(r["business_date"].is_string(), "business date is derived");
-    assert!(r["closed_at"].is_null(), "still open");
-    assert!(
-        r["closing_cash_declared"].is_null(),
-        "an open till has no declared figure — null, never 0"
-    );
-
-    // The reconciliation identity the whole report exists to show.
-    let expected = r["opening_cash"].as_i64().unwrap()
-        + r["net_cash_payment"].as_i64().unwrap()
-        + r["pay_ins"].as_i64().unwrap()
-        - r["pay_outs"].as_i64().unwrap()
-        - r["cash_drops"].as_i64().unwrap();
-    let system_cash = madar_rust::tills::handlers::compute_system_cash(&pool, till_id)
-        .await
-        .unwrap();
+    assert_eq!(r.till_id, till_id);
+    assert_eq!(r.branch_id, branch_id);
+    assert_eq!(r.teller_id, user_id);
+    assert_eq!(r.branch_name, "Test Branch");
+    assert!(!r.branch_code.is_empty(), "every branch has a code");
+    assert_eq!(r.status, "open");
+    assert_eq!(r.opening_cash, 10000);
+    assert_eq!(r.orders_count, 2, "the void is not a sale");
+    assert_eq!(r.net_sales, 570 + 1400 - 70, "net of the refund");
     assert_eq!(
-        expected, system_cash,
+        r.net_cash_payment,
+        570 + 400 + 50 - 70,
+        "cash legs + cash tip − cash refund; the card leg and the void stay out"
+    );
+    assert_eq!(r.pay_ins, 2000);
+    assert_eq!(
+        r.pay_outs, 500,
+        "a magnitude, and the corrected pay-out nets to nothing"
+    );
+    assert_eq!(r.cash_drops, 3000, "a magnitude");
+    assert_eq!(
+        r.cash_adjustments, -120,
+        "a correction that names nothing is an adjustment"
+    );
+    assert!(r.closed_at.is_none(), "still open");
+    assert!(
+        r.closing_cash_declared.is_none()
+            && r.closing_cash_system.is_none()
+            && r.cash_discrepancy.is_none(),
+        "an open till has no closing figures — null, never 0"
+    );
+    assert_eq!(
+        expected_cash(r),
+        compute_system_cash(&pool, till_id).await.unwrap(),
         "the columns must add up to what close() would compute"
     );
+
+    // Closed 300 short: the snapshot, the count and the variance come through,
+    // and the columns land on the snapshot.
+    let system = compute_system_cash(&pool, till_id).await.unwrap();
+    sqlx::query(
+        "UPDATE tills SET status = 'closed', closed_at = now(), closed_by = teller_id,
+                closing_cash_system = $2, closing_cash_declared = $2 - 300 WHERE id = $1",
+    )
+    .bind(till_id)
+    .bind(system as i32)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rows = till_sessions(&app, &uri, &token).await;
+    let r = &rows[0];
+    assert_eq!(r.status, "closed");
+    assert!(r.closed_at.is_some());
+    assert_eq!(r.closing_cash_system, Some(expected_cash(r)));
+    assert_eq!(r.closing_cash_declared, Some(system - 300));
+    assert_eq!(r.cash_discrepancy, Some(-300), "negative = short");
+}
+
+/// A till with nothing on it is a row of zeros, not a missing row and not nulls.
+#[sqlx::test]
+async fn till_sessions_report_shows_an_idle_till_as_zeros(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+    seed_shift(&pool, branch_id, user_id).await;
+
+    let rows = till_sessions(
+        &app,
+        &format!("/reports/branches/{branch_id}/tills"),
+        &token,
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    let r = &rows[0];
+    assert_eq!(
+        (
+            r.orders_count,
+            r.net_sales,
+            r.net_cash_payment,
+            r.pay_ins,
+            r.pay_outs,
+            r.cash_drops,
+            r.cash_adjustments
+        ),
+        (0, 0, 0, 0, 0, 0, 0)
+    );
+}
+
+/// The range filters on when the till was OPENED, and the business date is the
+/// branch-local day of that instant: 22:30 UTC is already tomorrow in Cairo,
+/// and still today in New York.
+#[sqlx::test]
+async fn till_sessions_report_filters_by_open_time_and_dates_in_the_branch_zone(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let cairo = seed_branch(&pool, org_id).await;
+    rename_branch(&pool, cairo, "Cairo").await;
+    let new_york = seed_branch(&pool, org_id).await;
+    sqlx::query("UPDATE branches SET timezone = 'Africa/Cairo' WHERE id = $1")
+        .bind(cairo)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE branches SET timezone = 'America/New_York' WHERE id = $1")
+        .bind(new_york)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    grant_permission(&pool, "org_admin", "tills", "read").await;
+
+    let before = seed_till_opened_at(&pool, cairo, user_id, "2026-02-27T10:00:00Z").await;
+    let late = seed_till_opened_at(&pool, cairo, user_id, "2026-03-01T22:30:00Z").await;
+    let ny = seed_till_opened_at(&pool, new_york, user_id, "2026-03-01T22:30:00Z").await;
+    // Opened inside the range, closed after it: it belongs to the day it opened.
+    sqlx::query(
+        "UPDATE tills SET status = 'closed', closed_at = '2026-03-05T01:00:00Z' WHERE id = $1",
+    )
+    .bind(late)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let nil = Uuid::nil();
+    let ranged =
+        format!("/reports/branches/{nil}/tills?from=2026-03-01T00:00:00Z&to=2026-03-02T00:00:00Z");
+    let rows = till_sessions(&app, &ranged, &token).await;
+    let date_of = |id: Uuid| {
+        rows.iter()
+            .find(|r| r.till_id == id)
+            .map(|r| r.business_date.to_string())
+    };
+    assert_eq!(rows.len(), 2, "the till opened before `from` is out");
+    assert_eq!(
+        date_of(late).as_deref(),
+        Some("2026-03-02"),
+        "00:30 in Cairo"
+    );
+    assert_eq!(
+        date_of(ny).as_deref(),
+        Some("2026-03-01"),
+        "17:30 in New York"
+    );
+    assert_eq!(date_of(before), None);
+
+    // Unbounded: everything, newest first.
+    let all = till_sessions(&app, &format!("/reports/branches/{cairo}/tills"), &token).await;
+    assert_eq!(
+        all.iter().map(|r| r.till_id).collect::<Vec<_>>(),
+        vec![late, before]
+    );
+
+    // An empty range is an empty list, not an error.
+    let none = till_sessions(
+        &app,
+        &format!(
+            "/reports/branches/{cairo}/tills?from=2030-01-01T00:00:00Z&to=2030-01-02T00:00:00Z"
+        ),
+        &token,
+    )
+    .await;
+    assert!(none.is_empty());
+
+    // Bad input is a 400, never a 500.
+    for bad in [
+        "from=2026-03-02T00:00:00Z&to=2026-03-01T00:00:00Z",
+        "from=yesterday",
+    ] {
+        let req = test::TestRequest::get()
+            .uri(&format!("/reports/branches/{cairo}/tills?{bad}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        assert_eq!(test::call_service(&app, req).await.status(), 400, "{bad}");
+    }
 }
