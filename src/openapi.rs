@@ -279,6 +279,7 @@ paths(
         // ── customers ─────────────────────────────────────────────────
         crate::customers::handlers::list_customers,
         crate::customers::handlers::get_customer,
+        crate::customers::handlers::list_customer_bookings,
         crate::customers::handlers::create_customer,
         crate::customers::handlers::update_customer,
         crate::customers::handlers::merge_customer,
@@ -370,6 +371,7 @@ paths(
         crate::tickets::public::create_table_order,
         crate::tickets::handlers::settle_open_ticket,
         crate::tickets::handlers::move_ticket_table,
+        crate::tickets::handlers::set_ticket_customer,
         // ── reservations + floor plan ─────────────────────────────────
         crate::reservations::floor::list_sections,
         crate::reservations::floor::create_section,
@@ -784,6 +786,8 @@ paths(
         crate::staff::payroll::Payslip,
         crate::staff::payroll::ComputedPayslip,
         crate::tickets::handlers::MoveTicketTableRequest,
+        crate::tickets::handlers::SetTicketCustomerRequest,
+        crate::tickets::handlers::SetTicketCustomerResponse,
         // ── held orders + transfer waitlist ───────────────────────────
         crate::floor_ops::TransferView,
         crate::floor_ops::TransfersSyncResponse,

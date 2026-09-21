@@ -627,6 +627,48 @@ pub async fn get_customer(
     Ok(HttpResponse::Ok().json(detail(pool.get_ref(), org, asked).await?))
 }
 
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct CustomerBookingsQuery {
+    /// Default 50, at most 200.
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// A customer's bookings, newest first. A merged id answers for its survivor,
+/// and bookings made under any id merged into it are included.
+#[utoipa::path(get, path = "/customers/{id}/bookings", tag = "customers",
+    params(("id" = Uuid, Path, description = "Customer ID (a merged id resolves)"), CustomerBookingsQuery),
+    responses((status = 200, description = "Bookings, newest first", body = Vec<crate::bookings::BookingView>), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn list_customer_bookings(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<Uuid>,
+    q: web::Query<CustomerBookingsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = claims_of(&req)?;
+    let org = org_of(&req, &claims)?;
+    require(pool.get_ref(), &claims, Cap::CustomersView, None).await?;
+    let id: Uuid = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
+        .bind(org)
+        .bind(path.into_inner())
+        .fetch_one(pool.get_ref())
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
+    let rows = crate::bookings::model::list_for_customer(
+        pool.get_ref(),
+        org,
+        id,
+        q.limit.unwrap_or(50).clamp(1, 200),
+        q.offset.unwrap_or(0).max(0),
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(rows))
+}
+
 async fn detail(pool: &sqlx::PgPool, org: Uuid, asked: Uuid) -> Result<CustomerDetail, AppError> {
     let mut conn = pool.acquire().await?;
     let id: Uuid = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
@@ -1047,7 +1089,7 @@ pub async fn merge_inner(
 /// The duplicate's saved addresses become the survivor's, folded by the same
 /// rule a write uses: an address the survivor already has absorbs the
 /// duplicate's uses; orders that were sent to the folded row follow it.
-async fn repoint_addresses(
+pub(crate) async fn repoint_addresses(
     tx: &mut PgConnection,
     org: Uuid,
     from: Uuid,

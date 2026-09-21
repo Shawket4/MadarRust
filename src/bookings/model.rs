@@ -200,6 +200,38 @@ where
     Ok(rows.into_iter().map(BookingView::from).collect())
 }
 
+/// One customer's bookings across the org, newest first. `customer` is the
+/// LIVE id; bookings still pointing at an id that was merged into it are
+/// included (the chain is walked, so nothing waits for the nightly re-point).
+pub async fn list_for_customer<'e, E>(
+    exec: E,
+    org: Uuid,
+    customer: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<BookingView>, AppError>
+where
+    E: PgExecutor<'e>,
+{
+    let rows: Vec<Row> = sqlx::query_as(&format!(
+        "WITH RECURSIVE chain(id, depth) AS ( \
+             SELECT $2::uuid, 0 \
+             UNION ALL \
+             SELECT c.id, chain.depth + 1 FROM customers c JOIN chain ON c.merged_into = chain.id \
+              WHERE c.org_id = $1 AND chain.depth < 16) \
+         {VIEW_SELECT} JOIN branches br ON br.id = b.branch_id \
+          WHERE br.org_id = $1 AND b.customer_id IN (SELECT id FROM chain) \
+          ORDER BY b.starts_at DESC, b.created_at DESC, b.id LIMIT $3 OFFSET $4"
+    ))
+    .bind(org)
+    .bind(customer)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(exec)
+    .await?;
+    Ok(rows.into_iter().map(BookingView::from).collect())
+}
+
 /// The same views for a set of booking ids (sync pull projection).
 pub async fn views_by_ids<'e, E>(exec: E, ids: &[Uuid]) -> Result<Vec<BookingView>, AppError>
 where

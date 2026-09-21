@@ -34,6 +34,29 @@ impl KeyExtractor for PeerIpOrLocalhost {
     }
 }
 
+/// Keys a limiter by the `{token}` segment of the matched route, so a budget
+/// belongs to ONE card whatever address asks (design §4.2). The per-IP limiter
+/// stops one machine; this stops a botnet working on one card — where every
+/// address is fresh and the per-IP bucket is always full. Wrap it INSIDE the
+/// per-IP limiter, so the addresses that can mint new keys here are themselves
+/// bounded. A route with no `{token}` shares one bucket, which is a loud
+/// misconfiguration rather than a silent hole.
+#[derive(Clone)]
+pub struct PathToken;
+
+impl KeyExtractor for PathToken {
+    type Key = String;
+    type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
+
+    fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
+        let token = req.match_info().get("token").unwrap_or("");
+        // A key is stored per distinct value: never let a caller choose how
+        // much memory one costs. Real tokens are far shorter than this.
+        let end = token.char_indices().nth(96).map_or(token.len(), |(i, _)| i);
+        Ok(token[..end].to_string())
+    }
+}
+
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 /// The header a client sets on a read it is making in order to EXPORT.
