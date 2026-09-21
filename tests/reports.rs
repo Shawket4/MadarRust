@@ -3912,3 +3912,93 @@ async fn till_sessions_report_filters_by_open_time_and_dates_in_the_branch_zone(
         assert_eq!(test::call_service(&app, req).await.status(), 400, "{bad}");
     }
 }
+
+/// Who sees whose drawer. `till.read` is core for every teller, so on its own
+/// it shows a person their OWN sessions; a colleague's float and variance is
+/// `till.read.branch`, which a manager holds — at the branches they work at
+/// and nowhere else.
+#[sqlx::test]
+async fn till_sessions_report_is_scoped_to_the_caller(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let mine = seed_branch(&pool, org_id).await;
+    rename_branch(&pool, mine, "Mine").await;
+    let other = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let manager = seed_user(&pool, org_id, "branch_manager").await;
+    let teller = seed_user(&pool, org_id, "teller").await;
+    // Teller names are unique per org.
+    sqlx::query("UPDATE users SET name = 'First Teller' WHERE id = $1")
+        .bind(teller)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let colleague = seed_user(&pool, org_id, "teller").await;
+    for u in [manager, teller, colleague] {
+        assign_user_to_branch(&pool, u, mine).await;
+    }
+    for role in ["org_admin", "branch_manager", "teller"] {
+        grant_permission(&pool, role, "tills", "read").await;
+    }
+    let till_teller = seed_shift(&pool, mine, teller).await;
+    let till_colleague = seed_shift(&pool, mine, colleague).await;
+    let till_other = seed_shift(&pool, other, admin).await;
+
+    let ids = |rows: Vec<TillSessionRow>| {
+        let mut v: Vec<Uuid> = rows.into_iter().map(|r| r.till_id).collect();
+        v.sort();
+        v
+    };
+    let sorted = |mut v: Vec<Uuid>| {
+        v.sort();
+        v
+    };
+    let nil = Uuid::nil();
+    let at_mine = format!("/reports/branches/{mine}/tills");
+    let everywhere = format!("/reports/branches/{nil}/tills");
+
+    let admin_token = generate_org_admin_token(admin, org_id);
+    assert_eq!(
+        ids(till_sessions(&app, &everywhere, &admin_token).await),
+        sorted(vec![till_teller, till_colleague, till_other])
+    );
+
+    let manager_token = generate_token(manager, Some(org_id), UserRole::BranchManager);
+    assert_eq!(
+        ids(till_sessions(&app, &at_mine, &manager_token).await),
+        sorted(vec![till_teller, till_colleague])
+    );
+    assert_eq!(
+        ids(till_sessions(&app, &everywhere, &manager_token).await),
+        sorted(vec![till_teller, till_colleague]),
+        "\"all branches\" is the branches the manager works at"
+    );
+    let req = test::TestRequest::get()
+        .uri(&format!("/reports/branches/{other}/tills"))
+        .insert_header(("Authorization", format!("Bearer {manager_token}")))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 403);
+
+    let teller_token = generate_teller_token(teller, org_id, mine);
+    assert_eq!(
+        ids(till_sessions(&app, &at_mine, &teller_token).await),
+        vec![till_teller],
+        "a teller sees their own drawer, not a colleague's"
+    );
+
+    // Another org's admin reaches nothing here: the tenant-scoped pool hides
+    // the branch itself, so it is a 404 rather than a 403.
+    let stranger_org = seed_org(&pool).await;
+    let stranger = seed_user(&pool, stranger_org, "org_admin").await;
+    let stranger_token = generate_org_admin_token(stranger, stranger_org);
+    let req = test::TestRequest::get()
+        .uri(&at_mine)
+        .insert_header(("Authorization", format!("Bearer {stranger_token}")))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 404);
+    assert!(
+        till_sessions(&app, &everywhere, &stranger_token)
+            .await
+            .is_empty()
+    );
+}

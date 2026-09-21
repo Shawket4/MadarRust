@@ -3304,7 +3304,7 @@ pub struct TillSessionRow {
     params(("branch_id" = Uuid, Path, description = "Branch ID (nil UUID = every branch the caller works at)")),
     params(TillSessionsQuery),
     responses(
-        (status = 200, description = "Till sessions opened in the range, newest first.", body = Vec<TillSessionRow>),
+        (status = 200, description = "Till sessions opened in the range, newest first. Every session at a branch where the caller holds `till.read.branch`; elsewhere only the caller's own.", body = Vec<TillSessionRow>),
         AppErrorResponse
     ),
     security(("bearer_jwt" = []))
@@ -3324,6 +3324,23 @@ pub async fn branch_till_sessions(
         && to < from
     {
         return Err(AppError::BadRequest("`to` is before `from`".into()));
+    }
+
+    // `till.read` is core for every teller; seeing a COLLEAGUE's drawer and its
+    // variance is `till.read.branch`. Without it the report narrows to the
+    // caller's own sessions, the way `GET /tills/branches/{b}/current` does.
+    let mut sees_all: Vec<Uuid> = Vec::with_capacity(branch_ids.len());
+    for b in &branch_ids {
+        if crate::authz::require::can(
+            pool.get_ref(),
+            &claims,
+            crate::authz::Cap::TillReadBranch,
+            Some(*b),
+        )
+        .await?
+        {
+            sees_all.push(*b);
+        }
     }
 
     // The cash figures are deliberately the SAME expressions the single-till
@@ -3391,8 +3408,9 @@ pub async fn branch_till_sessions(
         WHERE s.branch_id = ANY($1)
           AND ($2::timestamptz IS NULL OR s.opened_at >= $2)
           AND ($3::timestamptz IS NULL OR s.opened_at <= $3)
+          AND (s.branch_id = ANY($4) OR s.teller_id = $5)
         ORDER BY s.opened_at DESC, s.id
-        LIMIT $4
+        LIMIT $6
         "#,
         TENDERED = crate::orders::TENDERED,
         SOLD = crate::orders::SOLD
@@ -3402,6 +3420,8 @@ pub async fn branch_till_sessions(
         .bind(&branch_ids)
         .bind(query.from)
         .bind(query.to)
+        .bind(&sees_all)
+        .bind(claims.user_id())
         .bind(MAX_TILL_SESSIONS + 1)
         .fetch_all(pool.get_ref())
         .await?;
