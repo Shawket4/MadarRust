@@ -1363,6 +1363,16 @@ pub async fn set_ticket_customer(
     body: web::Json<SetTicketCustomerRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    // Asked BEFORE the bill is looked up, so someone without the grant learns
+    // nothing about which ticket ids exist; asked again below for the bill's
+    // own branch, where a per-branch override may say otherwise.
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::CustomersAttach,
+        None,
+    )
+    .await?;
     let row: Option<(Uuid, Uuid)> =
         sqlx::query_as("SELECT branch_id, org_id FROM open_tickets WHERE id = $1")
             .bind(*id)
