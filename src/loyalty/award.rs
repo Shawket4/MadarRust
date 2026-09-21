@@ -17,8 +17,12 @@
 //! 3. **Once.** `loyalty_transactions_earn_order_key` allows one earn per order,
 //!    so a double tap, a retried request and a replayed offline op all converge
 //!    on the same single award.
-//! 4. **The amount.** Points come from the ORDER's own stored totals and the
-//!    settings of the ORDER's branch. A till sends who, never how many.
+//! 4. **The amount.** Points come from the ORDER's own stored totals — and, for
+//!    a stamp card counting per item, its own stored LINES — together with the
+//!    settings of the ORDER's branch. A till sends who, never how many. This is
+//!    also why per-item stamps needed no new field on the wire and why a till
+//!    that has never heard of the feature awards exactly the right number: the
+//!    lines were already on the server, put there by the sale itself.
 //!
 //! Live route / `*_inner` split, like every other POS-facing mutation, so
 //! `/sync/replay` flushes a queued award through exactly this code.
@@ -88,7 +92,7 @@ pub struct AwardResult {
     pub order_id: Uuid,
 }
 
-/// The order an award names, with the amounts the points come from.
+/// The order an award names, with the amounts — and lines — the points come from.
 struct OrderFacts {
     id: Uuid,
     branch_id: Uuid,
@@ -100,6 +104,8 @@ struct OrderFacts {
     tax_amount: i32,
     /// The member whose card was scanned at the till, if one was.
     member_id: Option<Uuid>,
+    /// What was actually sold, for a programme that counts items.
+    lines: Vec<crate::loyalty::earn::OrderLine>,
 }
 
 async fn load_order(
@@ -144,6 +150,28 @@ async fn load_order(
         AppError::NotFound("That sale is not on the server yet".into())
     })?;
 
+    // The sale's own lines. Read here rather than sent, so live checkout, a
+    // replayed offline order and a teller pressing the button tomorrow all read
+    // the same rows and reach the same count.
+    //
+    // `menu_item_id` is nullable — a bundle or a one-off line has none. Those
+    // become the nil uuid, which counts while the eligible list is empty (every
+    // item collects) and can never match a chosen item (an admin cannot pick a
+    // line that has no menu item to pick). `reward_units` is what a redemption
+    // covered, which is how a free latte fails to hand a stamp back.
+    #[derive(sqlx::FromRow)]
+    struct LineRow {
+        menu_item_id: Option<Uuid>,
+        quantity: i32,
+        reward_units: i32,
+    }
+    let line_rows: Vec<LineRow> = sqlx::query_as(
+        "SELECT menu_item_id, quantity, reward_units FROM order_items WHERE order_id = $1",
+    )
+    .bind(r.id)
+    .fetch_all(pool)
+    .await?;
+
     Ok(OrderFacts {
         id: r.id,
         branch_id: r.branch_id,
@@ -154,6 +182,14 @@ async fn load_order(
         discount_amount: r.discount_amount,
         tax_amount: r.tax_amount,
         member_id: r.loyalty_customer_id,
+        lines: line_rows
+            .into_iter()
+            .map(|l| crate::loyalty::earn::OrderLine {
+                menu_item_id: l.menu_item_id.unwrap_or(Uuid::nil()),
+                quantity: l.quantity,
+                redeemed_units: l.reward_units,
+            })
+            .collect(),
     })
 }
 
@@ -243,6 +279,12 @@ pub async fn award_inner(
             .await?;
     let cap = crate::loyalty::settings::effective_balance_cap(&settings, &catalogue);
 
+    // Which items collect, at the ORDER's branch. Empty = all of them, which is
+    // every programme that has not narrowed itself, and is why this costs a
+    // query and changes nothing for almost everyone.
+    let eligible = crate::loyalty::settings::eligible_item_ids(pool, order.org_id, order.branch_id)
+        .await?;
+
     let mut tx = pool.begin().await?;
     let points = model::award_for_order(
         &mut tx,
@@ -255,6 +297,8 @@ pub async fn award_inner(
             discount_amount: order.discount_amount,
             tax_amount: order.tax_amount,
         },
+        &order.lines,
+        &eligible,
         settings.rule(),
         settings.enabled,
         cap,

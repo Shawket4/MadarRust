@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "aa8db466ef758739";
+pub const SPEC_HASH: &str = "b8ccbb8bb5315238";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -189,6 +189,7 @@ pub enum Cap {
     CustomersErase = 219,
     ReportsLegal = 220,
     MenuPackagingRulesApply = 221,
+    OrdersStaffDrinkRecord = 223,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -371,6 +372,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::CustomersErase, key: "customers.erase", legacy: None, group: "customers", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Erase a customer's personal data (PDPL)", ar: "محو البيانات الشخصية للعميل", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::ReportsLegal, key: "reports.legal", legacy: None, group: "reports", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See legal reports: tax, refunds, voids, discounts, waivers and price overrides", ar: "عرض التقارير القانونية: الضريبة والمرتجعات والإلغاءات والخصومات والإعفاءات وتعديلات الأسعار", hint_en: Some("They name the staff who gave money back. A manager sees only their own branches."), hint_ar: Some("ت\u{64f}ظهر أسماء الموظفين الذين أعادوا المال. يرى المدير فروعه فقط.") },
     CapMeta { cap: Cap::MenuPackagingRulesApply, key: "menu.packaging_rules.apply", legacy: None, group: "menu", tier: Tier::Advanced, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Re-apply packaging rules to every menu item", ar: "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::OrdersStaffDrinkRecord, key: "orders.staff_drink.record", legacy: None, group: "selling", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: true, limits: &[], pos: true, protected: false, en: "Record a staff drink", ar: "تسجيل مشروب موظفين", hint_en: Some("Off for tellers by default. Turn it on to let the till put a drink on the branch's daily staff pool. A note saying who it is for is always required."), hint_ar: Some("مقفول للكاشير في الأصل. افتحه عشان الكاشير يحسب المشروب على رصيد الموظفين اليومي بتاع الفرع. لازم دايم\u{64b}ا يكتب ملاحظة بالمشروب ده لمين.") },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[

@@ -37,9 +37,6 @@ pub mod snapshot;
 pub mod staff;
 pub mod whatsapp;
 
-#[cfg(test)]
-mod tests;
-
 pub const CHANNEL_IN_MALL: &str = "in_mall";
 pub const CHANNEL_OUTSIDE: &str = "outside";
 /// Deliver to a beach/pool umbrella or sunbed (by number); flat per-branch fee.

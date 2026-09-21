@@ -66,10 +66,64 @@ const DEFAULT_TENANT_MAX_CONNECTIONS: u32 = 5;
 /// Idle connections are reaped this fast so a finished tenant's connections
 /// don't linger. Very short under test (throwaway DBs churn in milliseconds),
 /// relaxed in production (avoid needless reconnect churn).
-#[cfg(test)]
-const TENANT_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
-const TENANT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// `cfg(test)` alone is NOT enough any more. The suites are integration tests
+/// now, each its own binary, and they link this library the way production does
+/// — without `cfg(test)`. They were silently getting the 30 s production value,
+/// and it cost 5 s of wall time PER TEST: a tenant connection opened by a
+/// request outlives the test, so `#[sqlx::test]`'s teardown cannot drop the
+/// throwaway database ("is being accessed by other users") until the reaper
+/// lets go. Measured 2026-09-20: an orders test whose body takes 75 ms reported
+/// 5.25 s.
+///
+/// `MADAR_FAST_TEST_POOLS` restores the short reaping for those binaries, and
+/// It is gated on `debug_assertions` as well, so a release
+/// build cannot be talked into it whatever the environment says.
+fn tenant_idle_timeout() -> Duration {
+    if cfg!(test) {
+        return Duration::from_secs(2);
+    }
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var_os("MADAR_FAST_TEST_POOLS").is_some() {
+            return Duration::from_millis(200);
+        }
+    }
+    // Ten minutes, not thirty seconds. A cafe's traffic is BURSTY: a till syncs,
+    // then nothing happens for a minute while the barista makes the drink. At
+    // 30 s the pool was empty again before the next order, so a quiet shop paid
+    // a full reconnect — TCP, Postgres auth, `set_config`, `SET ROLE`, and then
+    // sqlx re-preparing every statement, because the statement cache lives on
+    // the CONNECTION. Measured on the production box: ~0.5 s, which is most of
+    // the 760 ms a single order fetch was taking.
+    //
+    // This must outlast the gap between two customers, not the gap between two
+    // requests in one burst. Ten minutes does; it also matches the registry's
+    // own `time_to_idle`, so a pool's connections and the pool itself now go
+    // away together instead of the connections dying first and leaving an empty
+    // pool that still has to reconnect.
+    Duration::from_secs(600)
+}
+
+/// One warm connection per active tenant in production, none under test.
+///
+/// Gated exactly like `tenant_idle_timeout`, and for the same reason: `cfg!(test)`
+/// is FALSE in the integration suites (they are separate binaries that link this
+/// library the way production does), so gating on it alone would hand every test
+/// a held connection — and a held connection makes `#[sqlx::test]`'s teardown
+/// fail to drop the throwaway database ("is being accessed by other users").
+fn tenant_min_connections() -> u32 {
+    if cfg!(test) {
+        return 0;
+    }
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var_os("MADAR_FAST_TEST_POOLS").is_some() {
+            return 0;
+        }
+    }
+    1
+}
 
 /// Per-org pool sizing.
 fn tenant_max_connections() -> u32 {
@@ -160,14 +214,19 @@ pub async fn tenant_pool(base: &PgPool, org_id: Uuid) -> PgPool {
             let org = org_id.to_string();
             PgPoolOptions::new()
                 .max_connections(tenant_max_connections())
-                // Hold no idle connections and reap quickly. Tenant pools are
-                // many and bursty (one per active org), and under `#[sqlx::test]`
-                // every test spins its own throwaway DB — without prompt reaping
-                // their idle connections would accumulate and exhaust Postgres
-                // mid-suite. min=0 + a short idle timeout keeps the resident
-                // connection count proportional to *active* tenants, not total.
-                .min_connections(0)
-                .idle_timeout(TENANT_IDLE_TIMEOUT)
+                // Keep ONE connection warm per active tenant, and reap the
+                // rest. The resident count stays proportional to *active*
+                // tenants (the registry evicts a pool that goes ten minutes
+                // unused, closing its connections with it), but an org that is
+                // merely between customers no longer pays a cold connect —
+                // which, with sqlx's per-connection statement cache, meant a
+                // reconnect AND a re-prepare of every query in the handler.
+                //
+                // Under test this must stay 0: `#[sqlx::test]` gives every test
+                // its own throwaway database, and a held connection blocks the
+                // DROP at teardown ("is being accessed by other users").
+                .min_connections(tenant_min_connections())
+                .idle_timeout(tenant_idle_timeout())
                 .max_lifetime(Duration::from_secs(1800))
                 .after_connect(move |conn, _meta| {
                     let org = org.clone();

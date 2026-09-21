@@ -427,5 +427,3 @@ async fn swap_defaults(
         .collect())
 }
 
-#[cfg(test)]
-mod tests;

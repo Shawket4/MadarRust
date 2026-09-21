@@ -43,11 +43,10 @@ pub mod stream;
 pub mod telemetry;
 pub mod tools;
 
-#[cfg(test)]
+// Not `#[cfg(test)]`: the AI tests are their own binary and link this library
+// without it. Inert — `choose_provider_kind` never selects the mock.
+#[doc(hidden)]
 pub mod mock;
-
-#[cfg(test)]
-mod tests;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,7 +138,7 @@ impl AiState {
     }
 
     /// Construct with an explicit provider (tests).
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn with_provider(provider: Arc<dyn LlmProvider>) -> Self {
         Self {
             provider: Some(provider),

@@ -93,7 +93,8 @@ pub fn labels() -> Vec<Pair> {
         pair("Reward earned", "مكافأة جاهزة"),
         pair("How it works", "طريقة الاستخدام"),
         pair("Member", "العضو"),
-        pair("Rewards you can claim", "مكافآت متاحة"),
+        // "Rewards you can claim" went with the back-of-card list it labelled
+        // (owner, 2026-09-19) — see `back_of_card`.
         pair("Where it works", "أماكن الاستخدام"),
         pair("Terms", "الشروط"),
         pair("Find us", "تجدنا هنا"),
@@ -117,6 +118,26 @@ pub fn how_it_works(settings: &LoyaltySettings) -> Pair {
                 ),
             )
         }
+        // Two sentences, because a card that says the wrong one is a card the
+        // customer will hold up at the counter. A programme counting items
+        // gives a stamp per ITEM, and saying "every order earns a stamp" to
+        // someone who just bought three coffees is a promise of one third of
+        // what they are about to get — the argument runs the other way from the
+        // usual one, but it is still an argument nobody should have to have.
+        //
+        // Which items collect is deliberately NOT listed here. The back of a
+        // pass is not a menu, the list is per-branch and changes, and a stale
+        // list printed on a card is worse than none.
+        Mode::Visits if settings.stamp_per_line_item.unwrap_or(false) => pair(
+            format!(
+                "Show this card when you pay. Every item you buy earns a stamp, and a \
+                 reward costs {threshold} of them."
+            ),
+            format!(
+                "اعرض هذه البطاقة عند الدفع. كل صنف تشتريه يكسبك ختمًا، والمكافأة تكلف \
+                 {threshold} من الأختام."
+            ),
+        ),
         Mode::Visits => pair(
             format!(
                 "Show this card when you pay. Every order earns a stamp, and a reward costs \
@@ -254,5 +275,36 @@ mod tests {
         let p = how_it_works(&s);
         assert!(p.en.contains("costs 5 of them"));
         assert!(p.ar.contains("5 من الأختام"));
+    }
+
+    /// The back of the card says which rule this shop actually runs.
+    ///
+    /// A customer holding a card that says "every order earns a stamp" after
+    /// buying three coffees under a per-item programme has been told a third
+    /// of the truth, and the card is the thing they will hold up at the
+    /// counter to settle it.
+    #[test]
+    fn a_per_item_card_says_per_item_in_both_languages() {
+        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 5;
+
+        s.stamp_per_line_item = Some(false);
+        let per_order = how_it_works(&s);
+        assert!(per_order.en.contains("Every order earns a stamp"), "{}", per_order.en);
+        assert!(per_order.ar.contains("كل طلب"), "{}", per_order.ar);
+
+        s.stamp_per_line_item = Some(true);
+        let per_item = how_it_works(&s);
+        assert!(per_item.en.contains("Every item you buy earns a stamp"), "{}", per_item.en);
+        assert!(per_item.ar.contains("كل صنف"), "{}", per_item.ar);
+        // The threshold is still in both, whichever sentence was chosen.
+        assert!(per_item.en.contains("costs 5 of them"));
+        assert!(per_item.ar.contains("5 من الأختام"));
+
+        // Points are untouched by any of this — the switch is a stamps setting
+        // and must not leak into a sentence about money.
+        s.mode = "points".into();
+        assert!(how_it_works(&s).en.contains("you spend"));
     }
 }

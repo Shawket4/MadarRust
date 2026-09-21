@@ -1164,14 +1164,13 @@ pub async fn otp_request(
     }
 
     let code = generate_otp_code();
-    let code_hash = bcrypt::hash(&code, bcrypt::DEFAULT_COST).map_err(|_| AppError::Internal)?;
 
     sqlx::query(
-        "INSERT INTO delivery_otp (phone, code_hash, expires_at) \
+        "INSERT INTO delivery_otp (phone, code, expires_at) \
          VALUES ($1, $2, now() + ($3 || ' seconds')::interval)",
     )
     .bind(&phone)
-    .bind(&code_hash)
+    .bind(&code)
     .bind(OTP_TTL_SECONDS.to_string())
     .execute(pool.get_ref())
     .await?;
@@ -1206,7 +1205,7 @@ pub async fn otp_verify(
     body: web::Json<OtpVerifyInput>,
 ) -> Result<HttpResponse, AppError> {
     let phone = normalize_phone(&body.phone)?;
-    // The code is a short numeric string; reject anything else before bcrypt.
+    // The code is a short numeric string; reject anything else before touching the DB.
     if body.code.is_empty()
         || body.code.len() > MAX_OTP_CODE_LEN
         || !body.code.chars().all(|c| c.is_ascii_digit())
@@ -1214,29 +1213,70 @@ pub async fn otp_verify(
         return Err(AppError::BadRequest("Incorrect code.".into()));
     }
 
-    let row: Option<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT id, code_hash, attempts FROM delivery_otp \
-         WHERE phone = $1 AND consumed_at IS NULL AND expires_at > now() \
-         ORDER BY created_at DESC LIMIT 1",
+    // CLAIM the attempt and read the code in ONE statement.
+    //
+    // This used to SELECT the code and the attempt count, compare them in
+    // Rust, and only then UPDATE the counter on a miss. Three statements, and
+    // the window between the first and the last is where the cap lived. Guesses
+    // arriving together all read `attempts` before any of them wrote it, so all
+    // of them passed a check that only one should have — the five-attempt cap
+    // was really "five attempts per round trip", and the only thing bounding a
+    // parallel attacker was the per-IP limiter (three per thirty seconds).
+    //
+    // That matters more than it looks, because the code is FOUR digits. Ten
+    // thousand possibilities, a five-minute life: an attacker spread across
+    // enough addresses to dodge the per-IP limiter could cover the whole space
+    // inside one code's lifetime.
+    //
+    // Incrementing INSIDE the predicate makes the database the arbiter. Exactly
+    // five updates can ever succeed for a row, whoever sends them, from however
+    // many addresses, however simultaneously — the sixth matches no row because
+    // `attempts < $2` is false by then, and returns nothing.
+    //
+    // The successful attempt is counted too. It costs one of the five and is
+    // immediately irrelevant, because a correct code consumes the row.
+    let claimed: Option<(Uuid, String)> = sqlx::query_as(
+        "UPDATE delivery_otp SET attempts = attempts + 1 \
+         WHERE id = ( \
+             SELECT id FROM delivery_otp \
+              WHERE phone = $1 AND consumed_at IS NULL AND expires_at > now() \
+              ORDER BY created_at DESC LIMIT 1 \
+         ) \
+           AND attempts < $2 \
+         RETURNING id, code",
     )
     .bind(&phone)
+    .bind(OTP_MAX_ATTEMPTS)
     .fetch_optional(pool.get_ref())
     .await?;
 
-    let (id, code_hash, attempts) =
-        row.ok_or_else(|| AppError::BadRequest("No active code — request a new one.".into()))?;
-    if attempts >= OTP_MAX_ATTEMPTS {
-        return Err(AppError::BadRequest(
-            "Too many attempts — request a new code.".into(),
-        ));
-    }
+    let Some((id, expected)) = claimed else {
+        // Nothing was claimed, for one of two reasons, and they are worth
+        // telling apart: "request a new one" is the right instruction for an
+        // expired code and the wrong one for a code being ground down. This
+        // read races nothing — the cap has already been enforced above.
+        let spent: bool = sqlx::query_scalar(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM delivery_otp \
+                  WHERE phone = $1 AND consumed_at IS NULL AND expires_at > now() \
+                    AND attempts >= $2 \
+             )",
+        )
+        .bind(&phone)
+        .bind(OTP_MAX_ATTEMPTS)
+        .fetch_one(pool.get_ref())
+        .await?;
+        return Err(AppError::BadRequest(if spent {
+            "Too many attempts — request a new code.".into()
+        } else {
+            "No active code — request a new one.".to_string()
+        }));
+    };
 
-    let ok = bcrypt::verify(&body.code, &code_hash).unwrap_or(false);
-    if !ok {
-        sqlx::query("UPDATE delivery_otp SET attempts = attempts + 1 WHERE id = $1")
-            .bind(id)
-            .execute(pool.get_ref())
-            .await?;
+    // Constant-time, so a wrong code cannot be narrowed a digit at a time by
+    // timing the reply. Cheap enough not to think about — the reason this is
+    // not bcrypt is in the migration that made the column plain.
+    if !crate::secrets::constant_time_eq(body.code.as_bytes(), expected.as_bytes()) {
         return Err(AppError::BadRequest("Incorrect code.".into()));
     }
 

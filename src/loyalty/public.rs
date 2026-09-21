@@ -10,6 +10,10 @@
 //! token; this module simply requires that token when the branch asks for it,
 //! the same way delivery intake does.
 
+use std::sync::LazyLock;
+use std::time::Duration;
+
+use actix_web::web::Bytes;
 use actix_web::{HttpResponse, web};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -284,10 +288,12 @@ pub async fn org_logo_badge(
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
-    let brand = crate::orgs::branding::load(pool.get_ref(), path.0).await?;
-    let img = crate::orgs::branding::logo_badge(&brand, 512)
-        .ok_or_else(|| AppError::NotFound("That shop has no logo".into()))?;
-    png_response(img)
+    let (org_id, v) = path.into_inner();
+    let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
+    cached_png_response((org_id, v, 512, 512), "That shop has no logo", move || {
+        crate::orgs::branding::logo_badge(&brand, 512)
+    })
+    .await
 }
 
 /// One organisation's card photograph, cropped to a banner.
@@ -295,23 +301,86 @@ pub async fn org_card_banner(
     pool: web::Data<PgPool>,
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
-    let brand = crate::orgs::branding::load(pool.get_ref(), path.0).await?;
+    let (org_id, v) = path.into_inner();
+    let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     // Google's hero is about 3:1 and much wider than Apple's strip; each wallet
     // gets a crop made for its own slot rather than one shape squeezed into both.
-    let img = crate::orgs::branding::card_banner(&brand, 1032, 336)
-        .ok_or_else(|| AppError::NotFound("That shop has no card image".into()))?;
-    png_response(img)
+    cached_png_response(
+        (org_id, v, 1032, 336),
+        "That shop has no card image",
+        move || crate::orgs::branding::card_banner(&brand, 1032, 336),
+    )
+    .await
+}
+
+/// Composed brand PNGs, keyed by exactly what went into them.
+///
+/// These endpoints recomposed the picture on EVERY request: load the branding,
+/// decode the source photograph, crop it to the wallet's slot, re-encode a PNG.
+/// Measured against production, the 1032x336 card banner took **8.1 seconds**
+/// and the logo badge about one — per request, on the single vCPU, blocking
+/// whatever else the server had to do.
+///
+/// Nothing about the result varies per viewer. The response already claims to
+/// be immutable for a year, because the `{v}` in the path changes whenever the
+/// underlying file does — so the only thing missing was somewhere to keep it.
+///
+/// The key carries `v` as well as the org and the slot size, so a new upload
+/// lands on a fresh entry rather than waiting out a TTL. The hour is the
+/// backstop for a picture replaced at the same version, and matches the wallet
+/// caches so an image cannot be staler here than it already is inside a pass.
+static BRAND_PNG_CACHE: LazyLock<moka::future::Cache<(Uuid, String, u32, u32), Bytes>> =
+    LazyLock::new(|| {
+        moka::future::Cache::builder()
+            // A few dozen orgs, two slots each, a few hundred KB apiece.
+            .max_capacity(128)
+            .time_to_live(Duration::from_secs(3600))
+            .build()
+    });
+
+/// Serve a composed brand PNG, making it only if this exact one is not held.
+///
+/// `compose` is called at most once per key per hour, and runs on the blocking
+/// pool: PNG encoding is CPU-bound, and on one vCPU doing it on the reactor
+/// stops every other request for its duration.
+async fn cached_png_response<F>(
+    key: (Uuid, String, u32, u32),
+    missing: &'static str,
+    compose: F,
+) -> Result<HttpResponse, AppError>
+where
+    F: FnOnce() -> Option<image::DynamicImage> + Send + 'static,
+{
+    if let Some(bytes) = BRAND_PNG_CACHE.get(&key).await {
+        return Ok(png_ok(bytes));
+    }
+    let built = web::block(move || {
+        let img = compose()?;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).ok()?;
+        Some(buf.into_inner())
+    })
+    .await
+    .map_err(|_| AppError::Internal)?
+    .ok_or_else(|| AppError::NotFound(missing.into()))?;
+    let bytes = Bytes::from(built);
+    BRAND_PNG_CACHE.insert(key, bytes.clone()).await;
+    Ok(png_ok(bytes))
+}
+
+fn png_ok(bytes: Bytes) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("image/png")
+        // Immutable against the key in the URL, which changes with the file.
+        .insert_header(("Cache-Control", "public, max-age=31536000, immutable"))
+        .body(bytes)
 }
 
 fn png_response(img: image::DynamicImage) -> Result<HttpResponse, AppError> {
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, image::ImageFormat::Png)
         .map_err(|_| AppError::Internal)?;
-    Ok(HttpResponse::Ok()
-        .content_type("image/png")
-        // Immutable against the key in the URL, which changes with the file.
-        .insert_header(("Cache-Control", "public, max-age=31536000, immutable"))
-        .body(buf.into_inner()))
+    Ok(png_ok(Bytes::from(buf.into_inner())))
 }
 
 /// A reward as the signup page lists it: what it is, and what it costs.
@@ -554,6 +623,9 @@ pub async fn join(
 
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
     let passes = wallet::links_for(pool.get_ref(), &member, &settings, &org, &locations).await;
+    // The Apple button is about to be on screen. Build the pass behind it now,
+    // in the background, rather than when a thumb lands on it.
+    wallet::apple::prebuild(pool.get_ref(), &member);
     Ok(HttpResponse::Ok().json(JoinResult {
         member_token: Some(member.member_token.clone()),
         name: member.name.clone(),
@@ -824,6 +896,9 @@ pub async fn card(
     let brand = card_brand(&org, &settings);
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
     let passes = wallet::links_for(pool.get_ref(), &member, &settings, &org, &locations).await;
+    // The Apple button is about to be on screen. Build the pass behind it now,
+    // in the background, rather than when a thumb lands on it.
+    wallet::apple::prebuild(pool.get_ref(), &member);
     let marketing_opt_out = member.marketing_opt_out;
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
@@ -866,8 +941,10 @@ pub async fn apple_pass(
         .await?
         .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
     // The same builder the device's own refetch uses, so the pass a customer
-    // downloads and the pass their phone later pulls are the same shape.
-    let bytes = wallet::apple::build_pass_for(pool.get_ref(), &member).await?;
+    // downloads and the pass their phone later pulls are the same shape — and
+    // the same STORE, so both get the bytes that were built after the last
+    // balance change rather than making them again here.
+    let bytes = wallet::apple::pass_bytes_for(pool.get_ref(), &member).await?;
 
     // Record the serial so pass updates can find this member later.
     sqlx::query(

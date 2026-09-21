@@ -109,6 +109,25 @@ pub struct LoyaltySettings {
     #[serde(default)]
     pub reward_any_item: bool,
 
+    /// Count stamps per LINE ITEM rather than per sale. Stamps mode only.
+    ///
+    /// Off, an order of three lattes is one stamp. On, it is three, and a line
+    /// of quantity three is three — the rate the customer counts coffees at,
+    /// which is what a card saying "buy ten coffees" promised them.
+    ///
+    /// **`None` on the way IN means "leave it as it is."** This type doubles as
+    /// the PUT body and a settings save replaces the row wholesale, so a
+    /// dashboard built before this field existed would otherwise send `false`
+    /// by omission and silently put a per-item programme back on per-order —
+    /// or, with the other default, silently triple every existing card's rate.
+    /// Neither is a decision a stale browser tab gets to make. A fresh scope
+    /// with nothing sent resolves to `true`: that is what a stamp card means,
+    /// and a new programme should not need a switch to get it.
+    ///
+    /// Always `Some` on the way OUT; the column is NOT NULL.
+    #[serde(default)]
+    pub stamp_per_line_item: Option<bool>,
+
     /// Whether a ceiling applies to what a member may hold at all.
     ///
     /// Separate from the figure below, because "no number" has to be able to
@@ -210,6 +229,9 @@ impl LoyaltySettings {
             winback_message: None,
             winback_reward_amount: None,
             reward_any_item: false,
+            // What a stamp card means. See the field's docs for why a
+            // programme that already exists does not get this.
+            stamp_per_line_item: Some(true),
             balance_cap_enabled: false,
             balance_cap: None,
             max_rewards_per_order: None,
@@ -233,6 +255,10 @@ impl LoyaltySettings {
             piastres_per_point: self.earn_piastres_per_point,
             on_discounted: self.earn_on_discounted,
             include_tax: self.earn_include_tax,
+            // An unset value here is only reachable on a request body; a row
+            // read from the database always carries the column. Per-order is
+            // the conservative reading of "we do not know".
+            per_line_item: self.stamp_per_line_item.unwrap_or(false),
         }
     }
 
@@ -300,6 +326,7 @@ struct Row {
     winback_message: Option<String>,
     winback_reward_amount: Option<i32>,
     reward_any_item: bool,
+    stamp_per_line_item: bool,
     balance_cap_enabled: bool,
     balance_cap: Option<i32>,
     max_rewards_per_order: Option<i32>,
@@ -312,7 +339,8 @@ const COLS: &str = "org_id, branch_id, enabled, program_name, program_name_ar, m
     earn_piastres_per_point, earn_on_discounted, earn_include_tax, \
     default_reward_cost, require_otp, birthday_enabled, birthday_reward_amount, \
     birthday_message, birthday_message_ar, winback_enabled, winback_message, \
-    winback_reward_amount, reward_any_item, balance_cap_enabled, balance_cap, \
+    winback_reward_amount, reward_any_item, stamp_per_line_item, \
+    balance_cap_enabled, balance_cap, \
     max_rewards_per_order, allow_negative_balance, terms, terms_ar";
 
 impl From<Row> for LoyaltySettings {
@@ -337,6 +365,9 @@ impl From<Row> for LoyaltySettings {
             winback_message: r.winback_message,
             winback_reward_amount: r.winback_reward_amount,
             reward_any_item: r.reward_any_item,
+            // Always concrete on the way out, so the dashboard renders the
+            // switch's real position rather than an absence.
+            stamp_per_line_item: Some(r.stamp_per_line_item),
             balance_cap_enabled: r.balance_cap_enabled,
             balance_cap: r.balance_cap,
             max_rewards_per_order: r.max_rewards_per_order,
@@ -515,9 +546,10 @@ pub async fn put_settings(
             mode, earn_piastres_per_point, earn_on_discounted, earn_include_tax, default_reward_cost, \
             require_otp, birthday_enabled, birthday_reward_amount, birthday_message, \
             birthday_message_ar, winback_enabled, winback_message, winback_reward_amount, \
-            reward_any_item, balance_cap_enabled, balance_cap, \
+            reward_any_item, stamp_per_line_item, balance_cap_enabled, balance_cap, \
             max_rewards_per_order, allow_negative_balance, terms, terms_ar) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, \
+                 COALESCE($20, true),$21,$22,$23,$24,$25,$26) \
          ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
          DO UPDATE SET enabled = EXCLUDED.enabled, program_name = EXCLUDED.program_name, \
             program_name_ar = EXCLUDED.program_name_ar, mode = EXCLUDED.mode, \
@@ -534,6 +566,8 @@ pub async fn put_settings(
             winback_message = EXCLUDED.winback_message, \
             winback_reward_amount = EXCLUDED.winback_reward_amount, \
             reward_any_item = EXCLUDED.reward_any_item, \
+            stamp_per_line_item = \
+                COALESCE($20, loyalty_settings.stamp_per_line_item), \
             balance_cap_enabled = EXCLUDED.balance_cap_enabled, \
             balance_cap = EXCLUDED.balance_cap, \
             max_rewards_per_order = EXCLUDED.max_rewards_per_order, \
@@ -561,6 +595,12 @@ pub async fn put_settings(
     .bind(&incoming.winback_message)
     .bind(incoming.winback_reward_amount)
     .bind(incoming.reward_any_item)
+    // The one field a settings save does NOT replace wholesale. `None` keeps
+    // the row's current value on an update and resolves to per-item on an
+    // insert — see the field's docs: neither silently retiming every card in
+    // circulation nor silently undoing a switch the owner deliberately flipped
+    // is something a client that has never heard of this field may do.
+    .bind(incoming.stamp_per_line_item)
     .bind(incoming.balance_cap_enabled)
     .bind(incoming.balance_cap)
     .bind(incoming.max_rewards_per_order)
@@ -592,6 +632,12 @@ pub async fn put_settings(
     .execute(pool.get_ref())
     .await?;
 
+    // Every stored .pkpass of this shop was built around the settings that
+    // just changed — the programme name, the mode, the terms on the back. The
+    // hour-long TTL would get there on its own, but this is the edit an owner
+    // makes and then immediately opens their own card to look at.
+    crate::loyalty::wallet::store::purge_org(pool.get_ref(), org_id).await;
+
     Ok(HttpResponse::Ok().json(LoyaltySettings::from(row)))
 }
 
@@ -616,6 +662,7 @@ pub async fn delete_settings(
         .bind(branch_id)
         .execute(pool.get_ref())
         .await?;
+    crate::loyalty::wallet::store::purge_org(pool.get_ref(), org_id).await;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -623,8 +670,11 @@ pub async fn delete_settings(
 // Which menu items a member may claim at the threshold. Scoped like the
 // settings above: a branch with no rows of its own inherits the org's list, so
 // an org curates one catalogue and a branch departs from it only when it means
-// to. Item selection governs REDEMPTION only — earning reads order totals, so
-// the till never needs to know which lines were eligible.
+// to.
+//
+// There are now TWO item lists, and they are independent on purpose: this one
+// is what a balance BUYS, and `loyalty_earning_items` below is what FILLS it.
+// A shop may perfectly well let you collect on coffee and spend on cake.
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RewardItem {
@@ -941,4 +991,249 @@ pub async fn load_effective_rewards_org(
         .unwrap_or_else(|| LoyaltySettings::defaults(org_id, None))
         .mode();
     Ok(in_mode(load_reward_rows(pool, org_id, None).await?, mode))
+}
+
+/// The same catalogue, for a caller that ALREADY holds the org's settings.
+///
+/// [`load_effective_rewards_org`] re-reads `loyalty_settings` purely to learn
+/// the mode. A pass build asked for the catalogue twice — once for the list on
+/// the back, once for the headline on the front — and paid three settings reads
+/// between them for a value it had loaded before it started. Same rows, same
+/// ordering, one query.
+pub async fn rewards_org_in(
+    pool: &PgPool,
+    org_id: Uuid,
+    settings: &LoyaltySettings,
+) -> Result<Vec<RewardItem>, AppError> {
+    Ok(in_mode(
+        load_reward_rows(pool, org_id, None).await?,
+        settings.mode(),
+    ))
+}
+
+// ── The items that collect a stamp ───────────────────────────────────────────
+// The other half of per-item stamps. Scoped and shaped exactly like the reward
+// catalogue above so an admin learns one idea and a branch overrides one way,
+// but kept a separate list because the two answer different questions: that one
+// is what a balance BUYS, this one is what FILLS it.
+//
+// The emptiness of this list is LOAD-BEARING: empty means every item collects.
+// That is where every programme starts, which is what makes the whole feature
+// free to ignore.
+
+/// One item that collects, denormalised for the picker the same way a reward is.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EarningItem {
+    pub menu_item_id: Uuid,
+    pub name: String,
+    pub image_url: Option<String>,
+    /// Menu price in piastres. Shown so an admin picking items can see what
+    /// they are handing a stamp for.
+    pub base_price: i32,
+    pub sort_order: i32,
+}
+
+/// The list in force at a scope, and whether it came from the org.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EarningItemList {
+    pub org_id: Uuid,
+    pub branch_id: Option<Uuid>,
+    /// True when these rows are the org's rather than this branch's own.
+    pub inherited: bool,
+    /// Empty means EVERY item collects — not that nothing does.
+    pub items: Vec<EarningItem>,
+}
+
+async fn load_earning_rows<'e, E>(
+    exec: E,
+    org_id: Uuid,
+    branch_id: Option<Uuid>,
+) -> Result<Vec<EarningItem>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        menu_item_id: Uuid,
+        name: String,
+        image_url: Option<String>,
+        base_price: i32,
+        sort_order: i32,
+    }
+    // A deleted menu item drops out of the list rather than lingering as an id
+    // nothing can sell. Note what that means for the rule: narrowing a list to
+    // one item and then deleting it empties the list, and an empty list means
+    // everything collects. That is the same direction every other decision here
+    // leans — a shop's data going missing must not quietly stop customers
+    // earning at a counter.
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT m.id AS menu_item_id, m.name, m.image_url, m.base_price, e.sort_order \
+           FROM loyalty_earning_items e JOIN menu_items m ON m.id = e.menu_item_id \
+          WHERE e.org_id = $1 \
+            AND COALESCE(e.branch_id, '00000000-0000-0000-0000-000000000000'::uuid) \
+              = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid) \
+            AND m.deleted_at IS NULL \
+          ORDER BY e.sort_order, m.name",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .fetch_all(exec)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| EarningItem {
+            menu_item_id: r.menu_item_id,
+            name: r.name,
+            image_url: r.image_url,
+            base_price: r.base_price,
+            sort_order: r.sort_order,
+        })
+        .collect())
+}
+
+/// The list a branch actually collects on: its own when it has one, else the
+/// org's. An empty branch list means INHERIT, exactly as the reward catalogue
+/// does — a branch that wants to collect on everything clears the org's list or
+/// picks the whole menu.
+pub async fn load_effective_earning_items(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+) -> Result<(Vec<EarningItem>, bool), AppError> {
+    let own = load_earning_rows(pool, org_id, Some(branch_id)).await?;
+    if !own.is_empty() {
+        return Ok((own, false));
+    }
+    Ok((load_earning_rows(pool, org_id, None).await?, true))
+}
+
+/// Just the ids, which is all the earn rule wants.
+pub async fn eligible_item_ids(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
+    Ok(load_effective_earning_items(pool, org_id, branch_id)
+        .await?
+        .0
+        .into_iter()
+        .map(|i| i.menu_item_id)
+        .collect())
+}
+
+#[utoipa::path(get, path = "/loyalty/earning-items", tag = "loyalty",
+    operation_id = "get_loyalty_earning_items", params(ScopeQuery),
+    responses((status = 200, body = EarningItemList), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn get_earning_items(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<ScopeQuery>,
+) -> Result<HttpResponse, AppError> {
+    let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
+    let (items, inherited) = match query.branch_id {
+        Some(b) => {
+            require_branch_access(pool.get_ref(), &claims, b).await?;
+            load_effective_earning_items(pool.get_ref(), org_id, b).await?
+        }
+        None => (
+            load_earning_rows(pool.get_ref(), org_id, None).await?,
+            false,
+        ),
+    };
+    Ok(HttpResponse::Ok().json(EarningItemList {
+        org_id,
+        branch_id: query.branch_id,
+        inherited,
+        items,
+    }))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PutEarningItems {
+    pub branch_id: Option<Uuid>,
+    /// The complete list for this scope, in order. An empty list clears it: for
+    /// an org that means every item collects again, for a branch it means going
+    /// back to inheriting the org's.
+    pub menu_item_ids: Vec<Uuid>,
+}
+
+#[utoipa::path(put, path = "/loyalty/earning-items", tag = "loyalty",
+    operation_id = "put_loyalty_earning_items", request_body = PutEarningItems,
+    responses((status = 200, body = EarningItemList), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn put_earning_items(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    body: web::Json<PutEarningItems>,
+) -> Result<HttpResponse, AppError> {
+    let incoming = body.into_inner();
+    let (org_id, claims) = scope_org(pool.get_ref(), &req, incoming.branch_id).await?;
+    check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
+    if let Some(b) = incoming.branch_id {
+        require_branch_access(pool.get_ref(), &claims, b).await?;
+    }
+
+    // Every item must belong to this org — the same check the reward catalogue
+    // makes, and for the same reason: without it an admin could name another
+    // tenant's item id and read its name and price back out of the list.
+    let distinct: Vec<Uuid> = {
+        let mut seen = std::collections::HashSet::new();
+        incoming
+            .menu_item_ids
+            .iter()
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect()
+    };
+    if !distinct.is_empty() {
+        let valid: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM menu_items \
+              WHERE id = ANY($1) AND org_id = $2 AND deleted_at IS NULL AND is_active",
+        )
+        .bind(&distinct)
+        .bind(org_id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if valid != distinct.len() as i64 {
+            return Err(AppError::BadRequest(
+                "earning items must be active menu items of this org".into(),
+            ));
+        }
+    }
+
+    // One transaction, like the catalogue: a half-written list would be a list
+    // whose emptiness means something, which is the worst thing to leave behind.
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM loyalty_earning_items WHERE org_id = $1 \
+           AND COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid) \
+             = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)",
+    )
+    .bind(org_id)
+    .bind(incoming.branch_id)
+    .execute(&mut *tx)
+    .await?;
+    for (i, id) in distinct.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO loyalty_earning_items (org_id, branch_id, menu_item_id, sort_order) \
+             VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        )
+        .bind(org_id)
+        .bind(incoming.branch_id)
+        .bind(id)
+        .bind(i as i32)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
+    let items = load_earning_rows(pool.get_ref(), org_id, incoming.branch_id).await?;
+    Ok(HttpResponse::Ok().json(EarningItemList {
+        org_id,
+        branch_id: incoming.branch_id,
+        inherited: false,
+        items,
+    }))
 }

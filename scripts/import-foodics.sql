@@ -49,6 +49,8 @@ CREATE TEMP TABLE keep_org AS SELECT * FROM organizations WHERE id = :'org'::uui
 UPDATE organizations SET is_demo = true WHERE id = :'org'::uuid;
 \elif :replace_menu
 UPDATE organizations SET is_demo = true WHERE id = :'org'::uuid;
+\elif :reset_activity
+UPDATE organizations SET is_demo = true WHERE id = :'org'::uuid;
 \endif
 
 \if :reset_org
@@ -87,8 +89,100 @@ SELECT CASE WHEN to_regclass('bundles') IS NOT NULL
 UPDATE organizations o SET is_demo = k.is_demo FROM keep_org k WHERE o.id = k.id;
 \echo '== Replace menu: rows deleted =='
 SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
+\elif :reset_activity
+-- Everything the org DID, none of how it is SET UP. Each root below is purged
+-- with its FK children (pg_temp.purge), so a new activity table that hangs off
+-- one of them is cleared without editing this list. What is deliberately NOT a
+-- root: branches, users/roles/permissions/overrides, devices, the menu, recipes,
+-- org_ingredients/suppliers/packaging, floor sections + branch_tables, payment
+-- methods, discounts, bundles, work_shifts + staff_schedules/profiles, loyalty
+-- settings and reward catalog, qr_short_links, asset_* (menu images).
+CREATE FUNCTION pg_temp.purge_activity(tbl text, col text DEFAULT 'org_id')
+RETURNS void LANGUAGE plpgsql AS $fn$
+DECLARE o uuid := current_setting('app.org_id')::uuid;
+BEGIN
+  IF to_regclass(tbl) IS NULL THEN RETURN; END IF;
+  IF col = 'branch_id' THEN
+    PERFORM pg_temp.purge(tbl::regclass,
+      format('branch_id IN (SELECT id FROM branches WHERE org_id = %L)', o));
+  ELSE
+    PERFORM pg_temp.purge(tbl::regclass, format('%I = %L', col, o));
+  END IF;
+END
+$fn$;
+
+\o /dev/null
+-- Selling: tills first (their FK children are the orders, payments, refunds and
+-- occupancies), then the roots that can outlive a till.
+SELECT pg_temp.purge_activity('tills', 'branch_id');
+SELECT pg_temp.purge_activity('orders', 'branch_id');
+SELECT pg_temp.purge_activity('open_tickets', 'branch_id');
+SELECT pg_temp.purge_activity('order_refunds');
+SELECT pg_temp.purge_activity('delivery_orders');
+SELECT pg_temp.purge_activity('kitchen_tickets');
+SELECT pg_temp.purge_activity('table_occupancies', 'branch_id');
+SELECT pg_temp.purge_activity('table_transfer_requests');
+SELECT pg_temp.purge_activity('bookings');
+
+-- Inventory LEDGER (the catalog — org_ingredients, suppliers, recipes — stays).
+SELECT pg_temp.purge_activity('inventory_movements', 'branch_id');
+SELECT pg_temp.purge_activity('stocktakes');
+SELECT pg_temp.purge_activity('goods_receipts');
+SELECT pg_temp.purge_activity('purchase_orders');
+SELECT pg_temp.purge_activity('stock_transfers');
+SELECT pg_temp.purge_activity('waste_events');
+SELECT pg_temp.purge_activity('ingredient_cost_history', 'branch_id');
+
+-- Customers + loyalty history (loyalty_settings and the reward catalog stay).
+SELECT pg_temp.purge_activity('loyalty_transactions');
+SELECT pg_temp.purge_activity('customers');
+SELECT pg_temp.purge_activity('loyalty_customers');
+
+-- HR activity (work_shifts, staff_schedules, staff_profiles/documents stay).
+SELECT pg_temp.purge_activity('attendance_records');
+SELECT pg_temp.purge_activity('payslips');
+SELECT pg_temp.purge_activity('payroll_periods');
+SELECT pg_temp.purge_activity('payroll_bonuses');
+SELECT pg_temp.purge_activity('payroll_deductions');
+SELECT pg_temp.purge_activity('salary_advances');
+SELECT pg_temp.purge_activity('staff_requests');
+SELECT pg_temp.purge_activity('leave_balances');
+
+-- Decisions, approvals and assistant history.
+SELECT pg_temp.purge_activity('approvals');
+SELECT pg_temp.purge_activity('ai_conversations');
+SELECT pg_temp.purge_activity('menu_decisions');
+
+-- POS changefeed + per-branch numbering: a POS pulls a clean feed and the next
+-- order of the day is #1 again.
+SELECT pg_temp.purge_activity('sync_changes', 'branch_id');
+SELECT pg_temp.purge_activity('sync_feed_watermarks', 'branch_id');
+SELECT pg_temp.purge_activity('client_seen', 'branch_id');
+SELECT pg_temp.purge_activity('order_ref_counters', 'branch_id');
+SELECT pg_temp.purge_activity('ticket_ref_counters', 'branch_id');
+SELECT pg_temp.purge_activity('delivery_ref_counters', 'branch_id');
+\o
+
+-- branch_stock.on_hand is derived from the ledger we just deleted, so it has to
+-- come back to zero with it — the one sanctioned direct write (see the
+-- branch_stock_on_hand_guard trigger). The rows themselves stay: they carry the
+-- unit, par level and cost the catalog set up.
+SELECT set_config('madar.stock_rebase', 'on', true) AS stock_rebase \gset
+UPDATE branch_stock SET on_hand = 0
+WHERE branch_id IN (SELECT id FROM branches WHERE org_id = :'org'::uuid)
+  AND on_hand <> 0;
+SELECT set_config('madar.stock_rebase', 'off', true) AS stock_rebase \gset
+
+-- Occupancy lives on the table row too; every table is free again.
+UPDATE branch_tables SET status = 'free'
+WHERE org_id = :'org'::uuid AND status IS DISTINCT FROM 'free';
+
+UPDATE organizations o SET is_demo = k.is_demo FROM keep_org k WHERE o.id = k.id;
+\echo '== Reset activity: rows deleted (setup kept) =='
+SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
 \endif
 
+\if :do_import
 -- ── Categories ────────────────────────────────────────────────────────────
 -- Foodics image URLs are deliberately not copied into image_url: images are
 -- uploaded through Madar's asset pipeline (scripts/upload-menu-images.sh) so
@@ -402,5 +496,7 @@ FROM map_group m JOIN modifier_groups g ON g.id = m.id
 WHERE NOT EXISTS (SELECT 1 FROM modifier_options o WHERE o.group_id = g.id) ORDER BY 1;
 
 \echo '-- Not imported (no Madar column): sku, barcode, tax_group_reference, calories, is_sold_by_weight, preparation_time, free_options, ereceipt_*, option sku/calories/tax_group'
+
+\endif
 
 :final;

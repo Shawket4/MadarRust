@@ -45,6 +45,28 @@ tracing-actix-web  = "0.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures            = "0.3"
 image              = { version = "0.25", features = ["jpeg", "png", "gif", "webp", "bmp"] }
+# Wallet strip images (src/loyalty/wallet/apple.rs). Apple Wallet takes PNG and
+# nothing else, and the strip is a PHOTOGRAPH — the one thing PNG is worst at.
+# Three strips were 93% of a 832 KB pass.
+#
+# `png` is the encoder `image` already uses; naming it directly buys the palette
+# (PNG8) colour type and the compression/filter knobs `image`'s convenience
+# `write_to` does not expose. Already in the tree via `image` — no new code
+# compiled, no new transitive dependency.
+#
+# `exoquant` is the quantiser. It IS new: ~1.4k lines of pure Rust, MIT, ZERO
+# dependencies of its own (its only optional one, `rand`, stays off), no
+# `unsafe`, no I/O — a pure function from pixels to a palette. It is unmaintained
+# (last release 2018), which is affordable precisely because it is pure and
+# vendorable if it ever breaks. It was chosen over `imagequant` (libimagequant /
+# pngquant), which is the better-known quantiser but is GPL-3.0-or-commercial —
+# a licensing decision for the owner, not a dependency bump. Measured: exoquant
+# at 256 colours with Floyd-Steinberg is visually indistinguishable from the
+# lossless strip at 2.9x smaller; NeuQuant (`color_quant`, already in the tree
+# and therefore free) was tried first and REJECTED on looking at the output —
+# visible posterisation in the highlights.
+png                = "0.18"
+exoquant           = { version = "0.2", default-features = false }
 rustls             = "0.23"
 rustls-pemfile     = "2"
 # sqlx HELD at 0.8: 0.9 gates every dynamic SQL string behind AssertSqlSafe
@@ -122,9 +144,27 @@ strip = true
 # carry none. Faster builds and a much smaller target dir.
 [profile.dev]
 debug = "line-tables-only"
+# Never strip. Cargo strips AUTOMATICALLY whenever a profile lowers debug info,
+# and Apple's `strip` on Xcode 27 / macOS 27 corrupts what it touches: a
+# proc-macro dylib (sqlx-macros) that `dlopen` refuses with "mis-aligned
+# LINKEDIT string pool", and a test binary whose ad-hoc signature no longer
+# matches, which macOS then kills on exec with SIGKILL — and reports to the
+# user as malware. The symptom is deterministic and survives `cargo clean -p`,
+# re-signing with codesign, and freeing disk, because each rebuild strips
+# again. See CLAUDE.md.
+strip = false
 
 [profile.dev.package."*"]
 debug = false
+strip = false
+
+# `cargo test` inherits dev, but spell it out: these are the binaries macOS was
+# killing, and a later edit to dev must not silently re-enable stripping here.
+[profile.test]
+strip = false
+
+[profile.test.package."*"]
+strip = false
 
 # The POS real-backend scenarios (madar/tool/offline_b_backend.sh): release
 # optimisations without LTO, so the scenario backend builds in minutes.
@@ -133,6 +173,12 @@ inherits = "release"
 lto = false
 codegen-units = 16
 incremental = true
+# `release` strips (it ships to Linux, where stripping is fine and the size
+# matters). This profile never ships — it only builds a backend for the POS
+# scenarios to talk to on THIS machine — and on macOS 27 a stripped binary is
+# corrupt, so the scenario backend would not run at all. Inheriting `release`
+# means inheriting `strip = true`, hence the explicit override.
+strip = false
 
 [dev-dependencies]
 # Measures the shipped font in the QR-card layout test, so the "Powered by"

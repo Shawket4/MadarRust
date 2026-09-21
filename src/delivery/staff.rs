@@ -378,7 +378,7 @@ pub async fn set_status(
 /// longer at `prev`: another till got there first, and the caller must re-read
 /// rather than assume. Separate from the handler so the guard can be exercised
 /// without staging a race.
-pub(crate) async fn advance_status(
+pub async fn advance_status(
     pool: &PgPool,
     id: Uuid,
     prev: &str,

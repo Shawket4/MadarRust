@@ -306,7 +306,29 @@ async fn run() -> std::io::Result<()> {
     })
     // Drop slow/stalled clients so a resource-tight box can't be tied up.
     .client_request_timeout(std::time::Duration::from_secs(30))
-    .client_disconnect_timeout(std::time::Duration::from_secs(5));
+    .client_disconnect_timeout(std::time::Duration::from_secs(5))
+    // Actix defaults to one worker per CPU, and the production box has ONE
+    // vCPU — so the whole API ran on a single thread. That is the right default
+    // for work that is purely async, and the wrong one here, because a handful
+    // of handlers still block: bcrypt on login and PIN entry, and PNG
+    // composition for the wallet and card images. While one of those ran,
+    // nothing else in the system was served — not a till syncing, not the
+    // dashboard, not another customer.
+    //
+    // Four threads on one core do not add throughput to CPU-bound work; they
+    // add ISOLATION, so one blocked request no longer stops the other three.
+    // The blocking work is being moved off the reactor separately (see
+    // `web::block` on the bcrypt paths); this is the floor under that, for
+    // whatever blocking call gets added next.
+    //
+    // Overridable so a bigger box can be told to use it.
+    .workers(
+        std::env::var("MADAR_HTTP_WORKERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get().max(4))),
+    );
 
     if let Some(tls) = tls_config {
         tracing::info!("HTTPS on {} and HTTP on {}", https_addr, bind_addr);

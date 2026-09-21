@@ -1,5 +1,10 @@
 # cargo nextest run — per-test process isolation, real parallelism, and no
 # silent hangs: a test slower than 60s is reported, and killed at 3 min.
+
+# NOTE: export MADAR_FAST_TEST_POOLS=1 when running these suites, or every test
+# that serves a request waits ~5s for its throwaway database to become
+# droppable — see src/db.rs. scripts/run_tests.sh does it for you. It cannot be set
+# here: nextest 0.9.144 ignores an [env] table.
 [profile.default]
 # These tests are database-bound: each waits on Postgres far more than it uses a
 # CPU, so 12 (one per core) leaves the machine idle. The :5433 cluster allows 500

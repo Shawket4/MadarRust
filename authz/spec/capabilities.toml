@@ -2154,6 +2154,21 @@ ar = "إعادة تطبيق قواعد التغليف على جميع أصناف
 # 20260922010000 removes the grants 20260921050100 seeded. `started_by` on the
 # order is untouched — the handover is still traced.
 
+# ── staff drinks pool ───────────────────────────────────────────────────────
+[[cap]]
+id = 223
+key = "orders.staff_drink.record"
+group = "selling"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+approval = true
+pos = true
+en = "Record a staff drink"
+ar = "تسجيل مشروب موظفين"
+hint_en = "Off for tellers by default. Turn it on to let the till put a drink on the branch's daily staff pool. A note saying who it is for is always required."
+hint_ar = "مقفول للكاشير في الأصل. افتحه عشان الكاشير يحسب المشروب على رصيد الموظفين اليومي بتاع الفرع. لازم دايمًا يكتب ملاحظة بالمشروب ده لمين."
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.

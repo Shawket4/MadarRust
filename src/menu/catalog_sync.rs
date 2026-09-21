@@ -709,8 +709,6 @@ async fn load_referenced_ingredients(
         .collect())
 }
 
-#[cfg(test)]
-mod tests;
 
 /// `SyncItem`s for a set of ids, resolved for `branch_id` (default channel).
 /// Inactive or deleted items are omitted (sync pull projection).

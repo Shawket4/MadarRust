@@ -326,7 +326,7 @@ async fn fetch_item_basics(pool: &PgPool, id: Uuid) -> Result<Option<ItemBasics>
 /// Marks the bump with this transaction's id so the deferred `catalog_revision_bump`
 /// triggers skip it at commit: the revision returned here is the one that commits.
 /// Call it after the transaction's catalog writes.
-pub(crate) async fn bump_catalog_revision(
+pub async fn bump_catalog_revision(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
 ) -> Result<i64, AppError> {
@@ -945,6 +945,16 @@ pub async fn put_sizes(
     let item_id = basics.id;
     let incoming = body.into_inner().sizes;
 
+    // Price lives in sizes, so an item with none has no price at all. The schema
+    // refuses it at COMMIT; say so here instead, with a message a person can act
+    // on rather than a constraint name.
+    if !incoming.iter().any(|s| s.is_active) {
+        return Err(AppError::BadRequest(
+            "A menu item must keep at least one active size — that is where its price lives."
+                .into(),
+        ));
+    }
+
     // Reject duplicate labels in the payload (UNIQUE(menu_item_id,label) would 500).
     let mut seen = std::collections::HashSet::new();
     for s in &incoming {
@@ -1297,8 +1307,14 @@ pub async fn duplicate_item(
     let mut size_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     for (old_id, label, price, sort, is_active) in &src_sizes {
         let new_size: Uuid = sqlx::query_scalar(
+            // The copy is born with its own `one_size` row, so copying a simple
+            // item's size means writing that same label again: take over the
+            // row rather than colliding with it.
             "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (menu_item_id, label) DO UPDATE \
+                 SET price = EXCLUDED.price, sort = EXCLUDED.sort, is_active = EXCLUDED.is_active \
+             RETURNING id",
         )
         .bind(new_item)
         .bind(label)
@@ -1492,5 +1508,3 @@ async fn clone_overrides(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests;

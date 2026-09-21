@@ -359,7 +359,7 @@ fn generate_secret() -> String {
 }
 
 fn hash_secret(secret: &str) -> Result<String, AppError> {
-    bcrypt::hash(secret, bcrypt::DEFAULT_COST).map_err(|_| AppError::Internal)
+    bcrypt::hash(secret, crate::secrets::BCRYPT_COST).map_err(|_| AppError::Internal)
 }
 
 /// The org whose credentials this request may touch. Super admins carry no org

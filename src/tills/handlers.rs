@@ -337,6 +337,14 @@ pub struct TillReportFigures {
     pub standard_float: Option<i64>,
     pub suggested_safe_drop: Option<i64>,
     pub expected_cash: i64,
+    /// Staff drinks put on the branch's pool during this till, and how many of
+    /// them were past the day's allowance. The Z report shows what the shop
+    /// gave its own people; the money is zero, so neither figure enters any
+    /// total. Additive — an older tablet simply does not read them.
+    #[serde(default)]
+    pub staff_drinks_count: i64,
+    #[serde(default)]
+    pub staff_drinks_overspent_count: i64,
     /// Who viewed (and printed) the cash spot report of this till, oldest first. Additive.
     #[serde(default)]
     pub spot_views: Vec<crate::tills::spot_views::TillSpotView>,
@@ -514,7 +522,7 @@ pub(crate) async fn fetch_till<'e, E: sqlx::PgExecutor<'e>>(
     .await
 }
 
-pub(crate) async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Till, AppError> {
+pub async fn fetch_till_or_404(pool: &PgPool, till_id: Uuid) -> Result<Till, AppError> {
     fetch_till(pool, till_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Till not found".into()))
@@ -570,7 +578,7 @@ async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
 /// voided) + movements − cash refunds issued from this till.
-pub(crate) async fn compute_system_cash<'e, E>(
+pub async fn compute_system_cash<'e, E>(
     executor: E,
     till_id: Uuid,
 ) -> Result<i64, sqlx::Error>
@@ -799,7 +807,7 @@ pub struct OpenMeta {
 /// Live: one-open-per-person check (409 `TILL_OPEN_AT_OTHER_BRANCH` /
 /// `TILL_OPEN_ELSEWHERE`, resume on the same device), carryover reason.
 /// Replay: always accepts; a second open till of the same person is flagged.
-pub(crate) async fn open_till_inner(
+pub async fn open_till_inner(
     pool: &PgPool,
     hub: Option<&BranchEventHub>,
     branch_id: Uuid,
@@ -864,10 +872,24 @@ pub(crate) async fn open_till_inner(
                 till: serde_json::to_value(TillBrief::from(other)).unwrap_or_default(),
             });
         }
-        if let Some(here) = others
-            .iter()
-            .find(|t| device_id.is_some() && t.device_id == device_id)
-        {
+        // A till belongs to "this device" when the ids match. A client from
+        // before device codes (POS v0.5) sends none, and for it the only honest
+        // reading of a device-less till of its own teller is that it came from a
+        // device just like this one — there is nothing else it could be.
+        //
+        // Refusing instead locked those tellers out permanently: they could not
+        // resume the till, could not close it, and their queued sales could not
+        // drain, because a device with no till has nowhere to replay them. Two
+        // real shops sat like that (one for three weeks) before anyone worked out
+        // that "open on another device" meant "open on this one".
+        //
+        // A till that DOES carry a device id is still someone else's, and an old
+        // client is refused as before.
+        if let Some(here) = others.iter().find(|t| match (device_id, t.device_id) {
+            (Some(_), _) => t.device_id == device_id,
+            (None, None) => t.branch_id == branch_id,
+            (None, Some(_)) => false,
+        }) {
             return Ok((here.clone(), false));
         }
         if let Some(other) = others.first() {
@@ -1116,18 +1138,33 @@ pub async fn get_till(
 }
 
 #[utoipa::path(get, path = "/tills/{till_id}/report", tag = "tills",
-    params(("till_id" = Uuid, Path, description = "Till ID")),
+    params(
+        ("till_id" = Uuid, Path, description = "Till ID"),
+        ("X-Madar-Approval" = Option<String>, Header, description = "A one-time manager-PIN unlock (a `ReplayApproval` as JSON) for an OPEN till's figures, when the caller does not hold `till.cash_spot_check`. Read from POS/KDS clients >= 0.7.11 only; a closed till's report never needs it."),
+    ),
     responses((status = 200, description = "Till (Z) report", body = TillReportResponse), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn get_till_report(
     req: HttpRequest,
     pool: crate::db::Db,
     till_id: web::Path<Uuid>,
+    device: DeviceHeader,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "read").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
+    // An OPEN till's figures follow `till.cash_spot_check` for a POS build
+    // that knows how to ask; a closed till's finished report never does.
+    crate::tills::figures_guard::require_live_figures(
+        pool.get_ref(),
+        &claims,
+        &req,
+        &till,
+        crate::tills::figures_guard::OP_REPORT,
+        device.0,
+    )
+    .await?;
     // Horizon first, figures after: the figures then include at least everything
     // up to it (READ COMMITTED; the horizon waits out uncommitted emitters).
     let as_of_seq: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0, 200)")
@@ -1161,7 +1198,7 @@ pub async fn get_till_report(
     }))
 }
 
-pub(crate) async fn report_figures(
+pub async fn report_figures(
     pool: &PgPool,
     till: &Till,
 ) -> Result<TillReportFigures, AppError> {
@@ -1271,7 +1308,18 @@ pub(crate) async fn report_figures(
         _ => None,
     };
     let spot_views = crate::tills::spot_views::spot_views_for_till(pool, till_id).await?;
+    // What the shop gave its own people on this till. Zero money, so it enters
+    // no total — it is a count the owner reads beside the takings.
+    let (staff_drinks_count, staff_drinks_overspent_count): (Option<i64>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT sum(quantity)::bigint,                     sum(quantity) FILTER (WHERE overspent)::bigint                FROM staff_drinks WHERE till_id = $1",
+        )
+        .bind(till_id)
+        .fetch_one(pool)
+        .await?;
     Ok(TillReportFigures {
+        staff_drinks_count: staff_drinks_count.unwrap_or(0),
+        staff_drinks_overspent_count: staff_drinks_overspent_count.unwrap_or(0),
         spot_views,
         payment_summary,
         total_payments,
@@ -1537,18 +1585,33 @@ pub async fn list_cash_movements(
 // ── T8 close preview / T9 close / T10 force close ──────────────
 
 #[utoipa::path(get, path = "/tills/{till_id}/close-preview", tag = "tills",
-    params(("till_id" = Uuid, Path, description = "Till ID")),
+    params(
+        ("till_id" = Uuid, Path, description = "Till ID"),
+        ("X-Madar-Approval" = Option<String>, Header, description = "A one-time manager-PIN unlock (a `ReplayApproval` as JSON) for the expected figures before a close, when the caller does not hold `till.cash_spot_check`. Read from POS/KDS clients >= 0.7.11 only."),
+    ),
     responses((status = 200, description = "What the close screen shows", body = CloseTillPreview), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn close_preview(
     req: HttpRequest,
     pool: crate::db::Db,
     till_id: web::Path<Uuid>,
+    device: DeviceHeader,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "update").await?;
     let till = fetch_till_or_404(pool.get_ref(), *till_id).await?;
     require_branch_access(pool.get_ref(), &claims, till.branch_id).await?;
+    // The expected figures BEFORE the close are the same secret as the live
+    // report's, and follow the same gate.
+    crate::tills::figures_guard::require_live_figures(
+        pool.get_ref(),
+        &claims,
+        &req,
+        &till,
+        crate::tills::figures_guard::OP_CLOSE_PREVIEW,
+        device.0,
+    )
+    .await?;
     let expected_cash = match till.closing_cash_system {
         Some(v) => v as i64,
         None => compute_system_cash(pool.get_ref(), till.id).await?,

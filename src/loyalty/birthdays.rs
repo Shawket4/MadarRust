@@ -57,12 +57,12 @@ pub fn spawn(pool: PgPool) {
 
 /// One member with a birthday today, and the programme that greets them.
 #[derive(sqlx::FromRow)]
-pub(crate) struct Greetable {
-    pub(crate) id: Uuid,
-    pub(crate) org_id: Uuid,
-    pub(crate) name: String,
-    pub(crate) locale: String,
-    pub(crate) year: i32,
+pub struct Greetable {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub name: String,
+    pub locale: String,
+    pub year: i32,
 }
 
 /// Members to greet on `on` (default: today in each ORG's timezone), at most 500.
@@ -80,7 +80,7 @@ pub(crate) struct Greetable {
 /// swallow the rest of the query and the sweep failed on every tick. (Behind
 /// that it would have failed anyway: `organizations.timezone` is the
 /// `timezone_name` domain, which `AT TIME ZONE` only takes as `text`.)
-pub(crate) async fn due_greetings(
+pub async fn due_greetings(
     pool: &PgPool,
     on: Option<chrono::NaiveDate>,
 ) -> Result<Vec<Greetable>, AppError> {
@@ -113,7 +113,7 @@ SELECT c.id, c.org_id, c.name, c.locale,
           AND g.year = EXTRACT(YEAR FROM t.d)::int)
  LIMIT 500";
 
-pub(crate) async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
+pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     let due = due_greetings(pool, None).await?;
 
     for m in due {

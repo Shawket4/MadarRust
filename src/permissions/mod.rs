@@ -4,10 +4,6 @@ pub mod handlers;
 pub mod routes;
 pub mod seeder;
 
-#[cfg(test)]
-mod phase0_tests;
-#[cfg(test)]
-mod tests;
 
 /// Single source of truth for every permission resource the system knows about.
 ///
@@ -77,7 +73,9 @@ pub const RESOURCES: &[&str] = &[
 ];
 
 /// DB enum labels that exist but are intentionally not part of the matrix.
-#[cfg(test)]
+///
+/// Read by the permissions suite, which is its own binary and links this
+/// library without `cfg(test)`.
 pub const RETIRED_RESOURCES: &[&str] = &[
     "shift_counts",
     // The booking flow was removed; the enum label stays because dropping a

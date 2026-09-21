@@ -39,7 +39,7 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
 ## Development Workflow
 - **Build**: `cargo build`
 - **Run**: `cargo run`
-- **Test**: `DATABASE_URL=postgres://shawket@localhost:5433/madar cargo nextest run` (see "Running the test suite fast" below; plain `cargo test` still works but is slower and a hung test hangs the whole run)
+- **Test**: `scripts/run_tests.sh` (everything) or `scripts/run_tests.sh orders menu` (named suites). Use it rather than a bare `cargo nextest run` — see "Where the tests live" and "Running the test suite fast" below for the two reasons why.
 - **Check**: `cargo check`
 - **OpenAPI Export**: `cargo run --bin export-openapi`
 - **Reprice order cost snapshots at current recipes & ingredient costs** (operator-only, never exposed over HTTP):
@@ -72,8 +72,61 @@ The tools (and where they live):
 - **k6 load testing** (`scripts/loadtest.sh`, `docker-compose.loadtest.yml`, `loadtest/`) — drives the real release binary in Docker, **resource-capped to mimic the prod VPS** (1 vCPU / 4 GB, Postgres co-resident: both containers pinned to `cpuset: "0"`), with [k6](https://k6.io) on the host. Profiles `smoke|ramp|soak|spike|pos-day|all`; `scripts/loadtest.sh ramp`. Authenticated org-admin read/write mix (writes hit the money engine). Caveat: Apple-silicon cores are faster than a Hostinger vCPU, so absolute latency is optimistic — throttle with `BACKEND_CPUS=0.5`. See `loadtest/README.md`.
 - **CI** (`.github/workflows/ci.yml`) — PR gate (test + clippy + fmt with a Postgres service) + nightly mutants/fuzz; mirrors `preflight.sh`.
 
+### Where the tests live
+
+**Every test is an integration test, under `tests/`, one binary per suite.** `src`
+holds no `mod tests` files at all; only small inline `#[cfg(test)] mod tests`
+blocks beside pure functions remain, and those run under `--lib`.
+
+This is not tidiness. The single lib test binary reached ~295 MB and **XProtect
+returns a malware verdict on it**: it stalls in `_dyld_start`, never reaches
+`main`, is killed with SIGKILL, and is then deleted from disk. To cargo that
+looks like a corrupt or vanished artifact, and it cost days before anyone read it
+as a security action. A binary of ~70–100 MB is not matched; splitting is what
+makes the suite runnable at all. See `XPROTECT_FALSE_POSITIVE.md` in the parent
+directory.
+
+Consequences worth knowing:
+
+- **`#[cfg(test)]` does not reach these suites.** An integration test binary links
+  the library the way production does. A `#[cfg(test)]` helper in `src` is
+  invisible to them, and — worse — a `#[cfg(test)]` / `#[cfg(not(test))]` pair
+  silently gives them the production branch. `src/db.rs` did exactly that with the
+  tenant pool's idle timeout and cost ~5 s per test. If you need a switch for
+  tests, gate it on an env var AND `debug_assertions`, never on `cfg(test)` alone.
+- **Fixtures shared by two suites live in `tests/common/`**, never in a sibling
+  suite. Reaching into another suite's helpers is what `tests/common/{assets,
+  analytics,sizes}.rs` exists to replace.
+- **A test-only hook in `src` must not be `#[cfg(test)]`.** Make it
+  `#[doc(hidden)] pub` (inert, e.g. `ai::mock`, `qr_card::shlink::fake`) or gate
+  it on `debug_assertions` when it changes behaviour (e.g. `assets::ingest`'s
+  `FAIL_BEFORE_COMMIT` fault injection, which release builds compile out).
+- **`tests/client_seen.rs` is skipped by the runner.** Its binary is killed on
+  exec: its fixtures embed complete browser User-Agent strings, which is the most
+  likely signature match. Rewriting test data so a malware scanner stops matching
+  it is an evasion decision for the owner, not a refactor — so it is named and
+  skipped, never silently dropped.
+
 ### Running the test suite fast
-The Rust code is not what's slow: each `#[sqlx::test]` creates a fresh database and replays the full migration set, then drops it. Postgres disk syncing and migration replay dominate. So:
+Measured 2026-09-20, and most of the old folklore here was wrong. `CREATE
+DATABASE` from the migrated template is **90 ms**; the whole harness floor (an
+empty `#[sqlx::test]`) is **0.21 s**; all the fixture seeding an orders test does
+is **0.19 s**. None of those were the cost.
+
+Two things actually dominated, both now fixed:
+
+- **The tenant pool's production idle timeout** reaching the suites through a
+  `cfg(test)` switch that no longer applies (see above). ~5 s per test that
+  serves a request, because the throwaway database cannot be dropped while a
+  tenant connection lingers. `MADAR_FAST_TEST_POOLS=1` (set by
+  `scripts/run_tests.sh`) restores the short reaping.
+- **Running the whole suite in one `cargo nextest run`.** ~1660 tests create
+  enough per-test databases to fill the 12 GiB RAM cluster, and whichever suite is
+  running when it fills dies with `PoolTimedOut` — which reads as broken code. The
+  cluster cannot grow: the machine has 24 GiB total. `scripts/run_tests.sh` runs
+  one suite at a time and sweeps `_sqlx_test%` between them, holding at ~2 GiB.
+
+Everything below still applies:
 - **The :5433 cluster now lives on a RAM disk** (`/Volumes/MadarTestRAM/pg`, owner-approved 2026-09-17): per-test `CREATE DATABASE` copies `template1` in memory instead of on the SSD. Connect exactly as before. It is volatile: recreate it after a reboot with `../tool/test_pg_ram.sh`, and see `../tool/test_pg.md`. Agents use THIS cluster rather than starting their own; a private cluster (for a branch with a different migration set) also goes on the RAM disk, on its own port.
 - **Use the dedicated throwaway test cluster on port 5433**, never the real `:5432` server (which holds `madar_dev`, `madar_prodcopy` and other real data). It runs with `fsync=off`, `synchronous_commit=off`, `full_page_writes=off`, `autovacuum=off`, `max_connections=500` — safe only because nothing on it matters.
   - Data dir `~/.madar-test-pg`; start: `/opt/homebrew/opt/postgresql@17/bin/pg_ctl -D ~/.madar-test-pg -l ~/.madar-test-pg/server.log start`.
@@ -83,6 +136,15 @@ The Rust code is not what's slow: each `#[sqlx::test]` creates a fresh database 
 - **Never pass `--no-capture` to nextest for a multi-test run**: it forces tests to run one at a time and looks exactly like a hang. Failing tests print their output anyway. Don't pipe a run through `sort`/`uniq`, which hides all progress until the end.
 - **Never run two full suites at once** against the same cluster, and never pass `--test-threads` below the default without a reason.
 - **A run that sits at ~0% CPU with test connections idle (`ClientRead`) is a deadlock in app code** (usually a handler holding a transaction while waiting for a second pool connection, or an advisory lock), not slowness. nextest's timeout names the test; fix the cause.
+- **While other agents build, run the suite from a nextest ARCHIVE.** Worktrees that share one `CARGO_TARGET_DIR` overwrite each other's *unhashed* binaries (`target/debug/<name>` is a hardlink to `deps/<name>-<hash>`, and last writer wins). A plain `cargo nextest run` then dies mid-run with `failed to exec .../deps/madar_rust-<hash>: No such file or directory` — deterministically, hundreds of tests in, looking like a mass test failure rather than a build problem. Build once, then run from the archive, which extracts to a private directory nothing else touches:
+  ```
+  cargo nextest archive --archive-file /tmp/madar_tests.tar.zst      # ~160 MB, needs DATABASE_URL
+  cargo nextest run --archive-file /tmp/madar_tests.tar.zst --workspace-remap .
+  ```
+  The same collision silently breaks `cargo run --bin export-openapi`: it can run ANOTHER worktree's binary and write a spec with none of your work in it. Verify before trusting it (`strings target/debug/export-openapi | grep <your-new-route>`), or run the hashed binary in `target/debug/deps/` directly.
+- **A shared `CARGO_TARGET_DIR` can also give you ANOTHER worktree's `madar-authz`.** Cargo records dep-info paths RELATIVELY (`authz/crate/src/generated.rs`), so a build made from one worktree satisfies another worktree's fingerprint for that path dependency and is reused without rebuilding. Your binary then links a capability registry your branch's migrations never created, and org provisioning dies on an FK violation that surfaces as a `409` from `orgs::tests` — nothing in the failure points at authz. It also hits `authz::registry_tests`, `provision_tests` and `e2e`. `touch authz/crate/src/*.rs` before building forces the rebuild and clears all of it. Suspect this first whenever a green branch fails only in those suites.
+- **A `mis-aligned LINKEDIT string pool` dlopen error on a proc-macro dylib means it was STRIPPED, not that the crate or the disk is broken.** Apple's `strip` on Xcode 27 / macOS 27 corrupts any dylib it touches (the same family as the POS `libmadar_frb` bug), and cargo strips automatically when a profile turns debug info off. The trap is `[profile.dev.package."*"] debug = false` in a machine-local `.cargo/config.toml`, added for build speed: it silently enables stripping, and then `libsqlx_macros` — or any proc-macro — links to a dylib nothing can `dlopen`, so the whole workspace stops compiling. Set `strip = false` explicitly in every profile block that lowers `debug`. Symptoms that mislead: the corruption is DETERMINISTIC (same hash, same size, same byte offset every rebuild) and survives `cargo clean -p`, re-signing with `codesign`, and freeing disk, because each rebuild strips again.
+- **Disk:** `target/debug/deps` accumulates `*.rcgu.o` codegen intermediates from interrupted builds and cargo never collects them — tens of GB. With no cargo running, `find target/debug/deps -maxdepth 1 -name '*.rcgu.o' -delete` is safe and rustc regenerates what it needs. `target/debug/incremental` is likewise pure scratch.
 - Test databases are named `_sqlx_test_*`; after killed runs drop leftovers: `psql -p 5433 -d postgres -Atc "select 'drop database \"'||datname||'\";' from pg_database where datname like '_sqlx_test%'" | psql -p 5433 -d postgres`.
 
 Notes:

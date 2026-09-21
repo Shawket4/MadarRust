@@ -35,9 +35,6 @@ pub mod routes;
 pub mod rules;
 pub mod schedules;
 
-#[cfg(test)]
-mod tests;
-
 use actix_web::HttpRequest;
 use chrono::NaiveDate;
 use sqlx::PgPool;

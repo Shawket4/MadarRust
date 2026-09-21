@@ -164,6 +164,9 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "customer" => {
             "EXISTS (SELECT 1 FROM customers x WHERE x.id = $ID AND sync_live_customer(x))"
         }
+        // A recorded staff drink is an immutable audit row: once it exists it
+        // is live, and it is never edited or withdrawn. Nothing to age out.
+        "staff_drink" => "EXISTS (SELECT 1 FROM staff_drinks x WHERE x.id = $ID)",
         _ => return None,
     })
 }
@@ -264,6 +267,26 @@ pub async fn project(
             )
             .await?
         }
+        // The till counts its branch's pool from these rows, so every device of
+        // a branch converges on the same day's count over the cloud exactly as
+        // it does over the LAN. `business_date` is the branch's business day,
+        // already resolved server-side — the till must never re-derive it from
+        // `recorded_at` and a timezone it might not have.
+        "staff_drink" => {
+            by_sql(
+                conn,
+                "SELECT s.id, json_build_object('id', s.id, 'branch_id', s.branch_id, \
+                        'business_date', s.business_date, 'quantity', s.quantity, \
+                        'menu_item_id', s.menu_item_id, 'item_name', s.item_name, \
+                        'size_label', s.size_label, 'note', s.note, \
+                        'overspent', s.overspent, 'overspent_on_replay', s.overspent_on_replay, \
+                        'cost_minor', s.cost_minor, 'order_id', s.order_id, \
+                        'recorded_at', s.recorded_at, 'updated_at', s.updated_at) \
+                   FROM staff_drinks s WHERE s.id = ANY($1)",
+                ids,
+            )
+            .await?
+        }
         "bundle" => {
             let mut out = keyed(
                 crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,
@@ -320,10 +343,30 @@ pub async fn project(
                 .collect()
         }
         "discount" => {
+            // The SAME dual spelling `src/discounts/wire.rs` carries on the REST
+            // route, for the same reason — and this projection is why that reason
+            // came back. It emitted `type` and the STORED fraction (0.1), while
+            // every shipped till parses a discount with the generated model:
+            // `dtype`, an INTEGER `value`, plus org_id/created_at/updated_at. The
+            // row failed serde, the whole list failed with it, and the till showed
+            // no presets at all — exactly the failure wire.rs was written to end,
+            // reintroduced through the changefeed. Worse, this mirror is rewritten
+            // on EVERY pull, so it overwrote the good shape `GET /discounts` had
+            // already stored: reinstalling the app could not help.
+            //
+            // So: `value` is the legacy integer (0-100 for a percentage),
+            // `value_rate` the fraction for clients that know to ask, and `type`
+            // stays beside `dtype` because something in the field may read it.
+            // Additive in every direction; nothing that parsed before stops.
             by_sql(
                 conn,
-                "SELECT d.id, json_build_object('id', d.id, 'name', d.name, 'name_translations', d.name_translations, \
-                        'type', d.type::text, 'value', d.value, 'is_active', d.is_active) \
+                "SELECT d.id, json_build_object('id', d.id, 'org_id', d.org_id, 'name', d.name, \
+                        'name_translations', d.name_translations, \
+                        'type', d.type::text, 'dtype', d.type::text, \
+                        'value', (CASE WHEN d.value > 0 AND d.value <= 1 \
+                                       THEN round(d.value * 100) ELSE round(d.value) END)::bigint, \
+                        'value_rate', d.value, 'is_active', d.is_active, \
+                        'created_at', d.created_at, 'updated_at', d.updated_at) \
                    FROM discounts d WHERE d.id = ANY($1)",
                 ids,
             )
@@ -360,7 +403,12 @@ pub async fn project(
                         'loyalty', (SELECT json_build_object('enabled', l.enabled, 'mode', l.mode, \
                                 'program_name', l.program_name, 'program_name_ar', l.program_name_ar) \
                               FROM loyalty_settings l WHERE l.org_id = b.org_id AND (l.branch_id = b.id OR l.branch_id IS NULL) \
-                             ORDER BY l.branch_id NULLS LAST LIMIT 1)) \
+                             ORDER BY l.branch_id NULLS LAST LIMIT 1), \
+                        'staff_pool', (SELECT json_build_object('enabled', sp.enabled, \
+                                'daily_allowance', sp.daily_allowance, \
+                                'eligible_item_ids', sp.eligible_item_ids) \
+                              FROM staff_pool_settings sp WHERE sp.org_id = b.org_id AND (sp.branch_id = b.id OR sp.branch_id IS NULL) \
+                             ORDER BY sp.branch_id NULLS LAST LIMIT 1)) \
                    FROM branches b JOIN organizations o ON o.id = b.org_id \
                   WHERE b.id = ANY($1) AND b.deleted_at IS NULL",
                 tile_hash("o.logo_group_id")
@@ -610,4 +658,28 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
         }
         other => return Err(AppError::BadRequest(format!("Unknown sync type `{other}`"))),
     })
+}
+
+#[cfg(test)]
+mod projection_gate_tests {
+    /// Every wire type the POS may ask for must have a projection gate.
+    ///
+    /// `project()` refuses an unknown type with `Unknown sync type`, so a type
+    /// added to `ALL_TYPES` (and to `sync_source_tables()`, and given a feed
+    /// trigger) but NOT given an arm here fails only at runtime, on the pull —
+    /// the rows are emitted and then never delivered. `staff_drink` shipped
+    /// exactly that way and was caught by a feature test rather than here.
+    ///
+    /// The existing `.expect("state type has a projection gate")` in
+    /// `sync::pull` covers state types only, which is why a LEDGER type slipped
+    /// through; this covers every type either way.
+    #[test]
+    fn every_wire_type_has_a_projection_gate() {
+        for ty in crate::sync::pull::ALL_TYPES {
+            assert!(
+                super::projects_sql(ty).is_some(),
+                "`{ty}` is in ALL_TYPES but has no arm in projects_sql, so a pull for it 400s"
+            );
+        }
+    }
 }

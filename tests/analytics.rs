@@ -1,0 +1,686 @@
+//! Analytics integration tests.
+//!
+//! These run the real compiler against the real schema on a real database, so
+//! they prove the thing unit tests cannot: that every authored SQL fragment in
+//! the registry is *valid against the live schema*. A measure referencing a
+//! column that was renamed three migrations ago compiles fine in Rust and fails
+//! only when someone asks for it — [`every_preset_runs_against_the_real_schema`]
+//! is what turns that into a build failure.
+
+use actix_web::{App, test, web};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+mod common;
+use common::analytics::*;
+
+use madar_rust::auth::jwt::create_token;
+use madar_rust::models::UserRole;
+
+
+async fn post_query(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    body: Value,
+) -> Value {
+    let req = test::TestRequest::post()
+        .uri("/metrics/query")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert!(
+        resp.status().is_success(),
+        "query failed with {}",
+        resp.status()
+    );
+    test::read_body_json(resp).await
+}
+
+// ── The schema endpoint ──────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn schema_endpoint_describes_the_whole_registry(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let req = test::TestRequest::get()
+        .uri("/metrics/schema")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", org_admin_token(s.org)),
+        ))
+        .to_request();
+    let body: Value = test::read_body_json(test::call_service(&app, req).await).await;
+
+    assert_eq!(
+        body["datasets"].as_array().unwrap().len(),
+        madar_rust::analytics::schema::DATASETS.len()
+    );
+    assert!(!body["presets"].as_array().unwrap().is_empty());
+    assert!(!body["boards"].as_array().unwrap().is_empty());
+    assert!(
+        body["period_presets"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("last_month"))
+    );
+    // Measures explain themselves, which is what a widget picker needs.
+    let orders = body["datasets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "orders")
+        .unwrap();
+    let revenue = orders["measures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "revenue")
+        .unwrap();
+    assert!(revenue["help"].as_str().unwrap().contains("discount"));
+}
+
+#[sqlx::test]
+async fn schema_requires_authentication(pool: PgPool) {
+    seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let req = test::TestRequest::get().uri("/metrics/schema").to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 401);
+}
+
+// ── Querying ────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn a_preset_widget_returns_the_seeded_figures(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "period": { "preset": "all_time" },
+            "widgets": [{ "key": "rev", "preset": "revenue_total" }]
+        }),
+    )
+    .await;
+
+    let w = &body["results"]["rev"];
+    assert_eq!(w["status"], "ok");
+    // 10000 (2 × Latte) + 6300 (Mocha less its 700 discount).
+    assert_eq!(w["rows"][0]["revenue"], 16300);
+    assert_eq!(w["grain"], "scalar");
+    assert_eq!(w["viz"], "kpi");
+    assert_eq!(w["title"], "Revenue");
+    assert_eq!(body["timezone"], "Africa/Cairo");
+}
+
+#[sqlx::test]
+async fn a_custom_spec_widget_groups_and_ranks(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "widgets": [{
+                "key": "byproduct",
+                "spec": {
+                    "dataset": "order_items",
+                    "dimensions": ["product"],
+                    "measures": ["units_sold", "item_revenue"],
+                    "period": { "preset": "all_time" },
+                    "sort": { "measure": "item_revenue", "dir": "desc" }
+                }
+            }]
+        }),
+    )
+    .await;
+
+    let w = &body["results"]["byproduct"];
+    assert_eq!(w["status"], "ok");
+    let rows = w["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    // Latte: 2 × 5000 = 10000 beats Mocha's 7000.
+    assert_eq!(rows[0]["product"], "Latte");
+    assert_eq!(rows[0]["units_sold"], 2);
+    assert_eq!(rows[0]["item_revenue"], 10000);
+    assert_eq!(w["grain"], "categorical");
+}
+
+/// Weekly buckets start SATURDAY on the merchant's wall clock (`tz::WEEK_START`):
+/// a sale at 23:30 Friday in Cairo closes one week, 00:30 Saturday opens the
+/// next — though both are Friday in UTC.
+#[sqlx::test]
+async fn the_week_dimension_starts_saturday_in_the_merchant_zone(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    // Cairo is UTC+3 in September 2026; 18 Sep is a Friday.
+    for (n, at) in [(1, "2026-09-18T20:30:00Z"), (2, "2026-09-18T21:30:00Z")] {
+        sqlx::query("UPDATE orders SET created_at = $1::timestamptz WHERE branch_id = $2 AND order_number = $3")
+            .bind(at)
+            .bind(s.branch)
+            .bind(n)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "widgets": [{
+                "key": "weekly",
+                "spec": {
+                    "dataset": "orders",
+                    "dimensions": ["week"],
+                    "measures": ["order_count"],
+                    "period": { "preset": "all_time" }
+                }
+            }]
+        }),
+    )
+    .await;
+    let w = &body["results"]["weekly"];
+    assert_eq!(w["status"], "ok", "{w}");
+    let weeks: Vec<(String, i64)> = w["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["week"].as_str().unwrap().to_string(), r["order_count"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(
+        weeks,
+        vec![("2026-09-12".to_string(), 1), ("2026-09-19".to_string(), 1)]
+    );
+}
+
+#[sqlx::test]
+async fn one_bad_widget_does_not_blank_the_dashboard(pool: PgPool) {
+    // The reason results are per-widget outcomes rather than a batch that fails.
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "period": { "preset": "all_time" },
+            "widgets": [
+                { "key": "good", "preset": "revenue_total" },
+                { "key": "bad", "preset": "no_such_metric" },
+                { "key": "alsobad", "spec": { "dataset": "orders", "measures": ["nonsense"] } }
+            ]
+        }),
+    )
+    .await;
+
+    assert_eq!(body["results"]["good"]["status"], "ok");
+    assert_eq!(body["results"]["bad"]["status"], "error");
+    assert!(
+        body["results"]["bad"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no_such_metric")
+    );
+    // A bad measure names the valid ones, so a client can show a useful hint.
+    let e = body["results"]["alsobad"]["error"].as_str().unwrap();
+    assert!(e.contains("nonsense") && e.contains("revenue"));
+}
+
+#[sqlx::test]
+async fn a_widget_may_override_the_batch_period(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            // The batch says a window with no data in it...
+            "period": { "preset": "last_year" },
+            "widgets": [
+                { "key": "old", "preset": "revenue_total" },
+                // ...and this widget overrides it.
+                { "key": "all", "preset": "revenue_total", "period": { "preset": "all_time" } }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(body["results"]["old"]["rows"][0]["revenue"], 0);
+    assert_eq!(body["results"]["all"]["rows"][0]["revenue"], 16300);
+}
+
+#[sqlx::test]
+async fn the_resolved_period_comes_back_so_a_client_can_label_it(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({ "widgets": [{ "key": "k", "preset": "revenue_total",
+                              "period": { "preset": "last_month" } }] }),
+    )
+    .await;
+    let p = &body["results"]["k"]["period"];
+    assert!(p["from"].is_string() && p["to"].is_string());
+}
+
+#[sqlx::test]
+async fn specifying_neither_preset_nor_spec_is_a_per_widget_error(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({ "widgets": [{ "key": "k" }, { "key": "j", "preset": "revenue_total",
+                              "spec": { "dataset": "orders" } }] }),
+    )
+    .await;
+    assert_eq!(body["results"]["k"]["status"], "error");
+    assert!(
+        body["results"]["j"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not both")
+    );
+}
+
+#[sqlx::test]
+async fn an_empty_or_oversized_batch_is_rejected(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let token = org_admin_token(s.org);
+
+    let req = test::TestRequest::post()
+        .uri("/metrics/query")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "widgets": [] }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 400);
+
+    let many: Vec<Value> = (0..madar_rust::analytics::handlers::MAX_WIDGETS + 1)
+        .map(|i| json!({ "key": i.to_string(), "preset": "revenue_total" }))
+        .collect();
+    let req = test::TestRequest::post()
+        .uri("/metrics/query")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "widgets": many }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 400);
+}
+
+// ── Tenancy ─────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn one_merchant_never_sees_another_merchants_figures(pool: PgPool) {
+    let a = seed(&pool, "a").await;
+    let _b = seed(&pool, "b").await;
+    let app = metrics_app(&pool).await;
+
+    // Both orgs have identical data. If scoping leaked, revenue would double.
+    let body = post_query(
+        &app,
+        &org_admin_token(a.org),
+        json!({
+            "period": { "preset": "all_time" },
+            "widgets": [{ "key": "rev", "preset": "revenue_total" },
+                        { "key": "branches", "preset": "sales_by_branch",
+                          "period": { "preset": "all_time" } }]
+        }),
+    )
+    .await;
+    assert_eq!(body["results"]["rev"]["rows"][0]["revenue"], 16300);
+    assert_eq!(
+        body["results"]["branches"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(body["scope"]["branches"].as_array().unwrap().len(), 1);
+}
+
+#[sqlx::test]
+async fn a_teller_is_fenced_to_their_own_branch(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    // A teller token bound to a branch that is not theirs resolves to nothing
+    // they can see, so the fence yields no rows rather than another's data.
+    let token = create_token(
+        &secret(),
+        Uuid::new_v4(),
+        Some(s.org),
+        UserRole::Teller,
+        Some(Uuid::new_v4()),
+        24,
+    )
+    .unwrap();
+    let req = test::TestRequest::post()
+        .uri("/metrics/query")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(json!({ "period": { "preset": "all_time" },
+                          "widgets": [{ "key": "rev", "preset": "revenue_total" }] }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    // Either the role lacks `reports:read` (403) or it reads an empty scope —
+    // never another branch's revenue.
+    if resp.status().is_success() {
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(body["results"]["rev"]["rows"][0]["revenue"], 0);
+    } else {
+        assert_eq!(resp.status(), 403);
+    }
+}
+
+// ── The registry against the live schema ────────────────────────────────────
+
+#[sqlx::test]
+async fn every_preset_runs_against_the_real_schema(pool: PgPool) {
+    // The most valuable test here. Every curated metric is executed against a
+    // real database, so a fragment referencing a column that no longer exists
+    // fails the build instead of failing a merchant's dashboard.
+    let s = seed(&pool, "a").await;
+    let app = metrics_app(&pool).await;
+    let token = org_admin_token(s.org);
+
+    for chunk in madar_rust::analytics::presets::PRESETS.chunks(madar_rust::analytics::handlers::MAX_WIDGETS)
+    {
+        let widgets: Vec<Value> = chunk
+            .iter()
+            .map(|p| json!({ "key": p.id, "preset": p.id, "period": { "preset": "all_time" } }))
+            .collect();
+        let body = post_query(&app, &token, json!({ "widgets": widgets })).await;
+        for p in chunk {
+            let out = &body["results"][p.id];
+            assert_eq!(
+                out["status"],
+                "ok",
+                "preset '{}' failed: {}",
+                p.id,
+                out["error"].as_str().unwrap_or("?")
+            );
+        }
+    }
+}
+
+#[sqlx::test]
+async fn every_dataset_dimension_and_measure_executes(pool: PgPool) {
+    // Same guarantee, one level lower: every authored fragment in the semantic
+    // layer is proven to be valid SQL against the live schema.
+    use madar_rust::analytics::compile::{CompileCtx, compile};
+    use madar_rust::analytics::execute::{ExecCtx, run};
+    use madar_rust::analytics::spec::{Period, PeriodPreset, QuerySpec};
+
+    let s = seed(&pool, "a").await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
+
+    let ctx = CompileCtx {
+        tz: chrono_tz::Africa::Cairo,
+        now: chrono::Utc::now(),
+    };
+    let exec = ExecCtx {
+        branch_ids: &[s.branch],
+        locale: "en",
+        tz: "Africa/Cairo",
+    };
+    for ds in madar_rust::analytics::schema::DATASETS {
+        for dim in ds.dims {
+            // Measures are taken in batches: the compiler caps a single query at
+            // 8, and the point here is to execute EVERY fragment at least once.
+            for batch in ds.measures.chunks(8) {
+                let spec = QuerySpec {
+                    dataset: ds.id.into(),
+                    dimensions: vec![dim.id.into()],
+                    measures: batch.iter().map(|m| m.id.to_string()).collect(),
+                    period: Period::preset(PeriodPreset::AllTime),
+                    ..Default::default()
+                };
+                let compiled = compile(&spec, &ctx)
+                    .unwrap_or_else(|e| panic!("{}/{} did not compile: {e}", ds.id, dim.id));
+                run(&db, &compiled, &exec).await.unwrap_or_else(|e| {
+                    panic!(
+                        "{}/{} [{}] did not execute: {e}",
+                        ds.id,
+                        dim.id,
+                        batch.iter().map(|m| m.id).collect::<Vec<_>>().join(",")
+                    )
+                });
+            }
+        }
+    }
+}
+
+#[sqlx::test]
+async fn the_executor_refuses_to_write(pool: PgPool) {
+    // Defense in depth: even if a fragment were somehow malicious, the
+    // transaction is read-only.
+    let s = seed(&pool, "a").await;
+    let db = madar_rust::db::Db::for_org(&pool, s.org).await;
+    let mut tx = db.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let err = sqlx::query("DELETE FROM orders")
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("read-only"), "{err}");
+}
+
+// ── Refunds ─────────────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn a_partial_refund_is_netted_from_revenue_and_reported_apart(pool: PgPool) {
+    let s = seed(&pool, "a").await;
+    // The seed's Latte order: 10000, paid in cash, sold in the seeded shift.
+    let (latte_order, shift, teller): (Uuid, Uuid, Uuid) = sqlx::query_as(
+        "SELECT o.id, o.till_id, o.teller_id FROM orders o WHERE o.branch_id = $1 AND o.total_amount = 10000",
+    )
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
+         VALUES ($1, $2, 1000, 'cash', true, 'quality_issue', $3)",
+    )
+    .bind(latte_order)
+    .bind(shift)
+    .bind(teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "period": { "preset": "all_time" },
+            "widgets": [
+                { "key": "rev", "preset": "revenue_total" },
+                { "key": "money", "spec": {
+                    "dataset": "orders",
+                    "measures": ["gross_sales", "refund_amount", "revenue", "net_revenue",
+                                 "profit", "refund_count", "order_count", "avg_order_value"]
+                }},
+                { "key": "issued", "preset": "refunds_by_day" },
+                { "key": "reasons", "preset": "refunds_by_reason" }
+            ]
+        }),
+    )
+    .await;
+
+    // The order stays `completed` (only a full refund flips it), so the status
+    // filter alone would still count all 16300. Revenue must not.
+    assert_eq!(body["results"]["rev"]["rows"][0]["revenue"], 15300);
+
+    let m = &body["results"]["money"]["rows"][0];
+    assert_eq!(m["gross_sales"], 16300, "as rung up");
+    assert_eq!(m["refund_amount"], 1000);
+    assert_eq!(m["revenue"], 15300, "gross_sales − refund_amount");
+    // No tax and no delivery fee in the seed, so the merchant's take is the
+    // whole of what was kept: 9000 of the Latte bill plus 6300 for the Mocha.
+    assert_eq!(m["net_revenue"], 15300);
+    // Cost stays whole — the coffee was made: 2500 + 1750.
+    assert_eq!(m["profit"], 15300 - 4250);
+    assert_eq!(m["refund_count"], 1);
+    assert_eq!(
+        m["order_count"], 2,
+        "a partially refunded order is still an order"
+    );
+    assert_eq!(
+        m["avg_order_value"], 8150,
+        "the bill as rung up, not what was kept"
+    );
+
+    // The refund's own grain: by the day it was issued, cash apart.
+    let issued = &body["results"]["issued"];
+    assert_eq!(issued["status"], "ok", "{}", issued["error"]);
+    assert_eq!(issued["rows"][0]["refund_amount"], 1000);
+    assert_eq!(issued["rows"][0]["cash_refund_amount"], 1000);
+    assert_eq!(issued["rows"][0]["refund_count"], 1);
+    let reasons = &body["results"]["reasons"]["rows"];
+    assert_eq!(reasons[0]["refund_reason"], "quality_issue");
+    assert_eq!(reasons[0]["orders_refunded"], 1);
+
+    // Refund the rest: the status flips, the sale leaves `sold` and takes its
+    // refunds with it, and the refunds dataset counts it as fully refunded.
+    sqlx::query(
+        "INSERT INTO order_refunds (order_id, till_id, amount, method, is_cash, reason, issued_by)
+         VALUES ($1, $2, 9000, 'card', false, 'quality_issue', $3)",
+    )
+    .bind(latte_order)
+    .bind(shift)
+    .bind(teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "period": { "preset": "all_time" },
+            "widgets": [
+                { "key": "sold", "spec": { "dataset": "orders",
+                    "measures": ["gross_sales", "refund_amount", "revenue", "order_count"] }},
+                { "key": "all", "spec": { "dataset": "orders", "filters": { "status": "all" },
+                    "measures": ["gross_sales", "refund_amount", "revenue", "refund_count"] }},
+                { "key": "issued", "spec": { "dataset": "refunds",
+                    "measures": ["refund_amount", "cash_refund_amount", "fully_refunded_orders", "orders_refunded"] }}
+            ]
+        }),
+    )
+    .await;
+    let sold = &body["results"]["sold"]["rows"][0];
+    assert_eq!(sold["order_count"], 1);
+    assert_eq!(sold["gross_sales"], 6300);
+    assert_eq!(sold["refund_amount"], 0);
+    assert_eq!(sold["revenue"], 6300);
+    // Under 'all' the identity still holds and the whole refund is visible.
+    let all = &body["results"]["all"]["rows"][0];
+    assert_eq!(all["gross_sales"], 16300);
+    assert_eq!(all["refund_amount"], 10000);
+    assert_eq!(all["revenue"], 6300);
+    assert_eq!(all["refund_count"], 1);
+    let issued = &body["results"]["issued"]["rows"][0];
+    assert_eq!(issued["refund_amount"], 10000);
+    assert_eq!(issued["cash_refund_amount"], 1000);
+    assert_eq!(issued["fully_refunded_orders"], 1);
+    assert_eq!(issued["orders_refunded"], 1);
+}
+
+/// The tables dataset reads the sale's own table, covers and seating time.
+#[sqlx::test]
+async fn the_tables_dataset_measures_turns_covers_and_dwell(pool: PgPool) {
+    let s = seed(&pool, "t").await;
+    let section = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO floor_sections (id, org_id, branch_id, name) VALUES ($1,$2,$3,'Patio')",
+    )
+    .bind(section)
+    .bind(s.org)
+    .bind(s.branch)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let orders: Vec<(Uuid, i32)> = sqlx::query_as(
+        "SELECT id, order_number FROM orders WHERE branch_id = $1 ORDER BY order_number",
+    )
+    .bind(s.branch)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for ((order, _), (label, covers, minutes)) in orders.iter().zip([("T1", 2, 30), ("T2", 3, 60)])
+    {
+        let table: Uuid = sqlx::query_scalar(
+            "INSERT INTO branch_tables (org_id, branch_id, section_id, label) \
+             VALUES ($1,$2,$3,$4) RETURNING id",
+        )
+        .bind(s.org)
+        .bind(s.branch)
+        .bind(section)
+        .bind(label)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE orders SET table_id = $2, covers = $3, \
+                    seated_at = created_at - make_interval(mins => $4) WHERE id = $1",
+        )
+        .bind(order)
+        .bind(table)
+        .bind(covers)
+        .bind(minutes)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = metrics_app(&pool).await;
+    let body = post_query(
+        &app,
+        &org_admin_token(s.org),
+        json!({
+            "widgets": [
+                { "key": "total", "spec": {
+                    "dataset": "tables",
+                    "measures": ["turns", "covers", "table_revenue", "revenue_per_cover",
+                                 "avg_dwell_minutes", "active_tables", "revenue_per_table"],
+                    "period": { "preset": "all_time" } } },
+                { "key": "by_table", "spec": {
+                    "dataset": "tables", "dimensions": ["section", "table"],
+                    "measures": ["turns", "avg_dwell_minutes"],
+                    "period": { "preset": "all_time" },
+                    "sort": { "measure": "avg_dwell_minutes", "dir": "desc" } } }
+            ]
+        }),
+    )
+    .await;
+    let t = &body["results"]["total"];
+    assert_eq!(t["status"], "ok", "{t}");
+    let row = &t["rows"][0];
+    assert_eq!(row["turns"], 2);
+    assert_eq!(row["covers"], 5);
+    assert_eq!(row["active_tables"], 2);
+    let revenue = row["table_revenue"].as_i64().unwrap();
+    assert_eq!(
+        row["revenue_per_cover"].as_i64().unwrap(),
+        (revenue as f64 / 5.0).round() as i64
+    );
+    assert_eq!(row["revenue_per_table"].as_i64().unwrap(), revenue / 2);
+    assert_eq!(row["avg_dwell_minutes"].as_f64().unwrap(), 45.0);
+
+    let rows = body["results"]["by_table"]["rows"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["table"], "T2");
+    assert_eq!(rows[0]["section"], "Patio");
+    assert_eq!(rows[0]["avg_dwell_minutes"].as_f64().unwrap(), 60.0);
+}

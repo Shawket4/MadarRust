@@ -33,9 +33,6 @@
 pub mod handlers;
 pub mod routes;
 
-#[cfg(test)]
-mod tests;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgExecutor, Postgres, Transaction};
