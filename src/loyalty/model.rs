@@ -525,7 +525,9 @@ pub async fn ledger(
 ///     and any alias that pointed an older card at this member is dropped;
 ///   * the Apple auth token goes with it, so a device holding the old pass can
 ///     no longer authenticate a refetch;
-///   * pass devices are dropped, so no update is ever pushed to the phone again;
+///   * pass devices are dropped — at once when no phone holds the card; else
+///     after the phone has collected its voided copy, or 48 h, whichever is
+///     first ([`purge_erased_pass`]);
 ///   * any notice waiting on the card is cleared.
 ///
 /// Orders keep their `loyalty_customer_id`: which member a sale earned for is
@@ -566,11 +568,27 @@ pub async fn forget_in(
     let Some(before) = find_by_id(&mut *tx, member_id).await? else {
         return Ok(None);
     };
+    // A card sitting in a wallet has to be TOLD it is over, or the phone shows
+    // the last balance and a scannable barcode for ever — of a person we have
+    // promised to forget. So when a device holds the pass, the auth token and
+    // the registrations outlive the erase just long enough for the device to
+    // collect a voided copy (which is built from the scrubbed row and names
+    // nobody), and are then purged: on that fetch, or by the sweep after
+    // [`ERASED_PASS_GRACE_HOURS`]. See [`purge_erased_pass`]. With no device
+    // there is nothing to tell, and everything goes now.
+    let has_devices: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM loyalty_pass_devices WHERE customer_id = $1)",
+    )
+    .bind(member_id)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query(
         "UPDATE loyalty_customers \
             SET deleted_at = now(), \
                 member_token = $2, \
-                apple_auth_token = NULL, \
+                apple_auth_token = CASE WHEN $3 THEN apple_auth_token END, \
+                pass_voided_at = CASE WHEN $3 THEN now() END, \
+                pass_updated_at = CASE WHEN $3 THEN now() ELSE pass_updated_at END, \
                 pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
                 pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
                 updated_at = now() \
@@ -578,6 +596,7 @@ pub async fn forget_in(
     )
     .bind(member_id)
     .bind(super::mint_member_token())
+    .bind(has_devices)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -598,10 +617,7 @@ pub async fn forget_in(
         .bind(member_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = $1")
-        .bind(member_id)
-        .execute(&mut *tx)
-        .await?;
+    // (`loyalty_pass_devices` is NOT dropped here — see `has_devices` above.)
     // The pre-built pass has their name baked into it. In the transaction, so
     // there is no moment at which the person is erased and the bytes are not.
     sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
@@ -609,6 +625,60 @@ pub async fn forget_in(
         .execute(&mut *tx)
         .await?;
     Ok(Some(before))
+}
+
+/// How long an erased member's pass registrations may outlive the erase while
+/// their device has not yet collected the voided copy. Opaque device ids and
+/// push tokens only; bounded, and gone the moment the device comes back.
+pub const ERASED_PASS_GRACE_HOURS: i32 = 48;
+
+/// The second half of erasing a card that was in a wallet: drop what
+/// [`forget_in`] kept alive for the voided pass. After this the serial answers
+/// 401/404 like one that never existed. Only ever touches an ERASED customer's
+/// card — a merge loser or a leaver keeps being served voided.
+pub async fn purge_erased_pass(pool: &PgPool, member_id: Uuid) -> Result<bool, AppError> {
+    let mut tx = pool.begin().await?;
+    let hit = sqlx::query(
+        "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now() \
+          WHERE m.id = $1 AND m.deleted_at IS NOT NULL \
+            AND EXISTS (SELECT 1 FROM customers c WHERE c.id = m.id AND c.erased_at IS NOT NULL)",
+    )
+    .bind(member_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if hit {
+        sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = $1")
+            .bind(member_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(hit)
+}
+
+/// Erased cards whose device never came back within the grace: purge them
+/// anyway. Bounded per call; returns how many were purged.
+pub async fn purge_stale_erased_passes(pool: &PgPool) -> Result<usize, AppError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT m.id FROM loyalty_customers m JOIN customers c ON c.id = m.id \
+          WHERE c.erased_at IS NOT NULL AND m.deleted_at IS NOT NULL \
+            AND (m.apple_auth_token IS NOT NULL \
+                 OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)) \
+            AND c.erased_at < now() - make_interval(hours => $1) \
+          LIMIT 500",
+    )
+    .bind(ERASED_PASS_GRACE_HOURS)
+    .fetch_all(pool)
+    .await?;
+    let mut n = 0;
+    for id in ids {
+        if purge_erased_pass(pool, id).await? {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Leave the programme (design §2.8): the CARD ends, the person stays.
@@ -673,7 +743,8 @@ pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, 
 }
 
 /// A retired membership whose pass is still to be served voided: the loser of
-/// a merge, or someone who left. `None` for a live member, an erased one, or a
+/// a merge, someone who left, or an erased member whose device has not yet
+/// collected the voided copy. `None` for a live member, a purged one, or a
 /// serial that never existed. Reads the table, not the view's live filter.
 pub async fn find_voided<'e, E>(exec: E, id: Uuid) -> Result<Option<MemberRow>, AppError>
 where

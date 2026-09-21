@@ -1023,7 +1023,7 @@ async fn a_retired_card_is_served_voided_not_404(pool: PgPool) {
     assert_eq!(pass_json["voided"], json!(true));
     assert!(pass_json["expirationDate"].is_string());
 
-    // An ERASED member stays unreachable: no token, no devices.
+    // An ERASED member whose card no phone holds is unreachable at once.
     let erased = seed_loyalty_member(&pool, s.org, "01234567890", "Gone", "tok-void-2").await;
     sqlx::query("UPDATE loyalty_customers SET apple_auth_token = 'other-secret' WHERE id = $1")
         .bind(erased)
@@ -1049,6 +1049,106 @@ async fn a_retired_card_is_served_voided_not_404(pool: PgPool) {
     assert!(
         st == StatusCode::NOT_FOUND || st == StatusCode::UNAUTHORIZED,
         "{st}"
+    );
+}
+
+/// An erased member's card that IS in a wallet is voided before it is
+/// forgotten: the device can collect a voided copy (built from the scrubbed row),
+/// and then — or after the grace — the token and registrations are purged.
+#[sqlx::test]
+async fn an_erased_card_in_a_wallet_is_voided_then_purged(pool: PgPool) {
+    let s = shop(&pool, false).await;
+    let app = app!(pool);
+    let member = seed_loyalty_member(&pool, s.org, SARA, "Sara", "tok-era-1").await;
+    sqlx::query("UPDATE loyalty_customers SET apple_auth_token = 'apple-secret', apple_serial = $1::text WHERE id = $1")
+        .bind(member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO loyalty_pass_devices (device_library_id, customer_id, org_id, push_token) VALUES ('dev-e', $1, $2, 'push')")
+        .bind(member)
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/customers/{member}/erase")),
+            &admin_token(s.admin, s.org),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+
+    // The device is told the serial changed, and reaches the pass builder.
+    let (st, serials) = send(
+        &app,
+        test::TestRequest::get().uri("/wallet/v1/devices/dev-e/registrations/pass.test"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{serials}");
+    assert_eq!(serials["serialNumbers"], json!([member.to_string()]));
+    let pass = || {
+        test::TestRequest::get()
+            .uri(&format!("/wallet/v1/passes/pass.test/{member}"))
+            .insert_header(("Authorization", "ApplePass apple-secret"))
+    };
+    let (st, body) = send(&app, pass()).await;
+    assert!(
+        st == StatusCode::OK || st == StatusCode::SERVICE_UNAVAILABLE,
+        "an erased card in a wallet reaches the (voided) builder, got {st}: {body}"
+    );
+    // What it would be built from names nobody.
+    let row = madar_rust::loyalty::model::find_voided(&pool, member)
+        .await
+        .unwrap()
+        .expect("still served voided");
+    assert_eq!(row.name, "");
+    assert!(
+        !format!("{row:?}").contains("1000000000"),
+        "no phone: {row:?}"
+    );
+
+    if st == StatusCode::SERVICE_UNAVAILABLE {
+        // No signing credentials here, so nothing was served and nothing was
+        // purged: young, the sweep leaves it; past the grace, it goes.
+        assert_eq!(
+            madar_rust::loyalty::model::purge_stale_erased_passes(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        sqlx::query("UPDATE customers SET erased_at = now() - interval '49 hours' WHERE id = $1")
+            .bind(member)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            madar_rust::loyalty::model::purge_stale_erased_passes(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+    }
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM loyalty_pass_devices").await,
+        0
+    );
+    assert_eq!(
+        i64_of(&pool, "SELECT count(*) FROM loyalty_customers WHERE apple_auth_token IS NOT NULL OR pass_voided_at IS NOT NULL").await,
+        0
+    );
+    let (st, _) = send(&app, pass()).await;
+    assert!(
+        st == StatusCode::NOT_FOUND || st == StatusCode::UNAUTHORIZED,
+        "{st}"
+    );
+    // A leaver is never purged by this: only the erased.
+    assert!(
+        !madar_rust::loyalty::model::purge_erased_pass(&pool, Uuid::new_v4())
+            .await
+            .unwrap()
     );
 }
 

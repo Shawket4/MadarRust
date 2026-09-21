@@ -90,7 +90,7 @@ Merge is already implemented on `customers`; extend it:
 
 ### 2.8 Erase (PDPL) — one action
 
-`POST /customers/{id}/erase` (cap `customers.erase`) in one transaction: blank customer PII; forget the membership (existing `loyalty::model::forget`) and void passes; blank snapshots on `delivery_orders`, `bookings`, `open_tickets`, `orders.customer_name` for that customer; mark addresses erased; purge phone history and OTP rows. Money and ledger rows stay (legal retention), anonymised. `DELETE /loyalty/members/{id}` becomes "leave the programme" (membership only) and no longer wipes identity.
+`POST /customers/{id}/erase` (cap `customers.erase`) in one transaction: blank customer PII; forget the membership (existing `loyalty::model::forget`) and void passes; blank snapshots on `delivery_orders`, `bookings`, `open_tickets`, `orders.customer_name` for that customer; mark addresses erased; purge phone history and OTP rows. Money and ledger rows stay (legal retention), anonymised. **The Apple pass of an erased member is voided BEFORE it is forgotten:** when a device holds the card, erase keeps the pass auth token and the device registrations (opaque ids — everything naming the person is blanked in the same transaction), pushes, and serves ONE voided copy built from the scrubbed row; the token and registrations are purged on that fetch (single device) or by the daily sweep 48 h after the erase, whichever is first. With no registered device everything goes at once. Without this the phone shows an erased person's last balance and a live-looking barcode for ever. `DELETE /loyalty/members/{id}` becomes "leave the programme" (membership only) and no longer wipes identity.
 
 ## 3. Migration plan (backend)
 

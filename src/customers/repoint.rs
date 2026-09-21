@@ -53,6 +53,14 @@ pub fn spawn(pool: PgPool) {
                 run_tick(&pool).await.map(|_| ())
             })
             .await;
+            // The other daily chore erasing leaves behind: a card whose phone
+            // never came back for its voided copy.
+            crate::observability::report::guarded_tick("erased_pass_purge", || async {
+                crate::loyalty::model::purge_stale_erased_passes(&pool)
+                    .await
+                    .map(|_| ())
+            })
+            .await;
         }
     });
 }

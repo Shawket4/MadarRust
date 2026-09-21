@@ -51,8 +51,9 @@ async fn authenticated_member(
     // The serial IS the member id (see `apple::pass_json`).
     let id = Uuid::parse_str(serial).map_err(|_| AppError::NotFound("No such pass".into()))?;
     // A retired card (merge loser, or someone who left) still authenticates:
-    // its device has to be able to collect the voided copy. An erased member
-    // has no auth token left and falls out below, as before.
+    // its device has to be able to collect the voided copy. So does an erased
+    // member's, until it has (`model::purge_erased_pass`); after that there is
+    // no auth token left and it falls out below.
     let member = match model::find_by_id(pool, id).await? {
         Some(m) => m,
         None => model::find_voided(pool, id)
@@ -223,7 +224,21 @@ pub async fn latest_pass(
     .await?
     .unwrap_or(false);
     let bytes = if retired {
-        apple::build_voided_pass_for(pool.get_ref(), &member).await?
+        let bytes = apple::build_voided_pass_for(pool.get_ref(), &member).await?;
+        // An ERASED person's card has now said it is over on the one phone that
+        // held it: drop the registration and the token that were kept for this.
+        // With several devices the others still have to come; the sweep purges
+        // whatever is left after the grace. (A no-op for a leaver or a merge
+        // loser, who are not erased.)
+        let devices: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM loyalty_pass_devices WHERE customer_id = $1")
+                .bind(member.id)
+                .fetch_one(pool.get_ref())
+                .await?;
+        if devices <= 1 {
+            model::purge_erased_pass(pool.get_ref(), member.id).await?;
+        }
+        bytes
     } else {
         apple::pass_bytes_for(pool.get_ref(), &member).await?
     };

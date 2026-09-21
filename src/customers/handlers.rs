@@ -1253,18 +1253,20 @@ pub async fn erase_inner(
             cards.push(before);
         }
     }
+    // A card no phone holds has nothing to be told: its token and voided flag
+    // go now. One that IS in a wallet keeps both, and its registrations, until
+    // the device has collected the voided copy or the grace runs out
+    // (`loyalty::model::purge_erased_pass`) — otherwise the phone would show
+    // an erased person's last balance and barcode for ever.
     sqlx::query(
-        "UPDATE loyalty_customers SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now()
-          WHERE id = ANY($1) AND org_id = $2",
+        "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now()
+          WHERE m.id = ANY($1) AND m.org_id = $2
+            AND NOT EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)",
     )
     .bind(&chain[..])
     .bind(org)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = ANY($1)")
-        .bind(&chain[..])
-        .execute(&mut *tx)
-        .await?;
     sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)")
         .bind(&chain[..])
         .execute(&mut *tx)
@@ -1382,6 +1384,8 @@ pub async fn erase_customer(
     tx.commit().await?;
     // Network calls: after the commit, never inside it.
     for before in cards {
+        // Apple: the devices are told to come back, and get the voided copy.
+        crate::loyalty::wallet::apple::void_pass(pool.get_ref(), &before);
         tokio::spawn(async move {
             if let Err(e) = crate::loyalty::wallet::google::expire_object(&before).await {
                 use crate::observability::report::{Failure, report};
