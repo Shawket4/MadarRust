@@ -195,7 +195,11 @@ pub async fn public_branches(
 /// Whether a branch channel is open *right now* (enabled + override + window +
 /// an open shift). Mirrors the per-row computation in `public_branches`, reused
 /// to gate the menu, the quote, and order intake against direct-link bypass.
-pub(crate) async fn channel_open_now(pool: &PgPool, branch_id: Uuid, channel: &str) -> Result<bool, AppError> {
+pub(crate) async fn channel_open_now(
+    pool: &PgPool,
+    branch_id: Uuid,
+    channel: &str,
+) -> Result<bool, AppError> {
     let row: Option<BranchOpenRow> = sqlx::query_as(&format!(
         r#"SELECT {BRANCH_OPEN_SELECT}
            FROM branches b
@@ -1493,6 +1497,16 @@ pub async fn create_delivery_order(
             card_member.is_some()
                 || whatsapp::verify_device_token(&secret.0, &phone, &body.device_token)
         };
+        if !proven && contact_override {
+            // Same 401, but named: the device IS verified (for the card's
+            // phone) — what is missing is an OTP on the OTHER number, and the
+            // client has to ask for exactly that instead of signing out.
+            return Err(AppError::Coded {
+                status: 401,
+                code: "CONTACT_VERIFICATION_REQUIRED",
+                reason: "Verify the phone number this order is going to.".into(),
+            });
+        }
         if !proven {
             return Err(AppError::Unauthorized(
                 "Phone not verified on this device.".into(),
@@ -1759,31 +1773,30 @@ pub async fn create_delivery_order(
     };
     // WHERE — remembered only now that the order is being placed, and not at
     // all for a one-time order unless they asked (design §4.3, §4.4).
-    let address_id: Option<Uuid> = if identity.as_ref().is_none_or(|c| c.save_address)
-        && body.save_address != Some(false)
-    {
-        crate::customers::handlers::save_address(
-            &mut tx,
-            org_id,
-            customer_id,
-            &crate::customers::handlers::AddressInput {
-                branch_id: body.branch_id,
-                channel: &body.channel,
-                place_name: body.place_name.as_deref(),
-                floor: body.floor.as_deref(),
-                unit_number: body.unit_number.as_deref(),
-                landmark: body.landmark.as_deref(),
-                address_line: body.address_line.as_deref(),
-                delivery_notes: body.delivery_notes.as_deref(),
-                lat: body.customer_lat,
-                lng: body.customer_lng,
-                zone_id,
-            },
-        )
-        .await?
-    } else {
-        None
-    };
+    let address_id: Option<Uuid> =
+        if identity.as_ref().is_none_or(|c| c.save_address) && body.save_address != Some(false) {
+            crate::customers::handlers::save_address(
+                &mut tx,
+                org_id,
+                customer_id,
+                &crate::customers::handlers::AddressInput {
+                    branch_id: body.branch_id,
+                    channel: &body.channel,
+                    place_name: body.place_name.as_deref(),
+                    floor: body.floor.as_deref(),
+                    unit_number: body.unit_number.as_deref(),
+                    landmark: body.landmark.as_deref(),
+                    address_line: body.address_line.as_deref(),
+                    delivery_notes: body.delivery_notes.as_deref(),
+                    lat: body.customer_lat,
+                    lng: body.customer_lng,
+                    zone_id,
+                },
+            )
+            .await?
+        } else {
+            None
+        };
 
     let cart_json = serde_json::to_value(&resolved.snapshot).map_err(|_| AppError::Internal)?;
     let deductions_json =
@@ -1907,7 +1920,11 @@ fn require_guest_device_token(
 }
 
 /// The live customer holding this (canonical) phone in the org.
-async fn guest_customer(pool: &PgPool, org_id: Uuid, phone: &str) -> Result<Option<Uuid>, AppError> {
+async fn guest_customer(
+    pool: &PgPool,
+    org_id: Uuid,
+    phone: &str,
+) -> Result<Option<Uuid>, AppError> {
     Ok(sqlx::query_scalar(
         "SELECT id FROM customers WHERE org_id = $1 AND phone_key = $2
             AND merged_into IS NULL AND erased_at IS NULL",
