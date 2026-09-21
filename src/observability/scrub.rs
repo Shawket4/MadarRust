@@ -79,6 +79,11 @@ pub const PII_KEY_DENYLIST: &[&str] = &[
     "building",
     "apartment",
     "landmark",
+    // `delivery_orders` / `customer_addresses`: which door, and what the
+    // customer wrote for the driver ("ring twice, the dog bites"). `floor` is
+    // in the exact list — as a substring it would eat `floor_plan`.
+    "unit_number",
+    "delivery_notes",
     "postcode",
     "zipcode",
     "latitude",
@@ -134,7 +139,7 @@ pub const PII_KEY_DENYLIST: &[&str] = &[
 /// event while protecting nothing.
 pub const PII_KEY_EXACT: &[&str] = &[
     "pass", "pin", "otp", "lat", "lng", "lon", "ssn", "nid", "dob", "tel", "addr", "key", "auth",
-    "user", "owner", "uid", "cvv", "cvc", "gps", "pwd",
+    "user", "owner", "uid", "cvv", "cvc", "gps", "pwd", "floor",
 ];
 
 /// Checked **before** the denylist. Keys whose value is a machine describing
@@ -501,6 +506,12 @@ mod tests {
             "address_line",
             "place_name",
             "landmark",
+            "floor",
+            "unit_number",
+            "delivery_notes",
+            "new_phone",
+            "member_token",
+            "contact_device_token",
             "national_id",
             "base_salary_piastres",
             "emergency_contact_phone",
@@ -539,6 +550,8 @@ mod tests {
             "authority_id",
             "uuid",
             "auth_flow_step",
+            "floor_plan",
+            "floor_id",
         ] {
             assert!(!is_pii_key(key), "{key} must NOT be denied by a short form");
         }
