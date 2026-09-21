@@ -192,7 +192,7 @@ Add: `customers.merge` (split from edit, default owner/manager), `customers.addr
 - A sale is never refused because of a customer problem — bad/unknown reference degrades to snapshot-only and is logged.
 - Offline tills: old ids always resolve (merge chain), new fields optional for one release in both directions (old core ↔ new server, new core ↔ old server).
 - Property tests: phone vectors shared across 4 implementations; merge is associative on balances; erase leaves no PII (test greps every text column for the seeded phone/name).
-- Backfill dry-run mode that reports: customers created, merged, conflicts (same phone, different names) for manual review before commit.
+- Backfill dry-run mode that reports: customers created, merged, conflicts (same phone, different names) for manual review before commit. → `cargo run --bin customers-backfill-dry-run` against a COPY of prod; see `docs/customers-unification-deploy.md`, which also says what the migrations do on boot.
 - Metrics: count of orders with phone snapshot but null `customer_id` (should trend to 0), resolve-or-create outcomes, identity replacements, OTP failures per token.
 
 ## 9. Order of work

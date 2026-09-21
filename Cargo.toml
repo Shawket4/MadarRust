@@ -214,6 +214,10 @@ name = "backfill-recipe-units"
 path = "src/bin/backfill_recipe_units.rs"
 
 [[bin]]
+name = "customers-backfill-dry-run"
+path = "src/bin/customers_backfill_dry_run.rs"
+
+[[bin]]
 name = "backfill-order-ref"
 path = "src/bin/backfill_order_ref.rs"
 
