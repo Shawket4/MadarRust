@@ -69,7 +69,28 @@ macro_rules! app {
                 .configure(madar_rust::bookings::routes::configure)
                 .configure(madar_rust::tickets::routes::configure)
                 .configure(madar_rust::kitchen::routes::configure)
-                .configure(madar_rust::orders::routes::configure),
+                .configure(madar_rust::orders::routes::configure)
+                .configure(madar_rust::reservations::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
+        )
+        .await
+    }};
+}
+
+/// The same routes WITH their limiters: never sets the disable flag, so it is
+/// only for a test that is about the limiter. (nextest: one process per test.)
+macro_rules! limited_app {
+    ($pool:expr) => {{
+        assert!(
+            std::env::var("MADAR_DISABLE_RATE_LIMIT").is_err(),
+            "the limiter tests need the limiter: do not export MADAR_DISABLE_RATE_LIMIT"
+        );
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(secret()))
+                .app_data(web::Data::new(BranchEventHub::new()))
+                .configure(madar_rust::customers::routes::configure),
         )
         .await
     }};
@@ -1195,8 +1216,12 @@ async fn ordering_from_a_card_classifies_the_typed_identity(pool: PgPool) {
     // The token alone orders nothing: the device must prove the CUSTOMER's phone.
     let mut stolen = card_order("Sara", SARA, "1 A St");
     stolen["device_token"] = json!(device_token(FRIEND));
-    let (st, _) = place(&app, &stolen).await;
+    let (st, e) = place(&app, &stolen).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert!(
+        e["code"].is_null(),
+        "an unproven CARD phone stays a bare 401: {e}"
+    );
 
     // Nothing differs: an ordinary order, address saved.
     let (st, d) = place(&app, &card_order(" sara ", "+201000000000", "1 A St")).await;
@@ -1218,12 +1243,21 @@ async fn ordering_from_a_card_classifies_the_typed_identity(pool: PgPool) {
     // One-time, at a branch that requires OTP: the snapshot phone needs proof.
     let mut one = card_order("Omar", FRIEND, "2 B St");
     one["identity_change"] = json!("one_time");
-    let (st, _) = place(&app, &one).await;
+    let (st, e) = place(&app, &one).await;
     assert_eq!(
         st,
         StatusCode::UNAUTHORIZED,
         "the branch's OTP rule applies to the number the driver calls"
     );
+    assert_eq!(
+        e["code"], "CONTACT_VERIFICATION_REQUIRED",
+        "named, so the client asks for an OTP on the OTHER number: {e}"
+    );
+    // A token for the wrong number is the same ask, not a sign-out.
+    one["contact_device_token"] = json!(device_token(SARA));
+    let (st, e) = place(&app, &one).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(e["code"], "CONTACT_VERIFICATION_REQUIRED", "{e}");
     one["contact_device_token"] = json!(device_token(FRIEND));
     let (st, d) = place(&app, &one).await;
     assert_eq!(st, StatusCode::CREATED, "{d}");
@@ -1614,6 +1648,593 @@ async fn the_order_now_link_follows_the_env_and_the_shop(pool: PgPool) {
     .await;
     assert!(card.get("order_now_url").is_none(), "{card}");
     unsafe { std::env::remove_var("PUBLIC_ORDER_BASE_URL") };
+}
+
+// ── wave 3: the customer on an open bill, bookings, limits ──────────────────
+
+async fn seed_table(pool: &PgPool, s: &Shop, label: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branch_tables (id, org_id, branch_id, label) VALUES ($1,$2,$3,$4)")
+        .bind(id)
+        .bind(s.org)
+        .bind(s.branch)
+        .bind(label)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+/// An anonymous bill on `table` (a table-QR order with no phone).
+async fn open_bill<S>(app: &S, s: &Shop, table: Uuid) -> Uuid
+where
+    S: Service<Request, Response = ServiceResponse, Error = actix_web::Error>,
+{
+    let (st, v) = send(
+        app,
+        test::TestRequest::post()
+            .uri("/public/table-orders")
+            .set_json(json!({
+                "table_id": table, "customer_name": "Walk-in",
+                "idempotency_key": Uuid::new_v4(),
+                "items": [{ "menu_item_id": s.item, "quantity": 1 }]
+            })),
+    )
+    .await;
+    assert!(st.is_success(), "{v}");
+    u(v["id"].as_str().unwrap())
+}
+async fn new_customer<S>(app: &S, tok: &str, name: &str, phone: Option<&str>) -> Uuid
+where
+    S: Service<Request, Response = ServiceResponse, Error = actix_web::Error>,
+{
+    let (st, c) = send(
+        app,
+        auth(test::TestRequest::post().uri("/customers"), tok)
+            .set_json(json!({ "name": name, "phone": phone })),
+    )
+    .await;
+    assert!(st.is_success(), "{c}");
+    u(c["customer"]["id"].as_str().unwrap())
+}
+async fn ticket_customer(pool: &PgPool, ticket: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT customer_id FROM open_tickets WHERE id = $1")
+        .bind(ticket)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+async fn ticket_seq(pool: &PgPool, ticket: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT seq FROM sync_changes WHERE type = 'open_ticket' AND entity_id = $1")
+        .bind(ticket)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A customer picked on a bill that is ALREADY open reaches the server — and
+/// the other tills — at once, through replay and through REST alike; and no
+/// shape of it is ever an error a till's outbox could wedge on.
+#[sqlx::test]
+async fn the_customer_on_an_open_bill_is_set_changed_and_cleared(pool: PgPool) {
+    let s = shop(&pool, false).await;
+    let app = app!(pool);
+    let admin = admin_token(s.admin, s.org);
+    let tok = teller_token(s.teller, s.org, s.branch);
+    let table = seed_table(&pool, &s, "T1").await;
+    let ticket = open_bill(&app, &s, table).await;
+    assert_eq!(ticket_customer(&pool, ticket).await, None);
+
+    let sara = new_customer(&app, &admin, "Sara", Some(SARA)).await;
+    let omar = new_customer(&app, &admin, "Omar", Some("01155566677")).await;
+    let dupe = new_customer(&app, &admin, "Omar K", None).await;
+    let (st, m) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/customers/{dupe}/merge")),
+            &admin,
+        )
+        .set_json(json!({ "into": omar })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+
+    let replay = |customer: Value| {
+        auth(test::TestRequest::post().uri("/sync/replay"), &tok).set_json(json!({
+            "op": "set_ticket_customer", "teller_id": s.teller,
+            "ticket_id": ticket, "customer_id": customer
+        }))
+    };
+
+    // Set: the row, the response, and the changefeed all move.
+    let before = ticket_seq(&pool, ticket).await;
+    let (st, r) = send(&app, replay(json!(sara))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["ticket_id"], json!(ticket));
+    assert_eq!(r["customer_id"], json!(sara));
+    assert_eq!(r["applied"], json!(true));
+    assert!(r["order_id"].is_null());
+    assert_eq!(ticket_customer(&pool, ticket).await, Some(sara));
+    let after = ticket_seq(&pool, ticket).await;
+    assert!(
+        after > before,
+        "the other tills are told: {before} -> {after}"
+    );
+
+    // A re-flushed queue is the same row and no second feed entry.
+    let (st, r) = send(&app, replay(json!(sara))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["applied"], json!(true));
+    assert_eq!(ticket_seq(&pool, ticket).await, after, "idempotent");
+
+    // Last write wins; a MERGED id lands on its survivor.
+    let (st, r) = send(&app, replay(json!(dupe))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["customer_id"], json!(omar));
+    assert_eq!(ticket_customer(&pool, ticket).await, Some(omar));
+
+    // An unknown id is dropped without touching the bill — and without an error.
+    let (st, r) = send(&app, replay(json!(Uuid::new_v4()))).await;
+    assert_eq!(st, StatusCode::OK, "a bill is never refused: {r}");
+    assert_eq!(r["applied"], json!(false));
+    assert_eq!(r["customer_id"], json!(omar), "what the bill still says");
+    assert_eq!(ticket_customer(&pool, ticket).await, Some(omar));
+
+    // The pull projection (the ticket view) names the customer.
+    let (st, view) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/open-tickets/{ticket}")),
+            &tok,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(view["customer_id"], json!(omar));
+
+    // null — and an absent field — take the customer off.
+    let (st, r) = send(&app, replay(Value::Null)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert!(r["customer_id"].is_null());
+    assert_eq!(ticket_customer(&pool, ticket).await, None);
+    send(&app, replay(json!(sara))).await;
+    let (st, _) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/sync/replay"), &tok).set_json(
+            json!({ "op": "set_ticket_customer", "teller_id": s.teller, "ticket_id": ticket }),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(ticket_customer(&pool, ticket).await, None);
+
+    // REST, the dashboard's path: same core, same answers.
+    let put = |t: &str, body: Value| {
+        auth(
+            test::TestRequest::put().uri(&format!("/open-tickets/{ticket}/customer")),
+            t,
+        )
+        .set_json(body)
+    };
+    let (st, r) = send(&app, put(&admin, json!({ "customer_id": sara }))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["customer_id"], json!(sara));
+    assert_eq!(ticket_customer(&pool, ticket).await, Some(sara));
+    let (st, r) = send(&app, put(&admin, json!({ "customer_id": null }))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(ticket_customer(&pool, ticket).await, None);
+
+    // Gated by customers.attach — on REST and on replay.
+    let kitchen = seed_user(&pool, s.org, "kitchen").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1,$2)")
+        .bind(kitchen)
+        .bind(s.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ktok = create_token(
+        &secret(),
+        kitchen,
+        Some(s.org),
+        UserRole::Kitchen,
+        Some(s.branch),
+        24,
+    )
+    .unwrap();
+    let (st, _) = send(&app, put(&ktok, json!({ "customer_id": sara }))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, _) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/sync/replay"), &ktok).set_json(json!({
+            "op": "set_ticket_customer", "teller_id": kitchen,
+            "ticket_id": ticket, "customer_id": sara
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert_eq!(ticket_customer(&pool, ticket).await, None);
+    // Another shop's bill is a 404 on REST.
+    let other = shop(&pool, false).await;
+    let (st, _) = send(
+        &app,
+        put(
+            &admin_token(other.admin, other.org),
+            json!({ "customer_id": sara }),
+        ),
+    )
+    .await;
+    assert!(
+        st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN,
+        "{st}"
+    );
+    assert_eq!(ticket_customer(&pool, ticket).await, None);
+}
+
+/// The pick was queued while the bill was open and arrives after it was
+/// settled: it lands on the SALE, as `attach_customer` would have. A voided or
+/// unknown bill is a clean no-op. The table's history names the customer.
+#[sqlx::test]
+async fn a_late_pick_lands_on_the_sale_and_a_dead_bill_is_a_no_op(pool: PgPool) {
+    let s = shop(&pool, false).await;
+    let app = app!(pool);
+    let admin = admin_token(s.admin, s.org);
+    let tok = teller_token(s.teller, s.org, s.branch);
+    let table = seed_table(&pool, &s, "T1").await;
+    let ticket = open_bill(&app, &s, table).await;
+    let sara = new_customer(&app, &admin, "Sara", Some(SARA)).await;
+
+    let (st, o) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle")),
+            &tok,
+        )
+        .set_json(json!({ "shift_id": s.till, "payment_method": "cash" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{o}");
+    assert!(o["customer_id"].is_null());
+    let order = u(o["id"].as_str().unwrap());
+
+    let replay = |ticket: Uuid, customer: Value| {
+        auth(test::TestRequest::post().uri("/sync/replay"), &tok).set_json(json!({
+            "op": "set_ticket_customer", "teller_id": s.teller,
+            "ticket_id": ticket, "customer_id": customer
+        }))
+    };
+    let (st, r) = send(&app, replay(ticket, json!(sara))).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["applied"], json!(true));
+    assert_eq!(r["order_id"], json!(order));
+    let on_sale: Option<Uuid> = sqlx::query_scalar("SELECT customer_id FROM orders WHERE id = $1")
+        .bind(order)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(on_sale, Some(sara), "the sale belongs to her now");
+
+    // The table's history says who sat there.
+    let (st, h) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/floor/tables/{table}/history")),
+            &admin,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{h}");
+    assert_eq!(h["sittings"][0]["customer_id"], json!(sara), "{h}");
+
+    // A voided bill, and one that never existed: 200, nothing written.
+    let table2 = seed_table(&pool, &s, "T2").await;
+    let dead = open_bill(&app, &s, table2).await;
+    sqlx::query("UPDATE open_tickets SET status = 'voided', voided_at = now() WHERE id = $1")
+        .bind(dead)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for t in [dead, Uuid::new_v4()] {
+        let (st, r) = send(&app, replay(t, json!(sara))).await;
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "never an error that wedges an outbox: {r}"
+        );
+        assert_eq!(r["applied"], json!(false));
+    }
+    assert_eq!(ticket_customer(&pool, dead).await, None);
+}
+
+/// A customer's bookings: newest first, paged, behind `customers.view`, and a
+/// merged id answers with everything booked under either id.
+#[sqlx::test]
+async fn a_customers_bookings_are_listed_through_the_merge_chain(pool: PgPool) {
+    let s = shop(&pool, false).await;
+    let app = app!(pool);
+    let admin = admin_token(s.admin, s.org);
+    let at = chrono::Utc::now() + chrono::Duration::days(1);
+    let book = |phone: &str, hours: i64| {
+        auth(test::TestRequest::post().uri("/bookings"), &admin).set_json(json!({
+            "branch_id": s.branch, "party_size": 2,
+            "starts_at": at + chrono::Duration::hours(hours), "guest_name": "Sara",
+            "guest_phone": phone, "force": true, "table_ids": [], "send_confirmation": false
+        }))
+    };
+    let (st, b1) = send(&app, book(SARA, 0)).await;
+    assert_eq!(st, StatusCode::CREATED, "{b1}");
+    let (st, b2) = send(&app, book(SARA, 4)).await;
+    assert_eq!(st, StatusCode::CREATED, "{b2}");
+    let (st, b3) = send(&app, book("01155566677", 8)).await;
+    assert_eq!(st, StatusCode::CREATED, "{b3}");
+    let sara = u(b1["customer_id"].as_str().unwrap());
+    let other = u(b3["customer_id"].as_str().unwrap());
+    assert_ne!(sara, other);
+
+    let list = |id: Uuid, q: &str| {
+        auth(
+            test::TestRequest::get().uri(&format!("/customers/{id}/bookings{q}")),
+            &admin,
+        )
+    };
+    let (st, rows) = send(&app, list(sara, "")).await;
+    assert_eq!(st, StatusCode::OK, "{rows}");
+    let ids: Vec<&str> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![b2["id"].as_str().unwrap(), b1["id"].as_str().unwrap()],
+        "newest first, and only hers"
+    );
+    assert_eq!(
+        rows[0]["guest_name"], "Sara",
+        "the booking view type: {rows}"
+    );
+
+    // Merge the other into her: both ids now answer with all three.
+    let (st, m) = send(
+        &app,
+        auth(
+            test::TestRequest::post().uri(&format!("/customers/{other}/merge")),
+            &admin,
+        )
+        .set_json(json!({ "into": sara })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{m}");
+    // Even a reference the merge did not move is found through the chain.
+    sqlx::query("UPDATE bookings SET customer_id = $1 WHERE id = $2")
+        .bind(other)
+        .bind(u(b3["id"].as_str().unwrap()))
+        .execute(&pool)
+        .await
+        .unwrap();
+    for id in [sara, other] {
+        let (st, rows) = send(&app, list(id, "")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(rows.as_array().unwrap().len(), 3, "{rows}");
+        assert_eq!(rows[0]["id"], b3["id"]);
+    }
+    let (_, page) = send(&app, list(sara, "?limit=1&offset=1")).await;
+    assert_eq!(page.as_array().unwrap().len(), 1);
+    assert_eq!(page[0]["id"], b2["id"]);
+
+    let (st, _) = send(&app, list(Uuid::new_v4(), "")).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let kitchen = seed_user(&pool, s.org, "kitchen").await;
+    let ktok = create_token(
+        &secret(),
+        kitchen,
+        Some(s.org),
+        UserRole::Kitchen,
+        Some(s.branch),
+        24,
+    )
+    .unwrap();
+    let (st, _) = send(
+        &app,
+        auth(
+            test::TestRequest::get().uri(&format!("/customers/{sara}/bookings")),
+            &ktok,
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+/// Design §4.2: a card has its own budget whatever address asks, and the
+/// identity endpoints share a much tighter one. (The test client has no peer
+/// address, so every request is "127.0.0.1" to the per-IP limiter: the counts
+/// below stay under ITS bursts — 30 browse, 5 identity — so that what refuses
+/// is provably the per-card bucket.)
+#[sqlx::test]
+async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
+    let s = shop(&pool, false).await;
+    seed_loyalty_member(&pool, s.org, SARA, "Sara", "tok-lim-1").await;
+    seed_loyalty_member(&pool, s.org, "01155566677", "Omar", "tok-lim-2").await;
+    let app = limited_app!(pool);
+    let identity = |token: &str, which: &str| {
+        test::TestRequest::post()
+            .uri(&format!("/public/order-now/{token}/{which}"))
+            .set_json(json!({ "device_token": "x", "new_phone": "01222333444",
+                              "new_phone_device_token": "x", "other_phone": "01222333444",
+                              "other_device_token": "x" }))
+    };
+    // Three tries on one card — spread over BOTH identity endpoints — and the
+    // fourth is refused before it reaches the handler.
+    for (i, which) in ["replace-identity", "combine", "replace-identity"]
+        .into_iter()
+        .enumerate()
+    {
+        let (st, _) = send(&app, identity("tok-lim-1", which)).await;
+        assert_ne!(st, StatusCode::TOO_MANY_REQUESTS, "try {i}");
+    }
+    let (st, _) = send(&app, identity("tok-lim-1", "combine")).await;
+    assert_eq!(
+        st,
+        StatusCode::TOO_MANY_REQUESTS,
+        "the card's bucket is empty"
+    );
+    // The same address, ANOTHER card: not refused — so it was the card's
+    // bucket, not the address's (whose burst of five has one left).
+    let (st, _) = send(&app, identity("tok-lim-2", "replace-identity")).await;
+    assert_ne!(st, StatusCode::TOO_MANY_REQUESTS);
+
+    // Browsing: twenty a burst per card, under the address's thirty.
+    for i in 0..20 {
+        let (st, _) = send(
+            &app,
+            test::TestRequest::get().uri("/public/order-now/tok-lim-1"),
+        )
+        .await;
+        assert_ne!(st, StatusCode::TOO_MANY_REQUESTS, "view {i}");
+    }
+    let (st, _) = send(
+        &app,
+        test::TestRequest::get().uri("/public/order-now/tok-lim-1"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+    let (st, _) = send(
+        &app,
+        test::TestRequest::get().uri("/public/order-now/tok-lim-2"),
+    )
+    .await;
+    assert_ne!(
+        st,
+        StatusCode::TOO_MANY_REQUESTS,
+        "another card still opens"
+    );
+}
+
+/// Design §2.5: what still names a customer merged more than 30 days ago is
+/// moved to the survivor — at the END of the chain — and a younger merge is
+/// left alone. Twice is the same as once.
+#[sqlx::test]
+async fn the_nightly_job_repoints_references_to_long_merged_customers(pool: PgPool) {
+    let s = shop(&pool, false).await;
+    let app = app!(pool);
+    let admin = admin_token(s.admin, s.org);
+    let keep = new_customer(&app, &admin, "Sara", Some(SARA)).await;
+    let mid = new_customer(&app, &admin, "Sara M", None).await;
+    let old = new_customer(&app, &admin, "S. Mostafa", None).await;
+    let young = new_customer(&app, &admin, "Sarah", None).await;
+    for (from, into) in [(old, mid), (mid, keep), (young, keep)] {
+        let (st, m) = send(
+            &app,
+            auth(
+                test::TestRequest::post().uri(&format!("/customers/{from}/merge")),
+                &admin,
+            )
+            .set_json(json!({ "into": into })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{m}");
+    }
+    sqlx::query("UPDATE customers SET merged_at = now() - interval '31 days' WHERE id = ANY($1)")
+        .bind(vec![old, mid])
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Rows that arrived AFTER the merges, still naming the duplicates: a bill
+    // and a sale from a till that was offline, a booking, a saved address.
+    let table = seed_table(&pool, &s, "T1").await;
+    let bill = open_bill(&app, &s, table).await;
+    let late = open_bill(&app, &s, seed_table(&pool, &s, "T2").await).await;
+    sqlx::query("UPDATE open_tickets SET customer_id = $1 WHERE id = $2")
+        .bind(old)
+        .bind(bill)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE open_tickets SET customer_id = $1 WHERE id = $2")
+        .bind(young)
+        .bind(late)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, b) = send(
+        &app,
+        auth(test::TestRequest::post().uri("/bookings"), &admin).set_json(json!({
+            "branch_id": s.branch, "party_size": 2,
+            "starts_at": chrono::Utc::now() + chrono::Duration::days(1), "guest_name": "Sara",
+            "guest_phone": SARA, "force": true, "table_ids": [], "send_confirmation": false
+        })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    sqlx::query("UPDATE bookings SET customer_id = $1")
+        .bind(mid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, d) = place(
+        &app,
+        &outside_order(&s, "Sara", SARA, "1 A St", 30.001, 31.001),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{d}");
+    sqlx::query("UPDATE delivery_orders SET customer_id = $1")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE orders SET customer_id = $1 WHERE customer_id IS NOT NULL")
+        .bind(mid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE customer_addresses SET customer_id = $1")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let moved = madar_rust::customers::repoint::run_tick(&pool)
+        .await
+        .unwrap();
+    assert_eq!(moved.customers, 2, "{moved:?}");
+    for table in [
+        "orders",
+        "delivery_orders",
+        "bookings",
+        "customer_addresses",
+    ] {
+        assert_eq!(
+            i64_of(
+                &pool,
+                &format!(
+                    "SELECT count(*) FROM {table} WHERE customer_id IS NOT NULL AND customer_id <> '{keep}'"
+                )
+            )
+            .await,
+            0,
+            "{table} names only the survivor"
+        );
+    }
+    assert_eq!(ticket_customer(&pool, bill).await, Some(keep));
+    assert_eq!(
+        ticket_customer(&pool, late).await,
+        Some(young),
+        "a merge younger than 30 days is left to the chain"
+    );
+    assert_eq!(
+        i64_of(
+            &pool,
+            "SELECT count(*) FROM customer_addresses WHERE erased_at IS NULL"
+        )
+        .await,
+        1,
+        "the address moved, it was not lost"
+    );
+
+    let again = madar_rust::customers::repoint::run_tick(&pool)
+        .await
+        .unwrap();
+    assert_eq!(again, Default::default(), "idempotent");
 }
 
 // ── A: the seeded migration ─────────────────────────────────────────────────
