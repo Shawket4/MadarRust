@@ -259,10 +259,17 @@ pub async fn project(
         "customer" => {
             by_sql(
                 conn,
+                // `phone_key` is the canonical phone (`20…`). `loyalty_customer_id`
+                // is kept for one release for deployed tills: a membership
+                // shares the customer's id, so it is `id` for a member.
                 "SELECT c.id, json_build_object('id', c.id, 'name', c.name, 'phone', c.phone, \
-                        'phone_key', c.phone_key, 'loyalty_customer_id', c.loyalty_customer_id, \
+                        'phone_key', c.phone_key, \
+                        'loyalty_customer_id', CASE WHEN m.id IS NOT NULL THEN c.id END, \
+                        'is_member', m.id IS NOT NULL, 'source', c.source, \
                         'updated_at', c.updated_at) \
-                   FROM customers c WHERE c.id = ANY($1)",
+                   FROM customers c \
+                   LEFT JOIN loyalty_customers m ON m.id = c.id AND m.deleted_at IS NULL \
+                  WHERE c.id = ANY($1)",
                 ids,
             )
             .await?
@@ -582,7 +589,7 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'timezone', effective_timezone(o.branch_id), \
                         'created_at', o.created_at) \
                    FROM orders o LEFT JOIN users u ON u.id = o.teller_id LEFT JOIN users w ON w.id = o.waiter_id \
-                   LEFT JOIN loyalty_customers lc ON lc.id = o.loyalty_customer_id \
+                   LEFT JOIN customers lc ON lc.id = o.loyalty_customer_id \
                   WHERE o.id = ANY($1)",
                 ids,
             )
@@ -600,7 +607,8 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                         'service_charge_waived_at', o.service_charge_waived_at, \
                         'service_charge_waived_amount', o.service_charge_waived_amount, \
                         'discount_kind', o.discount_kind, 'discount_percent_bps', o.discount_percent_bps, \
-                        'discount_applied_by', o.discount_applied_by, 'discount_approval_id', o.discount_approval_id) \
+                        'discount_applied_by', o.discount_applied_by, 'discount_approval_id', o.discount_approval_id, \
+                        'customer_id', o.customer_id) \
                    FROM orders o LEFT JOIN users sw ON sw.id = o.service_charge_waived_by \
                   WHERE o.id = ANY($1)",
             )

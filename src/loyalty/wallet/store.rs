@@ -29,8 +29,15 @@ const TTL: chrono::Duration = chrono::Duration::hours(1);
 /// Not the whole row: `pass_updated_at` and the wallet ids change without
 /// changing a pixel, and hashing them would throw the cache away on its own
 /// bookkeeping. What is here is what a customer would see change.
-fn fingerprint(member: &MemberRow) -> String {
+///
+/// `order_now` is the one input that is not on the member row: the "Order now"
+/// link, present only while the shop takes online orders. Hashing it is what
+/// makes a stored pass stop matching the moment ordering is switched on or
+/// off, so the next fetch rebuilds it with (or without) the link.
+fn fingerprint(member: &MemberRow, order_now: Option<&str>) -> String {
     let mut h = Sha256::new();
+    h.update(order_now.unwrap_or("").as_bytes());
+    h.update([0]);
     h.update(member.points_balance.to_le_bytes());
     h.update(member.visits_balance.to_le_bytes());
     h.update(member.lifetime_points.to_le_bytes());
@@ -69,7 +76,8 @@ pub async fn load(pool: &PgPool, member: &MemberRow) -> Option<Vec<u8>> {
     .flatten();
 
     let (bytes, stored, built_at) = row?;
-    if stored != fingerprint(member) {
+    let order_now = super::order_now_for(pool, member).await;
+    if stored != fingerprint(member, order_now.as_deref()) {
         return None;
     }
     if chrono::Utc::now() - built_at > TTL {
@@ -83,6 +91,7 @@ pub async fn save(pool: &PgPool, member: &MemberRow, bytes: &[u8]) {
     if cfg!(test) {
         return;
     }
+    let order_now = super::order_now_for(pool, member).await;
     let res = sqlx::query(
         "INSERT INTO loyalty_pass_cache (customer_id, org_id, kind, bytes, fingerprint, built_at) \
          VALUES ($1, $2, 'apple', $3, $4, now()) \
@@ -93,7 +102,7 @@ pub async fn save(pool: &PgPool, member: &MemberRow, bytes: &[u8]) {
     .bind(member.id)
     .bind(member.org_id)
     .bind(bytes)
-    .bind(fingerprint(member))
+    .bind(fingerprint(member, order_now.as_deref()))
     .execute(pool)
     .await;
     if let Err(e) = res {

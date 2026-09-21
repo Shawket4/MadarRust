@@ -237,6 +237,16 @@ pub enum ReplayOp {
         #[serde(default)]
         customer_id: Option<Uuid>,
     },
+    // The customer on a bill that is ALREADY open (or, with no `customer_id`,
+    // nobody): without this a pick made mid-meal only reached the server at
+    // settle, and no other till saw it. Last write wins; never an error — an
+    // unknown customer is dropped, a settled bill passes it to its sale.
+    SetTicketCustomer {
+        teller_id: Uuid,
+        ticket_id: Uuid,
+        #[serde(default)]
+        customer_id: Option<Uuid>,
+    },
     // Waste recorded at the till (phase 6, `inventory.waste.record`). The id
     // inside the request is client-minted, so a re-flush posts once.
     RecordWaste {
@@ -281,6 +291,7 @@ impl ReplayOp {
             | ReplayOp::AwardLoyaltyPoints { teller_id, .. }
             | ReplayOp::CreateCustomer { teller_id, .. }
             | ReplayOp::AttachCustomer { teller_id, .. }
+            | ReplayOp::SetTicketCustomer { teller_id, .. }
             | ReplayOp::RecordWaste { teller_id, .. }
             | ReplayOp::RecordStaffDrink { teller_id, .. } => *teller_id,
         }
@@ -315,6 +326,7 @@ impl ReplayOp {
             ReplayOp::AwardLoyaltyPoints { .. } => "AwardLoyaltyPoints",
             ReplayOp::CreateCustomer { .. } => "CreateCustomer",
             ReplayOp::AttachCustomer { .. } => "AttachCustomer",
+            ReplayOp::SetTicketCustomer { .. } => "SetTicketCustomer",
             ReplayOp::RecordWaste { .. } => "RecordWaste",
             ReplayOp::RecordStaffDrink { .. } => "RecordStaffDrink",
         }
@@ -447,7 +459,9 @@ impl ReplayOp {
             // having queued it offline.
             ReplayOp::AwardLoyaltyPoints { .. } => &[("loyalty", "update")],
             // Architecture E capabilities with no legacy cell: see `required_caps`.
-            ReplayOp::CreateCustomer { .. } | ReplayOp::AttachCustomer { .. } => &[],
+            ReplayOp::CreateCustomer { .. }
+            | ReplayOp::AttachCustomer { .. }
+            | ReplayOp::SetTicketCustomer { .. } => &[],
             // Same capability as `POST /inventory/waste`; its `max_value` limit
             // and branch scope are checked in `replay` with the waste's value.
             ReplayOp::RecordWaste { .. } => &[("inventory_waste", "create")],
@@ -474,7 +488,9 @@ impl ReplayOp {
     fn required_caps(&self) -> &'static [crate::authz::Cap] {
         match self {
             ReplayOp::CreateCustomer { .. } => &[crate::authz::Cap::CustomersCreate],
-            ReplayOp::AttachCustomer { .. } => &[crate::authz::Cap::CustomersAttach],
+            ReplayOp::AttachCustomer { .. } | ReplayOp::SetTicketCustomer { .. } => {
+                &[crate::authz::Cap::CustomersAttach]
+            }
             _ => &[],
         }
     }
@@ -729,20 +745,22 @@ pub async fn replay(
     // locked rule for a money op is accept-and-flag (§4.4.5).
     if let ReplayOp::RecordStaffDrink { request, .. } = &op {
         let cap = crate::authz::Cap::OrdersStaffDrinkRecord.key();
-        if let Ok((_, org_id)) = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "SELECT id, org_id FROM branches WHERE id = $1",
-        )
-        .bind(request.branch_id)
-        .fetch_one(pool.get_ref())
-        .await
-        .map(|r| (r.0, r.1))
+        if let Ok((_, org_id)) =
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
+                .bind(request.branch_id)
+                .fetch_one(pool.get_ref())
+                .await
+                .map(|r| (r.0, r.1))
         {
             let tz = crate::tz::effective_tz(pool.get_ref(), request.branch_id).await?;
             let at = request.recorded_at.unwrap_or(occurred_at);
             let day = crate::staff_pool::engine::business_date_of(tz, at);
-            let settings =
-                crate::staff_pool::settings::load_effective(pool.get_ref(), org_id, request.branch_id)
-                    .await?;
+            let settings = crate::staff_pool::settings::load_effective(
+                pool.get_ref(),
+                org_id,
+                request.branch_id,
+            )
+            .await?;
             let used =
                 crate::staff_pool::record::used_on(pool.get_ref(), request.branch_id, day).await?;
             let d = crate::staff_pool::engine::decide(
@@ -862,7 +880,10 @@ pub async fn replay(
     // queue reads "orders.discount.preset:inactive" and knows at a glance that
     // this is a dead rule, not a revoked person.
     if let Some(state) = dead_preset {
-        flags.push(format!("{}:{state}", crate::authz::Cap::OrdersDiscountPreset.key()));
+        flags.push(format!(
+            "{}:{state}",
+            crate::authz::Cap::OrdersDiscountPreset.key()
+        ));
     }
     let mut op = op;
     let order_key = match &mut op {
@@ -897,8 +918,11 @@ pub async fn replay(
     let op_branch = op_branch_must_be_in_org(pool.get_ref(), &op, token_org).await?;
     // A spot view unlocked by a verified approval names who unlocked it.
     let mut op = op;
-    if let (ReplayOp::SpotReportView { request, .. }, Some(a), Ok(crate::authz::Cap::TillCashSpotCheck)) =
-        (&mut op, &approval, &approved)
+    if let (
+        ReplayOp::SpotReportView { request, .. },
+        Some(a),
+        Ok(crate::authz::Cap::TillCashSpotCheck),
+    ) = (&mut op, &approval, &approved)
     {
         request.approved_by = Some(a.approver_id);
         request.approval_id = Some(a.id);
@@ -945,14 +969,14 @@ pub async fn replay(
     // applied would send the owner looking for money that never moved.
     if result.is_ok() && !flags.is_empty() {
         let subject = match order_key {
-            Some(key) => sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM orders WHERE idempotency_key = $1",
-            )
-            .bind(key)
-            .fetch_optional(pool.get_ref())
-            .await
-            .ok()
-            .flatten(),
+            Some(key) => {
+                sqlx::query_scalar::<_, Uuid>("SELECT id FROM orders WHERE idempotency_key = $1")
+                    .bind(key)
+                    .fetch_optional(pool.get_ref())
+                    .await
+                    .ok()
+                    .flatten()
+            }
             None => None,
         };
         record_replay_flags(
@@ -1656,6 +1680,21 @@ async fn replay_dispatch(
             Ok(HttpResponse::Ok()
                 .json(serde_json::json!({"order_id": order_id, "customer_id": resolved})))
         }
+        ReplayOp::SetTicketCustomer {
+            ticket_id,
+            customer_id,
+            ..
+        } => {
+            let out = crate::tickets::handlers::set_ticket_customer_inner(
+                pool.get_ref(),
+                actor.org_id,
+                ticket_id,
+                customer_id,
+                Some(hub.get_ref()),
+            )
+            .await?;
+            Ok(HttpResponse::Ok().json(out))
+        }
         ReplayOp::RecordStaffDrink { mut request, .. } => {
             request.device_id = request.device_id.or(header_device);
             // The server's own recount decides what is stored; the divergence
@@ -1838,6 +1877,14 @@ async fn op_branch_must_be_in_org(
                 .bind(request.branch_id)
                 .fetch_optional(pool)
                 .await?
+        }
+        ReplayOp::SetTicketCustomer { ticket_id, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT branch_id, org_id FROM open_tickets WHERE id = $1",
+            )
+            .bind(ticket_id)
+            .fetch_optional(pool)
+            .await?
         }
         ReplayOp::AttachCustomer { order_id, .. } => {
             sqlx::query_as::<_, (Uuid, Uuid)>(

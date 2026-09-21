@@ -15,6 +15,8 @@ use madar_rust::orders::handlers::{
 };
 use madar_rust::orders::routes;
 
+mod common;
+
 fn get_secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
@@ -421,7 +423,7 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(false),
-            live_approval: None,
+        live_approval: None,
     };
     let req = test::TestRequest::post()
         .uri(&format!("/orders/{}/void", o1.order.id))
@@ -1062,7 +1064,7 @@ async fn test_void_order(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(true),
-            live_approval: None,
+        live_approval: None,
     };
 
     let req = test::TestRequest::post()
@@ -1167,7 +1169,7 @@ async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
                 note: None,
                 voided_at: None,
                 restore_inventory: Some(false),
-            live_approval: None,
+                live_approval: None,
             })
             .to_request(),
     )
@@ -1859,7 +1861,7 @@ async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(true),
-            live_approval: None,
+        live_approval: None,
     };
     for _ in 0..2 {
         let resp = test::call_service(
@@ -2049,7 +2051,7 @@ async fn test_summary_excludes_voided_discounts(pool: PgPool) {
         note: None,
         voided_at: None,
         restore_inventory: Some(false),
-            live_approval: None,
+        live_approval: None,
     };
     test::call_service(
         &app,
@@ -3387,7 +3389,7 @@ async fn test_void_voided_at_guard(pool: PgPool) {
                 note: None,
                 voided_at,
                 restore_inventory: Some(false),
-            live_approval: None,
+                live_approval: None,
             })
             .to_request()
     };
@@ -3709,15 +3711,14 @@ async fn a_void_is_one_transaction_across_every_ledger(pool: PgPool) {
 
     // The sale earned the customer 50 points (the award endpoint's row, seeded
     // the way the loyalty tests seed it; the ledger trigger books the balance).
-    let member: Uuid = sqlx::query_scalar(
-        "INSERT INTO loyalty_customers (org_id, phone, name, member_token) \
-         VALUES ($1, '+201000000001', 'Ali', $2) RETURNING id",
+    let member: Uuid = common::members::seed_loyalty_member(
+        &pool,
+        org_id,
+        "+201000000001",
+        "Ali",
+        &format!("tok-{order_id}"),
     )
-    .bind(org_id)
-    .bind(format!("tok-{order_id}"))
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    .await;
     let earn: Uuid = sqlx::query_scalar(
         "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, source) \
          VALUES ($1, $2, $3, 'earn', 'points', 50, $4, 'sale') RETURNING id",
@@ -3800,7 +3801,7 @@ async fn a_void_is_one_transaction_across_every_ledger(pool: PgPool) {
                 note: Some("rang twice".into()),
                 voided_at: None,
                 restore_inventory: Some(true),
-            live_approval: None,
+                live_approval: None,
             })
             .to_request(),
     )
@@ -3927,7 +3928,7 @@ async fn a_sale_that_has_refunded_money_cannot_be_voided(pool: PgPool) {
                 note: None,
                 voided_at: None,
                 restore_inventory: Some(true),
-            live_approval: None,
+                live_approval: None,
             })
             .to_request(),
     )
@@ -4342,7 +4343,10 @@ async fn a_negative_subtotal_is_refused_rather_than_panicking(pool: PgPool) {
     let mut body = one_item_order(branch, till, item);
     body.subtotal = Some(-1);
     let status = post_order(&app, &token, &body).await;
-    assert_eq!(status, 400, "a negative subtotal must be a refusal, not a 500");
+    assert_eq!(
+        status, 400,
+        "a negative subtotal must be a refusal, not a 500"
+    );
 
     // And nothing was written.
     let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE branch_id = $1")
@@ -4591,7 +4595,11 @@ async fn a_zero_priced_line_still_takes_its_recipe_off_the_stock(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert!(resp.status().is_success(), "a free drink is still a sale: {:?}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "a free drink is still a sale: {:?}",
+        resp.status()
+    );
 
     let order_full: OrderFull = test::read_body_json(resp).await;
     // It rang at zero and it is STILL A SALE — it does not vanish from the books.
@@ -4608,7 +4616,10 @@ async fn a_zero_priced_line_still_takes_its_recipe_off_the_stock(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(on_hand, 982.0, "18g of beans must come off a drink that was made");
+    assert_eq!(
+        on_hand, 982.0,
+        "18g of beans must come off a drink that was made"
+    );
 
     // Recorded as a real sale movement against this order, not a special case.
     let moves: i64 = sqlx::query_scalar(

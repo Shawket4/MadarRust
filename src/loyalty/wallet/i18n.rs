@@ -98,6 +98,8 @@ pub fn labels() -> Vec<Pair> {
         pair("Where it works", "أماكن الاستخدام"),
         pair("Terms", "الشروط"),
         pair("Find us", "تجدنا هنا"),
+        // The first back field, when the shop takes online orders.
+        pair("Order now", "اطلب الآن"),
     ]
 }
 

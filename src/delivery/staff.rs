@@ -25,6 +25,19 @@ pub struct DeliveryOrder {
     pub channel: String,
     pub status: String,
     pub delivery_ref: Option<String>,
+    /// The customer this order belongs to (design §2.5). `customer_name` and
+    /// `customer_phone` beside it are the SNAPSHOT — what was typed, what the
+    /// driver calls — and stay as they were whatever happens to the customer.
+    /// `None` for an order from before customers existed whose phone is not a
+    /// valid number.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
+    /// The saved address it was sent to, when it was saved.
+    #[serde(default)]
+    pub address_id: Option<Uuid>,
+    /// "Ordered by X for Y": the snapshot phone is not the customer's own.
+    #[serde(default)]
+    pub contact_override: bool,
     pub customer_name: String,
     pub customer_phone: String,
     pub place_name: Option<String>,
@@ -113,6 +126,7 @@ pub struct DeliveryOrder {
 }
 
 const DO_SELECT: &str = "SELECT id, org_id, branch_id, channel::text, status::text, delivery_ref, \
+    customer_id, address_id, contact_override, \
     customer_name, customer_phone, place_name, floor, unit_number, landmark, address_line, \
     delivery_notes, customer_lat, customer_lng, delivery_zone_id, road_distance_meters, \
     distance_source, \
@@ -675,6 +689,7 @@ pub async fn finalize_delivery_order(
         discount_value: order.discount_value,
         discount_amount: order.discount_amount,
         customer_name: Some(order.customer_name.as_str()),
+        customer_id: order.customer_id,
         notes: order.delivery_notes.as_deref(),
         order_type: "delivery",
         delivery_order_id: Some(id),

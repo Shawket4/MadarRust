@@ -155,7 +155,7 @@ pub const MAX_SIZE_LABEL_LEN: usize = 40;
 pub const MAX_CART_LINES: usize = 100;
 pub const MAX_LINE_QTY: i32 = 999;
 pub const MAX_ADDON_QTY: i32 = 99;
-pub const MAX_PHONE_RAW_LEN: usize = 32;
+pub use crate::phone::MAX_PHONE_RAW_LEN;
 pub const MAX_OTP_CODE_LEN: usize = 10;
 
 /// A required free-text field: non-empty after trimming, at most `max` chars.
@@ -262,36 +262,9 @@ pub fn channel_open(
     override_mode == "open" || within_window(open, close, now_local)
 }
 
-/// Normalise an Egyptian phone number to digits with a `20` country code, used
-/// as the OTP key and the WhatsApp recipient. Best-effort: keeps only digits,
-/// rewrites a leading `0` to `20`, prefixes `20` onto a bare national mobile
-/// typed without the leading `0` (e.g. `1012345678`), and leaves an
-/// already-`20`-prefixed number alone. Returns an error for anything
-/// implausibly short.
-pub fn normalize_phone(raw: &str) -> Result<String, AppError> {
-    if raw.chars().count() > MAX_PHONE_RAW_LEN {
-        return Err(AppError::BadRequest("phone number looks invalid".into()));
-    }
-    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
-    let normalized = if let Some(rest) = digits.strip_prefix("00") {
-        rest.to_string()
-    } else if digits.starts_with("20") {
-        digits.clone()
-    } else if let Some(rest) = digits.strip_prefix('0') {
-        format!("20{rest}")
-    } else if digits.len() == 10 && digits.starts_with('1') {
-        // Bare national mobile with no leading `0` (`1XXXXXXXXX`) — prefix `20`.
-        format!("20{digits}")
-    } else {
-        digits.clone()
-    };
-    // E.164 caps real numbers at 15 digits; a normalised value outside [10, 15]
-    // is not a phone number we can route an OTP / WhatsApp message to.
-    if normalized.len() < 10 || normalized.len() > 15 {
-        return Err(AppError::BadRequest("phone number looks invalid".into()));
-    }
-    Ok(normalized)
-}
+/// Moved to [`crate::phone`]: one canonical form for every module. Re-exported
+/// so the ordering, booking and loyalty callers keep their import.
+pub use crate::phone::normalize_phone;
 
 /// Branch-scoped access check, mirroring the orders module: super_admin bypass,
 /// org match for everyone else, branch assignment for non-org-admins, and the

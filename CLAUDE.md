@@ -48,6 +48,9 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
   line were ordered today (current recipe/addon rollups × quantities — mirrors the menu-engineering
   `cost_basis=current` view). Always `--dry-run` first.
 
+- **What the customers-unification migrations will do to a database, WITHOUT writing** (run against a COPY of prod before deploying; applies the pending migrations in one transaction, reports created/merged/conflicts, rolls back — see `docs/customers-unification-deploy.md`):
+  `DATABASE_URL=<copy> cargo run --bin customers-backfill-dry-run`
+
 ## Deploy: required environment
 The server checks its required settings BEFORE connecting or running migrations (`src/boot_config.rs`) and exits with every problem listed, so a bad `.env` never migrates prod and then crash-loops:
 - `DATABASE_URL`, `JWT_SECRET` — always.

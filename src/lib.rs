@@ -45,6 +45,7 @@ pub mod orders;
 pub mod orgs;
 pub mod payment_methods;
 pub mod permissions;
+pub mod phone;
 pub mod purchasing;
 pub mod qr_card;
 pub mod rate_limit;

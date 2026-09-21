@@ -9,6 +9,8 @@ use madar_rust::orders::handlers::Order;
 use madar_rust::realtime::hub::BranchEventHub;
 use madar_rust::tickets::OpenTicketView;
 
+mod common;
+
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())
 }
@@ -1344,14 +1346,14 @@ async fn a_reward_on_a_ticket_covers_the_line_it_names(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let member: Uuid = sqlx::query_scalar(
-        "INSERT INTO loyalty_customers (org_id, phone, name, member_token) \
-         VALUES ($1,'201000000001','Ali','Mticketline000000001') RETURNING id",
+    let member: Uuid = common::members::seed_loyalty_member(
+        &pool,
+        org,
+        "201000000001",
+        "Ali",
+        "Mticketline000000001",
     )
-    .bind(org)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    .await;
     sqlx::query(
         "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points) \
          VALUES ($1,$2,$3,'adjust','visits',5)",

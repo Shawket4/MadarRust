@@ -51,6 +51,7 @@ and the customer is shown their QR on the page instead of dead buttons.
 | Variable | Purpose | Unset |
 |---|---|---|
 | `PUBLIC_LOYALTY_BASE_URL` | Base of this site. The join QR's target and the pass's `webServiceURL`. | The join-QR endpoint returns 503; signup still works. |
+| `PUBLIC_ORDER_BASE_URL` | Base of the public ordering site. The card's "Order now" link is `{base}/now/{member_token}` — on both wallet passes, the web card and the win-back message. | No "Order now" anywhere. Also omitted for a shop with no online-ordering channel switched on. |
 | `LOYALTY_APPLE_PASS_TYPE_ID` | Pass Type ID. **Must match the certificate exactly.** | No Apple button. |
 | `LOYALTY_APPLE_TEAM_ID` | Your 10-character team id. Also the APNs issuer. | No Apple button. |
 | `LOYALTY_APPLE_CERT_PEM_FILE` | Pass certificate (or `LOYALTY_APPLE_CERT_PEM` inline). | No Apple button. |

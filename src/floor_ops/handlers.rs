@@ -966,6 +966,11 @@ pub struct TableSitting {
     pub minutes: i64,
     pub status: String,
     pub customer_name: Option<String>,
+    /// The customer the sitting belongs to, when one is known: the sale's once
+    /// settled (a settle may name one the bill never had), else the bill's.
+    /// Read through the merge chain, so it is always a live customer.
+    #[serde(default)]
+    pub customer_id: Option<Uuid>,
     pub guest_count: Option<i32>,
     /// The settled sale, when the bill became one.
     pub order_id: Option<Uuid>,
@@ -1061,6 +1066,7 @@ pub async fn table_history(
         Option<i32>,
         Option<i32>,
         DateTime<Utc>,
+        Option<Uuid>,
     )> = sqlx::query_as(
         "SELECT t.id, t.ticket_ref, t.opened_at, COALESCE(t.settled_at, t.voided_at), \
                 t.status::text, \
@@ -1068,7 +1074,8 @@ pub async fn table_history(
                 COALESCE(t.guest_count, (SELECT max(oc.party_size)::int FROM table_occupancies oc \
                                           WHERE oc.open_ticket_id = t.id)), o.id, o.order_number, \
                 CASE WHEN o.voided_at IS NULL THEN o.total_amount ELSE NULL END, \
-                LEAST(COALESCE(o.seated_at, t.seated_at, t.opened_at), t.opened_at) \
+                LEAST(COALESCE(o.seated_at, t.seated_at, t.opened_at), t.opened_at), \
+                customers_resolve(t.org_id, COALESCE(o.customer_id, t.customer_id)) \
            FROM open_tickets t \
            LEFT JOIN orders o ON o.open_ticket_id = t.id \
           WHERE t.table_id = $1 AND t.opened_at >= $2 AND t.opened_at < $3 \
@@ -1095,6 +1102,7 @@ pub async fn table_history(
                 minutes,
                 status: r.4,
                 customer_name: r.5,
+                customer_id: r.11,
                 guest_count: r.6,
                 order_id: r.7,
                 order_number: r.8,

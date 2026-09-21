@@ -372,10 +372,24 @@ pub(crate) async fn create_booking_inner(
             return Err(AppError::Conflict("That time is fully booked".into()));
         }
     }
+    // WHO booked (design §2.4): the live customer holding this phone, created
+    // on first contact. Their stored name is never overwritten by a booking;
+    // `guest_name` is the snapshot of what was typed this time.
+    let (customer_id, _) = crate::customers::handlers::resolve_or_create(
+        &mut tx,
+        org_id,
+        &body.guest_phone,
+        name,
+        crate::customers::handlers::CustomerSource::Booking,
+        Some(body.branch_id),
+        created_by,
+        None,
+    )
+    .await?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO bookings (org_id, branch_id, party_size, starts_at, ends_at, guest_name, \
-             guest_phone, phone_verified, notes, source, locale, section_id, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
+             guest_phone, phone_verified, notes, source, locale, section_id, created_by, customer_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
     )
     .bind(org_id)
     .bind(body.branch_id)
@@ -395,6 +409,7 @@ pub(crate) async fn create_booking_inner(
     .bind(clean_locale(body.locale.as_deref()))
     .bind(body.section_id)
     .bind(created_by)
+    .bind(customer_id)
     .fetch_one(&mut *tx)
     .await?;
     insert_claims(&mut tx, id, &table_ids).await?;

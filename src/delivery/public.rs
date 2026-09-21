@@ -195,7 +195,11 @@ pub async fn public_branches(
 /// Whether a branch channel is open *right now* (enabled + override + window +
 /// an open shift). Mirrors the per-row computation in `public_branches`, reused
 /// to gate the menu, the quote, and order intake against direct-link bypass.
-async fn channel_open_now(pool: &PgPool, branch_id: Uuid, channel: &str) -> Result<bool, AppError> {
+pub(crate) async fn channel_open_now(
+    pool: &PgPool,
+    branch_id: Uuid,
+    channel: &str,
+) -> Result<bool, AppError> {
     let row: Option<BranchOpenRow> = sqlx::query_as(&format!(
         r#"SELECT {BRANCH_OPEN_SELECT}
            FROM branches b
@@ -949,7 +953,7 @@ pub fn select_zone_fee(
 
 /// Server-authoritative outside fee: OSRM road distance → smallest matching ring →
 /// fee. The order endpoint recomputes this; the client value is never trusted.
-async fn compute_outside_fee(
+pub(crate) async fn compute_outside_fee(
     pool: &PgPool,
     branch_id: Uuid,
     cust: LatLng,
@@ -1317,9 +1321,32 @@ pub struct DeliveryOrderInput {
     pub customer_lng: Option<f64>,
     /// "cash" | "card" — a hint the teller can change at finalize.
     pub payment_method_hint: String,
-    /// Device-trust token from OTP verify (proves the phone).
+    /// Device-trust token from OTP verify (proves the phone). With
+    /// `member_token` it must prove the CUSTOMER's phone, not the typed one.
     pub device_token: String,
     pub items: Vec<CartLineInput>,
+    /// Ordering from a loyalty card ("order now"): the order belongs to the
+    /// card's customer whatever name and phone are typed. The server compares
+    /// the typed contact with the customer's and classifies the difference —
+    /// see `identity_change`.
+    #[serde(default)]
+    pub member_token: Option<String>,
+    /// What a typed name/phone that differs from the customer's MEANS:
+    /// `"one_time"` (ordering for someone else: the order's snapshot carries
+    /// the typed contact, the profile is untouched) or `"update_name"` (correct
+    /// the stored name). A different PHONE with no choice is refused with 409
+    /// `IDENTITY_CHOICE_REQUIRED` (`kind: "phone"`); a different name alone
+    /// defaults to one-time. Ignored without `member_token`.
+    #[serde(default)]
+    pub identity_change: Option<String>,
+    /// Keep the address on the customer's profile. Defaults to yes for an
+    /// ordinary order and to NO for a one-time order for someone else.
+    #[serde(default)]
+    pub save_address: Option<bool>,
+    /// A one-time order to a different phone, at a branch that requires OTP:
+    /// the device token proving THAT phone.
+    #[serde(default)]
+    pub contact_device_token: Option<String>,
 }
 
 #[utoipa::path(
@@ -1410,10 +1437,81 @@ pub async fn create_delivery_order(
     .fetch_optional(pool.get_ref())
     .await?
     .unwrap_or(true);
-    if otp_required && !whatsapp::verify_device_token(&secret.0, &phone, &body.device_token) {
-        return Err(AppError::Unauthorized(
-            "Phone not verified on this device.".into(),
-        ));
+    // Ordering from a card: the token says WHO, and only a device verified for
+    // that customer's own phone may order as them — whatever this branch's OTP
+    // setting is, because the token alone is printed on the card.
+    let card_member = match body.member_token.as_deref().filter(|t| !t.is_empty()) {
+        Some(token) => {
+            let member = crate::loyalty::model::find_by_token(pool.get_ref(), token)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+            if member.phone.is_empty()
+                || !whatsapp::verify_device_token(&secret.0, &member.phone, &body.device_token)
+            {
+                return Err(AppError::Unauthorized(
+                    "Phone not verified on this device.".into(),
+                ));
+            }
+            Some(member)
+        }
+        None => None,
+    };
+    let identity = match &card_member {
+        Some(member) => {
+            use crate::customers::order_now::{ClassifyRefusal, classify, conflict};
+            match classify(
+                &member.name,
+                &member.phone,
+                &body.customer_name,
+                &phone,
+                body.identity_change.as_deref(),
+                body.save_address,
+            ) {
+                Ok(c) => Some(c),
+                Err(ClassifyRefusal::ChoiceRequired) => {
+                    return Ok(conflict(
+                        "IDENTITY_CHOICE_REQUIRED",
+                        "That is not the phone number on this card. Is this order for someone else?",
+                        serde_json::json!({ "kind": "phone" }),
+                    ));
+                }
+                Err(ClassifyRefusal::UnknownChoice) => {
+                    return Err(AppError::BadRequest(
+                        "identity_change must be \"one_time\" or \"update_name\"".into(),
+                    ));
+                }
+            }
+        }
+        None => None,
+    };
+    let contact_override = identity.as_ref().is_some_and(|c| c.contact_override);
+    // The branch's OTP rule applies to the phone the driver will call. For an
+    // ordinary order that is the customer's (proven above when a card is
+    // used); for a one-time order to another number it is that number.
+    if otp_required {
+        let proven = if contact_override {
+            body.contact_device_token
+                .as_deref()
+                .is_some_and(|t| whatsapp::verify_device_token(&secret.0, &phone, t))
+        } else {
+            card_member.is_some()
+                || whatsapp::verify_device_token(&secret.0, &phone, &body.device_token)
+        };
+        if !proven && contact_override {
+            // Same 401, but named: the device IS verified (for the card's
+            // phone) — what is missing is an OTP on the OTHER number, and the
+            // client has to ask for exactly that instead of signing out.
+            return Err(AppError::Coded {
+                status: 401,
+                code: "CONTACT_VERIFICATION_REQUIRED",
+                reason: "Verify the phone number this order is going to.".into(),
+            });
+        }
+        if !proven {
+            return Err(AppError::Unauthorized(
+                "Phone not verified on this device.".into(),
+            ));
+        }
     }
 
     // Idempotency replay.
@@ -1438,6 +1536,10 @@ pub async fn create_delivery_order(
     .await?;
     let (org_id, branch_code) =
         branch.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    if card_member.as_ref().is_some_and(|m| m.org_id != org_id) {
+        // Another shop's card: the same 404 an unknown token gets.
+        return Err(AppError::NotFound("Card not found".into()));
+    }
 
     if !channel_open_now(pool.get_ref(), body.branch_id, &body.channel).await? {
         return Err(AppError::Conflict(
@@ -1635,6 +1737,67 @@ pub async fn create_delivery_order(
     .await?;
     let delivery_ref = format!("D-{}-{}-{:04}", branch_code, biz_date.format("%y%m%d"), seq);
 
+    // WHO (design §2.4). A card's customer as is; otherwise the live customer
+    // holding this phone, created on first contact. A matched customer's
+    // stored name is never touched by an order — only `update_name` does that.
+    let customer_id: Uuid = match &card_member {
+        Some(member) => member.id,
+        None => {
+            crate::customers::handlers::resolve_or_create(
+                &mut tx,
+                org_id,
+                &body.customer_phone,
+                &body.customer_name,
+                crate::customers::handlers::CustomerSource::Online,
+                Some(body.branch_id),
+                None,
+                None,
+            )
+            .await?
+            .0
+        }
+    };
+    let renamed = match identity.as_ref().and_then(|c| c.rename.as_deref()) {
+        Some(name) => {
+            crate::customers::handlers::rename(
+                &mut tx,
+                org_id,
+                customer_id,
+                name,
+                crate::customers::handlers::IdentityActor::CustomerSelf,
+            )
+            .await?;
+            true
+        }
+        None => false,
+    };
+    // WHERE — remembered only now that the order is being placed, and not at
+    // all for a one-time order unless they asked (design §4.3, §4.4).
+    let address_id: Option<Uuid> =
+        if identity.as_ref().is_none_or(|c| c.save_address) && body.save_address != Some(false) {
+            crate::customers::handlers::save_address(
+                &mut tx,
+                org_id,
+                customer_id,
+                &crate::customers::handlers::AddressInput {
+                    branch_id: body.branch_id,
+                    channel: &body.channel,
+                    place_name: body.place_name.as_deref(),
+                    floor: body.floor.as_deref(),
+                    unit_number: body.unit_number.as_deref(),
+                    landmark: body.landmark.as_deref(),
+                    address_line: body.address_line.as_deref(),
+                    delivery_notes: body.delivery_notes.as_deref(),
+                    lat: body.customer_lat,
+                    lng: body.customer_lng,
+                    zone_id,
+                },
+            )
+            .await?
+        } else {
+            None
+        };
+
     let cart_json = serde_json::to_value(&resolved.snapshot).map_err(|_| AppError::Internal)?;
     let deductions_json =
         serde_json::to_value(&resolved.deductions).map_err(|_| AppError::Internal)?;
@@ -1642,7 +1805,7 @@ pub async fn create_delivery_order(
     // The service-charge pair is written as an explicit zero rather than left
     // to the column default: finalize replays the whole policy from this row,
     // and zero IS the rate this quote was priced under.
-    let id: Uuid = sqlx::query_scalar(
+    let inserted: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
         r#"INSERT INTO delivery_orders
             (org_id, branch_id, channel, delivery_ref, customer_name, customer_phone,
              place_name, floor, unit_number, landmark, address_line, delivery_notes,
@@ -1651,11 +1814,13 @@ pub async fn create_delivery_order(
              payment_method_hint, otp_verified, idempotency_key,
              discount_id, discount_type, discount_value, discount_amount,
              tax_amount, tax_rate_applied, tax_inclusive,
-             service_charge_amount, service_charge_rate_applied, distance_source)
+             service_charge_amount, service_charge_rate_applied, distance_source,
+             customer_id, address_id, contact_override)
            VALUES ($1, $2, $3::delivery_channel, $4, $5, $6, $7, $8, $9, $10, $11, $12,
                    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, true, $23,
                    $24, $25::discount_type, $26, $27,
-                   $28, $29, $30, 0, 0, $31)
+                   $28, $29, $30, 0, 0, $31,
+                   $32, $33, $34)
            RETURNING id"#,
     )
     .bind(org_id)
@@ -1689,9 +1854,35 @@ pub async fn create_delivery_order(
     .bind(policy.tax_rate) // $29
     .bind(policy.tax_inclusive) // $30
     .bind(distance_source) // $31
+    .bind(customer_id) // $32
+    .bind(address_id) // $33
+    .bind(contact_override) // $34
     .fetch_one(&mut *tx)
-    .await?;
+    .await;
+    let id = match inserted {
+        Ok(id) => id,
+        // A double tap: both requests passed the replay check above before
+        // either had committed. The unique key lets one through; the other
+        // answers with the order that won, not with a 409.
+        Err(sqlx::Error::Database(db))
+            if db.code().as_deref() == Some("23505")
+                && db.constraint().is_some_and(|c| c.contains("idem")) =>
+        {
+            drop(tx);
+            if let Some(key) = idem
+                && let Some(existing) =
+                    super::staff::fetch_delivery_order_by_idem(pool.get_ref(), key).await?
+            {
+                return Ok(HttpResponse::Ok().json(existing));
+            }
+            return Err(AppError::Conflict("Please try again".into()));
+        }
+        Err(e) => return Err(e.into()),
+    };
     tx.commit().await?;
+    if renamed {
+        crate::customers::handlers::after_identity_change(pool.get_ref(), customer_id).await;
+    }
 
     whatsapp::send_message(
         pool.get_ref().clone(),
@@ -1726,6 +1917,22 @@ fn require_guest_device_token(
             "Phone not verified on this device.".into(),
         )),
     }
+}
+
+/// The live customer holding this (canonical) phone in the org.
+async fn guest_customer(
+    pool: &PgPool,
+    org_id: Uuid,
+    phone: &str,
+) -> Result<Option<Uuid>, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM customers WHERE org_id = $1 AND phone_key = $2
+            AND merged_into IS NULL AND erased_at IS NULL",
+    )
+    .bind(org_id)
+    .bind(phone)
+    .fetch_optional(pool)
+    .await?)
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -1809,6 +2016,13 @@ pub async fn guest_order_history(
     // phone number + org id alone must never unlock them.
     require_guest_device_token(&secret.0, &phone, query.device_token.as_deref())?;
 
+    // By CUSTOMER, not by phone string (design §2.5): the history follows the
+    // person through a phone change, and an order they placed for someone else
+    // (another number in the snapshot) is still theirs.
+    let Some(customer) = guest_customer(pool.get_ref(), query.org_id, &phone).await? else {
+        return Ok(HttpResponse::Ok().json(Vec::<OrderHistorySummary>::new()));
+    };
+
     let rows: Vec<OrderHistoryRow> = sqlx::query_as(
         "SELECT d.id, d.delivery_ref, d.status::text AS status, d.channel::text AS channel,
                 d.created_at, d.branch_id, b.name AS branch_name,
@@ -1818,11 +2032,11 @@ pub async fn guest_order_history(
                 d.customer_lat, d.customer_lng, d.customer_name, d.cart
          FROM delivery_orders d
          JOIN branches b ON b.id = d.branch_id
-         WHERE d.customer_phone = $1 AND d.org_id = $2
+         WHERE d.customer_id = $1 AND d.org_id = $2
          ORDER BY d.created_at DESC
          LIMIT 50",
     )
-    .bind(&phone)
+    .bind(customer)
     .bind(query.org_id)
     .fetch_all(pool.get_ref())
     .await?;
@@ -1913,48 +2127,26 @@ pub async fn guest_past_locations(
     // Device token REQUIRED (see guest_order_history).
     require_guest_device_token(&secret.0, &phone, query.device_token.as_deref())?;
 
-    // DISTINCT ON (branch_id, channel, coalesced address key) ordered by most recent.
-    // Derived from order history — no separate table needed.
-    let rows: Vec<GuestSavedLocation> = if let Some(bid) = query.branch_id {
-        sqlx::query_as(
-            "SELECT DISTINCT ON (d.branch_id, d.channel::text,
-                                  COALESCE(d.address_line, d.place_name, ''))
-                    d.branch_id, d.channel::text AS channel,
-                    d.address_line, d.place_name, d.floor, d.unit_number, d.landmark,
-                    d.customer_lat, d.customer_lng, d.created_at AS last_used_at
-             FROM delivery_orders d
-             WHERE d.customer_phone = $1 AND d.org_id = $2 AND d.branch_id = $3
-               AND (d.address_line IS NOT NULL OR d.place_name IS NOT NULL
-                    OR d.customer_lat IS NOT NULL)
-             ORDER BY d.branch_id, d.channel::text,
-                      COALESCE(d.address_line, d.place_name, ''),
-                      d.created_at DESC",
-        )
-        .bind(&phone)
-        .bind(query.org_id)
-        .bind(bid)
-        .fetch_all(pool.get_ref())
-        .await?
-    } else {
-        sqlx::query_as(
-            "SELECT DISTINCT ON (d.branch_id, d.channel::text,
-                                  COALESCE(d.address_line, d.place_name, ''))
-                    d.branch_id, d.channel::text AS channel,
-                    d.address_line, d.place_name, d.floor, d.unit_number, d.landmark,
-                    d.customer_lat, d.customer_lng, d.created_at AS last_used_at
-             FROM delivery_orders d
-             WHERE d.customer_phone = $1 AND d.org_id = $2
-               AND (d.address_line IS NOT NULL OR d.place_name IS NOT NULL
-                    OR d.customer_lat IS NOT NULL)
-             ORDER BY d.branch_id, d.channel::text,
-                      COALESCE(d.address_line, d.place_name, ''),
-                      d.created_at DESC",
-        )
-        .bind(&phone)
-        .bind(query.org_id)
-        .fetch_all(pool.get_ref())
-        .await?
+    // From the customer's saved addresses (design §2.6) — written when an
+    // order is placed, deduplicated on write. This used to be a `DISTINCT ON`
+    // scan of every delivery order carrying the phone string.
+    let Some(customer) = guest_customer(pool.get_ref(), query.org_id, &phone).await? else {
+        return Ok(HttpResponse::Ok().json(Vec::<GuestSavedLocation>::new()));
     };
+    let rows: Vec<GuestSavedLocation> = sqlx::query_as(
+        "SELECT a.branch_id, a.channel, a.address_line, a.place_name, a.floor, a.unit_number,
+                a.landmark, a.lat AS customer_lat, a.lng AS customer_lng, a.last_used_at
+           FROM customer_addresses a
+          WHERE a.customer_id = $1 AND a.org_id = $2 AND a.erased_at IS NULL
+            AND a.branch_id IS NOT NULL
+            AND ($3::uuid IS NULL OR a.branch_id = $3)
+          ORDER BY a.last_used_at DESC",
+    )
+    .bind(customer)
+    .bind(query.org_id)
+    .bind(query.branch_id)
+    .fetch_all(pool.get_ref())
+    .await?;
 
     Ok(HttpResponse::Ok().json(rows))
 }

@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "b8ccbb8bb5315238";
+pub const SPEC_HASH: &str = "768db7c58923aebf";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -190,6 +190,8 @@ pub enum Cap {
     ReportsLegal = 220,
     MenuPackagingRulesApply = 221,
     OrdersStaffDrinkRecord = 223,
+    CustomersMerge = 224,
+    CustomersAddressesView = 225,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -361,7 +363,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::CustomersAttach, key: "customers.attach", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(15), core: Kinds(0), approval: false, limits: &[], pos: true, protected: false, en: "Attach a customer to an order", ar: "ربط عميل بطلب", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::CustomersView, key: "customers.view", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(7), core: Kinds(0), approval: false, limits: &[], pos: true, protected: false, en: "See customers and their phone numbers", ar: "عرض العملاء وأرقام هواتفهم", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::CustomersCreate, key: "customers.create", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(15), core: Kinds(0), approval: false, limits: &[], pos: true, protected: false, en: "Add customers", ar: "إضافة عملاء", hint_en: None, hint_ar: None },
-    CapMeta { cap: Cap::CustomersEdit, key: "customers.edit", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Edit and merge customers", ar: "تعديل العملاء ودمجهم", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::CustomersEdit, key: "customers.edit", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Edit customers", ar: "تعديل العملاء", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::StaffRolesManage, key: "staff.roles.manage", legacy: None, group: "staff", tier: Tier::Configurable, risk: Risk::Admin, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Create and edit roles", ar: "إنشاء الأدوار وتعديلها", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::StaffOwnersManage, key: "staff.owners.manage", legacy: None, group: "staff", tier: Tier::Advanced, risk: Risk::Admin, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Add or remove owners", ar: "إضافة ملاك أو إزالتهم", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::ApprovalsReview, key: "approvals.review", legacy: None, group: "reports", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Review flagged offline actions and approvals", ar: "مراجعة الإجراءات والموافقات المعل\u{651}مة", hint_en: None, hint_ar: None },
@@ -373,6 +375,8 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::ReportsLegal, key: "reports.legal", legacy: None, group: "reports", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See legal reports: tax, refunds, voids, discounts, waivers and price overrides", ar: "عرض التقارير القانونية: الضريبة والمرتجعات والإلغاءات والخصومات والإعفاءات وتعديلات الأسعار", hint_en: Some("They name the staff who gave money back. A manager sees only their own branches."), hint_ar: Some("ت\u{64f}ظهر أسماء الموظفين الذين أعادوا المال. يرى المدير فروعه فقط.") },
     CapMeta { cap: Cap::MenuPackagingRulesApply, key: "menu.packaging_rules.apply", legacy: None, group: "menu", tier: Tier::Advanced, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Re-apply packaging rules to every menu item", ar: "إعادة تطبيق قواعد التغليف على جميع أصناف القائمة", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::OrdersStaffDrinkRecord, key: "orders.staff_drink.record", legacy: None, group: "selling", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: true, limits: &[], pos: true, protected: false, en: "Record a staff drink", ar: "تسجيل مشروب موظفين", hint_en: Some("Off for tellers by default. Turn it on to let the till put a drink on the branch's daily staff pool. A note saying who it is for is always required."), hint_ar: Some("مقفول للكاشير في الأصل. افتحه عشان الكاشير يحسب المشروب على رصيد الموظفين اليومي بتاع الفرع. لازم دايم\u{64b}ا يكتب ملاحظة بالمشروب ده لمين.") },
+    CapMeta { cap: Cap::CustomersMerge, key: "customers.merge", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Merge duplicate customers", ar: "دمج العملاء المكررين", hint_en: Some("Merging cannot be undone. When both are loyalty members, the points move to the customer that stays and the other card stops working."), hint_ar: Some("الدمج لا يمكن التراجع عنه. لو الاتنين أعضاء في برنامج الولاء، النقاط بتتنقل للعميل اللي هيفضل والكارت التاني بيتوقف.") },
+    CapMeta { cap: Cap::CustomersAddressesView, key: "customers.addresses.view", legacy: None, group: "customers", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(7), core: Kinds(0), approval: false, limits: &[], pos: true, protected: false, en: "See customers' saved addresses", ar: "عرض عناوين العملاء المحفوظة", hint_en: Some("The delivery addresses a customer has ordered to. Needed to dispatch an order; not needed to take one at a table."), hint_ar: Some("عناوين التوصيل اللي العميل طلب عليها قبل كده. مطلوبة لتجهيز طلب توصيل، ومش مطلوبة لأخذ طلب على ترابيزة.") },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[

@@ -8852,6 +8852,24 @@
             }
           },
           {
+            "name": "member",
+            "in": "query",
+            "description": "`true` = loyalty members only, `false` = non-members only.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Only customers that first came from this source (`pos`, `online`,\n`loyalty`, `booking`, `table_qr`, `aggregator`, `dashboard`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Default 100, at most 500.",
@@ -9258,6 +9276,226 @@
         ]
       }
     },
+    "/customers/{id}/addresses": {
+      "get": {
+        "tags": [
+          "customers"
+        ],
+        "operationId": "list_customer_addresses",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Customer id (a merged id resolves)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Saved addresses, most recently used first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CustomerAddress"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/customers/{id}/bookings": {
+      "get": {
+        "tags": [
+          "customers"
+        ],
+        "summary": "A customer's bookings, newest first. A merged id answers for its survivor,\nand bookings made under any id merged into it are included.",
+        "operationId": "list_customer_bookings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Customer ID (a merged id resolves)",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Default 50, at most 200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bookings, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BookingView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/customers/{id}/erase": {
       "post": {
         "tags": [
@@ -9278,7 +9516,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Personal data erased"
+            "description": "Personal data erased everywhere: the customer, their loyalty card and passes, the contact snapshots on their orders, delivery orders, bookings and bills, saved addresses, phone history and OTP rows. Money and ledger rows stay."
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -20156,14 +20394,14 @@
         "tags": [
           "loyalty"
         ],
-        "summary": "Forget a member. **Admin only.**",
-        "description": "A void corrects a sale; this corrects a membership — someone asked the shop\nto stop holding their details, or an admin is clearing a test signup. The\nperson is scrubbed and the books are kept: see [`model::forget`] for exactly\nwhat goes and what stays, and why the ledger is not the member's data.\n\n204 twice in a row: forgetting someone already forgotten is not a failure,\nand telling the caller \"no such member\" would confirm that a phone number\nused to be one.",
+        "summary": "Leave the programme: the card ends, the customer stays (design §2.8).",
+        "description": "This used to FORGET the person — it was written when the loyalty row was the\nonly record of them. A membership is now a card under the customer's id, so\nending it touches nothing but the card: the customer, their orders, their\naddresses and their bookings stay, and they can join again. Erasing a\nperson's data is `POST /customers/{id}/erase`, which also ends the card.\nSee [`model::leave`] for exactly what goes.\n\n204 twice in a row: a card that is already gone is not a failure.",
         "operationId": "delete_loyalty_member",
         "parameters": [
           {
             "name": "id",
             "in": "path",
-            "description": "Member ID",
+            "description": "Member ID (= customer id)",
             "required": true,
             "schema": {
               "type": "string",
@@ -20173,7 +20411,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Forgotten"
+            "description": "The membership is ended; the customer is kept"
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -25828,6 +26066,114 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OpenTicketView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/open-tickets/{id}/customer": {
+      "put": {
+        "tags": [
+          "open_tickets"
+        ],
+        "summary": "Set or clear the customer on an open bill (the dashboard / online path; a\ntill queues `set_ticket_customer` through `/sync/replay` instead).",
+        "operationId": "set_ticket_customer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Open ticket ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetTicketCustomerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What the bill says now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetTicketCustomerResponse"
                 }
               }
             }
@@ -32993,6 +33339,311 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/order-now/{token}": {
+      "get": {
+        "tags": [
+          "order-now"
+        ],
+        "operationId": "order_now_context",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Member token (the card's QR)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "device_token",
+            "in": "query",
+            "description": "From `/public/otp/verify`, for the customer's current phone. Absent or\nnot valid for that phone → the masked context.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Masked without a valid device token for the customer's current phone; full with one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderNowContext"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/order-now/{token}/combine": {
+      "post": {
+        "tags": [
+          "order-now"
+        ],
+        "operationId": "order_now_combine",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Member token — this customer survives",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceIdentityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplaceIdentityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/order-now/{token}/replace-identity": {
+      "post": {
+        "tags": [
+          "order-now"
+        ],
+        "operationId": "order_now_replace_identity",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "Member token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceIdentityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplaceIdentityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "`IDENTITY_REPLACE_LIMIT`"
           },
           "500": {
             "description": "Internal server error",
@@ -57526,6 +58177,14 @@
             ],
             "format": "uuid"
           },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer who booked (design §2.5); `guest_name` / `guest_phone`\nbeside it are the snapshot of what was typed. `None` for a booking\nfrom before customers existed whose phone is not a valid number."
+          },
           "ends_at": {
             "type": "string",
             "format": "date-time"
@@ -59337,6 +59996,13 @@
           "next_reward_cost": {
             "type": "integer",
             "format": "int32"
+          },
+          "order_now_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "\"Order now\": the ordering page, opened knowing who this is. Present only\nwhen public ordering is configured and the shop takes online orders —\nrender the primary button when it is there, nothing when it is not."
           },
           "passes": {
             "$ref": "#/components/schemas/PassLinks"
@@ -61355,7 +62021,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "DEPRECATED and ignored: a membership shares the customer's id, so there\nis nothing to link. Accepted so deployed tills keep working."
           },
           "name": {
             "type": "string"
@@ -61371,6 +62038,13 @@
               "string",
               "null"
             ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the customer came from. Defaults to `pos` when a branch is named\n(a till) and `dashboard` otherwise."
           }
         }
       },
@@ -61801,6 +62475,14 @@
           "branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer this bill is for, when the waiter picked one. Honoured when\nthe actor holds `customers.attach`; a merged id resolves and an unknown\none is ignored — a bill is never refused over its customer. Absent, a\nbill opened for a booking takes the booking's customer."
           },
           "customer_name": {
             "type": [
@@ -63117,6 +63799,20 @@
           "updated_at"
         ],
         "properties": {
+          "birth_day": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "birth_month": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -63125,6 +63821,10 @@
             "type": "string",
             "format": "uuid"
           },
+          "is_member": {
+            "type": "boolean",
+            "description": "A live loyalty membership exists for this customer (same id)."
+          },
           "last_order_at": {
             "type": [
               "string",
@@ -63132,12 +63832,23 @@
             ],
             "format": "date-time"
           },
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`en` or `ar`; null when never asked."
+          },
           "loyalty_customer_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "DEPRECATED, kept for one release: a loyalty membership now shares the\ncustomer's id, so this is `id` when `is_member` and null otherwise."
+          },
+          "marketing_opt_out": {
+            "type": "boolean"
           },
           "name": {
             "type": "string"
@@ -63158,6 +63869,18 @@
               "null"
             ]
           },
+          "points_balance": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Null when not a member."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the customer first came from: `pos`, `online`, `loyalty`,\n`booking`, `table_qr`, `aggregator` or `dashboard`."
+          },
           "total_spent": {
             "type": "integer",
             "format": "int64",
@@ -63166,6 +63889,123 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "visits_balance": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Null when not a member."
+          }
+        }
+      },
+      "CustomerAddress": {
+        "type": "object",
+        "description": "A place a customer has had an order sent to.",
+        "required": [
+          "id",
+          "customer_id",
+          "channel",
+          "use_count",
+          "last_used_at",
+          "created_at"
+        ],
+        "properties": {
+          "address_line": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch it was last ordered from."
+          },
+          "channel": {
+            "type": "string",
+            "description": "The channel it was last used with: `in_mall`, `outside` or `umbrella`."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "delivery_notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delivery_zone_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "floor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "landmark": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_used_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lat": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "lng": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "place_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "use_count": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -63837,6 +64677,14 @@
           "updated_at"
         ],
         "properties": {
+          "address_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The saved address it was sent to, when it was saved."
+          },
           "address_line": {
             "type": [
               "string",
@@ -63880,9 +64728,21 @@
             ],
             "format": "date-time"
           },
+          "contact_override": {
+            "type": "boolean",
+            "description": "\"Ordered by X for Y\": the snapshot phone is not the customer's own."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer this order belongs to (design §2.5). `customer_name` and\n`customer_phone` beside it are the SNAPSHOT — what was typed, what the\ndriver calls — and stay as they were whatever happens to the customer.\n`None` for an order from before customers existed whose phone is not a\nvalid number."
           },
           "customer_lat": {
             "type": [
@@ -64138,6 +64998,13 @@
           "channel": {
             "type": "string"
           },
+          "contact_device_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A one-time order to a different phone, at a branch that requires OTP:\nthe device token proving THAT phone."
+          },
           "customer_lat": {
             "type": [
               "number",
@@ -64166,13 +65033,20 @@
           },
           "device_token": {
             "type": "string",
-            "description": "Device-trust token from OTP verify (proves the phone)."
+            "description": "Device-trust token from OTP verify (proves the phone). With\n`member_token` it must prove the CUSTOMER's phone, not the typed one."
           },
           "floor": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "identity_change": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What a typed name/phone that differs from the customer's MEANS:\n`\"one_time\"` (ordering for someone else: the order's snapshot carries\nthe typed contact, the profile is untouched) or `\"update_name\"` (correct\nthe stored name). A different PHONE with no choice is refused with 409\n`IDENTITY_CHOICE_REQUIRED` (`kind: \"phone\"`); a different name alone\ndefaults to one-time. Ignored without `member_token`."
           },
           "items": {
             "type": "array",
@@ -64186,6 +65060,13 @@
               "null"
             ]
           },
+          "member_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Ordering from a loyalty card (\"order now\"): the order belongs to the\ncard's customer whatever name and phone are typed. The server compares\nthe typed contact with the customer's and classifies the difference —\nsee `identity_change`."
+          },
           "payment_method_hint": {
             "type": "string",
             "description": "\"cash\" | \"card\" — a hint the teller can change at finalize."
@@ -64195,6 +65076,13 @@
               "string",
               "null"
             ]
+          },
+          "save_address": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Keep the address on the customer's profile. Defaults to yes for an\nordinary order and to NO for a one-time order for someone else."
           },
           "unit_number": {
             "type": [
@@ -69675,6 +70563,14 @@
             "type": "string",
             "format": "uuid"
           },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer this bill belongs to, when one is known (design §2.5): a\ntable-QR guest who gave a phone, the party's booking, or one the waiter\nattached. `customer_name` is the free-text snapshot and may be set\nwithout it. Settling carries it onto the sale."
+          },
           "customer_name": {
             "type": [
               "string",
@@ -70022,6 +70918,14 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer this sale belongs to (design §2.5) — the same id the sync\nfeed's order row carries. `customer_name` beside it is the snapshot of\nwhat was typed or printed; this is who it was. A soft reference: `None`\nfor a walk-in, and it may name a customer since merged (resolve through\n`GET /customers/{id}`) or erased."
           },
           "customer_name": {
             "type": [
@@ -71140,6 +72044,172 @@
               "null"
             ],
             "format": "double"
+          }
+        }
+      },
+      "OrderNowAddress": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CustomerAddress"
+          },
+          {
+            "type": "object",
+            "required": [
+              "stale"
+            ],
+            "properties": {
+              "stale": {
+                "type": "boolean",
+                "description": "True when it can no longer be delivered to from the last branch."
+              },
+              "stale_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`out_of_zone` | `zone_unavailable` | `branch_unavailable`."
+              }
+            }
+          }
+        ]
+      },
+      "OrderNowBranch": {
+        "type": "object",
+        "description": "The branch the customer last ordered from, re-checked now.",
+        "required": [
+          "id",
+          "name",
+          "channel",
+          "stale"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel they last used there."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "True when it cannot be used as-is right now; the client falls back to\nits branch/channel chooser and keeps the rest of the prefill."
+          },
+          "stale_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`branch_unavailable` | `channel_closed`."
+          }
+        }
+      },
+      "OrderNowContext": {
+        "type": "object",
+        "required": [
+          "verify_required",
+          "org_id",
+          "org_name",
+          "first_name",
+          "phone_hint"
+        ],
+        "properties": {
+          "first_name": {
+            "type": "string",
+            "description": "First word of the name on file."
+          },
+          "full": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OrderNowFull"
+              }
+            ]
+          },
+          "last_branch_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "NAME only on the masked path; the full context carries the id."
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "org_name": {
+            "type": "string"
+          },
+          "phone_hint": {
+            "type": "string",
+            "description": "`•••• 4567`."
+          },
+          "verify_required": {
+            "type": "boolean",
+            "description": "True → this is the masked context; verify the phone\n(`/public/otp/request|verify`) and ask again with the device token."
+          }
+        }
+      },
+      "OrderNowFull": {
+        "type": "object",
+        "description": "Everything a verified device gets. Absent from the masked context.",
+        "required": [
+          "customer_id",
+          "name",
+          "phone",
+          "locale",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderNowAddress"
+            },
+            "description": "Most recently used first."
+          },
+          "customer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_branch": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OrderNowBranch",
+                "description": "Derived from the latest order; `None` before the first one."
+              }
+            ]
+          },
+          "last_payment_hint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`cash` | `card`, as they last said."
+          },
+          "locale": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string",
+            "description": "Canonical (`2010…`)."
           }
         }
       },
@@ -77014,6 +78084,60 @@
           }
         }
       },
+      "ReplaceIdentityRequest": {
+        "type": "object",
+        "required": [
+          "device_token",
+          "new_phone",
+          "new_phone_device_token"
+        ],
+        "properties": {
+          "device_token": {
+            "type": "string",
+            "description": "Proof of the CURRENT phone."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Also correct the name."
+          },
+          "new_phone": {
+            "type": "string"
+          },
+          "new_phone_device_token": {
+            "type": "string",
+            "description": "Proof of the NEW phone (the client runs `/public/otp/request|verify` on it)."
+          }
+        }
+      },
+      "ReplaceIdentityResponse": {
+        "type": "object",
+        "required": [
+          "customer_id",
+          "phone_hint",
+          "first_name",
+          "combined"
+        ],
+        "properties": {
+          "combined": {
+            "type": "boolean",
+            "description": "True when two customers were combined into this one."
+          },
+          "customer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "phone_hint": {
+            "type": "string",
+            "description": "The new number, masked. The client already holds its device token."
+          }
+        }
+      },
       "ReplayApproval": {
         "type": "object",
         "description": "A manager's approval carried by a queued op (PERMISSIONS_ARCHITECTURE §4.2),\nor — the same shape — a live request's one-time manager-PIN unlock (owner,\n2026-09-17). `Serialize` + `ToSchema` are for the live half: the offline\nqueue only ever deserializes one from the wire.",
@@ -78170,6 +79294,52 @@
           }
         }
       },
+      "SetTicketCustomerRequest": {
+        "type": "object",
+        "properties": {
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer this bill is for; `null` (or absent) takes the customer off."
+          }
+        }
+      },
+      "SetTicketCustomerResponse": {
+        "type": "object",
+        "required": [
+          "ticket_id",
+          "applied"
+        ],
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "False when nothing was written: unknown customer, unknown or voided bill."
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "What the bill now says, after the merge chain: the survivor of a merged\nid, `null` when the customer was taken off, and the PREVIOUS value when\nthe id was unknown (the pick is dropped, the bill is untouched)."
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The sale the change landed on instead, when the bill was already\nsettled by the time this arrived."
+          },
+          "ticket_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "SettleOpenTicketRequest": {
         "type": "object",
         "required": [
@@ -78191,6 +79361,14 @@
             ],
             "format": "int32",
             "description": "What the till handed back. Recorded as the drawer saw it, like a\ncounter sale's; absent, it is derived from `amount_tendered` and the\nserver's total."
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer this sale belongs to, when the cashier attached one at\nsettle. Same rules as `customer_id` on an order (needs\n`customers.attach`; merged ids resolve; unknown ids are ignored).\nAbsent, the sale takes the bill's own customer, if it has one."
           },
           "discount_amount": {
             "type": [
@@ -80683,6 +81861,13 @@
             ],
             "description": "Who is at the table, if they offered a name. Shown on the bill so the\nwaiter can find them."
           },
+          "customer_phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Their phone, if they offered one. Optional and never required: with a\nvalid number (and a name) the bill is linked to that customer — created\non first contact, `source = table_qr` — so the visit counts toward them.\nA number that is not valid is ignored; the order is never refused."
+          },
           "idempotency_key": {
             "type": [
               "string",
@@ -80775,6 +81960,14 @@
             ],
             "format": "date-time",
             "description": "When the bill was settled or voided; `None` while it is still open."
+          },
+          "customer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The customer the sitting belongs to, when one is known: the sale's once\nsettled (a settle may name one the bill never had), else the bill's.\nRead through the merge chain, so it is always a live customer."
           },
           "customer_name": {
             "type": [
@@ -82756,12 +83949,26 @@
       "UpdateCustomerRequest": {
         "type": "object",
         "properties": {
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`en` or `ar`. Absent = unchanged."
+          },
           "loyalty_customer_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid",
+            "description": "DEPRECATED and ignored (see `CreateCustomerRequest`)."
+          },
+          "marketing_opt_out": {
+            "type": [
+              "boolean",
+              "null"
+            ],
             "description": "Absent = unchanged."
           },
           "name": {
@@ -82786,7 +83993,7 @@
           },
           "unlink_loyalty": {
             "type": "boolean",
-            "description": "`true` unlinks the loyalty member."
+            "description": "DEPRECATED and ignored: leaving the programme is\n`DELETE /loyalty/members/{id}`."
           }
         }
       },
@@ -85070,7 +86277,11 @@
     },
     {
       "name": "customers",
-      "description": "Manual customers: list, history, create, edit, merge and PDPL erase."
+      "description": "Customers: list, history, addresses, create, edit, merge and PDPL erase."
+    },
+    {
+      "name": "order-now",
+      "description": "Public: ordering from the wallet pass. The member token identifies; a device token for the customer's phone authorises."
     },
     {
       "name": "discounts",

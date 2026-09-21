@@ -1115,6 +1115,7 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
         include_str!("../migrations/20260918200000_customers.sql"),
         include_str!("../migrations/20260921020000_till_spot_views.sql"),
         include_str!("../migrations/20260922030000_staff_drinks_pool.sql"),
+        include_str!("../migrations/20260925030000_customers_shared_key.sql"),
     ]
     .iter()
     .flat_map(|sql| {

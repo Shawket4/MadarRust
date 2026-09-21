@@ -1080,6 +1080,46 @@ fn hex(bytes: &[u8]) -> String {
 /// after an update are byte-identical in structure — a device that got a
 /// different shape from the two paths would show a pass that never settles.
 pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>, AppError> {
+    build_pass_inner(pool, member, false).await
+}
+
+/// Mark a pass as over. Apple greys a `voided` pass out and stops presenting
+/// its barcode; `expirationDate` in the past does the same on the iOS versions
+/// that ignore `voided` for store cards, so both are set.
+pub fn mark_voided(pass: &mut serde_json::Value, at: chrono::DateTime<chrono::Utc>) {
+    pass["voided"] = json!(true);
+    pass["expirationDate"] = json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+}
+
+/// The LAST pass a retired card is served: the same card, marked `voided`
+/// (design §2.7, §2.8). Never stored — it is built for a device that is about
+/// to stop asking.
+pub async fn build_voided_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>, AppError> {
+    build_pass_inner(pool, member, true).await
+}
+
+/// Tell the devices holding a retired card to come back for it; what they get
+/// is [`build_voided_pass_for`]. `member` is the row as it was BEFORE it was
+/// retired (its devices are still registered — see `model::leave`).
+pub fn void_pass(pool: &PgPool, member: &MemberRow) {
+    if member.apple_serial.is_none() {
+        return;
+    }
+    let pool = pool.clone();
+    let member = member.clone();
+    tokio::spawn(async move {
+        if let Err(e) = notify_devices(&pool, &member).await {
+            use crate::observability::report::{Failure, report};
+            report(Failure::new("loyalty", "void_apple_pass"), &e);
+        }
+    });
+}
+
+async fn build_pass_inner(
+    pool: &PgPool,
+    member: &MemberRow,
+    voided: bool,
+) -> Result<Vec<u8>, AppError> {
     let super::PassSource {
         settings,
         brand: org,
@@ -1093,7 +1133,10 @@ pub async fn build_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>
     // still resized and encoded three images up to 1125x432 — the cache existed
     // and was never consulted. This line is the whole of that fix.
     let strip = strip_images_cached(member.org_id, &org, &brand.foreground).await;
-    let pass = pass_json(member, &settings, &locations, &copy, &headline, &brand)?;
+    let mut pass = pass_json(member, &settings, &locations, &copy, &headline, &brand)?;
+    if voided {
+        mark_voided(&mut pass, chrono::Utc::now());
+    }
     // One list for the archive AND the manifest, so an image cannot end up in
     // the zip unhashed — which invalidates the signature and makes iOS refuse
     // the pass with no explanation at all.

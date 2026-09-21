@@ -2722,6 +2722,7 @@ dependencies = [
  "tracing-actix-web",
  "tracing-subscriber",
  "ttf-parser",
+ "unicode-normalization",
  "url",
  "urlencoding",
  "utoipa",

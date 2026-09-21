@@ -36,6 +36,8 @@ pub enum Source {
     Winback,
     /// A person typed it.
     Manual,
+    /// Two memberships of one person became one; the balance moved across.
+    Merge,
 }
 
 impl Source {
@@ -48,6 +50,7 @@ impl Source {
             Source::Birthday => "birthday",
             Source::Winback => "winback",
             Source::Manual => "manual",
+            Source::Merge => "merge",
         }
     }
 }
@@ -127,10 +130,17 @@ pub struct MemberRow {
     pub pass_notice: Option<String>,
 }
 
+/// Columns of [`MEMBERS`]. Name, phone, locale, birthday and the opt-out are
+/// the CUSTOMER's (design §2.2); the view puts them back under the names the
+/// card always used.
 pub const MEMBER_COLS: &str = "id, org_id, name, phone, member_token, points_balance, \
     visits_balance, lifetime_points, lifetime_visits, locale, apple_serial, apple_auth_token, \
     google_object_id, pass_updated_at, joined_branch_id, enrolled_at, marketing_opt_out, \
     pass_notice";
+
+/// The membership joined to its customer. Every read of a member goes through
+/// this; writes go to `loyalty_customers` (programme) or `customers` (person).
+pub const MEMBERS: &str = "loyalty_members_v";
 
 impl MemberRow {
     /// The balance that counts under `mode`.
@@ -220,9 +230,16 @@ pub async fn find_by_token<'e, E>(exec: E, token: &str) -> Result<Option<MemberR
 where
     E: sqlx::PgExecutor<'e>,
 {
+    // A card retired by a merge keeps finding the member it was merged into
+    // for ninety days (`loyalty_token_aliases`). A token that is itself live
+    // always wins over an alias.
     Ok(sqlx::query_as(&format!(
-        "SELECT {MEMBER_COLS} FROM loyalty_customers \
-         WHERE member_token = $1 AND deleted_at IS NULL"
+        "SELECT {MEMBER_COLS} FROM {MEMBERS} \
+          WHERE deleted_at IS NULL \
+            AND (member_token = $1 \
+                 OR id = (SELECT a.customer_id FROM loyalty_token_aliases a \
+                           WHERE a.member_token = $1 AND a.expires_at > now())) \
+          ORDER BY (member_token = $1) DESC LIMIT 1"
     ))
     .bind(token)
     .fetch_optional(exec)
@@ -238,9 +255,14 @@ pub async fn find_by_phone<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
+    // Through the customer's unique phone index, not the view's computed
+    // column. `phone` is canonical (`crate::phone`).
     Ok(sqlx::query_as(&format!(
-        "SELECT {MEMBER_COLS} FROM loyalty_customers \
-         WHERE org_id = $1 AND phone = $2 AND deleted_at IS NULL"
+        "SELECT {MEMBER_COLS} FROM {MEMBERS} \
+          WHERE deleted_at IS NULL \
+            AND id = (SELECT c.id FROM customers c \
+                       WHERE c.org_id = $1 AND c.phone_key = $2 \
+                         AND c.merged_into IS NULL AND c.erased_at IS NULL)"
     ))
     .bind(org_id)
     .bind(phone)
@@ -253,7 +275,7 @@ where
     E: sqlx::PgExecutor<'e>,
 {
     Ok(sqlx::query_as(&format!(
-        "SELECT {MEMBER_COLS} FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL"
+        "SELECT {MEMBER_COLS} FROM {MEMBERS} WHERE id = $1 AND deleted_at IS NULL"
     ))
     .bind(id)
     .fetch_optional(exec)
@@ -489,22 +511,24 @@ pub async fn ledger(
 /// The ledger is the SHOP's record of what it gave away and what it was owed —
 /// deleting it would change the meaning of every past report, and the database
 /// refuses to anyway (`loyalty_transactions` is append-only, and its FK to the
-/// member is RESTRICT). So the row is soft-deleted and everything that is about
-/// the PERSON rather than the money is scrubbed in place:
+/// member is RESTRICT). So the membership is soft-deleted, and everything that
+/// is about the PERSON rather than the money is scrubbed:
 ///
-///   * name and birthday go — there is nothing to greet;
-///   * the phone is redacted, not nulled (the column is NOT NULL, and the
-///     partial unique index only covers live rows, so the same number can join
-///     again tomorrow as a fresh member);
+///   * the person lives on the customer row now (design §2.2), so that row is
+///     erased exactly as `POST /customers/{id}/erase` erases it — name, phone,
+///     notes and birthday blanked, `erased_at` set, marketing off. That frees
+///     the phone: the same number can join again tomorrow as a fresh customer
+///     with a fresh card. The numbers they used to have go too;
 ///   * the member token is rotated, so the barcode on a pass that is still in a
 ///     wallet resolves to nobody — `find_by_token` already skips deleted rows,
-///     but a token that no longer exists cannot be un-skipped by a later bug;
+///     but a token that no longer exists cannot be un-skipped by a later bug —
+///     and any alias that pointed an older card at this member is dropped;
 ///   * the Apple auth token goes with it, so a device holding the old pass can
 ///     no longer authenticate a refetch;
-///   * pass devices are dropped, so no update is ever pushed to the phone again;
-///   * any notice waiting on the card is cleared, and marketing is switched
-///     off, because a person who asked to be forgotten has also asked not to be
-///     written to.
+///   * pass devices are dropped — at once when no phone holds the card; else
+///     after the phone has collected its voided copy, or 48 h, whichever is
+///     first ([`purge_erased_pass`]);
+///   * any notice waiting on the card is cleared.
 ///
 /// Orders keep their `loyalty_customer_id`: which member a sale earned for is
 /// part of the sale's history, and the row it points at now says nothing about
@@ -516,46 +540,398 @@ pub async fn ledger(
 /// Google object to expire. `None` when the member was already gone.
 pub async fn forget(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, AppError> {
     let mut tx = pool.begin().await?;
+    let before = forget_in(&mut tx, member_id).await?;
+    if before.is_some() {
+        tx.commit().await?;
+    }
+    Ok(before)
+}
+
+/// [`forget`], inside a transaction the caller owns — `POST
+/// /customers/{id}/erase` scrubs the membership, the snapshots, the addresses
+/// and the OTP rows in ONE transaction (design §2.8).
+pub async fn forget_in(
+    tx: &mut sqlx::PgConnection,
+    member_id: Uuid,
+) -> Result<Option<MemberRow>, AppError> {
     // Locked, so two admins forgetting the same member — or a sweep messaging
     // them at the same moment — serialise on the row.
-    let before: Option<MemberRow> = sqlx::query_as(&format!(
-        "SELECT {MEMBER_COLS} FROM loyalty_customers \
-          WHERE id = $1 AND deleted_at IS NULL FOR UPDATE"
-    ))
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
     .bind(member_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(before) = before else {
+    if locked.is_none() {
+        return Ok(None);
+    }
+    let Some(before) = find_by_id(&mut *tx, member_id).await? else {
         return Ok(None);
     };
+    // A card sitting in a wallet has to be TOLD it is over, or the phone shows
+    // the last balance and a scannable barcode for ever — of a person we have
+    // promised to forget. So when a device holds the pass, the auth token and
+    // the registrations outlive the erase just long enough for the device to
+    // collect a voided copy (which is built from the scrubbed row and names
+    // nobody), and are then purged: on that fetch, or by the sweep after
+    // [`ERASED_PASS_GRACE_HOURS`]. See [`purge_erased_pass`]. With no device
+    // there is nothing to tell, and everything goes now.
+    let has_devices: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM loyalty_pass_devices WHERE customer_id = $1)",
+    )
+    .bind(member_id)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query(
         "UPDATE loyalty_customers \
             SET deleted_at = now(), \
-                name = 'Deleted member', \
-                phone = $2, \
-                member_token = $3, \
-                apple_auth_token = NULL, \
-                birth_month = NULL, \
-                birth_day = NULL, \
-                marketing_opt_out = true, \
+                member_token = $2, \
+                apple_auth_token = CASE WHEN $3 THEN apple_auth_token END, \
+                pass_voided_at = CASE WHEN $3 THEN now() END, \
+                pass_updated_at = CASE WHEN $3 THEN now() ELSE pass_updated_at END, \
                 pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
                 pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
                 updated_at = now() \
           WHERE id = $1",
     )
     .bind(member_id)
-    // Distinct per member so a report joining on phone cannot merge every
-    // forgotten member into one; not a phone, so it cannot collide with one.
-    .bind(format!("deleted:{member_id}"))
+    .bind(super::mint_member_token())
+    .bind(has_devices)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE customers \
+            SET name = '', phone = NULL, phone_key = NULL, notes = NULL, \
+                birth_month = NULL, birth_day = NULL, marketing_opt_out = true, \
+                erased_at = now(), updated_at = now() \
+          WHERE id = $1 AND erased_at IS NULL",
+    )
+    .bind(member_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM customer_phone_history WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM loyalty_token_aliases WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+    // (`loyalty_pass_devices` is NOT dropped here — see `has_devices` above.)
+    // The pre-built pass has their name baked into it. In the transaction, so
+    // there is no moment at which the person is erased and the bytes are not.
+    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+    Ok(Some(before))
+}
+
+/// How long an erased member's pass registrations may outlive the erase while
+/// their device has not yet collected the voided copy. Opaque device ids and
+/// push tokens only; bounded, and gone the moment the device comes back.
+pub const ERASED_PASS_GRACE_HOURS: i32 = 48;
+
+/// The second half of erasing a card that was in a wallet: drop what
+/// [`forget_in`] kept alive for the voided pass. After this the serial answers
+/// 401/404 like one that never existed. Only ever touches an ERASED customer's
+/// card — a merge loser or a leaver keeps being served voided.
+pub async fn purge_erased_pass(pool: &PgPool, member_id: Uuid) -> Result<bool, AppError> {
+    let mut tx = pool.begin().await?;
+    let hit = sqlx::query(
+        "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now() \
+          WHERE m.id = $1 AND m.deleted_at IS NOT NULL \
+            AND EXISTS (SELECT 1 FROM customers c WHERE c.id = m.id AND c.erased_at IS NOT NULL)",
+    )
+    .bind(member_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    if hit {
+        sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = $1")
+            .bind(member_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(hit)
+}
+
+/// Erased cards whose device never came back within the grace: purge them
+/// anyway. Bounded per call; returns how many were purged.
+pub async fn purge_stale_erased_passes(pool: &PgPool) -> Result<usize, AppError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT m.id FROM loyalty_customers m JOIN customers c ON c.id = m.id \
+          WHERE c.erased_at IS NOT NULL AND m.deleted_at IS NOT NULL \
+            AND (m.apple_auth_token IS NOT NULL \
+                 OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)) \
+            AND c.erased_at < now() - make_interval(hours => $1) \
+          LIMIT 500",
+    )
+    .bind(ERASED_PASS_GRACE_HOURS)
+    .fetch_all(pool)
+    .await?;
+    let mut n = 0;
+    for id in ids {
+        if purge_erased_pass(pool, id).await? {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Leave the programme (design §2.8): the CARD ends, the person stays.
+///
+/// `DELETE /loyalty/members/{id}` used to be `forget`, which erased the whole
+/// customer — name, phone, order history link and all — because the card was
+/// the only record of the person. It is not any more. Leaving now retires the
+/// membership and nothing else: the customer row, their orders, their addresses
+/// and their bookings are untouched, and they can join again tomorrow
+/// ([`enrol`] revives the row under the same id with a fresh token).
+///
+/// What goes: the member token is rotated so the barcode resolves to nobody,
+/// aliases pointing older cards here are dropped, any pending notice is
+/// cleared, and the stored pass is deleted. What deliberately STAYS until the
+/// device has collected it: the Apple auth token and the device registrations,
+/// with `pass_voided_at` set — the web service serves that serial a pass marked
+/// `voided` instead of a 404, so the card in the wallet greys out rather than
+/// showing its last balance for ever.
+///
+/// The ledger stays (append-only, and it is the shop's record). A balance left
+/// on the card stays on the retired row; rejoining starts from that balance,
+/// which is the honest reading of "my points are still mine".
+///
+/// Returns the row as it was, for the caller's wallet calls after commit.
+pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, AppError> {
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(member_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(None);
+    }
+    let Some(before) = find_by_id(&mut *tx, member_id).await? else {
+        return Ok(None);
+    };
+    sqlx::query(
+        "UPDATE loyalty_customers \
+            SET deleted_at = now(), pass_voided_at = now(), pass_updated_at = now(), \
+                member_token = $2, \
+                pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
+                pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
+                updated_at = now() \
+          WHERE id = $1",
+    )
+    .bind(member_id)
     .bind(super::mint_member_token())
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = $1")
+    sqlx::query("DELETE FROM loyalty_token_aliases WHERE customer_id = $1")
+        .bind(member_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
         .bind(member_id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
     Ok(Some(before))
+}
+
+/// A retired membership whose pass is still to be served voided: the loser of
+/// a merge, someone who left, or an erased member whose device has not yet
+/// collected the voided copy. `None` for a live member, a purged one, or a
+/// serial that never existed. Reads the table, not the view's live filter.
+pub async fn find_voided<'e, E>(exec: E, id: Uuid) -> Result<Option<MemberRow>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    Ok(sqlx::query_as(&format!(
+        "SELECT {MEMBER_COLS} FROM {MEMBERS} v \
+          WHERE v.id = $1 AND v.deleted_at IS NOT NULL AND v.apple_auth_token IS NOT NULL \
+            AND EXISTS (SELECT 1 FROM loyalty_customers m \
+                         WHERE m.id = v.id AND m.pass_voided_at IS NOT NULL)"
+    ))
+    .bind(id)
+    .fetch_optional(exec)
+    .await?)
+}
+
+/// Give a customer a card: the membership row, under THE CUSTOMER'S id (design
+/// §2.1). `false` when that customer already has one.
+///
+/// A membership that was soft-deleted without its customer being erased (no
+/// path does that today; "leave the programme" will) is brought back with a
+/// fresh token rather than refused: the primary key is the person, and a person
+/// may join again.
+pub async fn enrol(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+    customer_id: Uuid,
+    joined_branch_id: Option<Uuid>,
+) -> Result<bool, AppError> {
+    let done = sqlx::query(
+        "INSERT INTO loyalty_customers (id, org_id, member_token, joined_branch_id, apple_auth_token) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (id) DO UPDATE \
+            SET deleted_at = NULL, pass_voided_at = NULL, member_token = EXCLUDED.member_token, \
+                apple_auth_token = EXCLUDED.apple_auth_token, \
+                joined_branch_id = EXCLUDED.joined_branch_id, \
+                apple_serial = NULL, google_object_id = NULL, \
+                enrolled_at = now(), updated_at = now() \
+          WHERE loyalty_customers.deleted_at IS NOT NULL \
+            AND loyalty_customers.org_id = EXCLUDED.org_id",
+    )
+    .bind(customer_id)
+    .bind(org_id)
+    .bind(super::mint_member_token())
+    // Reporting only, and honestly null for an org-wide code: we do not know
+    // where they were, and a membership belongs to the shop rather than to a
+    // branch.
+    .bind(joined_branch_id)
+    // Apple authenticates pass updates with this; minted now so a pass issued
+    // later needs no second write.
+    .bind(super::mint_member_token())
+    .execute(&mut *conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
+/// Two customers being merged are BOTH members (design §2.7): the loser's
+/// balances cross to the survivor, the loser's membership is retired, and its
+/// card keeps scanning — to the survivor — for ninety days.
+///
+/// The balance moves as a PAIR of `adjust` rows with `source = 'merge'`, one on
+/// each member. Nothing is edited and nothing is reversed, so the append-only
+/// ledger holds; and because both are adjustments the pair nets to zero in any
+/// report of what the programme gave away. A debt (possible only where the
+/// programme lets a clawback go negative) crosses too, as far as the
+/// survivor's balance can absorb it — an adjustment may not overdraw.
+///
+/// Both customer rows are already locked by the caller. Returns the loser as
+/// it was, so the caller can void its passes after the commit.
+pub async fn merge_memberships(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+    loser_id: Uuid,
+    survivor_id: Uuid,
+    actor: Option<Uuid>,
+) -> Result<MemberRow, AppError> {
+    let mut ids = [loser_id, survivor_id];
+    ids.sort();
+    sqlx::query(
+        "SELECT id FROM loyalty_customers WHERE id = ANY($1) AND org_id = $2 ORDER BY id FOR UPDATE",
+    )
+    .bind(&ids[..])
+    .bind(org_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let loser = find_by_id(&mut *conn, loser_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
+    let survivor = find_by_id(&mut *conn, survivor_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Member to keep not found".into()))?;
+    if loser.org_id != org_id || survivor.org_id != org_id {
+        return Err(AppError::NotFound("Member not found".into()));
+    }
+
+    let moves: Vec<(Mode, i32)> = [Mode::Points, Mode::Visits]
+        .into_iter()
+        .filter_map(|mode| {
+            let have = loser.balance_in(mode);
+            let delta = if have >= 0 {
+                have
+            } else {
+                have.max(-survivor.balance_in(mode).max(0))
+            };
+            (delta != 0).then_some((mode, delta))
+        })
+        .collect();
+    if !moves.is_empty() {
+        // A ledger row names a branch. Where the loser joined is the honest
+        // one; any branch of the org can carry it.
+        let branch: Option<Uuid> = sqlx::query_scalar(
+            "SELECT COALESCE($2, $3, (SELECT id FROM branches WHERE org_id = $1 \
+                                        AND deleted_at IS NULL ORDER BY created_at LIMIT 1))",
+        )
+        .bind(org_id)
+        .bind(loser.joined_branch_id)
+        .bind(survivor.joined_branch_id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let branch = branch.ok_or_else(|| {
+            AppError::Conflict("This organisation has no branch to record the transfer at".into())
+        })?;
+        for (mode, delta) in moves {
+            for (member, points, other) in [
+                (loser_id, -delta, survivor_id),
+                (survivor_id, delta, loser_id),
+            ] {
+                sqlx::query(
+                    "INSERT INTO loyalty_transactions \
+                        (org_id, customer_id, branch_id, kind, currency, points, note, created_by, source) \
+                     VALUES ($1,$2,$3,'adjust',$4,$5,$6,$7,'merge')",
+                )
+                .bind(org_id)
+                .bind(member)
+                .bind(branch)
+                .bind(mode.as_str())
+                .bind(points)
+                .bind(format!("Merged with member {other}"))
+                .bind(actor)
+                .execute(&mut *conn)
+                .await?;
+            }
+        }
+    }
+
+    sqlx::query(
+        // `pass_voided_at`: the card in the loser's wallet is served one last
+        // time, marked voided (see `find_voided`). `pass_updated_at` moves so
+        // the device's "what changed since" question includes this serial.
+        "UPDATE loyalty_customers \
+            SET deleted_at = now(), pass_voided_at = now(), pass_updated_at = now(), \
+                pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
+                pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
+                updated_at = now() \
+          WHERE id = $1",
+    )
+    .bind(loser_id)
+    .execute(&mut *conn)
+    .await?;
+    // Cards that already pointed at the loser (an earlier merge) follow it.
+    sqlx::query(
+        "UPDATE loyalty_token_aliases SET customer_id = $2, was_customer_id = COALESCE(was_customer_id, $1) \
+          WHERE customer_id = $1",
+    )
+    .bind(loser_id)
+    .bind(survivor_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT INTO loyalty_token_aliases (member_token, org_id, customer_id, was_customer_id) \
+         VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (member_token) DO UPDATE \
+            SET customer_id = EXCLUDED.customer_id, expires_at = EXCLUDED.expires_at",
+    )
+    .bind(&loser.member_token)
+    .bind(org_id)
+    .bind(survivor_id)
+    .bind(loser_id)
+    .execute(&mut *conn)
+    .await?;
+    // Both pre-built passes are wrong now: the loser's is a retired card with
+    // its name on it, the survivor's shows the balance before the transfer.
+    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)")
+        .bind(&[loser_id, survivor_id][..])
+        .execute(&mut *conn)
+        .await?;
+    Ok(loser)
 }
 
 #[cfg(test)]

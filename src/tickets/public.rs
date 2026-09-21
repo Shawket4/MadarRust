@@ -117,6 +117,12 @@ pub struct TableOrderRequest {
     /// waiter can find them.
     #[serde(default)]
     pub customer_name: Option<String>,
+    /// Their phone, if they offered one. Optional and never required: with a
+    /// valid number (and a name) the bill is linked to that customer — created
+    /// on first contact, `source = table_qr` — so the visit counts toward them.
+    /// A number that is not valid is ignored; the order is never refused.
+    #[serde(default)]
+    pub customer_phone: Option<String>,
     /// Client-minted, so a phone that resends on a flaky connection does not
     /// order twice. This is the ONLY protection against a double-send, because
     /// a customer's browser has no outbox to dedup against.
@@ -306,6 +312,43 @@ pub async fn create_table_order(
         return Err(AppError::Conflict("The kitchen is closed right now".into()));
     }
 
+    // WHO, when they said (design §2.4). Best-effort by design: a table order is
+    // never refused over its customer, so a bad number or a missing name just
+    // means an unlinked bill. Resolved on its own connection — the ticket's
+    // transaction belongs to `create_open_ticket_inner` — which is safe because
+    // resolve-or-create is idempotent and race-free on its own.
+    let customer_name = body
+        .customer_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+    let customer_id: Option<Uuid> = match (body.customer_phone.as_deref(), customer_name.as_deref())
+    {
+        (Some(phone), Some(name)) if crate::phone::canonical(phone).is_some() => {
+            let mut conn = base.get_ref().acquire().await?;
+            match crate::customers::handlers::resolve_or_create(
+                &mut conn,
+                org_id,
+                phone,
+                name,
+                crate::customers::handlers::CustomerSource::TableQr,
+                Some(branch_id),
+                None,
+                None,
+            )
+            .await
+            {
+                Ok((id, _)) => Some(id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "table order: could not resolve the customer; continuing unlinked");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
     // Joining a meal in progress, or starting one.
     let live: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM open_tickets WHERE table_id = $1 AND status = 'open' \
@@ -317,6 +360,17 @@ pub async fn create_table_order(
 
     match live {
         Some(ticket_id) => {
+            // The first person at the table to give a phone is who the bill is
+            // for; somebody joining later does not take it over.
+            if let Some(c) = customer_id {
+                sqlx::query(
+                    "UPDATE open_tickets SET customer_id = $2 WHERE id = $1 AND customer_id IS NULL",
+                )
+                .bind(ticket_id)
+                .bind(c)
+                .execute(pool.get_ref())
+                .await?;
+            }
             crate::tickets::handlers::add_round_inner(
                 pool.clone(),
                 ticket_id,
@@ -335,10 +389,10 @@ pub async fn create_table_order(
             let mut req = CreateOpenTicketRequest {
                 branch_id,
                 table_id: Some(body.table_id),
-                customer_name: body
-                    .customer_name
-                    .map(|n| n.trim().to_string())
-                    .filter(|n| !n.is_empty()),
+                customer_name,
+                // Set below, server-side: the guest actor holds no
+                // `customers.attach`, and this id was not theirs to choose.
+                customer_id: None,
                 notes: None,
                 guest_count: None,
                 booking_id: None,
@@ -373,10 +427,12 @@ pub async fn create_table_order(
             // just opened. `opened_via IS NULL` keeps it to the row that has
             // not been stamped, so a retry cannot relabel somebody else's.
             sqlx::query(
-                "UPDATE open_tickets SET opened_via = 'qr_table' \
+                "UPDATE open_tickets SET opened_via = 'qr_table', \
+                        customer_id = COALESCE(customer_id, $2) \
                   WHERE table_id = $1 AND status = 'open' AND opened_via IS NULL",
             )
             .bind(body.table_id)
+            .bind(customer_id)
             .execute(pool.get_ref())
             .await?;
             Ok(resp)

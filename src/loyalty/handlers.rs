@@ -612,7 +612,7 @@ pub async fn list_members(
         });
 
     let rows: Vec<MemberRow> = sqlx::query_as(&format!(
-        "SELECT {} FROM loyalty_customers \
+        "SELECT {} FROM loyalty_members_v \
           WHERE org_id = $1 AND deleted_at IS NULL \
             AND ($2::text IS NULL OR name ILIKE $2 OR phone ILIKE $2) \
           ORDER BY enrolled_at DESC LIMIT $3 OFFSET $4",
@@ -626,7 +626,7 @@ pub async fn list_members(
     .await?;
 
     let total: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM loyalty_customers \
+        "SELECT count(*) FROM loyalty_members_v \
           WHERE org_id = $1 AND deleted_at IS NULL \
             AND ($2::text IS NULL OR name ILIKE $2 OR phone ILIKE $2)",
     )
@@ -641,20 +641,20 @@ pub async fn list_members(
     }))
 }
 
-/// Forget a member. **Admin only.**
+/// Leave the programme: the card ends, the customer stays (design §2.8).
 ///
-/// A void corrects a sale; this corrects a membership — someone asked the shop
-/// to stop holding their details, or an admin is clearing a test signup. The
-/// person is scrubbed and the books are kept: see [`model::forget`] for exactly
-/// what goes and what stays, and why the ledger is not the member's data.
+/// This used to FORGET the person — it was written when the loyalty row was the
+/// only record of them. A membership is now a card under the customer's id, so
+/// ending it touches nothing but the card: the customer, their orders, their
+/// addresses and their bookings stay, and they can join again. Erasing a
+/// person's data is `POST /customers/{id}/erase`, which also ends the card.
+/// See [`model::leave`] for exactly what goes.
 ///
-/// 204 twice in a row: forgetting someone already forgotten is not a failure,
-/// and telling the caller "no such member" would confirm that a phone number
-/// used to be one.
+/// 204 twice in a row: a card that is already gone is not a failure.
 #[utoipa::path(delete, path = "/loyalty/members/{id}", tag = "loyalty",
     operation_id = "delete_loyalty_member",
-    params(("id" = Uuid, Path, description = "Member ID")),
-    responses((status = 204, description = "Forgotten"), AppErrorResponse),
+    params(("id" = Uuid, Path, description = "Member ID (= customer id)")),
+    responses((status = 204, description = "The membership is ended; the customer is kept"), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn delete_member(
     req: HttpRequest,
@@ -664,7 +664,7 @@ pub async fn delete_member(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "loyalty", "update").await?;
     // Above the till, like `adjust`: a teller identifies the person in front of
-    // them, and does not erase people.
+    // them, and does not end their membership.
     crate::authz::require::require(
         pool.get_ref(),
         &claims,
@@ -681,15 +681,16 @@ pub async fn delete_member(
         return Err(AppError::NotFound("Member not found".into()));
     }
 
-    let Some(before) = model::forget(pool.get_ref(), member.id).await? else {
+    let Some(before) = model::leave(pool.get_ref(), member.id).await? else {
         return Ok(HttpResponse::NoContent().finish());
     };
 
     // After the commit, never inside it — the same rule every wallet call here
-    // follows. The card is already dead on our side (token rotated, devices
-    // dropped); this tells Google to stop rendering it. A failure is reported,
-    // not surfaced: the forget has happened, and nothing the admin could do
-    // with a 503 would make it more so.
+    // follows. Apple: the devices are told to come back, and are served the
+    // pass marked voided. Google: the object goes INACTIVE. Failures are
+    // reported, not surfaced: the membership has ended either way.
+    wallet::store::invalidate(pool.get_ref(), before.id).await;
+    wallet::apple::void_pass(pool.get_ref(), &before);
     tokio::spawn(async move {
         if let Err(e) = wallet::google::expire_object(&before).await {
             use crate::observability::report::{Failure, report};
