@@ -3221,3 +3221,215 @@ pub async fn org_tax_report(
         net_revenue: totals.net_revenue,
     }))
 }
+
+// ── GET /reports/branches/:id/tills ──────────────────────────
+
+/// The most sessions one call returns. The page aggregates the rows it gets, so
+/// a silently truncated list would be a wrong total; past this the call is
+/// refused and the caller narrows the range instead.
+const MAX_TILL_SESSIONS: i64 = 5000;
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct TillSessionsQuery {
+    /// Sessions OPENED at or after this instant.
+    pub from: Option<DateTime<Utc>>,
+    /// Sessions OPENED at or before this instant.
+    pub to: Option<DateTime<Utc>>,
+}
+
+/// One till session, the way a manager reconciles a drawer: what was in it at
+/// open, what cash the shift put through it, what the teller declared at close,
+/// and what the system says should have been there.
+///
+/// Money is piastres. `null` means *not yet known* (an open till has no closing
+/// figures), never zero — a till still running and a till that counted zero are
+/// different facts.
+///
+/// The cash columns add up: `opening_cash + net_cash_payment + pay_ins −
+/// pay_outs − cash_drops + cash_adjustments` is the drawer's expected cash —
+/// `closing_cash_system` once the till is closed.
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct TillSessionRow {
+    pub till_id: Uuid,
+    /// The branch-local calendar day the till was OPENED on — a till opened at
+    /// 23:50 and closed at 02:10 belongs to the day it opened, which is the
+    /// day the takings are reported under.
+    pub business_date: chrono::NaiveDate,
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    /// The branch's short code, the prefix of its order references.
+    pub branch_code: String,
+    pub teller_id: Uuid,
+    pub teller_name: String,
+    pub opened_at: DateTime<Utc>,
+    /// `open` | `closed` | `force_closed`.
+    pub status: String,
+    pub opening_cash: i64,
+    /// Cash that came in over the counter: cash payments and cash tips on
+    /// tendered sales, less cash handed back as refunds from this drawer.
+    pub net_cash_payment: i64,
+    /// Cash added to the drawer that is not a sale (a float top-up), net of
+    /// corrections to pay-ins.
+    pub pay_ins: i64,
+    /// Cash spent out of the drawer, net of corrections to pay-outs.
+    /// Positive = the magnitude that left.
+    pub pay_outs: i64,
+    /// Cash moved to the safe, net of corrections to safe drops.
+    /// Positive = the magnitude that left.
+    pub cash_drops: i64,
+    /// Corrections that name no movement of the three kinds above. Signed:
+    /// positive = cash the drawer gained. The till report's `cash_adjustments`.
+    pub cash_adjustments: i64,
+    /// What was counted at close. `null` while the till is open, and for a
+    /// force-close nobody counted.
+    pub closing_cash_declared: Option<i64>,
+    /// What the system expected at close. `null` while the till is open.
+    pub closing_cash_system: Option<i64>,
+    /// Declared − expected. Negative = short, positive = over.
+    pub cash_discrepancy: Option<i64>,
+    pub closed_at: Option<DateTime<Utc>>,
+    /// Sales rung on this till, voided and fully-refunded bills excluded —
+    /// the same count the teller report uses.
+    pub orders_count: i64,
+    /// Those sales' value, net of what refunds took back (`net_sales` in the
+    /// POS metrics report, `revenue` in the teller report).
+    pub net_sales: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/reports/branches/{branch_id}/tills",
+    tag = "reports",
+    params(("branch_id" = Uuid, Path, description = "Branch ID (nil UUID = every branch the caller works at)")),
+    params(TillSessionsQuery),
+    responses(
+        (status = 200, description = "Till sessions opened in the range, newest first. Every session at a branch where the caller holds `till.read.branch`; elsewhere only the caller's own.", body = Vec<TillSessionRow>),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
+#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
+pub async fn branch_till_sessions(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+    query: web::Query<TillSessionsQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "tills", "read").await?;
+    let (branch_ids, _org) =
+        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
+    if let (Some(from), Some(to)) = (query.from, query.to)
+        && to < from
+    {
+        return Err(AppError::BadRequest("`to` is before `from`".into()));
+    }
+
+    // `till.read` is core for every teller; seeing a COLLEAGUE's drawer and its
+    // variance is `till.read.branch`. Without it the report narrows to the
+    // caller's own sessions, the way `GET /tills/branches/{b}/current` does.
+    let mut sees_all: Vec<Uuid> = Vec::with_capacity(branch_ids.len());
+    for b in &branch_ids {
+        if crate::authz::require::can(
+            pool.get_ref(),
+            &claims,
+            crate::authz::Cap::TillReadBranch,
+            Some(*b),
+        )
+        .await?
+        {
+            sees_all.push(*b);
+        }
+    }
+
+    // The cash figures are deliberately the SAME expressions the single-till
+    // report and `compute_system_cash` use, so a row here and that till's own
+    // report never disagree by a piastre. A `correction` movement counts
+    // against the bucket it corrects, exactly as `CashMovementSummaryRow::bucket`;
+    // one that names nothing (or another correction) stays an adjustment.
+    let sql = format!(
+        r#"
+        SELECT
+            s.id AS till_id,
+            (s.opened_at AT TIME ZONE effective_timezone(s.branch_id))::date AS business_date,
+            s.branch_id,
+            b.name AS branch_name,
+            b.code AS branch_code,
+            s.teller_id,
+            u.name AS teller_name,
+            s.opened_at,
+            s.status::text AS status,
+            s.opening_cash::bigint AS opening_cash,
+            (
+              COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders o ON o.id = op.order_id
+                    WHERE o.till_id = s.id AND COALESCE(op.is_cash, op.method = 'cash') = true AND o.{TENDERED}), 0)
+            + COALESCE((SELECT SUM(o.tip_amount) FROM orders o
+                    WHERE o.till_id = s.id
+                      AND COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
+                      AND o.{TENDERED}), 0)
+            - COALESCE((SELECT SUM(r.amount) FROM order_refunds r WHERE r.till_id = s.id AND r.is_cash), 0)
+            )::bigint AS net_cash_payment,
+            COALESCE(mv.pay_ins, 0)::bigint AS pay_ins,
+            COALESCE(mv.pay_outs, 0)::bigint AS pay_outs,
+            COALESCE(mv.cash_drops, 0)::bigint AS cash_drops,
+            COALESCE(mv.cash_adjustments, 0)::bigint AS cash_adjustments,
+            s.closing_cash_declared::bigint AS closing_cash_declared,
+            s.closing_cash_system::bigint AS closing_cash_system,
+            s.cash_discrepancy::bigint AS cash_discrepancy,
+            s.closed_at,
+            COALESCE(sal.orders_count, 0)::bigint AS orders_count,
+            COALESCE(sal.net_sales, 0)::bigint AS net_sales
+        FROM tills s
+        JOIN users u ON u.id = s.teller_id
+        JOIN branches b ON b.id = s.branch_id
+        LEFT JOIN LATERAL (
+            SELECT
+                SUM(m.amount) FILTER (WHERE bucket = 'pay_in')     AS pay_ins,
+               -SUM(m.amount) FILTER (WHERE bucket = 'pay_out')    AS pay_outs,
+               -SUM(m.amount) FILTER (WHERE bucket = 'safe_drop')  AS cash_drops,
+                SUM(m.amount) FILTER (WHERE bucket = 'correction') AS cash_adjustments
+            FROM (
+                SELECT m.amount,
+                       CASE WHEN m.kind = 'correction' AND c.kind IS NOT NULL
+                            THEN c.kind ELSE m.kind END AS bucket
+                FROM till_cash_movements m
+                LEFT JOIN till_cash_movements c ON c.id = m.corrects_id
+                WHERE m.till_id = s.id
+            ) m
+        ) mv ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS orders_count,
+                   SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)) AS net_sales
+            FROM orders o
+            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+            WHERE o.till_id = s.id AND o.{SOLD}
+        ) sal ON TRUE
+        WHERE s.branch_id = ANY($1)
+          AND ($2::timestamptz IS NULL OR s.opened_at >= $2)
+          AND ($3::timestamptz IS NULL OR s.opened_at <= $3)
+          AND (s.branch_id = ANY($4) OR s.teller_id = $5)
+        ORDER BY s.opened_at DESC, s.id
+        LIMIT $6
+        "#,
+        TENDERED = crate::orders::TENDERED,
+        SOLD = crate::orders::SOLD
+    );
+
+    let rows = sqlx::query_as::<_, TillSessionRow>(&sql)
+        .bind(&branch_ids)
+        .bind(query.from)
+        .bind(query.to)
+        .bind(&sees_all)
+        .bind(claims.user_id())
+        .bind(MAX_TILL_SESSIONS + 1)
+        .fetch_all(pool.get_ref())
+        .await?;
+    if rows.len() as i64 > MAX_TILL_SESSIONS {
+        return Err(AppError::BadRequest(format!(
+            "More than {MAX_TILL_SESSIONS} till sessions in this range; narrow `from`/`to`"
+        )));
+    }
+
+    Ok(HttpResponse::Ok().json(rows))
+}

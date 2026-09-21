@@ -556,6 +556,7 @@ paths(
         crate::reports::handlers::till_summary,
         crate::reports::handlers::till_deductions,
         crate::reports::handlers::shift_deductions,
+        crate::reports::handlers::branch_till_sessions,
         crate::reports::handlers::branch_sales,
         crate::reports::pos_metrics::branch_pos_metrics,
         crate::reports::handlers::branch_stock,
