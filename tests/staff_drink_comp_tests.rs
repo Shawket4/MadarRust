@@ -1173,7 +1173,14 @@ async fn the_sync_projections_carry_the_comp(pool: PgPool) {
     let line = &orders[&order_id]["items"][0];
     assert_eq!(line["staff_comp_minor"], 7000);
     assert_eq!(line["staff_drink_id"], json!(id));
-    assert_eq!(line["addons"][0]["staff_comp_minor"], 1000);
+    // Stored add-on rows are read back by their (random) id, so find the pick.
+    let hazelnut = line["addons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["addon_item_id"] == json!(s.hazelnut))
+        .expect("the hazelnut pick");
+    assert_eq!(hazelnut["staff_comp_minor"], 1000);
 
     let drinks = madar_rust::sync::pull::projection::project(
         &mut conn,
