@@ -1094,10 +1094,7 @@ pub fn mark_voided(pass: &mut serde_json::Value, at: chrono::DateTime<chrono::Ut
 /// The LAST pass a retired card is served: the same card, marked `voided`
 /// (design §2.7, §2.8). Never stored — it is built for a device that is about
 /// to stop asking.
-pub async fn build_voided_pass_for(
-    pool: &PgPool,
-    member: &MemberRow,
-) -> Result<Vec<u8>, AppError> {
+pub async fn build_voided_pass_for(pool: &PgPool, member: &MemberRow) -> Result<Vec<u8>, AppError> {
     build_pass_inner(pool, member, true).await
 }
 
