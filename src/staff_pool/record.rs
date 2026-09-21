@@ -96,6 +96,21 @@ pub struct StaffDrink {
     pub cost_minor: Option<i32>,
     pub recorded_by: Option<Uuid>,
     pub recorded_at: DateTime<Utc>,
+    /// What the pool comped on the sale's line, minor units, as the SERVER
+    /// prices it. `null` on a record-only drink (no priced line behind it).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub comp_minor: Option<i32>,
+    /// What that line was still charged: a bigger size, extras, pricier picks.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub extras_minor: Option<i32>,
+    /// What the TILL said the comp was, on a replayed sale. Differs from
+    /// `comp_minor` exactly when `orders.staff_drink.record:comp_mismatch` was
+    /// flagged.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub comp_minor_reported: Option<i32>,
 }
 
 /// The outcome of recording one drink.
@@ -212,7 +227,7 @@ pub async fn record_inner(
          ON CONFLICT (id) DO NOTHING \
          RETURNING id, branch_id, order_id, menu_item_id, item_name, size_label, quantity, note, \
                    business_date, allowance_at_record, used_before, overspent, overspent_on_replay, \
-                   cost_minor, recorded_by, recorded_at",
+                   cost_minor, recorded_by, recorded_at, comp_minor, extras_minor, comp_minor_reported",
     )
     .bind(req.id)
     .bind(org_id)
@@ -253,7 +268,7 @@ async fn fetch(pool: &PgPool, id: Uuid) -> Result<Option<StaffDrink>, AppError> 
     Ok(sqlx::query_as(
         "SELECT id, branch_id, order_id, menu_item_id, item_name, size_label, quantity, note, \
                 business_date, allowance_at_record, used_before, overspent, overspent_on_replay, \
-                cost_minor, recorded_by, recorded_at \
+                cost_minor, recorded_by, recorded_at, comp_minor, extras_minor, comp_minor_reported \
            FROM staff_drinks WHERE id = $1",
     )
     .bind(id)
@@ -409,7 +424,7 @@ pub async fn list(
     let drinks: Vec<StaffDrink> = sqlx::query_as(
         "SELECT id, branch_id, order_id, menu_item_id, item_name, size_label, quantity, note, \
                 business_date, allowance_at_record, used_before, overspent, overspent_on_replay, \
-                cost_minor, recorded_by, recorded_at \
+                cost_minor, recorded_by, recorded_at, comp_minor, extras_minor, comp_minor_reported \
            FROM staff_drinks \
           WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 \
             AND ($4::boolean IS NOT TRUE OR overspent) \
@@ -423,4 +438,83 @@ pub async fn list(
     .await?;
 
     Ok(HttpResponse::Ok().json(drinks))
+}
+
+// ── The range, added up ─────────────────────────────────────────────────────
+
+/// What the staff pool gave away and took in over a range of business days.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
+pub struct StaffDrinksSummary {
+    /// Rows (lines put on the pool).
+    pub drinks: i64,
+    /// Drinks (the sum of their quantities) — what the allowance is measured in.
+    pub quantity: i64,
+    /// Of those rows, how many went past the allowance.
+    pub overspent: i64,
+    /// What the pool comped, minor units (server-priced).
+    pub comp_minor: i64,
+    /// What those lines were still charged — the only part that is revenue.
+    pub extras_minor: i64,
+    /// What the drinks cost to make, where known. Counts in FULL: the drink
+    /// was made whether or not anyone paid for it.
+    pub cost_minor: i64,
+    /// Rows whose till-reported comp differs from the server's.
+    pub comp_mismatches: i64,
+    /// Record-only rows (no priced sale line behind them; POS ≤ v0.7.12).
+    pub unpriced: i64,
+}
+
+/// Totals for the same range and filter as `GET /staff-pool/drinks`.
+#[utoipa::path(get, path = "/staff-pool/drinks/summary", tag = "staff_pool",
+    operation_id = "summarize_staff_drinks", params(ListQuery),
+    responses((status = 200, body = StaffDrinksSummary), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn summary(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    query: web::Query<ListQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = crate::orgs::handlers::extract_claims(&req)?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        Cap::OrdersStaffDrinkRecord,
+        Some(query.branch_id),
+    )
+    .await?;
+    crate::delivery::require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
+
+    let tz = crate::tz::effective_tz(pool.get_ref(), query.branch_id).await?;
+    let today = engine::business_date_of(tz, Utc::now());
+    let from = query.from.unwrap_or(today);
+    let to = query.to.unwrap_or(today);
+    if to < from {
+        return Err(AppError::BadRequest(
+            "The end of the range comes before its start".into(),
+        ));
+    }
+
+    let totals: StaffDrinksSummary = sqlx::query_as(
+        "SELECT count(*)::bigint AS drinks, \
+                COALESCE(sum(quantity), 0)::bigint AS quantity, \
+                count(*) FILTER (WHERE overspent)::bigint AS overspent, \
+                COALESCE(sum(comp_minor), 0)::bigint AS comp_minor, \
+                COALESCE(sum(extras_minor), 0)::bigint AS extras_minor, \
+                COALESCE(sum(cost_minor), 0)::bigint AS cost_minor, \
+                count(*) FILTER (WHERE comp_minor_reported IS NOT NULL \
+                                   AND comp_minor_reported IS DISTINCT FROM comp_minor)::bigint \
+                    AS comp_mismatches, \
+                count(*) FILTER (WHERE comp_minor IS NULL)::bigint AS unpriced \
+           FROM staff_drinks \
+          WHERE branch_id = $1 AND business_date BETWEEN $2 AND $3 \
+            AND ($4::boolean IS NOT TRUE OR overspent)",
+    )
+    .bind(query.branch_id)
+    .bind(from)
+    .bind(to)
+    .bind(query.overspent_only)
+    .fetch_one(pool.get_ref())
+    .await?;
+
+    Ok(HttpResponse::Ok().json(totals))
 }

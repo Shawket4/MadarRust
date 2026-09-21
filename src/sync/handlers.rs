@@ -849,6 +849,24 @@ pub async fn replay(
     // envelope; it is simply not looked for here, so such a sale replays clean
     // instead of flagged, which is never a regression.
 
+    // A queued sale with a line on the STAFF POOL: the same act the record-only
+    // op is, so the same rule — a missing grant with no valid approval is
+    // accepted and flagged, never refused. (The pool's own verdicts — overspend,
+    // a comp the server prices differently — are flagged from inside the sale's
+    // transaction, where the true count is.)
+    if let ReplayOp::CreateOrder { request, .. } = &op
+        && request.items.iter().any(|i| i.staff_drink.is_some())
+    {
+        let cap = crate::authz::Cap::OrdersStaffDrinkRecord;
+        let held =
+            crate::authz::require::effective(pool.get_ref(), teller_id, Some(request.branch_id))
+                .await?
+                .can(cap);
+        if !held && !approved.as_ref().is_ok_and(|c| *c == cap) {
+            flags.push(cap.key().to_string());
+        }
+    }
+
     for &cap in op.flagged_caps() {
         let held = crate::authz::require::effective(pool.get_ref(), teller_id, None)
             .await?
@@ -1192,7 +1210,7 @@ async fn dead_preset_of(
 /// Never fails the request: the op has already committed, and losing the
 /// owner's notice is far better than 500-ing a sale that is now on the books
 /// and making the tablet retry a write it has already applied.
-async fn record_replay_flags(
+pub(crate) async fn record_replay_flags(
     pool: &PgPool,
     org_id: Uuid,
     branch_id: Option<Uuid>,
