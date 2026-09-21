@@ -242,7 +242,14 @@ async fn run() -> Result<(), String> {
         let started = std::time::Instant::now();
         tx.execute(&*m.sql).await.map_err(|e| {
             format!(
-                "migration {} ({}) FAILED on this data — it would fail on boot too:\n  {e}",
+                "migration {} ({}) FAILED on this data:\n  {e}\n\n\
+                 If this is NOT one of the customers-unification migrations (20260925010000 \
+                 onward), the copy is simply behind the deployed schema: this tool runs every \
+                 pending migration in ONE transaction, which boot does not, and some older \
+                 migrations cannot share one (e.g. `ALTER TYPE … ADD VALUE` then using the \
+                 value). Bring the copy level first — `sqlx migrate run --target-version \
+                 20260925000000` — and run this again. A failure in a unification migration \
+                 would fail on boot too.",
                 m.version, m.description
             )
         })?;

@@ -47,6 +47,18 @@ DATABASE_URL=postgres://<user>@localhost:5432/madar_prodcopy \
   cargo run --bin customers-backfill-dry-run              # [--conflicts 1000]
 ```
 
+The copy must be level with the deployed schema (a fresh dump of production is).
+An OLDER copy has earlier migrations pending too, and some of those cannot share
+the single transaction this tool uses (`ALTER TYPE … ADD VALUE` followed by a use
+of the value) although they apply fine on boot, one transaction each. Bring such
+a copy level first, on a throwaway clone:
+
+```
+createdb -T madar_prodcopy madar_prodcopy_dryrun_test
+DATABASE_URL=postgres://<user>@localhost:5432/madar_prodcopy_dryrun_test \
+  sqlx migrate run --target-version 20260925000000
+```
+
 It applies exactly the pending migrations (the SQL embedded in the binary — the
 same the server would run) inside ONE transaction, reports, and rolls back:
 
