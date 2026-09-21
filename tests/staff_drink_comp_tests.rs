@@ -1200,6 +1200,162 @@ async fn the_sync_projections_carry_the_comp(pool: PgPool) {
     );
 }
 
+// ── Swap groups (milk, beans) ───────────────────────────────────────────────
+
+/// A REQUIRED milk group on the latte: whole milk (the recipe's own, listed at
+/// 5.00) and oat (15.00, so it rings at the 10.00 difference). Returns
+/// `(whole, oat)`.
+async fn milk_group(pool: &PgPool, s: &Shop) -> (Uuid, Uuid) {
+    let mut ings = Vec::new();
+    for name in ["Whole milk", "Oat milk"] {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO org_ingredients (org_id, name, unit, cost_per_unit, category_id) \
+             VALUES ($1, $2, 'ml', 10, ingredient_category_id($1, 'milk')) RETURNING id",
+        )
+        .bind(s.org)
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        ings.push(id);
+    }
+    for label in ["small", "medium", "large"] {
+        sqlx::query(
+            "INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) \
+             VALUES ($1, $2, 100, $3, 'Whole milk', 'ml')",
+        )
+        .bind(s.latte)
+        .bind(ings[0])
+        .bind(label)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let group = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO modifier_groups (id, org_id, name, selection_type, min_selections, is_required, legacy_addon_type, effect) \
+         VALUES ($1, $2, 'Milk', 'single', 1, true, 'milk_type', 'swaps')",
+    )
+    .bind(group)
+    .bind(s.org)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO menu_item_modifier_groups (menu_item_id, group_id) VALUES ($1, $2)")
+        .bind(s.latte)
+        .bind(group)
+        .execute(pool)
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    for (i, (name, price)) in [("Whole", 500), ("Oat", 1500)].iter().enumerate() {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, 'milk_type', $4)")
+            .bind(id)
+            .bind(s.org)
+            .bind(name)
+            .bind(price)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO modifier_options (id, group_id, name, price, sort, is_default) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(id)
+        .bind(group)
+        .bind(name)
+        .bind(price)
+        .bind(i as i32)
+        .bind(i == 0)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) \
+             VALUES ($1, $2, 100, $3, 'ml')",
+        )
+        .bind(id)
+        .bind(ings[i])
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+        out.push(id);
+    }
+    (out[0], out[1])
+}
+
+#[sqlx::test]
+async fn a_swap_group_is_not_a_comp_group_own_milk_is_free_and_a_swap_pays_its_surcharge(
+    pool: PgPool,
+) {
+    let app = app!(pool);
+    let s = shop(&pool).await;
+    let (whole, oat) = milk_group(&pool, &s).await;
+    set_pool(&pool, s.org, 5, &[s.latte]).await;
+    let bearer = token(s.admin, s.org, UserRole::OrgAdmin);
+
+    // The recipe's own milk: it rings at 0 already, so the drink is fully free.
+    let body = order(
+        &s,
+        s.till,
+        vec![json!({
+            "menu_item_id": s.latte, "size_label": "small", "quantity": 1,
+            "addons": [{ "addon_item_id": s.vanilla }, { "addon_item_id": whole }],
+            "staff_drink": staff(Uuid::new_v4(), "own milk")
+        })],
+    );
+    let resp = post!(app, "/orders", bearer, &body);
+    assert_eq!(resp.status(), 201);
+    let o: Value = test::read_body_json(resp).await;
+    assert_eq!(o["subtotal"], 0, "{o}");
+    assert_eq!(o["total_amount"], 0);
+    let line = &o["items"][0];
+    assert_eq!(
+        line["staff_comp_minor"], 7000,
+        "the small and the default syrup, nothing for the milk"
+    );
+    let addons = line["addons"].as_array().unwrap();
+    assert_eq!(
+        addons[1]["unit_price"], 0,
+        "the recipe's own milk rings at nothing"
+    );
+    assert_eq!(addons[1]["staff_comp_minor"], 0);
+
+    // Oat: the 10.00 difference over whole is charged, and ONLY it. Were the
+    // required milk group a comp group, its default's 5.00 would come off too.
+    let id = Uuid::new_v4();
+    let body = order(
+        &s,
+        s.till,
+        vec![json!({
+            "menu_item_id": s.latte, "size_label": "small", "quantity": 1,
+            "addons": [{ "addon_item_id": s.vanilla }, { "addon_item_id": oat }],
+            "staff_drink": staff(id, "oat")
+        })],
+    );
+    let resp = post!(app, "/orders", bearer, &body);
+    assert_eq!(resp.status(), 201);
+    let o: Value = test::read_body_json(resp).await;
+    assert_eq!(o["subtotal"], 1000, "{o}");
+    assert_eq!(o["tax_amount"], 140);
+    assert_eq!(o["total_amount"], 1140);
+    let line = &o["items"][0];
+    assert_eq!(line["staff_comp_minor"], 7000);
+    assert_eq!(line["line_total"], 0);
+    let addons = line["addons"].as_array().unwrap();
+    assert_eq!(addons[0]["line_total"], 0, "the default syrup is free");
+    assert_eq!(addons[1]["unit_price"], 1000, "oat over whole");
+    assert_eq!(
+        addons[1]["staff_comp_minor"], 0,
+        "a swap's surcharge is never comped"
+    );
+    assert_eq!(addons[1]["line_total"], 1000);
+    let (_, comp, extras, ..) = drink(&pool, id).await;
+    assert_eq!((comp, extras), (Some(7000), Some(1000)));
+    assert_eq!(used(&pool, s.branch).await, 2);
+}
+
 // ── Tickets ─────────────────────────────────────────────────────────────────
 
 #[sqlx::test]
@@ -1221,4 +1377,46 @@ async fn a_tables_bill_never_carries_a_staff_drink(pool: PgPool) {
     let e: Value = test::read_body_json(resp).await;
     assert_eq!(e["code"], "staff_drink_not_on_ticket", "{e}");
     assert_eq!(used(&pool, s.branch).await, 0);
+}
+
+#[sqlx::test]
+async fn a_later_round_never_carries_a_staff_drink_either(pool: PgPool) {
+    let app = app!(pool);
+    let s = shop(&pool).await;
+    set_pool(&pool, s.org, 5, &[s.latte]).await;
+    let bearer = token(s.admin, s.org, UserRole::OrgAdmin);
+    let resp = post!(
+        app,
+        "/open-tickets",
+        bearer,
+        &json!({
+            "branch_id": s.branch,
+            "items": [{ "menu_item_id": s.cake, "quantity": 1 }]
+        })
+    );
+    assert_eq!(resp.status(), 201);
+    let t: Value = test::read_body_json(resp).await;
+    let ticket = t["id"].as_str().unwrap().to_string();
+
+    let resp = post!(
+        app,
+        &format!("/open-tickets/{ticket}/rounds"),
+        bearer,
+        &json!({
+            "idempotency_key": Uuid::new_v4(),
+            "items": [{ "menu_item_id": s.latte, "size_label": "small", "quantity": 1, "staff_drink": staff(Uuid::new_v4(), "Sara") }]
+        })
+    );
+    assert_eq!(resp.status(), 400);
+    let e: Value = test::read_body_json(resp).await;
+    assert_eq!(e["code"], "staff_drink_not_on_ticket", "{e}");
+    assert_eq!(used(&pool, s.branch).await, 0);
+    let rounds: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM open_ticket_rounds WHERE open_ticket_id = $1::uuid",
+    )
+    .bind(&ticket)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rounds, 1, "the refused round left nothing on the bill");
 }
