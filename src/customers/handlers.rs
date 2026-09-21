@@ -1095,6 +1095,7 @@ pub(crate) async fn repoint_addresses(
     from: Uuid,
     into: Uuid,
 ) -> Result<(), AppError> {
+    #[allow(clippy::type_complexity)]
     let theirs: Vec<(
         Uuid,
         String,

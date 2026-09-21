@@ -29,6 +29,9 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Connection, Executor, Row};
 use uuid::Uuid;
 
+/// (org, canonical phone) → every (name, source, occurrences) seen on it.
+type Groups = BTreeMap<(Uuid, String), Vec<(String, String, i64)>>;
+
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 const USAGE: &str = "\
@@ -319,7 +322,7 @@ async fn run() -> Result<(), String> {
             .fetch_one(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
-    let mut groups: BTreeMap<(Uuid, String), Vec<(String, String, i64)>> = BTreeMap::new();
+    let mut groups: Groups = BTreeMap::new();
     for r in &people {
         groups
             .entry((r.get("org_id"), r.get("key")))
