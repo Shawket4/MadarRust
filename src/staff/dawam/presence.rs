@@ -790,7 +790,7 @@ pub async fn resolve_flag(
         let source = if resolution == "deducted" {
             "left_mid_shift"
         } else {
-            "unpaid_excuse"
+            "excused_unpaid"
         };
         deduction_id = Some(
             sqlx::query_scalar(

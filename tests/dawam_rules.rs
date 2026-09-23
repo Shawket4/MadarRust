@@ -415,7 +415,7 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     .unwrap();
 
     let (st, b) = send!(app, "POST", "/staff/requests".to_string(), f.owner_token(), json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-08-20" }));
-    assert_eq!((st, b["code"].as_str()), (409, Some("MONTH_CLOSED")), "filing into an approved month");
+    assert_eq!((st, b["code"].as_str()), (409, Some("PERIOD_CLOSED")), "filing into an approved month");
     // A leave reaching back into the closed month through its END is refused too.
     let (st, _) = send!(app, "POST", "/staff/requests".to_string(), f.owner_token(), json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-07-25", "end_date": "2026-08-02" }));
     assert_eq!(st, 409, "every day of the span is checked");
@@ -811,7 +811,8 @@ async fn a_waiver_can_be_taken_back_with_a_reason(pool: PgPool) {
     let (st, _) = send!(app, "PATCH", uri.clone(), format!("{}|{}", s.token, s.device), json!({ "reason": "r" }));
     assert_eq!(st, 403, "the employee's phone");
     let (st, b) = send!(app, "PATCH", uri.clone(), f.owner_token(), json!({ "reason": "No sick note came" }));
-    assert_eq!(st, 204, "{b}");
+    assert_eq!(st, 200, "{b}");
+    assert!(b["waived_at"].is_null(), "the row comes back live: {b}");
     let (waived, by, why): (Option<DateTime<Utc>>, Option<Uuid>, Option<String>) = sqlx::query_as(
         "SELECT waived_at, unwaived_by, unwaive_reason FROM payroll_deductions WHERE id = $1",
     )
@@ -842,7 +843,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let (st, _) = send!(app, "PUT", "/staff/attendance/settings".to_string(), owner.clone(), json!({ "absence_deduction_days": 2 }));
     assert_eq!(st, 200);
     let a = body(call!(app, "GET", format!("/staff/attendance/settings?branch_id={}", f.a), owner.clone())).await;
-    assert_eq!(a["absence_deduction_days"], "2.00");
+    assert_eq!(a["absence_deduction_days"].as_f64(), Some(2.0));
     assert_eq!(a["overtime_mode"], "automatic");
     let biz = body(call!(app, "GET", "/staff/attendance/settings".to_string(), owner.clone())).await;
     assert_eq!(biz["overtime_mode"], "off", "the business keeps its own");
@@ -864,7 +865,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     assert_eq!(st, 204);
     let a = body(call!(app, "GET", format!("/staff/attendance/settings?branch_id={}", f.a), owner)).await;
     assert_eq!(a["overridden"], json!([]));
-    assert_eq!(a["working_days_per_month"], "30.00");
+    assert_eq!(a["working_days_per_month"].as_f64(), Some(30.0));
 }
 
 // ── Owner decision 2026-09-23: managers VIEW the rules, read-only ───────────
@@ -947,4 +948,162 @@ fn the_half_of_a_split_day_is_its_first_shift() {
     let one = [(at(d, "09:00"), at(d, "17:00"))];
     assert_eq!(half_day_window(&one, "first"), Some((at(d, "09:00"), at(d, "13:00"))));
     assert_eq!(half_day_window(&[], "first"), None);
+}
+
+// ── RU-10 / audit B15: holidays are suggested every year, read without writes,
+// and a decision re-prices the day ────────────────────────────────────────
+
+#[sqlx::test]
+async fn reading_the_roster_suggests_holidays_without_writing_them(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // 2028: past the old hard-coded table, the arithmetic calendar answers.
+    let uri = format!("/staff/roster?branch_id={}&from=2028-02-20&to=2028-03-05", f.a);
+    let (st, b) = send!(app, "GET", uri, f.owner_token());
+    assert_eq!(st, 200, "{b}");
+    let names: Vec<&str> = b["holidays"].as_array().unwrap().iter().filter_map(|h| h["name_en"].as_str()).collect();
+    assert!(names.contains(&"Eid al-Fitr"), "2028 still has its Eid: {b}");
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM staff_holidays WHERE org_id = $1")
+        .bind(f.org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0, "a GET never writes (B15)");
+}
+
+#[sqlx::test]
+async fn deciding_a_holiday_takes_back_the_sweeps_absence_and_dismissing_restores_it(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    roster(&pool, &f, f.e, &[f.day_shift]).await;
+    let d = "2026-05-01"; // Labour Day, a suggestion.
+    let rec = record(&pool, &f, f.e, f.day_shift, d, (at(d, "09:00"), at(d, "17:00")), None, "absent").await;
+    rederive(&app, &f, rec).await;
+    assert_eq!(deduction(&pool, rec, "absence").await, DAY);
+    // A day a manager punched stays whatever is decided.
+    let worked = record(&pool, &f, f.x, f.day_shift, d, (at(d, "09:00"), at(d, "17:00")), Some((at(d, "09:00"), at(d, "17:00"))), "present").await;
+
+    // Refusals first (AT-11): a manager can't decide the business's holiday;
+    // an unknown date is not a holiday; a bad decision is refused.
+    let (st, _) = send!(app, "PUT", format!("/staff/holidays/{d}"), f.mgr_token(), json!({ "decision": "holiday" }));
+    assert_eq!(st, 403, "a branch manager");
+    let (st, _) = send!(app, "PUT", "/staff/holidays/2026-05-02".to_string(), f.owner_token(), json!({ "decision": "holiday" }));
+    assert_eq!(st, 404, "not a public holiday");
+    let (st, _) = send!(app, "PUT", format!("/staff/holidays/{d}"), f.owner_token(), json!({ "decision": "maybe" }));
+    assert_eq!(st, 400);
+
+    let (st, b) = send!(app, "PUT", format!("/staff/holidays/{d}"), f.owner_token(), json!({ "decision": "holiday" }));
+    assert_eq!(st, 200, "{b}");
+    assert_eq!(b["decision"], "holiday");
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attendance_records WHERE id = $1").bind(rec).fetch_one(&pool).await.unwrap();
+    assert_eq!(left, 0, "nobody is absent on a holiday (RU-10)");
+    let docked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE employee_id = $1").bind(f.e).fetch_one(&pool).await.unwrap();
+    assert_eq!(docked, 0, "the absence's deduction went with it");
+    let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attendance_records WHERE id = $1").bind(worked).fetch_one(&pool).await.unwrap();
+    assert_eq!(kept, 1, "a worked day stays");
+
+    // Dismissed: a normal day again, the no-show is absent again.
+    let (st, b) = send!(app, "PUT", format!("/staff/holidays/{d}"), f.owner_token(), json!({ "decision": "dismissed" }));
+    assert_eq!(st, 200, "{b}");
+    let back: Uuid = sqlx::query_scalar(
+        "SELECT id FROM attendance_records WHERE employee_id = $1 AND business_date = $2::date AND status = 'absent'",
+    )
+    .bind(f.e)
+    .bind(d)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(deduction(&pool, back, "absence").await, DAY);
+}
+
+#[sqlx::test]
+async fn a_holiday_in_an_approved_month_cant_be_decided(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+         VALUES ($1, 'May', '2026-04-26', '2026-05-25', 'generated')",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, b) = send!(app, "PUT", "/staff/holidays/2026-05-01".to_string(), f.owner_token(), json!({ "decision": "holiday" }));
+    assert_eq!((st, b["code"].as_str()), (409, Some("PERIOD_CLOSED")), "{b}");
+}
+
+// ── RQ-11: overlaps are judged on the shift, not on `on_date + time` ────────
+
+#[sqlx::test]
+async fn a_split_day_takes_one_late_arrival_per_shift_and_a_night_keeps_one(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    roster(&pool, &f, f.e, &[f.morning, f.evening]).await;
+    let d = "2026-08-10";
+    // Both used to start at 00:00 of the date, so the second was refused.
+    file(&app, &f, f.e, json!({ "kind": "late_arrival", "on_date": d, "to_time": "09:30:00" })).await;
+    file(&app, &f, f.e, json!({ "kind": "late_arrival", "on_date": d, "to_time": "17:30:00" })).await;
+    // A second one for the same (morning) shift still overlaps.
+    let (st, b) = send!(app, "POST", "/staff/requests".to_string(), f.owner_token(), json!({ "employee_id": f.e, "kind": "late_arrival", "on_date": d, "to_time": "09:45:00" }));
+    assert_eq!(st, 409, "{b}");
+
+    // A night shift's two excuses after midnight are on the same morning:
+    // they overlap, whatever the calendar date says.
+    roster(&pool, &f, f.x, &[f.night]).await;
+    file(&app, &f, f.x, json!({ "kind": "excuse", "on_date": d, "from_time": "01:00:00", "to_time": "02:00:00" })).await;
+    let (st, b) = send!(app, "POST", "/staff/requests".to_string(), f.owner_token(), json!({ "employee_id": f.x, "kind": "excuse", "on_date": d, "from_time": "01:30:00", "to_time": "03:00:00" }));
+    assert_eq!(st, 409, "{b}");
+    let (from, to): (Option<chrono::NaiveDateTime>, Option<chrono::NaiveDateTime>) = sqlx::query_as(
+        "SELECT window_from, window_to FROM staff_requests WHERE employee_id = $1 AND kind = 'excuse'",
+    )
+    .bind(f.x)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (from.map(|t| t.to_string()), to.map(|t| t.to_string())),
+        (Some("2026-08-11 01:00:00".into()), Some("2026-08-11 02:00:00".into())),
+        "the night's 01:00 is the next morning"
+    );
+}
+
+// ── RQ-9: a shift nobody clocked can still be corrected ─────────────────────
+
+#[sqlx::test]
+async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    roster(&pool, &f, f.e, &[f.day_shift]).await;
+    let d = "2026-08-10";
+    let s = session(&pool, f.e).await;
+    let phone = format!("{}|{}", s.token, s.device);
+
+    // Refusals: a shift not on their roster, a shift that hasn't started.
+    let (st, _) = send!(app, "POST", "/staff/me/requests".to_string(), phone.clone(), json!({ "kind": "correction", "on_date": d, "work_shift_id": f.night, "from_time": "09:00:00", "to_time": "17:00:00" }));
+    assert_eq!(st, 400, "not their shift");
+    let (st, _) = send!(app, "POST", "/staff/me/requests".to_string(), phone.clone(), json!({ "kind": "correction", "on_date": "2099-01-01", "work_shift_id": f.day_shift, "from_time": "09:00:00" }));
+    assert_eq!(st, 400, "not started yet");
+    let (st, _) = send!(app, "POST", "/staff/me/requests".to_string(), phone.clone(), json!({ "kind": "correction", "on_date": d, "from_time": "09:00:00" }));
+    assert_eq!(st, 400, "neither a record nor a shift");
+
+    let (st, corr) = send!(app, "POST", "/staff/me/requests".to_string(), phone.clone(), json!({ "kind": "correction", "on_date": d, "work_shift_id": f.day_shift, "from_time": "09:05:00", "to_time": "17:00:00", "reason": "My phone died" }));
+    assert_eq!(st, 201, "{corr}");
+    assert!(corr["attendance_record_id"].is_null());
+    let (st, _) = send!(app, "POST", "/staff/me/requests".to_string(), phone.clone(), json!({ "kind": "correction", "on_date": d, "work_shift_id": f.day_shift, "from_time": "09:00:00" }));
+    assert_eq!(st, 409, "one correction waits per shift");
+
+    let (st, b) = decide(&app, &f.owner_token(), &corr["id"], json!({ "status": "approved" })).await;
+    assert_eq!(st, 200, "{b}");
+    let rec: Uuid = b["attendance_record_id"].as_str().unwrap().parse().unwrap();
+    let (cin, cout, late, method): (Option<DateTime<Utc>>, Option<DateTime<Utc>>, i32, Option<String>) = sqlx::query_as(
+        "SELECT check_in_at, check_out_at, late_minutes, check_in_method FROM attendance_records WHERE id = $1",
+    )
+    .bind(rec)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((cin, cout), (Some(at(d, "09:05")), Some(at(d, "17:00"))));
+    assert_eq!(late, 5, "lateness is kept (RQ-10)");
+    assert_eq!(method.as_deref(), Some("correction"));
+    assert_eq!(deduction(&pool, rec, "absence").await, 0, "no absence for a worked shift");
 }

@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
@@ -26,6 +26,9 @@ use crate::staff::days::{self, Block};
 use crate::staff::principal::{Me, caller};
 use crate::staff::schedules::{DayTime, ResolvedShift, after_day_change, resolve_range};
 
+pub use super::holidays::{
+    __path_decide_holiday, HolidayDecision, HolidayView, decide_holiday, holidays_in,
+};
 pub use super::suggest::{
     __path_decide_suggestion, __path_fairness, __path_suggestions, DecideSuggestion, FairnessQuery,
     FairnessView, SuggestQuery, Suggestion, decide_suggestion, fairness, precompute, suggestions,
@@ -138,15 +141,6 @@ pub struct RosterPerson {
     /// Who set the preferences last: `employee` or `manager` (SC-12).
     #[sqlx(default)]
     pub prefs_set_by: String,
-}
-
-#[derive(Serialize, ToSchema, sqlx::FromRow, Clone)]
-pub struct HolidayView {
-    pub on_date: NaiveDate,
-    pub name_en: String,
-    pub name_ar: String,
-    /// null = not decided yet: a normal day unless set up (RU-10).
-    pub decision: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1702,118 +1696,7 @@ pub(crate) async fn pos_hourly(
 }
 
 // ── holidays (RU-10) ───────────────────────────────────────────────────────
-
-/// Egypt's public holidays, suggested — never applied automatically. The
-/// Islamic dates are the expected ones and move with the moon; the manager
-/// confirms each.
-fn egypt_holidays(year: i32) -> Vec<(NaiveDate, &'static str, &'static str)> {
-    let d = |m, day| NaiveDate::from_ymd_opt(year, m, day).expect("valid holiday date");
-    let mut out = vec![
-        (d(1, 7), "Coptic Christmas", "عيد الميلاد المجيد"),
-        (d(1, 25), "Revolution Day (25 January)", "عيد ثورة 25 يناير"),
-        (d(4, 25), "Sinai Liberation Day", "عيد تحرير سيناء"),
-        (d(5, 1), "Labour Day", "عيد العمال"),
-        (d(6, 30), "30 June Revolution", "ذكرى ثورة 30 يونيو"),
-        (d(7, 23), "Revolution Day (23 July)", "عيد ثورة 23 يوليو"),
-        (d(10, 6), "Armed Forces Day", "عيد القوات المسلحة"),
-    ];
-    let lunar: &[(u32, u32, &str, &str)] = match year {
-        2026 => &[
-            (3, 20, "Eid al-Fitr", "عيد الفطر"),
-            (5, 27, "Eid al-Adha", "عيد الأضحى"),
-            (6, 16, "Islamic New Year", "رأس السنة الهجرية"),
-            (8, 25, "Prophet's Birthday", "المولد النبوي"),
-        ],
-        2027 => &[
-            (3, 10, "Eid al-Fitr", "عيد الفطر"),
-            (5, 16, "Eid al-Adha", "عيد الأضحى"),
-            (6, 6, "Islamic New Year", "رأس السنة الهجرية"),
-            (8, 15, "Prophet's Birthday", "المولد النبوي"),
-        ],
-        _ => &[],
-    };
-    for &(m, day, en, ar) in lunar {
-        out.push((d(m, day), en, ar));
-    }
-    out
-}
-
-async fn holidays_in(
-    pool: &PgPool,
-    org_id: Uuid,
-    from: NaiveDate,
-    to: NaiveDate,
-) -> Result<Vec<HolidayView>, AppError> {
-    for year in from.year()..=to.year() {
-        for (date, en, ar) in egypt_holidays(year) {
-            if date >= from && date <= to {
-                sqlx::query(
-                    "INSERT INTO staff_holidays (org_id, on_date, name_en, name_ar) \
-                     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                )
-                .bind(org_id)
-                .bind(date)
-                .bind(en)
-                .bind(ar)
-                .execute(pool)
-                .await?;
-            }
-        }
-    }
-    Ok(sqlx::query_as(
-        "SELECT on_date, name_en, name_ar, decision FROM staff_holidays \
-          WHERE org_id = $1 AND on_date BETWEEN $2 AND $3 ORDER BY on_date",
-    )
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
-    .fetch_all(pool)
-    .await?)
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct HolidayDecision {
-    /// `holiday` (nobody marked absent; working it pays the multiplier) or
-    /// `dismissed` (a normal day).
-    pub decision: String,
-}
-
-#[utoipa::path(
-    put, path = "/staff/holidays/{date}", tag = "staff", request_body = HolidayDecision,
-    params(("date" = NaiveDate, Path)),
-    responses((status = 200, body = HolidayView), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn decide_holiday(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    date: web::Path<NaiveDate>,
-    body: web::Json<HolidayDecision>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = crate::staff::scope_org(&req, &claims)?;
-    // A public holiday is the business's, every branch at once (audit B-3).
-    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrSchedulePublish).await?;
-    if body.decision != "holiday" && body.decision != "dismissed" {
-        return Err(AppError::BadRequest(
-            "decision is holiday or dismissed".into(),
-        ));
-    }
-    holidays_in(pool.get_ref(), org_id, *date, *date).await?;
-    let row: HolidayView = sqlx::query_as(
-        "UPDATE staff_holidays SET decision = $3, decided_by = $4 \
-          WHERE org_id = $1 AND on_date = $2 \
-          RETURNING on_date, name_en, name_ar, decision",
-    )
-    .bind(org_id)
-    .bind(*date)
-    .bind(&body.decision)
-    .bind(claims.user_id_safe().ok())
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("No public holiday on that date.".into()))?;
-    Ok(HttpResponse::Ok().json(row))
-}
+// Suggested and decided in [`super::holidays`]; the roster shows them.
 
 // ── Coverage needs (SC-13) ────────────────────────────────────────────────
 

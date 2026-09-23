@@ -172,7 +172,9 @@ pub async fn recompute_for_day(
 /// `amount == 0` means the rule no longer owes anything (a correction fixed the
 /// lateness, say). The existing row is DELETED rather than zeroed, so a payslip
 /// never carries a meaningless "EGP 0" line — but only if no human has touched it,
-/// because a waived row is a record of a decision and must survive.
+/// because a waived row is a record of a decision and must survive. A row a
+/// manager wrote by hand from a flag (`created_by` set, e.g. an unpaid excuse
+/// of a mid-shift absence) is theirs too: never rewritten, never deleted.
 async fn upsert_auto_deduction(
     conn: &mut PgConnection,
     day: &PricedDay,
@@ -183,7 +185,7 @@ async fn upsert_auto_deduction(
     if amount <= 0 {
         let deleted = sqlx::query(
             "DELETE FROM payroll_deductions \
-              WHERE attendance_record_id = $1 AND source = $2 \
+              WHERE attendance_record_id = $1 AND source = $2 AND created_by IS NULL \
                 AND waived_at IS NULL AND overridden_at IS NULL",
         )
         .bind(day.record_id)
@@ -208,7 +210,8 @@ async fn upsert_auto_deduction(
                        reason                   = EXCLUDED.reason, \
                        updated_at               = now() \
               WHERE payroll_deductions.waived_at IS NULL \
-                AND payroll_deductions.overridden_at IS NULL",
+                AND payroll_deductions.overridden_at IS NULL \
+                AND payroll_deductions.created_by IS NULL",
     )
     .bind(day.org_id)
     .bind(day.employee_id)
