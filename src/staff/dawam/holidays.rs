@@ -121,7 +121,9 @@ pub fn egypt_holidays(year: i32) -> Vec<(NaiveDate, &'static str, &'static str)>
                 // they are the same holiday (a day or two apart).
                 .filter(|p| (*p - date).num_days().abs() <= 2)
                 .unwrap_or(date);
-            if !out.iter().any(|(o, _, _)| *o == date) {
+            // Two holidays may share a date (Eid al-Fitr on 25 January
+            // 2031); only the same holiday twice is dropped.
+            if !out.iter().any(|(o, e, _)| *o == date && *e == en) {
                 out.push((date, en, ar));
             }
         }
@@ -131,7 +133,10 @@ pub fn egypt_holidays(year: i32) -> Vec<(NaiveDate, &'static str, &'static str)>
 }
 
 /// The suggestions in `[from, to]`.
-fn suggested_between(from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, &'static str, &'static str)> {
+fn suggested_between(
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Vec<(NaiveDate, &'static str, &'static str)> {
     (from.year()..=to.year())
         .flat_map(egypt_holidays)
         .filter(|(d, _, _)| *d >= from && *d <= to)
@@ -171,10 +176,16 @@ fn merge(
             decision: None,
         })
         .collect();
+    // A decision is the DAY's (one row per date): it covers every holiday
+    // suggested on that date.
     for row in stored {
-        match out.iter_mut().find(|h| h.on_date == row.on_date) {
-            Some(h) => h.decision = row.decision,
-            None => out.push(row),
+        let mut found = false;
+        for h in out.iter_mut().filter(|h| h.on_date == row.on_date) {
+            h.decision = row.decision.clone();
+            found = true;
+        }
+        if !found {
+            out.push(row);
         }
     }
     out.sort_by_key(|h| h.on_date);
@@ -361,8 +372,18 @@ mod tests {
     #[test]
     fn the_published_dates_win_where_known() {
         let y2026 = egypt_holidays(2026);
-        for (m, day, name) in [(3, 20, "Eid al-Fitr"), (5, 27, "Eid al-Adha"), (6, 16, "Islamic New Year"), (8, 25, "Prophet's Birthday")] {
-            assert!(y2026.iter().any(|(date, en, _)| *date == d(2026, m, day) && *en == name), "{name}");
+        for (m, day, name) in [
+            (3, 20, "Eid al-Fitr"),
+            (5, 27, "Eid al-Adha"),
+            (6, 16, "Islamic New Year"),
+            (8, 25, "Prophet's Birthday"),
+        ] {
+            assert!(
+                y2026
+                    .iter()
+                    .any(|(date, en, _)| *date == d(2026, m, day) && *en == name),
+                "{name}"
+            );
         }
     }
 
@@ -375,7 +396,11 @@ mod tests {
             }
         }
         // 2028's Eid al-Fitr is expected late February.
-        let fitr = egypt_holidays(2028).into_iter().find(|(_, en, _)| *en == "Eid al-Fitr").unwrap().0;
+        let fitr = egypt_holidays(2028)
+            .into_iter()
+            .find(|(_, en, _)| *en == "Eid al-Fitr")
+            .unwrap()
+            .0;
         assert!(fitr >= d(2028, 2, 25) && fitr <= d(2028, 2, 28), "{fitr}");
     }
 
@@ -383,7 +408,10 @@ mod tests {
     fn a_holiday_can_fall_twice_in_one_year() {
         // The lunar year is 11 days short: Eid al-Fitr comes twice in 2033
         // (early January and late December).
-        let fitr = egypt_holidays(2033).into_iter().filter(|(_, en, _)| *en == "Eid al-Fitr").count();
+        let fitr = egypt_holidays(2033)
+            .into_iter()
+            .filter(|(_, en, _)| *en == "Eid al-Fitr")
+            .count();
         assert_eq!(fitr, 2);
     }
 
@@ -392,8 +420,18 @@ mod tests {
         let merged = merge(
             vec![(d(2026, 5, 1), "Labour Day", "عيد العمال")],
             vec![
-                HolidayView { on_date: d(2026, 5, 1), name_en: "Labour Day".into(), name_ar: "عيد العمال".into(), decision: Some("holiday".into()) },
-                HolidayView { on_date: d(2026, 5, 2), name_en: "Old".into(), name_ar: "قديم".into(), decision: Some("dismissed".into()) },
+                HolidayView {
+                    on_date: d(2026, 5, 1),
+                    name_en: "Labour Day".into(),
+                    name_ar: "عيد العمال".into(),
+                    decision: Some("holiday".into()),
+                },
+                HolidayView {
+                    on_date: d(2026, 5, 2),
+                    name_en: "Old".into(),
+                    name_ar: "قديم".into(),
+                    decision: Some("dismissed".into()),
+                },
             ],
         );
         assert_eq!(merged.len(), 2);

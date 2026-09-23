@@ -137,7 +137,7 @@ pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), crate::errors::App
 #[doc(hidden)]
 pub async fn open_pay_periods(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     let orgs: Vec<(Uuid, i16, Option<String>)> = sqlx::query_as(&format!(
-        "SELECT o.id, COALESCE(s.period_start_day, 26),                 (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL                   ORDER BY b.created_at LIMIT 1)            FROM organizations o            LEFT JOIN attendance_settings s ON s.org_id = o.id AND s.branch_id IS NULL           WHERE {LIVE_ORG}"
+        "SELECT o.id, COALESCE(s.period_start_day, 26::int2),                 (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL                   ORDER BY b.created_at LIMIT 1)            FROM organizations o            LEFT JOIN attendance_settings s ON s.org_id = o.id AND s.branch_id IS NULL           WHERE {LIVE_ORG}"
     ))
     .fetch_all(pool)
     .await?;

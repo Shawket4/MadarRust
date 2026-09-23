@@ -130,6 +130,16 @@ pub struct StaffRequest {
     #[sqlx(default)]
     #[serde(default)]
     pub record_check_out_at: Option<DateTime<Utc>>,
+    /// The request is the CALLER's own (worked out for whoever asks).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub is_own: bool,
+    /// The caller may approve or reject it now: it is pending, not their own,
+    /// at one of their branches, and — a manager's request — they outrank
+    /// the requester (RQ-5). The same checks the decision makes.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub can_decide: bool,
 }
 
 const REQUEST_SELECT: &str = r#"
@@ -493,7 +503,11 @@ fn place(shift: &LocalShift, date: NaiveDate, time: NaiveTime) -> NaiveDateTime 
     };
     let same = date.and_time(time);
     let next = same + Duration::days(1);
-    if distance(next) < distance(same) { next } else { same }
+    if distance(next) < distance(same) {
+        next
+    } else {
+        same
+    }
 }
 
 /// A timed request's excused window on the branch's wall clock, resolved on
@@ -808,6 +822,54 @@ async fn enrich(pool: &PgPool, rows: &mut [StaffRequest]) -> Result<(), AppError
     Ok(())
 }
 
+/// Fill `is_own` / `can_decide` for the caller, with the same checks
+/// [`decide_request`] makes, so no client guesses them.
+async fn mark_for_caller(
+    pool: &PgPool,
+    org_id: Uuid,
+    claims: Option<&Claims>,
+    my_employee: Option<Uuid>,
+    rows: &mut [StaffRequest],
+) -> Result<(), AppError> {
+    let mut seen: HashMap<Uuid, (bool, bool)> = HashMap::new();
+    for r in rows.iter_mut() {
+        let (own, may) = match seen.get(&r.employee_id) {
+            Some(v) => *v,
+            None => {
+                let subject = access::subject(pool, org_id, r.employee_id).await?;
+                let own =
+                    my_employee == Some(r.employee_id) || claims.is_some_and(|c| subject.is(c));
+                let may = match claims {
+                    Some(c) if !own => {
+                        access::require_for(pool, c, Cap::HrLeaveEdit, &subject)
+                            .await
+                            .is_ok()
+                            && match subject.user_id {
+                                Some(user) if is_decider(pool, Some(user)).await? => {
+                                    crate::permissions::guard::require_dominance(
+                                        pool,
+                                        c,
+                                        user,
+                                        Cap::HrLeaveEdit,
+                                    )
+                                    .await
+                                    .is_ok()
+                                }
+                                _ => true,
+                            }
+                    }
+                    _ => false,
+                };
+                seen.insert(r.employee_id, (own, may));
+                (own, may)
+            }
+        };
+        r.is_own = own;
+        r.can_decide = may && r.status == "pending";
+    }
+    Ok(())
+}
+
 // ── Requests CRUD ─────────────────────────────────────────────
 
 async fn insert_request(
@@ -891,9 +953,7 @@ async fn insert_request(
             }
             // Nobody corrects a shift that hasn't started yet.
             if shifts.iter().any(|s| s.id == shift && s.start > s.now) {
-                return Err(AppError::BadRequest(
-                    "That shift hasn't started yet".into(),
-                ));
+                return Err(AppError::BadRequest("That shift hasn't started yet".into()));
             }
             record_id = sqlx::query_scalar(
                 "SELECT id FROM attendance_records \
@@ -1064,6 +1124,11 @@ pub async fn list_requests(
     .fetch_all(pool.get_ref())
     .await?;
     enrich(pool.get_ref(), &mut rows).await?;
+    let me: Option<Uuid> = req
+        .extensions()
+        .get::<StaffPrincipal>()
+        .map(|m| m.employee_id);
+    mark_for_caller(pool.get_ref(), org_id, Some(&claims), me, &mut rows).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -1097,6 +1162,9 @@ pub async fn create_request_admin(
         body.is_paid,
     )
     .await?;
+    let mut rows = [row];
+    mark_for_caller(pool.get_ref(), org_id, Some(&claims), None, &mut rows).await?;
+    let [row] = rows;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -1121,6 +1189,9 @@ pub async fn create_my_request(
     // A linked, active manager acts through their account (`caller`).
     let claims: Option<Claims> = req.extensions().get::<Claims>().cloned();
     let row = after_filing(pool, org_id, claims.as_ref(), &subject, row, body.is_paid).await?;
+    let mut rows = [row];
+    mark_for_caller(pool, org_id, None, Some(employee_id), &mut rows).await?;
+    let [row] = rows;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -1137,6 +1208,9 @@ pub async fn my_requests(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
     .fetch_all(pool.get_ref())
     .await?;
     enrich(pool.get_ref(), &mut rows).await?;
+    for r in rows.iter_mut() {
+        r.is_own = true;
+    }
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -1310,7 +1384,10 @@ pub async fn decide_request(
         )
         .await;
     }
-    let row = load_request(pool, *id).await?;
+    let mut rows = [load_request(pool, *id).await?];
+    let my_employee = me.as_ref().map(|m| m.employee_id);
+    mark_for_caller(pool, org_id, claims.as_ref(), my_employee, &mut rows).await?;
+    let [row] = rows;
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -1387,7 +1464,9 @@ async fn apply_decision(
     let record = if decision == "approved" && locked.kind == "correction" {
         match (locked.attendance_record_id, locked.work_shift_id) {
             (Some(r), _) => Some(Ok(r)),
-            (None, Some(shift)) => Some(record_for_shift(pool, org_id, id, &locked, shift, actor).await),
+            (None, Some(shift)) => {
+                Some(record_for_shift(pool, org_id, id, &locked, shift, actor).await)
+            }
             (None, None) => None,
         }
     } else {
@@ -1440,7 +1519,9 @@ async fn record_for_shift(
     actor: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
     let Some(branch) = request_branch(pool, request.employee_id, request.on_date).await? else {
-        return Err(AppError::Conflict("That shift is no longer on the roster".into()));
+        return Err(AppError::Conflict(
+            "That shift is no longer on the roster".into(),
+        ));
     };
     let tz = crate::staff::branch_timezone(pool, branch).await?;
     let shift = crate::staff::schedules::resolve_shifts_for(
@@ -1486,11 +1567,13 @@ async fn record_for_shift(
     .await?;
     // From now on the request fixes that record (and the one-live-correction
     // rule per record applies).
-    sqlx::query("UPDATE staff_requests SET attendance_record_id = $2, updated_at = now() WHERE id = $1")
-        .bind(request_id)
-        .bind(record_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE staff_requests SET attendance_record_id = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(request_id)
+    .bind(record_id)
+    .execute(pool)
+    .await?;
     Ok(record_id)
 }
 

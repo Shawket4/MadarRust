@@ -1107,3 +1107,42 @@ async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
     assert_eq!(method.as_deref(), Some("correction"));
     assert_eq!(deduction(&pool, rec, "absence").await, 0, "no absence for a worked shift");
 }
+
+// ── RQ-5: the server says whose request it is and who may decide it ────────
+
+#[sqlx::test]
+async fn every_request_says_whether_the_caller_may_decide_it(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let e_req = file(&app, &f, f.e, json!({ "kind": "leave", "on_date": "2026-08-20" })).await;
+    let mgr_req = file(&app, &f, f.e_mgr, json!({ "kind": "leave", "on_date": "2026-08-21" })).await;
+    let x_req = file(&app, &f, f.x, json!({ "kind": "leave", "on_date": "2026-08-22" })).await;
+    let flags = |list: &Value, id: &Value| {
+        let r = list.as_array().unwrap().iter().find(|r| r["id"] == *id).cloned();
+        r.map(|r| (r["is_own"].as_bool().unwrap(), r["can_decide"].as_bool().unwrap()))
+    };
+
+    // The manager of A: decides Eman, not their own, never sees B.
+    let (st, list) = send!(app, "GET", "/staff/requests".to_string(), f.mgr_token());
+    assert_eq!(st, 200, "{list}");
+    assert_eq!(flags(&list, &e_req["id"]), Some((false, true)));
+    assert_eq!(flags(&list, &mgr_req["id"]), Some((true, false)), "their own");
+    assert_eq!(flags(&list, &x_req["id"]), None, "another branch");
+    // A peer manager can't decide a manager's request; the owner can.
+    let (_, list) = send!(app, "GET", "/staff/requests".to_string(), f.peer_token());
+    assert_eq!(flags(&list, &mgr_req["id"]), Some((false, false)), "a peer is not above them");
+    let (_, list) = send!(app, "GET", "/staff/requests".to_string(), f.owner_token());
+    assert_eq!(flags(&list, &mgr_req["id"]), Some((false, true)));
+    assert_eq!(flags(&list, &x_req["id"]), Some((false, true)));
+
+    // Decided: nobody can decide it again.
+    let (st, row) = decide(&app, &f.owner_token(), &e_req["id"], json!({ "status": "approved", "is_paid": true })).await;
+    assert_eq!(st, 200, "{row}");
+    assert_eq!((row["is_own"].as_bool(), row["can_decide"].as_bool()), (Some(false), Some(false)));
+
+    // The employee's own list: all theirs, none to decide.
+    let s = session(&pool, f.e).await;
+    let (st, mine) = send!(app, "GET", "/staff/me/requests".to_string(), format!("{}|{}", s.token, s.device));
+    assert_eq!(st, 200);
+    assert!(mine.as_array().unwrap().iter().all(|r| r["is_own"] == true && r["can_decide"] == false), "{mine}");
+}
