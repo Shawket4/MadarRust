@@ -9,6 +9,9 @@ default-run = "madar-rust"
 # tag). The registry is generated there, from authz/spec/capabilities.toml.
 # Bump the tag in both repos together; see madar-shared's README.
 madar-authz        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
+# Money rules the till runs too (tax engine, refund split, staff pool/comp,
+# reward cover, POS-metrics average): one copy, in madar-shared, same tag.
+madar-money        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"

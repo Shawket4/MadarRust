@@ -515,15 +515,18 @@ async fn figures_agree_with_branch_sales(pool: PgPool) {
 // must agree field by field. Regenerate after a formula or projection change:
 //
 // ```sh
-// MADAR_WRITE_POS_METRICS_VECTORS=1 cargo nextest run --lib -E 'test(pos_metrics_vectors)'
-// cp tests/fixtures/pos_metrics_vectors.json \
-//    ../madar/rust-core/crates/madar-core/tests/fixtures/pos_metrics_vectors.json
+// MADAR_WRITE_POS_METRICS_VECTORS=1 cargo nextest run --test reports_pos_metrics_tests -E 'test(pos_metrics_vectors)'
 // ```
+//
+// The file lives in madar-shared (`madar_money::vectors::POS_METRICS`), the
+// one copy both sides read. The write goes into the madar-shared checkout
+// beside this one (or `$MADAR_SHARED_DIR`); release it there with a tag.
 
-const VECTORS: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/pos_metrics_vectors.json"
-);
+fn vectors_out() -> std::path::PathBuf {
+    let shared = std::env::var("MADAR_SHARED_DIR")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../madar-shared").into());
+    std::path::Path::new(&shared).join("crates/madar-money/vectors/pos_metrics_vectors.json")
+}
 
 fn vid(label: &str) -> Uuid {
     Uuid::new_v5(
@@ -661,16 +664,13 @@ async fn pos_metrics_vectors(pool: PgPool) {
     vector_scrub(&mut doc);
     let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
     if std::env::var("MADAR_WRITE_POS_METRICS_VECTORS").is_ok() {
-        std::fs::write(VECTORS, &text).unwrap();
+        std::fs::write(vectors_out(), &text).unwrap();
         return;
     }
-    let committed: Value = serde_json::from_str(
-        &std::fs::read_to_string(VECTORS)
-            .expect("tests/fixtures/pos_metrics_vectors.json (regenerate: see the comment above)"),
-    )
-    .unwrap();
+    let committed: Value = serde_json::from_str(madar_money::vectors::POS_METRICS)
+        .expect("madar-money's pos_metrics_vectors.json parses");
     assert_eq!(
         committed, doc,
-        "pos-metrics or its projections changed: regenerate the vectors and copy them to the POS"
+        "pos-metrics or its projections changed: regenerate the vectors into madar-shared"
     );
 }
