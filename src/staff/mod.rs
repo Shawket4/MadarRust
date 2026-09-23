@@ -22,6 +22,9 @@
 //!   a penalty at its source rather than generating one and cancelling it.
 //! - [`penalties`]  — where rules become money. The only writer of automatic
 //!   deductions, and the thing that refuses to overwrite a human's override.
+//! - [`pricing`]    — THE shift-pricing function (AT-9): every figure a shift
+//!   is worth, under the branch's rules, used by penalties, payroll, reports.
+//! - [`period_lock`]— the one notion of a closed month (AD-10, PAY-5/6).
 //! - [`payroll`]    — deductions, bonuses, advances, periods, payslips.
 //! - [`jobs`]       — the nightly sweep: mark absences, close forgotten checkouts.
 //! - [`principal`]  — who is calling: the staff token and its checks.
@@ -35,6 +38,8 @@ pub mod discipline;
 pub mod jobs;
 pub mod payroll;
 pub mod penalties;
+pub mod period_lock;
+pub mod pricing;
 pub mod principal;
 pub mod requests;
 pub mod routes;

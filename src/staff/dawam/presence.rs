@@ -17,7 +17,6 @@ use crate::geo::osrm::{LatLng, haversine_meters};
 use crate::staff::access;
 use crate::staff::attendance::{AttendanceSettings, load_settings, require_active_employee};
 use crate::staff::principal::{Me, caller};
-use crate::staff::rules::PayRates;
 
 /// Two pings in a row outside the fence is "left" (CL-6).
 const OUTSIDE_STREAK: usize = 2;
@@ -420,7 +419,8 @@ pub async fn list_flags(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-/// Minutes away at the person's minute rate, to the nearest 5 EGP (CL-7, RU-12).
+/// Minutes away at the person's minute rate, to the nearest 5 EGP (CL-7,
+/// RU-12): the one pricing function, under the record's branch's rules.
 async fn away_cost(
     pool: &PgPool,
     org_id: Uuid,
@@ -434,27 +434,25 @@ async fn away_cost(
             .fetch_optional(pool)
             .await?
             .unwrap_or(0);
-    let scheduled: Option<i32> = match record_id {
-        Some(id) => sqlx::query_scalar(
-            "SELECT (EXTRACT(EPOCH FROM (scheduled_end_at - scheduled_start_at)) / 60)::int \
+    let (scheduled, branch): (Option<i32>, Option<Uuid>) = match record_id {
+        Some(id) => sqlx::query_as(
+            "SELECT (EXTRACT(EPOCH FROM (scheduled_end_at - scheduled_start_at)) / 60)::int, branch_id \
                FROM attendance_records WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .flatten(),
-        None => None,
+        .unwrap_or((None, None)),
+        None => (None, None),
     };
-    let settings = load_settings(pool, org_id, None).await?;
-    let rates = PayRates::from_base(
+    let settings = load_settings(pool, org_id, branch).await?;
+    let exact = crate::staff::pricing::minutes_piastres(
         salary,
         settings.working_days_per_month,
         i64::from(scheduled.unwrap_or(480).max(1)),
+        i64::from(minutes.max(0)),
     );
-    let exact = rates.minutes_piastres(Decimal::from(minutes.max(0)));
-    // Nearest 500 piastres, halves away from zero.
-    let fives = (exact / Decimal::from(500)).round();
-    Ok((fives * Decimal::from(500)).try_into().unwrap_or(0))
+    Ok(crate::staff::pricing::round_to_five_egp(exact))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -465,6 +463,9 @@ pub struct ResolveFlag {
     /// For `deduct`: the amount the manager typed (CL-7).
     #[serde(default)]
     pub amount_piastres: Option<i64>,
+    /// For `deduct`: why, on the pay line the employee sees (AD-9).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Handle a flag. Nothing is ever charged automatically (CL-6).
@@ -527,7 +528,15 @@ pub async fn resolve_flag(
                 .amount_piastres
                 .filter(|a| *a > 0)
                 .ok_or_else(|| AppError::BadRequest("Type the amount to deduct.".into()))?;
-            ("deducted", amount, "Left mid-shift")
+            (
+                "deducted",
+                amount,
+                body.reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or("Left mid-shift"),
+            )
         }
         "revoke" if kind == "new_phone" => {
             super::revoke_devices(pool, employee_id).await?;
@@ -545,14 +554,17 @@ pub async fn resolve_flag(
                 "You can't add pay lines for yourself.".into(),
             ));
         }
-        let at = access::decision_branch(pool, &claims, Cap::HrAdjustmentsCreate, &subject).await?;
-        let mut ask = AuthzRequest::of(Cap::HrAdjustmentsCreate);
+        if let Some(d) = date {
+            crate::staff::period_lock::assert_open(pool, org_id, d, "this deduction").await?;
+        }
+        let at = access::decision_branch(pool, &claims, Cap::HrDeductionsCreate, &subject).await?;
+        let mut ask = AuthzRequest::of(Cap::HrDeductionsCreate);
         ask.amount = Some(amount);
         let status = match crate::authz::require::decide_for(pool, by, &ask, at).await? {
             Decision::Allow => "approved",
             Decision::NeedsApproval(_) => "pending",
             Decision::Deny(_) => {
-                return Err(crate::authz::require::denied(Cap::HrAdjustmentsCreate));
+                return Err(crate::authz::require::denied(Cap::HrDeductionsCreate));
             }
         };
         let source = if resolution == "deducted" {
@@ -907,16 +919,20 @@ pub async fn decide_overtime(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrOvertimeApprove).await?;
-    let row: Option<(Uuid, Uuid, i32, Option<i32>)> = sqlx::query_as(
-        "SELECT employee_id, branch_id, overtime_minutes, \
-                (EXTRACT(EPOCH FROM (scheduled_end_at - scheduled_start_at)) / 60)::int \
-           FROM attendance_records WHERE id = $1 AND org_id = $2 AND overtime_status = 'pending'",
-    )
-    .bind(*id)
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await?;
-    let Some((employee_id, branch_id, minutes, scheduled)) = row else {
+    let row: Option<(Uuid, Uuid, i32, Option<i32>, NaiveDate, Option<Decimal>, Option<Decimal>)> =
+        sqlx::query_as(
+            "SELECT a.employee_id, a.branch_id, a.overtime_minutes, \
+                    (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int, \
+                    a.business_date, ws.ot_day_multiplier, ws.ot_night_multiplier \
+               FROM attendance_records a LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id \
+              WHERE a.id = $1 AND a.org_id = $2 AND a.overtime_status = 'pending'",
+        )
+        .bind(*id)
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?;
+    let Some((employee_id, branch_id, minutes, scheduled, on_date, shift_day, shift_night)) = row
+    else {
         return Err(AppError::NotFound("No overtime waiting here.".into()));
     };
     let subject = access::subject(pool, org_id, employee_id).await?;
@@ -926,21 +942,37 @@ pub async fn decide_overtime(
         ));
     }
     access::require_at(pool, &claims, org_id, Cap::HrOvertimeApprove, branch_id).await?;
+    // An approved month is a snapshot: its overtime is decided (AD-10).
+    crate::staff::period_lock::assert_open(pool, org_id, on_date, "this overtime").await?;
     if body.approve {
-        let salary: i64 =
-            sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
-                .bind(employee_id)
-                .fetch_optional(pool)
-                .await?
-                .unwrap_or(0);
+        // Priced exactly as payroll will price it (AT-9): the salary in
+        // force that day, the branch's rules, the shift's own rates, and the
+        // night minutes at the night rate (RU-8).
         let settings = load_settings(pool, org_id, Some(branch_id)).await?;
-        let rates = PayRates::from_base(
+        let (salary, night): (i64, i64) = sqlx::query_as(
+            "SELECT COALESCE((SELECT h.base_salary_piastres FROM employee_salary_history h \
+                               WHERE h.employee_id = a.employee_id AND h.effective_from <= a.business_date \
+                               ORDER BY h.effective_from DESC LIMIT 1), e.base_salary_piastres), \
+                    COALESCE(dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $2, $3), 0)::bigint \
+               FROM attendance_records a JOIN employees e ON e.id = a.employee_id \
+               JOIN branches br ON br.id = a.branch_id WHERE a.id = $1",
+        )
+        .bind(*id)
+        .bind(settings.night_start)
+        .bind(settings.night_end)
+        .fetch_one(pool)
+        .await?;
+        let rules = crate::staff::pricing::ShiftRules::from_settings(&settings, shift_day, shift_night);
+        let total = i64::from(minutes.max(0));
+        let night = night.clamp(0, total);
+        let amount = crate::staff::pricing::overtime_piastres(
             salary,
-            settings.working_days_per_month,
+            rules.working_days_per_month,
             i64::from(scheduled.unwrap_or(480).max(1)),
-        );
-        let amount = crate::costing::round_piastres(
-            rates.minutes_piastres(Decimal::from(minutes)) * settings.overtime_day_multiplier,
+            total - night,
+            night,
+            rules.overtime_day_multiplier,
+            rules.overtime_night_multiplier,
         );
         let mut ask = AuthzRequest::of(Cap::HrOvertimeApprove);
         ask.amount = Some(amount);

@@ -81,8 +81,10 @@ pub struct StaffContext {
     /// The HR capabilities I hold (`hr.*` keys) — through my Madar account;
     /// empty for an employee with none. The app gates tabs on these (PM-4).
     pub caps: Vec<String>,
-    /// My ceiling on a bonus/deduction before it waits for the owner; null = none.
+    /// My ceiling on a bonus before it waits for the owner; null = none.
     pub adjustment_limit_piastres: Option<i64>,
+    /// My ceiling on a deduction (AD-5: separate from the bonus limit).
+    pub deduction_limit_piastres: Option<i64>,
     pub advance_limit_percent: Option<i64>,
     pub branches: Vec<ContextBranch>,
     pub people: Vec<ContextPerson>,
@@ -226,6 +228,9 @@ pub async fn my_context(
         caps,
         adjustment_limit_piastres: eff
             .limits_of(Cap::HrAdjustmentsCreate)
+            .get(LimitKey::MaxAmount),
+        deduction_limit_piastres: eff
+            .limits_of(Cap::HrDeductionsCreate)
             .get(LimitKey::MaxAmount),
         advance_limit_percent: eff
             .limits_of(Cap::HrAdvancesDecide)

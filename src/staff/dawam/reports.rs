@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -17,7 +16,6 @@ use crate::errors::{AppError, AppErrorResponse};
 use crate::staff::access;
 use crate::staff::attendance::load_settings;
 use crate::staff::principal::caller;
-use crate::staff::rules::PayRates;
 
 const MAX_DAYS: i64 = 400;
 
@@ -75,11 +73,37 @@ pub async fn labour_vs_sales(
         ));
     }
     let settings = load_settings(pool, org_id, None).await?;
-    let rows: Vec<(NaiveDate, Uuid, i64, Option<i32>, i32, i32)> = sqlx::query_as(
-        "SELECT a.business_date, a.branch_id, p.base_salary_piastres, \
-                (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int, \
-                a.worked_minutes, a.overtime_minutes \
+    // Every worked shift at the person's minute rate that day, plus the
+    // overtime PREMIUM as payroll prices it (the one function, AT-9): the
+    // branch's rules, the shift's own rates, night minutes at the night rate.
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        business_date: NaiveDate,
+        branch_id: Uuid,
+        salary: i64,
+        scheduled: Option<i32>,
+        worked: i32,
+        overtime: i32,
+        night: i64,
+        overtime_status: Option<String>,
+        is_cover: bool,
+        cover_status: Option<String>,
+        shift_day: Option<Decimal>,
+        shift_night: Option<Decimal>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT a.business_date, a.branch_id, \
+                COALESCE((SELECT h.base_salary_piastres FROM employee_salary_history h \
+                           WHERE h.employee_id = a.employee_id AND h.effective_from <= a.business_date \
+                           ORDER BY h.effective_from DESC LIMIT 1), p.base_salary_piastres) AS salary, \
+                (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int AS scheduled, \
+                COALESCE(a.worked_minutes, 0) AS worked, COALESCE(a.overtime_minutes, 0) AS overtime, \
+                COALESCE(dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $5, $6), 0)::bigint AS night, \
+                a.overtime_status, a.covered_employee_id IS NOT NULL AS is_cover, a.cover_status, \
+                ws.ot_day_multiplier AS shift_day, ws.ot_night_multiplier AS shift_night \
            FROM attendance_records a JOIN employees p ON p.id = a.employee_id \
+           JOIN branches br ON br.id = a.branch_id \
+           LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id \
           WHERE a.org_id = $1 AND a.business_date BETWEEN $2 AND $3 \
             AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4)) AND a.check_in_at IS NOT NULL",
     )
@@ -87,19 +111,46 @@ pub async fn labour_vs_sales(
     .bind(q.from)
     .bind(q.to)
     .bind(scope.as_deref())
+    .bind(settings.night_start)
+    .bind(settings.night_end)
     .fetch_all(pool)
     .await?;
-    let mut days: BTreeMap<(NaiveDate, Uuid), (Decimal, i64)> = BTreeMap::new();
-    for (date, branch, salary, scheduled, worked, overtime) in rows {
-        let rates = PayRates::from_base(
-            salary,
-            settings.working_days_per_month,
-            i64::from(scheduled.unwrap_or(480).max(1)),
+    let mut by_branch: BTreeMap<Uuid, crate::staff::attendance::AttendanceSettings> = BTreeMap::new();
+    let mut days: BTreeMap<(NaiveDate, Uuid), (i64, i64)> = BTreeMap::new();
+    for r in rows {
+        if !by_branch.contains_key(&r.branch_id) {
+            by_branch.insert(r.branch_id, load_settings(pool, org_id, Some(r.branch_id)).await?);
+        }
+        let branch_rules = &by_branch[&r.branch_id];
+        let rules = crate::staff::pricing::ShiftRules::from_settings(branch_rules, r.shift_day, r.shift_night);
+        let scheduled = i64::from(r.scheduled.unwrap_or(480).max(1));
+        if r.is_cover && r.cover_status.as_deref() != Some("confirmed") {
+            continue;
+        }
+        let plain = crate::staff::pricing::minutes_piastres(
+            r.salary,
+            rules.working_days_per_month,
+            scheduled,
+            i64::from(r.worked),
         );
-        let premium = settings.overtime_day_multiplier - Decimal::ONE;
-        let cost = rates.minutes_piastres(Decimal::from(worked))
-            + rates.minutes_piastres(Decimal::from(overtime)) * premium.max(Decimal::ZERO);
-        days.entry((date, branch)).or_default().0 += cost;
+        let premium = if !r.is_cover
+            && crate::staff::pricing::overtime_counts(&rules.overtime_mode, r.overtime_status.as_deref())
+        {
+            let total = i64::from(r.overtime.max(0));
+            let night = r.night.clamp(0, total);
+            crate::staff::pricing::overtime_piastres(
+                r.salary,
+                rules.working_days_per_month,
+                scheduled,
+                total - night,
+                night,
+                (rules.overtime_day_multiplier - Decimal::ONE).max(Decimal::ZERO),
+                (rules.overtime_night_multiplier - Decimal::ONE).max(Decimal::ZERO),
+            )
+        } else {
+            0
+        };
+        days.entry((r.business_date, r.branch_id)).or_default().0 += plain + premium;
     }
     let sales: Vec<(NaiveDate, Uuid, i64)> = sqlx::query_as(
         "SELECT (o.created_at AT TIME ZONE COALESCE(b.timezone::text, 'Africa/Cairo'))::date, \
@@ -126,7 +177,6 @@ pub async fn labour_vs_sales(
     let out: Vec<LabourDay> = days
         .into_iter()
         .map(|((date, branch_id), (labour, sales))| {
-            let labour = labour.round().to_i64().unwrap_or(0);
             LabourDay {
                 date,
                 branch_id,
@@ -247,11 +297,18 @@ pub async fn advances(
     let pool = pool.get_ref();
     check(&q)?;
     let scope = access::scope_at(pool, &claims, org_id, Cap::HrPayrollRead, q.branch_id).await?;
+    // Dated in the person's branch's zone, never the server's (AT-1).
     let salary: Vec<SalaryAdvanceRow> = sqlx::query_as(&format!(
         "SELECT a.id, a.employee_id, p.name AS employee_name, a.amount_piastres, a.remaining_piastres, \
-                a.installments, a.status, (a.created_at AT TIME ZONE 'Africa/Cairo')::date AS given_on \
+                a.installments, a.status, \
+                (COALESCE(a.decided_at, a.created_at) AT TIME ZONE COALESCE(bz.tz, 'Africa/Cairo'))::date AS given_on \
            FROM salary_advances a JOIN employees p ON p.id = a.employee_id \
-          WHERE a.org_id = $1 AND (a.created_at AT TIME ZONE 'Africa/Cairo')::date BETWEEN $2 AND $3 \
+           LEFT JOIN LATERAL (SELECT b.timezone::text AS tz FROM employee_branches eb \
+                               JOIN branches b ON b.id = eb.branch_id \
+                              WHERE eb.employee_id = a.employee_id ORDER BY eb.assigned_at LIMIT 1) bz ON true \
+          WHERE a.org_id = $1 \
+            AND (COALESCE(a.decided_at, a.created_at) AT TIME ZONE COALESCE(bz.tz, 'Africa/Cairo'))::date BETWEEN $2 AND $3 \
+            AND a.status IN ('approved', 'settled') \
             AND {} \
           ORDER BY a.created_at DESC",
         access::in_scope("a.employee_id", 4)

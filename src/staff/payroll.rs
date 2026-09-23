@@ -2,27 +2,28 @@
 //!
 //!   Net = base + overtime + bonuses − deductions − advance installment
 //!
-//! A PAYSLIP IS A SNAPSHOT. Generating a period freezes every figure, including
-//! the individual bonus/deduction/advance rows that fed it, into
-//! `payslips.breakdown`. Editing an attendance record or adding a deduction
-//! afterwards changes nothing until someone regenerates — which is only possible
-//! while the period is still `draft` or `generated`. Once it is `paid` or
-//! `closed`, the numbers are what was paid, and that is the point.
+//! A PAYSLIP IS A SNAPSHOT. Approving (generating) a period freezes every
+//! figure, including the individual bonus/deduction/advance rows that fed it,
+//! into `payslips.breakdown`. From that moment the month is CLOSED
+//! (`period_lock`): nothing dated inside it moves money any more, and the
+//! only way back is a reopen — before anyone is marked paid — which drops the
+//! payslips and makes the month a live preview again.
 //!
-//! REGENERATION IS REVERSIBLE. Generating collects installments against live
-//! salary advances, which mutates `salary_advances.remaining_piastres`. Doing that
-//! twice would collect the same money twice, so regeneration first REFUNDS every
-//! installment recorded in the period's existing payslips, then deletes them, then
-//! recomputes from scratch. The whole thing is one transaction.
+//! ADVANCES ARE A LEDGER. Approving writes one `salary_advance_collections`
+//! row per installment taken; `salary_advances.remaining_piastres` is derived
+//! from that ledger by a database trigger. Dropping a payslip (reopen, delete)
+//! drops its collections and the money comes back by itself — so nothing is
+//! ever collected twice, and any balance can be rebuilt from the rows (AV-6).
+//!
+//! EVERY SHIFT IS PRICED ONCE, in `pricing::price_shift`, under the branch's
+//! rules (AT-9, RU-2): payroll sums what it says for each attendance record,
+//! and reads the penalty rows `penalties` wrote with the same function.
 
-use std::collections::HashMap;
-
-use crate::costing::round_piastres;
+use std::collections::{BTreeMap, HashMap};
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
@@ -31,20 +32,27 @@ use uuid::Uuid;
 
 use crate::{
     auth::jwt::Claims,
-    authz::Cap,
+    authz::{Cap, Decision, Request as AuthzRequest},
     errors::{AppError, AppErrorResponse},
     staff::{
         access,
-        attendance::load_settings,
+        attendance::{AttendanceSettings, load_settings},
+        period_lock,
+        pricing::{self, ShiftFacts, ShiftRules},
         principal::{Me, caller},
-        rules::{PayrollInputs, compute_net_salary, resolve_adjustment_piastres},
-        scope_org, validate_decision,
+        rules::resolve_adjustment_piastres,
+        scope_org,
     },
 };
 
-/// Fallback shift length when an employee has no scheduled window to average —
-/// a standard eight-hour day. Only ever used as the per-minute divisor.
+/// Fallback shift length when a record has no scheduled window — a standard
+/// eight-hour day. Only ever used as the per-minute divisor.
 const DEFAULT_SHIFT_MINUTES: i64 = 480;
+
+/// Statuses that mean the payslips are frozen.
+pub(crate) fn is_closed_status(status: &str) -> bool {
+    matches!(status, "generated" | "paid" | "closed")
+}
 
 // ── Models ────────────────────────────────────────────────────
 
@@ -89,6 +97,7 @@ pub struct SalaryAdvance {
     pub amount_piastres: i64,
     pub installments: i32,
     pub monthly_installment_piastres: i64,
+    /// Derived from the collection ledger (AV-6).
     pub remaining_piastres: i64,
     pub reason: Option<String>,
     pub status: String,
@@ -97,13 +106,24 @@ pub struct SalaryAdvance {
     pub decision_note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The owner's cap on what this person may owe in advances, in piastres
+    /// (AV-5) — the server's figure, so no client recomputes it.
+    #[sqlx(default)]
+    pub cap_piastres: i64,
+    /// What the person owes across their live advances (pending ones count).
+    #[sqlx(default)]
+    pub outstanding_piastres: i64,
 }
 
 const ADVANCE_SELECT: &str = r#"
     SELECT a.id, a.org_id, a.employee_id, e.name AS employee_name, a.amount_piastres,
            a.installments, a.monthly_installment_piastres, a.remaining_piastres,
            a.reason, a.status, a.decided_by, a.decided_at, a.decision_note,
-           a.created_at, a.updated_at
+           a.created_at, a.updated_at,
+           dawam_advance_cap(a.org_id, e.base_salary_piastres) AS cap_piastres,
+           COALESCE((SELECT SUM(o.remaining_piastres) FROM salary_advances o
+                      WHERE o.employee_id = a.employee_id AND o.status IN ('pending', 'approved')), 0)::bigint
+               AS outstanding_piastres
       FROM salary_advances a
       JOIN employees e ON e.id = a.employee_id
 "#;
@@ -126,7 +146,8 @@ pub struct PayrollPeriod {
     pub updated_at: DateTime<Utc>,
 }
 
-const PERIOD_COLS: &str = "id, org_id, name, start_date, end_date, status, employee_count, \
+pub(crate) const PERIOD_COLS: &str =
+    "id, org_id, name, start_date, end_date, status, employee_count, \
      total_net_piastres, generated_at, generated_by, paid_at, closed_at, created_at, updated_at";
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -150,11 +171,15 @@ pub struct Payslip {
     pub net_piastres: i64,
     pub breakdown: serde_json::Value,
     pub generated_at: DateTime<Utc>,
-    /// Paid by `cash` · `bank` · `wallet` (PAY-7); null until marked paid.
+    /// Paid by `cash` · `bank` · `wallet` (PAY-7), or `none` for a payslip
+    /// with nothing to pay, marked by the run itself; null until marked paid.
     #[sqlx(default)]
     pub paid_method: Option<String>,
     #[sqlx(default)]
     pub paid_at: Option<DateTime<Utc>>,
+    /// Who marked it paid (AT-10).
+    #[sqlx(default)]
+    pub paid_by: Option<Uuid>,
     /// What deductions exceeded pay by; carried into the next payslip (PAY-12).
     #[sqlx(default)]
     pub carry_out_piastres: i64,
@@ -167,34 +192,28 @@ pub struct Payslip {
     pub period_start: Option<NaiveDate>,
     #[sqlx(default)]
     pub period_end: Option<NaiveDate>,
+    /// The person's pay method and account at the time of reading, for the
+    /// bank and wallet lists (PAY-8).
+    #[sqlx(default)]
+    pub pay_method: Option<String>,
+    #[sqlx(default)]
+    pub pay_account: Option<String>,
 }
 
-const PAYSLIP_SELECT: &str = r#"
+pub(crate) const PAYSLIP_SELECT: &str = r#"
     SELECT s.id, s.org_id, s.payroll_period_id, s.employee_id, e.name AS employee_name,
            s.base_salary_piastres, s.worked_days, s.absent_days, s.leave_days,
            s.late_minutes, s.overtime_minutes, s.overtime_piastres, s.bonuses_piastres,
            s.deductions_piastres, s.advance_installment_piastres, s.net_piastres,
-           s.breakdown, s.generated_at, s.paid_method, s.paid_at, s.carry_out_piastres,
+           s.breakdown, s.generated_at, s.paid_method, s.paid_at, s.paid_by, s.carry_out_piastres,
            pp.name AS period_name, pp.start_date AS period_start,
-           pp.end_date AS period_end
+           pp.end_date AS period_end, e.pay_method, e.pay_account
       FROM payslips s
       JOIN employees e ON e.id = s.employee_id
       JOIN payroll_periods pp ON pp.id = s.payroll_period_id
 "#;
 
 // ── Requests ──────────────────────────────────────────────────
-
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct CreateAdjustmentRequest {
-    pub employee_id: Uuid,
-    /// Exactly one of `amount_piastres` or `percent_of_base`.
-    #[serde(default)]
-    pub amount_piastres: Option<i64>,
-    #[serde(default)]
-    pub percent_of_base: Option<Decimal>,
-    pub reason: String,
-    pub effective_date: NaiveDate,
-}
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateAdvanceRequest {
@@ -209,18 +228,6 @@ pub struct CreateAdvanceRequest {
     pub reason: Option<String>,
 }
 
-/// Deciding a SALARY ADVANCE. Deliberately not called `DecisionRequest`: staff
-/// requests have their own decision body carrying `is_paid`, and two structs
-/// sharing a name collapse into one OpenAPI schema — which silently gave every
-/// generated client the wrong shape for one of them.
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct AdvanceDecision {
-    /// `approved` | `rejected` | `cancelled`.
-    pub status: String,
-    #[serde(default)]
-    pub note: Option<String>,
-}
-
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreatePeriodRequest {
     pub name: String,
@@ -230,8 +237,13 @@ pub struct CreatePeriodRequest {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct PeriodStatusRequest {
-    /// `draft` | `generated` | `paid` | `closed`.
+    /// `draft` (reopen an approved month, before anyone is paid) or `closed`
+    /// (archive a paid month). Approving is `POST …/generate`; Paid is
+    /// reached by marking everyone paid (PAY-7), never by hand.
     pub status: String,
+    /// Why (AD-9). Required to reopen.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -243,6 +255,105 @@ pub struct AdjustmentQuery {
     pub from: Option<NaiveDate>,
     #[serde(default)]
     pub to: Option<NaiveDate>,
+}
+
+/// The most installments an advance is spread over (AV-3); the dashboard and
+/// the app offer the same range.
+pub const MAX_INSTALLMENTS: i32 = 24;
+
+// ── Audit log (AD-9, AT-10) ───────────────────────────────────
+
+/// One line in the money audit log: who did what to which row, and why.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn audit<'e, E>(
+    conn: E,
+    org_id: Uuid,
+    actor: Option<Uuid>,
+    action: &str,
+    entity: &str,
+    entity_id: Option<Uuid>,
+    employee_id: Option<Uuid>,
+    period_id: Option<Uuid>,
+    reason: Option<&str>,
+    details: serde_json::Value,
+) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query(
+        "INSERT INTO payroll_audit_log (org_id, actor_id, action, entity, entity_id, employee_id, \
+             period_id, reason, details) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(org_id)
+    .bind(actor)
+    .bind(action)
+    .bind(entity)
+    .bind(entity_id)
+    .bind(employee_id)
+    .bind(period_id)
+    .bind(reason)
+    .bind(details)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
+pub struct AuditRow {
+    pub id: Uuid,
+    pub actor_id: Option<Uuid>,
+    pub actor_name: Option<String>,
+    pub action: String,
+    pub entity: String,
+    pub entity_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
+    pub employee_name: Option<String>,
+    pub period_id: Option<Uuid>,
+    pub reason: Option<String>,
+    pub details: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, IntoParams, Debug)]
+#[into_params(parameter_in = Query)]
+pub struct AuditQuery {
+    #[serde(default)]
+    pub employee_id: Option<Uuid>,
+    #[serde(default)]
+    pub period_id: Option<Uuid>,
+}
+
+/// The money audit log: every delete, stop, waive, override, reopen and
+/// payment, with who and why (AD-9, AT-10).
+#[utoipa::path(
+    get, path = "/staff/payroll/audit", tag = "staff", params(AuditQuery),
+    responses((status = 200, body = Vec<AuditRow>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn list_audit(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    query: web::Query<AuditQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRead).await?;
+    let rows = sqlx::query_as::<_, AuditRow>(
+        "SELECT l.id, l.actor_id, u.name AS actor_name, l.action, l.entity, l.entity_id, \
+                l.employee_id, e.name AS employee_name, l.period_id, l.reason, l.details, l.created_at \
+           FROM payroll_audit_log l \
+           LEFT JOIN users u ON u.id = l.actor_id \
+           LEFT JOIN employees e ON e.id = l.employee_id \
+          WHERE l.org_id = $1 AND ($2::uuid IS NULL OR l.employee_id = $2) \
+            AND ($3::uuid IS NULL OR l.period_id = $3) \
+          ORDER BY l.created_at DESC LIMIT 500",
+    )
+    .bind(org_id)
+    .bind(query.employee_id)
+    .bind(query.period_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(rows))
 }
 
 // ── Adjustments (deductions + bonuses) ────────────────────────
@@ -271,6 +382,16 @@ fn adjustment_select(table: &str) -> String {
     )
 }
 
+/// The capability that adds (and so may delete) a line of `table` (AD-5:
+/// bonuses and deductions have separate limits).
+pub(crate) fn create_cap(table: &str) -> Cap {
+    if table == "payroll_deductions" {
+        Cap::HrDeductionsCreate
+    } else {
+        Cap::HrAdjustmentsCreate
+    }
+}
+
 async fn list_adjustments(
     req: &HttpRequest,
     pool: &crate::db::Db,
@@ -279,7 +400,7 @@ async fn list_adjustments(
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(req)?;
     let org_id = scope_org(req, &claims)?;
-    let scope = money_scope(pool.get_ref(), &claims, org_id, Cap::HrAdjustmentsCreate).await?;
+    let scope = money_scope(pool.get_ref(), &claims, org_id, &[create_cap(table)]).await?;
 
     let rows = sqlx::query_as::<_, PayrollAdjustment>(&format!(
         "{} WHERE a.org_id = $1 \
@@ -301,68 +422,8 @@ async fn list_adjustments(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-async fn create_adjustment(
-    req: &HttpRequest,
-    pool: &crate::db::Db,
-    body: &CreateAdjustmentRequest,
-    table: &str,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(req)?;
-    let org_id = scope_org(req, &claims)?;
-    // The unlimited, instantly approved path is the owner's (audit B4): a
-    // manager adds a pay line under their limit through `POST /staff/adjustments`.
-    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollCreate).await?;
-    crate::staff::require_employee_in_org(pool.get_ref(), org_id, body.employee_id).await?;
-
-    let reason = body.reason.trim();
-    if reason.is_empty() {
-        return Err(AppError::BadRequest("A reason is required".into()));
-    }
-    match (body.amount_piastres, body.percent_of_base) {
-        (Some(_), Some(_)) => {
-            return Err(AppError::BadRequest(
-                "Give either an amount or a percentage, not both".into(),
-            ));
-        }
-        (None, None) => {
-            return Err(AppError::BadRequest(
-                "Give either an amount or a percentage".into(),
-            ));
-        }
-        (Some(amount), None) if amount <= 0 => {
-            return Err(AppError::BadRequest("Amount must be positive".into()));
-        }
-        (None, Some(percent)) if percent <= Decimal::ZERO => {
-            return Err(AppError::BadRequest("Percentage must be positive".into()));
-        }
-        _ => {}
-    }
-
-    let id = sqlx::query_scalar::<_, Uuid>(&format!(
-        "INSERT INTO {table} (org_id, employee_id, amount_piastres, percent_of_base, reason, \
-                              effective_date, source, status, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'approved', $7) RETURNING id"
-    ))
-    .bind(org_id)
-    .bind(body.employee_id)
-    .bind(body.amount_piastres)
-    .bind(body.percent_of_base)
-    .bind(reason)
-    .bind(body.effective_date)
-    .bind(claims.user_id_safe().ok())
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    let row = sqlx::query_as::<_, PayrollAdjustment>(&format!(
-        "{} WHERE a.id = $1",
-        adjustment_select(table)
-    ))
-    .bind(id)
-    .fetch_one(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::Created().json(row))
-}
-
+/// Delete a MANUAL line while its month is still open (AD-7, AD-10). Rule-made
+/// lines are never deleted: they are waived or overridden, with a reason.
 async fn delete_adjustment(
     req: &HttpRequest,
     pool: &crate::db::Db,
@@ -371,19 +432,55 @@ async fn delete_adjustment(
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(req)?;
     let org_id = scope_org(req, &claims)?;
-    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollDelete).await?;
+    let cap = create_cap(table);
+    access::gate(pool.get_ref(), &claims, org_id, cap).await?;
 
-    let deleted = sqlx::query(&format!(
-        "DELETE FROM {table} WHERE id = $1 AND org_id = $2"
+    let row: Option<(Uuid, String, NaiveDate, String, Option<i64>)> = sqlx::query_as(&format!(
+        "SELECT employee_id, source, effective_date, reason, amount_piastres \
+           FROM {table} WHERE id = $1 AND org_id = $2"
     ))
     .bind(id)
     .bind(org_id)
-    .execute(pool.get_ref())
+    .fetch_optional(pool.get_ref())
+    .await?;
+    let Some((employee_id, source, effective_date, reason, amount)) = row else {
+        return Err(AppError::NotFound("Adjustment not found".into()));
+    };
+    let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, cap, &subject).await?;
+    if source != "manual" {
+        return Err(AppError::Conflict(
+            "A rule-made line is never deleted: waive or override it, with a reason.".into(),
+        ));
+    }
+    period_lock::assert_open(pool.get_ref(), org_id, effective_date, "a pay line").await?;
+
+    let mut tx = pool.begin().await?;
+    let deleted = sqlx::query(&format!(
+        "DELETE FROM {table} WHERE id = $1 AND org_id = $2 AND source = 'manual'"
+    ))
+    .bind(id)
+    .bind(org_id)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
     if deleted == 0 {
         return Err(AppError::NotFound("Adjustment not found".into()));
     }
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "adjustment.delete",
+        table,
+        Some(id),
+        Some(employee_id),
+        None,
+        None,
+        json!({ "reason": reason, "amount_piastres": amount, "effective_date": effective_date }),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -401,22 +498,13 @@ pub async fn list_deductions(
 }
 
 #[utoipa::path(
-    post, path = "/staff/payroll/deductions", tag = "staff", request_body = CreateAdjustmentRequest,
-    responses((status = 201, description = "Deduction created", body = PayrollAdjustment), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn create_deduction(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    body: web::Json<CreateAdjustmentRequest>,
-) -> Result<HttpResponse, AppError> {
-    create_adjustment(&req, &pool, &body, "payroll_deductions").await
-}
-
-#[utoipa::path(
     delete, path = "/staff/payroll/deductions/{id}", tag = "staff",
     params(("id" = Uuid, Path, description = "Deduction ID")),
-    responses((status = 204, description = "Deduction deleted"), AppErrorResponse),
+    responses(
+        (status = 204, description = "Deduction deleted"),
+        (status = 409, description = "Rule-made, or its month is approved"),
+        AppErrorResponse,
+    ),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_deduction(
@@ -441,22 +529,13 @@ pub async fn list_bonuses(
 }
 
 #[utoipa::path(
-    post, path = "/staff/payroll/bonuses", tag = "staff", request_body = CreateAdjustmentRequest,
-    responses((status = 201, description = "Bonus created", body = PayrollAdjustment), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn create_bonus(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    body: web::Json<CreateAdjustmentRequest>,
-) -> Result<HttpResponse, AppError> {
-    create_adjustment(&req, &pool, &body, "payroll_bonuses").await
-}
-
-#[utoipa::path(
     delete, path = "/staff/payroll/bonuses/{id}", tag = "staff",
     params(("id" = Uuid, Path, description = "Bonus ID")),
-    responses((status = 204, description = "Bonus deleted"), AppErrorResponse),
+    responses(
+        (status = 204, description = "Bonus deleted"),
+        (status = 409, description = "Its month is approved"),
+        AppErrorResponse,
+    ),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_bonus(
@@ -484,11 +563,41 @@ pub struct WaiveDeductionRequest {
     pub reason: String,
 }
 
+/// The deduction a waive/override/unwaive acts on, once the caller may edit
+/// that person's pay and its month is still open.
+async fn deduction_for_edit(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+    id: Uuid,
+    what: &str,
+) -> Result<(Uuid, NaiveDate, i64, bool), AppError> {
+    let row: Option<(Uuid, NaiveDate, i64, bool)> = sqlx::query_as(
+        "SELECT employee_id, effective_date, amount_piastres, waived_at IS NOT NULL \
+           FROM payroll_deductions WHERE id = $1 AND org_id = $2",
+    )
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Err(AppError::NotFound("Deduction not found".into()));
+    };
+    let subject = access::subject(pool, org_id, row.0).await?;
+    access::require_for(pool, claims, Cap::HrPayrollEdit, &subject).await?;
+    period_lock::assert_open(pool, org_id, row.1, what).await?;
+    Ok(row)
+}
+
 #[utoipa::path(
     patch, path = "/staff/payroll/deductions/{id}/override", tag = "staff",
     params(("id" = Uuid, Path, description = "Deduction ID")),
     request_body = OverrideDeductionRequest,
-    responses((status = 200, description = "Deduction overridden", body = PayrollAdjustment), AppErrorResponse),
+    responses(
+        (status = 200, description = "Deduction overridden", body = PayrollAdjustment),
+        (status = 409, description = "Waived (final), or its month is approved"),
+        AppErrorResponse,
+    ),
     security(("bearer_jwt" = []))
 )]
 pub async fn override_deduction(
@@ -500,7 +609,8 @@ pub async fn override_deduction(
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
-    require_deduction_edit(pool.get_ref(), &claims, org_id, *id).await?;
+    let (employee_id, _, current, waived) =
+        deduction_for_edit(pool.get_ref(), &claims, org_id, *id, "an override").await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
@@ -509,7 +619,34 @@ pub async fn override_deduction(
     if body.amount_piastres < 0 {
         return Err(AppError::BadRequest("Amount cannot be negative".into()));
     }
+    // A waived line is final (AD-8): no override brings it back or changes it.
+    if waived {
+        return Err(AppError::Conflict(
+            "This deduction was waived — a waiver is final.".into(),
+        ));
+    }
+    // Raising a deduction is adding one: the increase is judged against the
+    // caller's deduction limit (AD-5). Lowering it is a partial waiver.
+    if body.amount_piastres > current {
+        let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
+        let branch =
+            access::decision_branch(pool.get_ref(), &claims, Cap::HrDeductionsCreate, &subject)
+                .await?;
+        let mut ask = AuthzRequest::of(Cap::HrDeductionsCreate);
+        ask.amount = Some(body.amount_piastres - current);
+        match crate::authz::require::decide_for(pool.get_ref(), claims.user_id_safe()?, &ask, branch)
+            .await?
+        {
+            Decision::Allow => {}
+            _ => {
+                return Err(AppError::Forbidden(
+                    "Raising this deduction is above your limit — the owner can override it.".into(),
+                ));
+            }
+        }
+    }
 
+    let mut tx = pool.begin().await?;
     // `original_amount_piastres` is only ever set from the CURRENT amount when it
     // is still NULL, so overriding twice does not lose what the rule first said.
     let updated = sqlx::query(
@@ -517,19 +654,33 @@ pub async fn override_deduction(
              original_amount_piastres = COALESCE(original_amount_piastres, amount_piastres), \
              amount_piastres = $3, overridden_at = now(), overridden_by = $4, \
              override_reason = $5, updated_at = now() \
-          WHERE id = $1 AND org_id = $2",
+          WHERE id = $1 AND org_id = $2 AND waived_at IS NULL",
     )
     .bind(*id)
     .bind(org_id)
     .bind(body.amount_piastres)
     .bind(claims.user_id_safe().ok())
     .bind(reason)
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await?
     .rows_affected();
     if updated == 0 {
         return Err(AppError::NotFound("Deduction not found".into()));
     }
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "deduction.override",
+        "payroll_deductions",
+        Some(*id),
+        Some(employee_id),
+        None,
+        Some(reason),
+        json!({ "from_piastres": current, "to_piastres": body.amount_piastres }),
+    )
+    .await?;
+    tx.commit().await?;
 
     let row = sqlx::query_as::<_, PayrollAdjustment>(&format!(
         "{} WHERE a.id = $1",
@@ -545,7 +696,11 @@ pub async fn override_deduction(
     patch, path = "/staff/payroll/deductions/{id}/waive", tag = "staff",
     params(("id" = Uuid, Path, description = "Deduction ID")),
     request_body = WaiveDeductionRequest,
-    responses((status = 200, description = "Deduction waived", body = PayrollAdjustment), AppErrorResponse),
+    responses(
+        (status = 200, description = "Deduction waived", body = PayrollAdjustment),
+        (status = 409, description = "Its month is approved"),
+        AppErrorResponse,
+    ),
     security(("bearer_jwt" = []))
 )]
 pub async fn waive_deduction(
@@ -557,13 +712,15 @@ pub async fn waive_deduction(
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
-    require_deduction_edit(pool.get_ref(), &claims, org_id, *id).await?;
+    let (employee_id, _, amount, _) =
+        deduction_for_edit(pool.get_ref(), &claims, org_id, *id, "a waiver").await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
         return Err(AppError::BadRequest("A waiver needs a reason".into()));
     }
 
+    let mut tx = pool.begin().await?;
     // Deliberately NOT a delete. The row stays so the decision is on the record,
     // and so the nightly sweep sees it and leaves it alone instead of recreating
     // the penalty the manager just forgave.
@@ -577,7 +734,7 @@ pub async fn waive_deduction(
     .bind(org_id)
     .bind(claims.user_id_safe().ok())
     .bind(reason)
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await?
     .rows_affected();
     if updated == 0 {
@@ -585,7 +742,85 @@ pub async fn waive_deduction(
             "Deduction not found, or already waived".into(),
         ));
     }
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "deduction.waive",
+        "payroll_deductions",
+        Some(*id),
+        Some(employee_id),
+        None,
+        Some(reason),
+        json!({ "amount_piastres": amount }),
+    )
+    .await?;
+    tx.commit().await?;
 
+    let row = sqlx::query_as::<_, PayrollAdjustment>(&format!(
+        "{} WHERE a.id = $1",
+        adjustment_select("payroll_deductions")
+    ))
+    .bind(*id)
+    .fetch_one(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
+/// Undo a waiver, with a reason (AT-7): the line counts again at the amount
+/// it had. Only while the month is open.
+#[utoipa::path(
+    patch, path = "/staff/payroll/deductions/{id}/unwaive", tag = "staff",
+    params(("id" = Uuid, Path, description = "Deduction ID")),
+    request_body = WaiveDeductionRequest,
+    responses(
+        (status = 200, description = "Waiver undone", body = PayrollAdjustment),
+        (status = 409, description = "Its month is approved"),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn unwaive_deduction(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    body: web::Json<WaiveDeductionRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
+    let (employee_id, _, amount, waived) =
+        deduction_for_edit(pool.get_ref(), &claims, org_id, *id, "undoing a waiver").await?;
+    let reason = body.reason.trim();
+    if reason.is_empty() {
+        return Err(AppError::BadRequest("Undoing a waiver needs a reason".into()));
+    }
+    if !waived {
+        return Err(AppError::Conflict("This deduction is not waived.".into()));
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE payroll_deductions SET waived_at = NULL, waived_by = NULL, waive_reason = NULL, \
+             updated_at = now() WHERE id = $1 AND org_id = $2",
+    )
+    .bind(*id)
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await?;
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "deduction.unwaive",
+        "payroll_deductions",
+        Some(*id),
+        Some(employee_id),
+        None,
+        Some(reason),
+        json!({ "amount_piastres": amount }),
+    )
+    .await?;
+    tx.commit().await?;
     let row = sqlx::query_as::<_, PayrollAdjustment>(&format!(
         "{} WHERE a.id = $1",
         adjustment_select("payroll_deductions")
@@ -611,7 +846,7 @@ pub async fn list_advances(
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
     // Payroll readers, and whoever decides advances, for their branches (B15).
-    let scope = money_scope(pool.get_ref(), &claims, org_id, Cap::HrAdvancesDecide).await?;
+    let scope = money_scope(pool.get_ref(), &claims, org_id, &[Cap::HrAdvancesDecide]).await?;
 
     let rows = sqlx::query_as::<_, SalaryAdvance>(&format!(
         "{ADVANCE_SELECT} WHERE a.org_id = $1 AND ($2::uuid IS NULL OR a.employee_id = $2) \
@@ -626,26 +861,29 @@ pub async fn list_advances(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-async fn insert_advance(
+/// Validate an advance's shape; returns the monthly installment.
+pub(crate) fn installment_of(amount: i64, installments: i32) -> Result<i64, AppError> {
+    if amount <= 0 {
+        return Err(AppError::BadRequest("Amount must be positive".into()));
+    }
+    if !(1..=MAX_INSTALLMENTS).contains(&installments) {
+        return Err(AppError::BadRequest(format!(
+            "Installments must be between 1 and {MAX_INSTALLMENTS}"
+        )));
+    }
+    // Round the installment UP so the final one is the small remainder rather
+    // than leaving a few piastres outstanding forever.
+    Ok((amount as u64).div_ceil(installments as u64) as i64)
+}
+
+pub(crate) async fn insert_advance(
     pool: &PgPool,
     org_id: Uuid,
     employee_id: Uuid,
     body: &CreateAdvanceRequest,
 ) -> Result<SalaryAdvance, AppError> {
-    if body.amount_piastres <= 0 {
-        return Err(AppError::BadRequest("Amount must be positive".into()));
-    }
     let installments = body.installments.unwrap_or(1);
-    if installments <= 0 {
-        return Err(AppError::BadRequest(
-            "Installments must be at least 1".into(),
-        ));
-    }
-    // Round the installment UP so the final one is the small remainder rather
-    // than leaving a few piastres outstanding forever.
-    // Both operands are checked positive above, so the unsigned round-trip is
-    // safe — and `div_ceil` is only stable for unsigned integers.
-    let monthly = (body.amount_piastres as u64).div_ceil(installments as u64) as i64;
+    let monthly = installment_of(body.amount_piastres, installments)?;
 
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO salary_advances (org_id, employee_id, amount_piastres, installments, \
@@ -666,6 +904,10 @@ async fn insert_advance(
     .fetch_one(pool)
     .await?;
 
+    load_advance(pool, id).await
+}
+
+pub(crate) async fn load_advance(pool: &PgPool, id: Uuid) -> Result<SalaryAdvance, AppError> {
     Ok(
         sqlx::query_as::<_, SalaryAdvance>(&format!("{ADVANCE_SELECT} WHERE a.id = $1"))
             .bind(id)
@@ -674,9 +916,12 @@ async fn insert_advance(
     )
 }
 
+/// Record an ask on someone's behalf: it still waits for a decision
+/// (`PATCH /staff/advances/{id}/review`). To hand one over at once, use
+/// `POST /staff/advances/record`.
 #[utoipa::path(
     post, path = "/staff/payroll/advances", tag = "staff", request_body = CreateAdvanceRequest,
-    responses((status = 201, description = "Advance created", body = SalaryAdvance), AppErrorResponse),
+    responses((status = 201, description = "Advance created (pending)", body = SalaryAdvance), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn create_advance_admin(
@@ -691,7 +936,6 @@ pub async fn create_advance_admin(
         .employee_id
         .ok_or_else(|| AppError::BadRequest("employee_id is required".into()))?;
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
-    // Recording an ask on someone's behalf: it still waits for a decision.
     access::require_for(pool.get_ref(), &claims, Cap::HrAdvancesDecide, &subject).await?;
 
     let row = insert_advance(pool.get_ref(), org_id, employee_id, &body).await?;
@@ -727,57 +971,6 @@ pub async fn my_advances(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
     Ok(HttpResponse::Ok().json(rows))
 }
 
-#[utoipa::path(
-    patch, path = "/staff/payroll/advances/{id}/decision", tag = "staff",
-    params(("id" = Uuid, Path, description = "Advance ID")),
-    request_body = AdvanceDecision,
-    responses((status = 200, description = "Decision recorded", body = SalaryAdvance), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn decide_advance(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    id: web::Path<Uuid>,
-    body: web::Json<AdvanceDecision>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    // No cap and no limit on this path, so it is the owner's (audit B4); a
-    // manager decides through `PATCH /staff/advances/{id}/review`.
-    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
-    let decision = validate_decision(&body.status)?;
-
-    let updated = sqlx::query(
-        "UPDATE salary_advances SET status = $3, decided_by = $4, decided_at = now(), \
-             decision_note = $5, updated_at = now() \
-          WHERE id = $1 AND org_id = $2 AND status = 'pending'",
-    )
-    .bind(*id)
-    .bind(org_id)
-    .bind(decision)
-    .bind(claims.user_id_safe().ok())
-    .bind(
-        body.note
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty()),
-    )
-    .execute(pool.get_ref())
-    .await?
-    .rows_affected();
-    if updated == 0 {
-        return Err(AppError::Conflict(
-            "This advance has already been decided".into(),
-        ));
-    }
-
-    let row = sqlx::query_as::<_, SalaryAdvance>(&format!("{ADVANCE_SELECT} WHERE a.id = $1"))
-        .bind(*id)
-        .fetch_one(pool.get_ref())
-        .await?;
-    Ok(HttpResponse::Ok().json(row))
-}
-
 // ── Periods ───────────────────────────────────────────────────
 
 #[utoipa::path(
@@ -801,7 +994,11 @@ pub async fn list_periods(req: HttpRequest, pool: crate::db::Db) -> Result<HttpR
 
 #[utoipa::path(
     post, path = "/staff/payroll/periods", tag = "staff", request_body = CreatePeriodRequest,
-    responses((status = 201, description = "Period created", body = PayrollPeriod), AppErrorResponse),
+    responses(
+        (status = 201, description = "Period created", body = PayrollPeriod),
+        (status = 409, description = "Overlaps an existing period"),
+        AppErrorResponse,
+    ),
     security(("bearer_jwt" = []))
 )]
 pub async fn create_period(
@@ -821,6 +1018,22 @@ pub async fn create_period(
     if body.end_date < body.start_date {
         return Err(AppError::BadRequest("End date is before start date".into()));
     }
+    // Two periods that overlap would each pay the base and each collect an
+    // installment (B8). The database refuses it too; this is the readable answer.
+    let overlaps: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM payroll_periods \
+          WHERE org_id = $1 AND start_date <= $3 AND end_date >= $2)",
+    )
+    .bind(org_id)
+    .bind(body.start_date)
+    .bind(body.end_date)
+    .fetch_one(pool.get_ref())
+    .await?;
+    if overlaps {
+        return Err(AppError::Conflict(
+            "That span overlaps a period that already exists.".into(),
+        ));
+    }
 
     let row = sqlx::query_as::<_, PayrollPeriod>(&format!(
         "INSERT INTO payroll_periods (org_id, name, start_date, end_date) \
@@ -835,11 +1048,20 @@ pub async fn create_period(
     Ok(HttpResponse::Created().json(row))
 }
 
+/// Reopen an approved month (before anyone is paid) or close a paid one.
+///
+/// Reopening DROPS the frozen payslips: their advance collections go with
+/// them (the ledger trigger refunds), so the live preview reads exactly what
+/// re-approving will collect (PAY-2, PAY-6, audit B7).
 #[utoipa::path(
     patch, path = "/staff/payroll/periods/{id}/status", tag = "staff",
     params(("id" = Uuid, Path, description = "Period ID")),
     request_body = PeriodStatusRequest,
-    responses((status = 200, description = "Status changed", body = PayrollPeriod), AppErrorResponse),
+    responses(
+        (status = 200, description = "Status changed", body = PayrollPeriod),
+        (status = 409, description = "Not a move this period can make"),
+        AppErrorResponse,
+    ),
     security(("bearer_jwt" = []))
 )]
 pub async fn set_period_status(
@@ -853,71 +1075,121 @@ pub async fn set_period_status(
     // Approving, reopening, paying and closing are the payroll run (RO-9).
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
 
-    let target = match body.status.as_str() {
-        s @ ("draft" | "generated" | "paid" | "closed") => s,
-        other => {
-            return Err(AppError::BadRequest(format!(
-                "Unknown period status '{other}' — expected draft, generated, paid, or closed"
-            )));
-        }
-    };
-
-    let current: String =
-        sqlx::query_scalar("SELECT status FROM payroll_periods WHERE id = $1 AND org_id = $2")
-            .bind(*id)
-            .bind(org_id)
-            .fetch_optional(pool.get_ref())
-            .await?
-            .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
-
-    // Money that has been paid does not become unpaid. Once a period is `paid`
-    // the only move left is `closed`.
-    let allowed = match current.as_str() {
-        "draft" => matches!(target, "draft" | "generated"),
-        "generated" => matches!(target, "draft" | "generated" | "paid"),
-        "paid" => matches!(target, "paid" | "closed"),
-        "closed" => target == "closed",
-        _ => false,
-    };
-    if !allowed {
-        return Err(AppError::Conflict(format!(
-            "A {current} period cannot move to {target}"
-        )));
-    }
-    // PAY-8: reopening is only possible while nobody has been paid.
-    if current == "generated" && target == "draft" {
-        let any_paid: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM payslips WHERE payroll_period_id = $1 AND paid_at IS NOT NULL)",
-        )
-        .bind(*id)
-        .fetch_one(pool.get_ref())
-        .await?;
-        if any_paid {
-            return Err(AppError::Conflict(
-                "Someone has already been paid — this payroll can't be reopened.".into(),
-            ));
-        }
-    }
-
-    let row = sqlx::query_as::<_, PayrollPeriod>(&format!(
-        "UPDATE payroll_periods SET status = $3, \
-             paid_at   = CASE WHEN $3 = 'paid'   THEN now() ELSE paid_at   END, \
-             closed_at = CASE WHEN $3 = 'closed' THEN now() ELSE closed_at END, \
-             updated_at = now() \
-          WHERE id = $1 AND org_id = $2 RETURNING {PERIOD_COLS}"
-    ))
+    let mut tx = pool.begin().await?;
+    let current: String = sqlx::query_scalar(
+        "SELECT status FROM payroll_periods WHERE id = $1 AND org_id = $2 FOR UPDATE",
+    )
     .bind(*id)
     .bind(org_id)
-    .bind(target)
-    .fetch_one(pool.get_ref())
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
+    let reason = body.reason.as_deref().map(str::trim).filter(|r| !r.is_empty());
+
+    match (current.as_str(), body.status.as_str()) {
+        ("generated", "draft") => {
+            let Some(reason) = reason else {
+                return Err(AppError::BadRequest("Reopening needs a reason".into()));
+            };
+            // PAY-6: only while nobody has been paid — a 'none' mark by the run
+            // itself (nothing to pay) is not a payment.
+            let any_paid: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM payslips WHERE payroll_period_id = $1 \
+                    AND paid_at IS NOT NULL AND paid_method <> 'none')",
+            )
+            .bind(*id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if any_paid {
+                return Err(AppError::Conflict(
+                    "Someone has already been paid — this payroll can't be reopened.".into(),
+                ));
+            }
+            let dropped = sqlx::query("DELETE FROM payslips WHERE payroll_period_id = $1")
+                .bind(*id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            sqlx::query(
+                "UPDATE payroll_periods SET status = 'draft', employee_count = 0, \
+                     total_net_piastres = 0, generated_at = NULL, generated_by = NULL, \
+                     updated_at = now() WHERE id = $1",
+            )
+            .bind(*id)
+            .execute(&mut *tx)
+            .await?;
+            audit(
+                &mut *tx,
+                org_id,
+                claims.user_id_safe().ok(),
+                "period.reopen",
+                "payroll_periods",
+                Some(*id),
+                None,
+                Some(*id),
+                Some(reason),
+                json!({ "payslips_dropped": dropped }),
+            )
+            .await?;
+        }
+        ("paid", "closed") => {
+            sqlx::query(
+                "UPDATE payroll_periods SET status = 'closed', closed_at = now(), updated_at = now() \
+                  WHERE id = $1",
+            )
+            .bind(*id)
+            .execute(&mut *tx)
+            .await?;
+            audit(
+                &mut *tx,
+                org_id,
+                claims.user_id_safe().ok(),
+                "period.close",
+                "payroll_periods",
+                Some(*id),
+                None,
+                Some(*id),
+                reason,
+                json!({}),
+            )
+            .await?;
+        }
+        (_, "generated") => {
+            return Err(AppError::Conflict(
+                "Approve a month with POST …/generate; it freezes the payslips.".into(),
+            ));
+        }
+        (_, "paid") => {
+            return Err(AppError::Conflict(
+                "A month is Paid when every payslip is marked paid — never by hand (PAY-7).".into(),
+            ));
+        }
+        (cur, target) => {
+            return Err(AppError::Conflict(format!(
+                "A {cur} period cannot move to {target}"
+            )));
+        }
+    }
+    let row = sqlx::query_as::<_, PayrollPeriod>(&format!(
+        "SELECT {PERIOD_COLS} FROM payroll_periods WHERE id = $1"
+    ))
+    .bind(*id)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(HttpResponse::Ok().json(row))
 }
 
+/// Delete a DRAFT period. An approved month is reopened first (which is
+/// refused once anyone is paid), so a paid payslip can never be wiped (B3).
 #[utoipa::path(
     delete, path = "/staff/payroll/periods/{id}", tag = "staff",
     params(("id" = Uuid, Path, description = "Period ID")),
-    responses((status = 204, description = "Period deleted"), AppErrorResponse),
+    responses(
+        (status = 204, description = "Period deleted"),
+        (status = 409, description = "Only a draft period can be deleted"),
+        AppErrorResponse,
+    ),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_period(
@@ -930,23 +1202,34 @@ pub async fn delete_period(
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
 
     let mut tx = pool.begin().await?;
-    let status: String = sqlx::query_scalar(
-        "SELECT status FROM payroll_periods WHERE id = $1 AND org_id = $2 FOR UPDATE",
+    let (status, name): (String, String) = sqlx::query_as(
+        "SELECT status, name FROM payroll_periods WHERE id = $1 AND org_id = $2 FOR UPDATE",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
-    if status == "paid" || status == "closed" {
+    if status != "draft" {
         return Err(AppError::Conflict(format!(
-            "A {status} period cannot be deleted"
+            "A {status} period cannot be deleted — reopen it first (only before anyone is paid)"
         )));
     }
-
-    // Deleting cascades to the payslips, so the advances they collected against
-    // have to be refunded first or that money silently vanishes.
-    refund_advances(&mut tx, *id).await?;
+    // Any payslips a draft still holds cascade away, and their collections'
+    // trigger gives the advances back.
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "period.delete",
+        "payroll_periods",
+        Some(*id),
+        None,
+        None,
+        None,
+        json!({ "name": name }),
+    )
+    .await?;
     sqlx::query("DELETE FROM payroll_periods WHERE id = $1 AND org_id = $2")
         .bind(*id)
         .bind(org_id)
@@ -957,18 +1240,6 @@ pub async fn delete_period(
 }
 
 // ── Generation ────────────────────────────────────────────────
-
-/// Attendance totals for one employee over the period.
-#[derive(Debug, Default, Clone, Copy)]
-struct AttendanceTotals {
-    worked_days: Decimal,
-    absent_days: Decimal,
-    leave_days: Decimal,
-    late_minutes: i64,
-    overtime_minutes: i64,
-    /// Average scheduled shift length, the per-minute pay divisor.
-    scheduled_minutes: i64,
-}
 
 /// One employee's pay for a period, computed but not yet written.
 ///
@@ -981,13 +1252,15 @@ struct AttendanceTotals {
 pub struct ComputedPayslip {
     pub employee_id: Uuid,
     pub name: String,
+    /// The monthly salary in force at the end of the window.
     pub base_salary_piastres: i64,
     pub worked_days: Decimal,
     pub absent_days: Decimal,
     pub leave_days: Decimal,
     pub late_minutes: i64,
     pub overtime_minutes: i64,
-    /// After the attendance proration — what the days actually worked earn.
+    /// After the calendar-day proration — what the days employed earn, at
+    /// each day's salary (PAY-13).
     pub base_piastres: i64,
     pub overtime_piastres: i64,
     pub bonuses_piastres: i64,
@@ -1009,15 +1282,81 @@ pub struct ComputedPayslip {
     pub advance_applications: Vec<(Uuid, i64)>,
 }
 
-/// Compute every payslip for a window without writing anything.
+/// The whole run's figures, added up by the server (AT-3).
+#[derive(Debug, Serialize, Deserialize, Clone, Default, ToSchema)]
+pub struct PayrollTotals {
+    pub people: i64,
+    pub base_piastres: i64,
+    pub overtime_piastres: i64,
+    pub bonuses_piastres: i64,
+    pub deductions_piastres: i64,
+    pub advances_piastres: i64,
+    pub net_piastres: i64,
+    pub carry_out_piastres: i64,
+}
+
+impl PayrollTotals {
+    pub fn of_computed(slips: &[ComputedPayslip]) -> Self {
+        let mut t = Self::default();
+        for s in slips {
+            t.people += 1;
+            t.base_piastres += s.base_piastres;
+            t.overtime_piastres += s.overtime_piastres;
+            t.bonuses_piastres += s.bonuses_piastres;
+            t.deductions_piastres += s.deductions_piastres;
+            t.advances_piastres += s.advance_installment_piastres;
+            t.net_piastres += s.net_piastres;
+            t.carry_out_piastres += s.carry_out_piastres;
+        }
+        t
+    }
+
+    pub fn of_payslips(slips: &[Payslip]) -> Self {
+        let mut t = Self::default();
+        for s in slips {
+            t.people += 1;
+            t.base_piastres += s.base_salary_piastres;
+            t.overtime_piastres += s.overtime_piastres;
+            t.bonuses_piastres += s.bonuses_piastres;
+            t.deductions_piastres += s.deductions_piastres;
+            t.advances_piastres += s.advance_installment_piastres;
+            t.net_piastres += s.net_piastres;
+            t.carry_out_piastres += s.carry_out_piastres;
+        }
+        t
+    }
+}
+
+/// The rules of every branch of the org, loaded once per run (RU-2).
+async fn rules_by_branch(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+) -> Result<HashMap<Option<Uuid>, AttendanceSettings>, AppError> {
+    let branches: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL")
+            .bind(org_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    let mut out = HashMap::new();
+    out.insert(None, load_settings(&mut *conn, org_id, None).await?);
+    for b in branches {
+        let s = load_settings(&mut *conn, org_id, Some(b)).await?;
+        out.insert(Some(b), s);
+    }
+    Ok(out)
+}
+
+/// Compute every payslip for a window without writing anything. With
+/// `only`, just that person's (the app's estimate, PAY-9).
 pub(crate) async fn compute_payslips(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
     start_date: NaiveDate,
     end_date: NaiveDate,
-    settings: &crate::staff::attendance::AttendanceSettings,
+    settings: &AttendanceSettings,
+    only: Option<Uuid>,
 ) -> Result<Vec<ComputedPayslip>, AppError> {
-    // ── Everyone who was employed during the window ──────────────
+    // ── Everyone on payroll who was employed during the window ──
     #[derive(sqlx::FromRow)]
     struct Staff {
         employee_id: Uuid,
@@ -1031,113 +1370,175 @@ pub(crate) async fn compute_payslips(
                 p.termination_date \
            FROM employees p \
           WHERE p.org_id = $1 \
+            AND p.on_payroll \
             AND p.employment_status <> 'suspended' \
             AND (p.hire_date        IS NULL OR p.hire_date        <= $3) \
             AND (p.termination_date IS NULL OR p.termination_date >= $2) \
+            AND ($4::uuid IS NULL OR p.id = $4) \
           ORDER BY lower(p.name)",
     )
     .bind(org_id)
     .bind(start_date)
     .bind(end_date)
+    .bind(only)
+    .fetch_all(&mut *conn)
+    .await?;
+    if staff.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // ── Salary history (PAY-13) ──────────────────────────────────
+    let history_rows: Vec<(Uuid, NaiveDate, i64)> = sqlx::query_as(
+        "SELECT employee_id, effective_from, base_salary_piastres FROM employee_salary_history \
+          WHERE org_id = $1 AND ($2::uuid IS NULL OR employee_id = $2) \
+          ORDER BY employee_id, effective_from",
+    )
+    .bind(org_id)
+    .bind(only)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut history: HashMap<Uuid, Vec<(NaiveDate, i64)>> = HashMap::new();
+    for (e, from, s) in history_rows {
+        history.entry(e).or_default().push((from, s));
+    }
+
+    // ── Every attendance record in the window, priced one by one ─
+    #[derive(sqlx::FromRow)]
+    struct Rec {
+        employee_id: Uuid,
+        branch_id: Uuid,
+        business_date: NaiveDate,
+        status: String,
+        late_minutes: i32,
+        worked_minutes: i32,
+        overtime_minutes: i32,
+        overtime_status: Option<String>,
+        night_overtime_minutes: i64,
+        scheduled_minutes: Option<i32>,
+        cover_status: Option<String>,
+        is_cover: bool,
+        holiday: bool,
+        unpaid_leave: bool,
+        shift_ot_day: Option<Decimal>,
+        shift_ot_night: Option<Decimal>,
+    }
+    let recs: Vec<Rec> = sqlx::query_as(
+        r#"
+        SELECT a.employee_id, a.branch_id, a.business_date, a.status, a.late_minutes,
+               COALESCE(a.worked_minutes, 0) AS worked_minutes,
+               COALESCE(a.overtime_minutes, 0) AS overtime_minutes, a.overtime_status,
+               COALESCE(dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $5, $6), 0)::bigint
+                   AS night_overtime_minutes,
+               (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int AS scheduled_minutes,
+               a.cover_status,
+               a.covered_employee_id IS NOT NULL AS is_cover,
+               h.on_date IS NOT NULL AS holiday,
+               EXISTS (
+                   SELECT 1 FROM staff_requests r
+                     LEFT JOIN leave_types lt ON lt.id = r.leave_type_id
+                    WHERE r.employee_id = a.employee_id AND r.kind = 'leave'
+                      AND r.status = 'approved' AND NOT COALESCE(r.is_paid, lt.is_paid, true)
+                      AND r.on_date <= a.business_date
+                      AND COALESCE(r.end_date, r.on_date) >= a.business_date
+               ) AS unpaid_leave,
+               ws.ot_day_multiplier AS shift_ot_day, ws.ot_night_multiplier AS shift_ot_night
+          FROM attendance_records a
+          JOIN branches br ON br.id = a.branch_id
+          LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id
+          LEFT JOIN staff_holidays h ON h.org_id = a.org_id AND h.on_date = a.business_date
+                                    AND h.decision = 'holiday'
+         WHERE a.org_id = $1 AND a.business_date BETWEEN $2 AND $3
+           AND ($4::uuid IS NULL OR a.employee_id = $4)
+         ORDER BY a.employee_id, a.business_date
+        "#,
+    )
+    .bind(org_id)
+    .bind(start_date)
+    .bind(end_date)
+    .bind(only)
+    .bind(settings.night_start)
+    .bind(settings.night_end)
     .fetch_all(&mut *conn)
     .await?;
 
-    // ── Attendance totals, one query for the whole org ───────────
-    #[derive(sqlx::FromRow)]
-    struct TotalsRow {
-        employee_id: Uuid,
+    let rules = rules_by_branch(&mut *conn, org_id).await?;
+
+    #[derive(Default)]
+    struct Totals {
         worked_days: Decimal,
         absent_days: Decimal,
         leave_days: Decimal,
         late_minutes: i64,
         overtime_minutes: i64,
         night_overtime_minutes: i64,
-        cover_minutes: i64,
-        holiday_minutes: i64,
-        avg_scheduled_minutes: Option<Decimal>,
+        overtime_piastres: i64,
+        cover_piastres: i64,
+        holiday_piastres: i64,
+        /// Per-shift overtime lines, for the breakdown.
+        shifts: Vec<serde_json::Value>,
     }
-    let totals_rows: Vec<TotalsRow> = sqlx::query_as(
-        r#"
-        SELECT a.employee_id,
-               COALESCE(SUM(CASE WHEN a.status IN ('present','late') THEN 1
-                                 WHEN a.status = 'half_day'          THEN 0.5
-                                 ELSE 0 END), 0)::numeric                     AS worked_days,
-               -- ::numeric on purpose. A SUM over integers comes back BIGINT,
-               -- which does not decode into the Decimal these columns are, and
-               -- the mismatch only surfaces once an org HAS attendance rows —
-               -- i.e. in production, not on an empty test org.
-               COALESCE(SUM(CASE WHEN a.status = 'absent'   THEN 1 ELSE 0 END), 0)::numeric AS absent_days,
-               COALESCE(SUM(CASE WHEN a.status = 'on_leave' THEN 1 ELSE 0 END), 0)::numeric AS leave_days,
-               COALESCE(SUM(a.late_minutes) FILTER (WHERE a.covered_employee_id IS NULL), 0)::bigint
-                                                                              AS late_minutes,
-               -- Overtime is off unless the owner turned it on; in approval mode
-               -- only what a manager approved counts (RU-7). A night shift's
-               -- overtime is priced at the night rate (RU-8).
-               COALESCE(SUM(a.overtime_minutes) FILTER (WHERE a.covered_employee_id IS NULL
-                   AND ($4 = 'automatic' OR ($4 = 'approval' AND a.overtime_status = 'approved'))), 0)::bigint
-                                                                              AS overtime_minutes,
-               -- Night overtime is the overtime that falls in the night window,
-               -- in the branch's time zone (RU-8, RU-9).
-               COALESCE(SUM(LEAST(a.overtime_minutes,
-                   dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $5, $6)))
-                   FILTER (WHERE a.covered_employee_id IS NULL
-                   AND ($4 = 'automatic' OR ($4 = 'approval' AND a.overtime_status = 'approved'))), 0)::bigint
-                                                                              AS night_overtime_minutes,
-               -- A confirmed cover pays the coverer at their own plain rate (CV-4, CV-5).
-               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_employee_id IS NOT NULL
-                   AND a.cover_status = 'confirmed'), 0)::bigint             AS cover_minutes,
-               -- Working a day set up as a holiday (RU-10).
-               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_employee_id IS NULL
-                   AND h.on_date IS NOT NULL), 0)::bigint                    AS holiday_minutes,
-               AVG(EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60.0)
-                   FILTER (WHERE a.scheduled_start_at IS NOT NULL
-                             AND a.scheduled_end_at   IS NOT NULL)            AS avg_scheduled_minutes
-          FROM attendance_records a
-          LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id
-          JOIN branches br ON br.id = a.branch_id
-          LEFT JOIN staff_holidays h ON h.org_id = a.org_id AND h.on_date = a.business_date
-                                    AND h.decision = 'holiday'
-         WHERE a.org_id = $1 AND a.business_date BETWEEN $2 AND $3
-         GROUP BY a.employee_id
-        "#,
-    )
-    .bind(org_id)
-    .bind(start_date)
-    .bind(end_date)
-    .bind(&settings.overtime_mode)
-    .bind(settings.night_start)
-    .bind(settings.night_end)
-    .fetch_all(&mut *conn)
-    .await?;
-
-    let mut extra: HashMap<Uuid, (i64, i64, i64)> = HashMap::new();
-    for row in &totals_rows {
-        extra.insert(
-            row.employee_id,
-            (
-                row.night_overtime_minutes,
-                row.cover_minutes,
-                row.holiday_minutes,
-            ),
-        );
-    }
-    let mut totals: HashMap<Uuid, AttendanceTotals> = HashMap::new();
-    for row in totals_rows {
-        totals.insert(
-            row.employee_id,
-            AttendanceTotals {
-                worked_days: row.worked_days,
-                absent_days: row.absent_days,
-                leave_days: row.leave_days,
-                late_minutes: row.late_minutes,
-                overtime_minutes: row.overtime_minutes,
-                scheduled_minutes: row
-                    .avg_scheduled_minutes
-                    .and_then(|d| d.round().to_i64())
-                    .filter(|m| *m > 0)
-                    .unwrap_or(DEFAULT_SHIFT_MINUTES),
-            },
-        );
+    let mut totals: HashMap<Uuid, Totals> = HashMap::new();
+    for r in &recs {
+        let t = totals.entry(r.employee_id).or_default();
+        let hist = history.get(&r.employee_id).map(Vec::as_slice).unwrap_or(&[]);
+        let fallback = staff
+            .iter()
+            .find(|p| p.employee_id == r.employee_id)
+            .map_or(0, |p| p.base_salary_piastres);
+        let salary = pricing::salary_on(hist, r.business_date, fallback);
+        let branch_rules = rules
+            .get(&Some(r.branch_id))
+            .or_else(|| rules.get(&None))
+            .unwrap_or(settings);
+        let shift_rules = ShiftRules::from_settings(branch_rules, r.shift_ot_day, r.shift_ot_night);
+        let status = crate::staff::rules::AttendanceStatus::parse(&r.status)?;
+        let facts = ShiftFacts {
+            base_salary_piastres: salary,
+            scheduled_minutes: r
+                .scheduled_minutes
+                .map(i64::from)
+                .filter(|m| *m > 0)
+                .unwrap_or(DEFAULT_SHIFT_MINUTES),
+            status,
+            unpaid_leave: r.unpaid_leave,
+            late_minutes: i64::from(r.late_minutes),
+            worked_minutes: i64::from(r.worked_minutes),
+            overtime_minutes: i64::from(r.overtime_minutes),
+            night_overtime_minutes: r.night_overtime_minutes,
+            overtime_status: r.overtime_status.clone(),
+            is_confirmed_cover: r.is_cover && r.cover_status.as_deref() == Some("confirmed"),
+            is_other_cover: r.is_cover && r.cover_status.as_deref() != Some("confirmed"),
+            holiday: r.holiday,
+        };
+        let price = pricing::price_shift(&facts, &shift_rules);
+        if !r.is_cover {
+            match status {
+                crate::staff::rules::AttendanceStatus::Present
+                | crate::staff::rules::AttendanceStatus::Late => t.worked_days += Decimal::ONE,
+                crate::staff::rules::AttendanceStatus::HalfDay => {
+                    t.worked_days += Decimal::new(5, 1)
+                }
+                crate::staff::rules::AttendanceStatus::Absent => t.absent_days += Decimal::ONE,
+                crate::staff::rules::AttendanceStatus::OnLeave => t.leave_days += Decimal::ONE,
+            }
+            t.late_minutes += i64::from(r.late_minutes);
+        }
+        t.overtime_minutes += price.overtime_minutes;
+        t.night_overtime_minutes += price.night_overtime_minutes;
+        t.overtime_piastres += price.overtime_piastres;
+        t.cover_piastres += price.cover_piastres;
+        t.holiday_piastres += price.holiday_piastres;
+        if price.overtime_piastres > 0 {
+            t.shifts.push(json!({
+                "date": r.business_date, "branch_id": r.branch_id,
+                "minutes": price.overtime_minutes, "night_minutes": price.night_overtime_minutes,
+                "piastres": price.overtime_piastres,
+                "day_multiplier": shift_rules.overtime_day_multiplier,
+                "night_multiplier": shift_rules.overtime_night_multiplier,
+                "scheduled_minutes": facts.scheduled_minutes,
+                "salary_piastres": salary,
+            }));
+        }
     }
 
     // ── Approved adjustments in the window ───────────────────────
@@ -1149,6 +1550,8 @@ pub(crate) async fn compute_payslips(
         percent_of_base: Option<Decimal>,
         reason: String,
         source: String,
+        effective_date: NaiveDate,
+        recurring: bool,
         waived: bool,
     }
     async fn load_adjustments(
@@ -1157,6 +1560,7 @@ pub(crate) async fn compute_payslips(
         org_id: Uuid,
         from: NaiveDate,
         to: NaiveDate,
+        only: Option<Uuid>,
     ) -> Result<HashMap<Uuid, Vec<AdjRow>>, AppError> {
         // A waived deduction stays on the payslip, struck through and counted
         // for nothing (AD-8): the decision is final and visible. The bonuses
@@ -1168,17 +1572,20 @@ pub(crate) async fn compute_payslips(
         };
         let rows: Vec<AdjRow> = sqlx::query_as(&format!(
             // A recurring allowance or deduction counts in every period from
-            // its start until stopped (AD-3).
+            // its start month until stopped (AD-3): `ends_on` applies whether
+            // the line started this period or earlier.
             "SELECT id, employee_id, amount_piastres, percent_of_base, reason, source, \
-                    {waived} AS waived FROM {table} \
+                    effective_date, recurring, {waived} AS waived FROM {table} \
               WHERE org_id = $1 AND status = 'approved' \
-                AND (effective_date BETWEEN $2 AND $3 \
-                     OR (recurring AND effective_date <= $3 \
-                         AND (ends_on IS NULL OR ends_on >= $2)))"
+                AND ($4::uuid IS NULL OR employee_id = $4) \
+                AND effective_date <= $3 \
+                AND (effective_date >= $2 OR recurring) \
+                AND (NOT recurring OR ends_on IS NULL OR ends_on >= $2)"
         ))
         .bind(org_id)
         .bind(from)
         .bind(to)
+        .bind(only)
         .fetch_all(&mut *conn)
         .await?;
         let mut map: HashMap<Uuid, Vec<AdjRow>> = HashMap::new();
@@ -1188,48 +1595,46 @@ pub(crate) async fn compute_payslips(
         Ok(map)
     }
     let bonus_rows =
-        load_adjustments(&mut *conn, "payroll_bonuses", org_id, start_date, end_date).await?;
+        load_adjustments(&mut *conn, "payroll_bonuses", org_id, start_date, end_date, only).await?;
     let deduction_rows = load_adjustments(
         &mut *conn,
         "payroll_deductions",
         org_id,
         start_date,
         end_date,
+        only,
     )
     .await?;
 
+    let window_days = (end_date - start_date).num_days() + 1;
     let mut out = Vec::with_capacity(staff.len());
     for person in &staff {
-        // No attendance rows at all (a new hire, or a month nobody clocked):
-        // every total is zero, but the pay divisor still needs a sane day length.
-        let attendance = totals
+        let attendance = totals.remove(&person.employee_id).unwrap_or_default();
+        let hist = history
             .get(&person.employee_id)
-            .copied()
-            .unwrap_or(AttendanceTotals {
-                scheduled_minutes: DEFAULT_SHIFT_MINUTES,
-                ..Default::default()
-            });
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        // The salary in force at the window's end prices percent lines.
+        let salary_now = pricing::salary_on(hist, end_date, person.base_salary_piastres);
 
         let resolve = |rows: Option<&Vec<AdjRow>>| -> (i64, Vec<serde_json::Value>) {
             let mut total = 0i64;
             let mut lines = Vec::new();
             for row in rows.map(Vec::as_slice).unwrap_or(&[]) {
-                let amount = resolve_adjustment_piastres(
-                    row.amount_piastres,
-                    row.percent_of_base,
-                    person.base_salary_piastres,
-                );
+                let amount =
+                    resolve_adjustment_piastres(row.amount_piastres, row.percent_of_base, salary_now);
+                let mut line = json!({
+                    "id": row.id, "reason": row.reason, "piastres": amount,
+                    "source": row.source, "effective_date": row.effective_date,
+                    "recurring": row.recurring,
+                });
                 if row.waived {
-                    lines.push(json!({
-                        "id": row.id, "reason": row.reason, "piastres": amount,
-                        "source": row.source, "waived": true,
-                    }));
+                    line["waived"] = json!(true);
+                    lines.push(line);
                     continue;
                 }
                 total = total.saturating_add(amount);
-                lines.push(json!({
-                    "id": row.id, "reason": row.reason, "piastres": amount, "source": row.source,
-                }));
+                lines.push(line);
             }
             (total, lines)
         };
@@ -1237,51 +1642,45 @@ pub(crate) async fn compute_payslips(
         let (mut deduction_total, mut deduction_lines) =
             resolve(deduction_rows.get(&person.employee_id));
 
-        // Joined, left or changed mid-period: paid by calendar days (PAY-13).
-        let window_days = (end_date - start_date).num_days() + 1;
+        // Joined, left or changed salary mid-period: paid by calendar days at
+        // each day's rate (PAY-13).
         let from = person.hire_date.map_or(start_date, |h| h.max(start_date));
         let to = person
             .termination_date
             .map_or(end_date, |t| t.min(end_date));
         let paid_days = ((to - from).num_days() + 1).clamp(0, window_days);
-        let base_salary = if paid_days < window_days {
-            round_piastres(
-                Decimal::from(person.base_salary_piastres) * Decimal::from(paid_days)
-                    / Decimal::from(window_days.max(1)),
-            )
-        } else {
-            person.base_salary_piastres
-        };
-        let rates = crate::staff::rules::PayRates::from_base(
+        let base_salary = pricing::prorated_base(
+            hist,
             person.base_salary_piastres,
-            settings.working_days_per_month,
-            attendance.scheduled_minutes,
+            start_date,
+            end_date,
+            from,
+            to,
         );
-        let (night_ot, cover_minutes, holiday_minutes) =
-            extra.get(&person.employee_id).copied().unwrap_or_default();
-        if cover_minutes > 0 {
-            let pay = round_piastres(rates.minutes_piastres(Decimal::from(cover_minutes)));
-            bonus_total = bonus_total.saturating_add(pay);
-            bonus_lines
-                .push(json!({ "id": null, "kind": "cover", "reason": "cover", "piastres": pay }));
+
+        if attendance.cover_piastres > 0 {
+            bonus_total = bonus_total.saturating_add(attendance.cover_piastres);
+            bonus_lines.push(json!({
+                "id": null, "kind": "cover", "reason": "cover", "piastres": attendance.cover_piastres,
+            }));
         }
-        if holiday_minutes > 0 {
-            let pay = round_piastres(
-                rates.minutes_piastres(Decimal::from(holiday_minutes))
-                    * (settings.holiday_multiplier - Decimal::ONE).max(Decimal::ZERO),
-            );
-            bonus_total = bonus_total.saturating_add(pay);
-            bonus_lines.push(
-                json!({ "id": null, "kind": "holiday", "reason": "holiday", "piastres": pay }),
-            );
+        if attendance.holiday_piastres > 0 {
+            bonus_total = bonus_total.saturating_add(attendance.holiday_piastres);
+            bonus_lines.push(json!({
+                "id": null, "kind": "holiday", "reason": "holiday", "piastres": attendance.holiday_piastres,
+            }));
         }
-        // Last payslip's shortfall is this one's first deduction (PAY-12).
-        let carry_in: i64 = sqlx::query_scalar(
+        // Last APPROVED payslip's shortfall is this one's first deduction
+        // (PAY-12). A reopened month has no payslips, so it cannot leak a
+        // stale carry.
+        let carry_in: i64 = sqlx::query_scalar(&format!(
             "SELECT s.carry_out_piastres FROM payslips s \
                JOIN payroll_periods pp ON pp.id = s.payroll_period_id \
               WHERE s.employee_id = $1 AND pp.org_id = $2 AND pp.end_date < $3 \
+                AND pp.status IN ({}) \
               ORDER BY pp.end_date DESC LIMIT 1",
-        )
+            period_lock::CLOSED
+        ))
         .bind(person.employee_id)
         .bind(org_id)
         .bind(start_date)
@@ -1294,15 +1693,6 @@ pub(crate) async fn compute_payslips(
                 json!({ "id": null, "kind": "carry", "reason": "carry", "piastres": carry_in }),
             );
         }
-        // One multiplier that prices day and night overtime at their own rates.
-        let ot_multiplier = if attendance.overtime_minutes > 0 {
-            let day = attendance.overtime_minutes - night_ot.min(attendance.overtime_minutes);
-            (Decimal::from(day) * settings.overtime_day_multiplier
-                + Decimal::from(night_ot) * settings.overtime_night_multiplier)
-                / Decimal::from(attendance.overtime_minutes)
-        } else {
-            settings.overtime_day_multiplier
-        };
 
         // Live advances, oldest first — the earliest debt is repaid first.
         #[derive(sqlx::FromRow)]
@@ -1327,71 +1717,72 @@ pub(crate) async fn compute_payslips(
             .map(|a| a.monthly_installment_piastres.min(a.remaining_piastres))
             .sum();
 
-        let result = compute_net_salary(&PayrollInputs {
-            base_salary_piastres: base_salary,
-            working_days_per_month: settings.working_days_per_month,
-            scheduled_minutes_per_day: attendance.scheduled_minutes,
-            overtime_minutes: attendance.overtime_minutes,
-            overtime_multiplier: ot_multiplier,
-            bonuses_piastres: bonus_total,
-            deductions_piastres: deduction_total,
-            advance_installment_piastres: wanted,
-        });
+        // Every shift is already priced; the payslip only adds up, with the two
+        // guards that keep it payable (deductions never past earnings, the
+        // advance only out of what is left).
+        let settled = pricing::settle_net(
+            base_salary,
+            attendance.overtime_piastres,
+            bonus_total,
+            deduction_total,
+            wanted,
+        );
+        let deductions = settled.deductions_piastres;
+        let advance = settled.advance_piastres;
+        let net = settled.net_piastres;
+        let capped = settled.capped_piastres;
 
         // Distribute whatever the payslip could actually afford across the
         // advances in order, so a partial collection settles the oldest debt
         // first and the rest stays owed.
-        let mut left = result.advance_installment_piastres;
+        let mut left = advance;
         let mut advance_applications = Vec::new();
         let mut advance_lines = Vec::new();
-        for advance in &advances {
+        for a in &advances {
             if left <= 0 {
                 break;
             }
-            let take = advance
+            let take = a
                 .monthly_installment_piastres
-                .min(advance.remaining_piastres)
+                .min(a.remaining_piastres)
                 .min(left);
             if take <= 0 {
                 continue;
             }
             left -= take;
-            advance_applications.push((advance.id, take));
-            advance_lines.push(json!({ "id": advance.id, "applied_piastres": take }));
+            advance_applications.push((a.id, take));
+            advance_lines.push(json!({ "id": a.id, "applied_piastres": take }));
         }
 
         out.push(ComputedPayslip {
             employee_id: person.employee_id,
             name: person.name.clone(),
-            base_salary_piastres: person.base_salary_piastres,
+            base_salary_piastres: salary_now,
             worked_days: attendance.worked_days,
             absent_days: attendance.absent_days,
             leave_days: attendance.leave_days,
             late_minutes: attendance.late_minutes,
             overtime_minutes: attendance.overtime_minutes,
-            base_piastres: result.base_piastres,
-            overtime_piastres: result.overtime_piastres,
-            bonuses_piastres: result.bonuses_piastres,
-            deductions_piastres: result.deductions_piastres,
-            advance_installment_piastres: result.advance_installment_piastres,
-            net_piastres: result.net_piastres,
-            carry_out_piastres: deduction_total
-                .saturating_sub(
-                    result
-                        .base_piastres
-                        .saturating_add(result.overtime_piastres)
-                        .saturating_add(result.bonuses_piastres),
-                )
-                .max(0),
+            base_piastres: base_salary,
+            overtime_piastres: attendance.overtime_piastres,
+            bonuses_piastres: settled.bonuses_piastres,
+            deductions_piastres: deductions,
+            advance_installment_piastres: advance,
+            net_piastres: net,
+            carry_out_piastres: capped,
             breakdown: json!({
                 "bonuses": bonus_lines,
                 "deductions": deduction_lines,
                 "advances": advance_lines,
-                "overtime_multiplier": ot_multiplier,
+                "overtime_shifts": attendance.shifts,
+                "night_overtime_minutes": attendance.night_overtime_minutes,
                 "paid_days": paid_days,
                 "window_days": window_days,
-                "scheduled_minutes_per_day": attendance.scheduled_minutes,
+                "salary_piastres": salary_now,
                 "working_days_per_month": settings.working_days_per_month,
+                // Deductions past what was earned: the lines above add up to
+                // more than the net; this is the part that carried (PAY-12).
+                "capped_piastres": capped,
             }),
             advance_applications,
         });
@@ -1399,54 +1790,15 @@ pub(crate) async fn compute_payslips(
     Ok(out)
 }
 
-/// Give back every advance installment the period's existing payslips collected.
-/// Called before a regeneration or a delete, inside the caller's transaction.
-async fn refund_advances(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    period_id: Uuid,
-) -> Result<(), AppError> {
-    let breakdowns: Vec<serde_json::Value> =
-        sqlx::query_scalar("SELECT breakdown FROM payslips WHERE payroll_period_id = $1")
-            .bind(period_id)
-            .fetch_all(&mut **tx)
-            .await?;
-
-    for breakdown in breakdowns {
-        let Some(advances) = breakdown.get("advances").and_then(|a| a.as_array()) else {
-            continue;
-        };
-        for entry in advances {
-            let (Some(id), Some(applied)) = (
-                entry
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok()),
-                entry.get("applied_piastres").and_then(|v| v.as_i64()),
-            ) else {
-                continue;
-            };
-            sqlx::query(
-                "UPDATE salary_advances \
-                    SET remaining_piastres = LEAST(remaining_piastres + $2, amount_piastres), \
-                        status = CASE WHEN status = 'settled' THEN 'approved' ELSE status END, \
-                        updated_at = now() \
-                  WHERE id = $1",
-            )
-            .bind(id)
-            .bind(applied)
-            .execute(&mut **tx)
-            .await?;
-        }
-    }
-    Ok(())
-}
-
+/// Approve a DRAFT month: freeze every payslip and collect the advance
+/// installments in the ledger. An approved month is not regenerated — it is
+/// reopened (before anyone is paid) and approved again.
 #[utoipa::path(
     post, path = "/staff/payroll/periods/{id}/generate", tag = "staff",
     params(("id" = Uuid, Path, description = "Period ID")),
     responses(
         (status = 200, description = "Payslips generated", body = Vec<Payslip>),
-        (status = 409, description = "A paid or closed period cannot be regenerated"),
+        (status = 409, description = "Only a draft period is approved; reopen first"),
         AppErrorResponse,
     ),
     security(("bearer_jwt" = []))
@@ -1460,6 +1812,7 @@ pub async fn generate_period(
     let org_id = scope_org(&req, &claims)?;
     // Approving payroll is the payroll run, held for every branch (RO-9).
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
+    let actor = claims.user_id_safe().ok();
 
     #[derive(sqlx::FromRow)]
     struct Period {
@@ -1479,15 +1832,14 @@ pub async fn generate_period(
     .await?
     .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
 
-    if period.status == "paid" || period.status == "closed" {
+    if period.status != "draft" {
         return Err(AppError::Conflict(format!(
-            "A {} period cannot be regenerated — the payslips are what was paid",
+            "A {} period is frozen — reopen it (before anyone is paid) to approve it again",
             period.status
         )));
     }
-
-    // Start from a clean slate: refund, then drop, then recompute.
-    refund_advances(&mut tx, *id).await?;
+    // A draft never holds payslips after a reopen; clear any older leftovers
+    // (their collections cascade and the ledger refunds them).
     sqlx::query("DELETE FROM payslips WHERE payroll_period_id = $1")
         .bind(*id)
         .execute(&mut *tx)
@@ -1500,6 +1852,7 @@ pub async fn generate_period(
         period.start_date,
         period.end_date,
         &settings,
+        None,
     )
     .await?;
 
@@ -1507,29 +1860,24 @@ pub async fn generate_period(
     let mut grand_total = 0i64;
 
     for slip in &computed {
-        // Collect the installments this payslip affords. Doing it here rather
-        // than inside the computation is what keeps the preview side-effect free.
-        for (advance_id, take) in &slip.advance_applications {
-            sqlx::query(
-                "UPDATE salary_advances \
-                    SET remaining_piastres = remaining_piastres - $2, \
-                        status = CASE WHEN remaining_piastres - $2 <= 0 THEN 'settled' ELSE status END, \
-                        updated_at = now() \
-                  WHERE id = $1",
-            )
-            .bind(advance_id)
-            .bind(take)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        sqlx::query(
+        // A payslip with nothing on it — no pay, no lines — is marked paid by
+        // the run itself, so it never blocks the month reaching Paid (PAY-7).
+        let empty = slip.net_piastres == 0
+            && slip.base_piastres == 0
+            && slip.overtime_piastres == 0
+            && slip.bonuses_piastres == 0
+            && slip.deductions_piastres == 0
+            && slip.advance_installment_piastres == 0;
+        let payslip_id: Uuid = sqlx::query_scalar(
             "INSERT INTO payslips (
                  org_id, payroll_period_id, employee_id, base_salary_piastres, worked_days,
                  absent_days, leave_days, late_minutes, overtime_minutes, overtime_piastres,
                  bonuses_piastres, deductions_piastres, advance_installment_piastres,
-                 net_piastres, breakdown, carry_out_piastres
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
+                 net_piastres, breakdown, carry_out_piastres, paid_method, paid_at, paid_by
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                       CASE WHEN $17 THEN 'none' END, CASE WHEN $17 THEN now() END,
+                       CASE WHEN $17 THEN $18 END)
+             RETURNING id",
         )
         .bind(org_id)
         .bind(*id)
@@ -1547,8 +1895,29 @@ pub async fn generate_period(
         .bind(slip.net_piastres)
         .bind(&slip.breakdown)
         .bind(slip.carry_out_piastres)
-        .execute(&mut *tx)
+        .bind(empty)
+        .bind(actor)
+        .fetch_one(&mut *tx)
         .await?;
+
+        // Collect the installments this payslip affords, in the ledger. The
+        // trigger derives `remaining_piastres`; deleting the payslip later
+        // deletes these rows and the money comes back (AV-6).
+        for (advance_id, take) in &slip.advance_applications {
+            sqlx::query(
+                "INSERT INTO salary_advance_collections \
+                     (org_id, advance_id, payslip_id, period_id, employee_id, amount_piastres) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(org_id)
+            .bind(advance_id)
+            .bind(payslip_id)
+            .bind(*id)
+            .bind(slip.employee_id)
+            .bind(take)
+            .execute(&mut *tx)
+            .await?;
+        }
 
         employee_count += 1;
         grand_total = grand_total.saturating_add(slip.net_piastres);
@@ -1562,8 +1931,23 @@ pub async fn generate_period(
     .bind(*id)
     .bind(employee_count)
     .bind(grand_total)
-    .bind(claims.user_id_safe().ok())
+    .bind(actor)
     .execute(&mut *tx)
+    .await?;
+    // Nothing to pay anyone? Then everyone is "paid" and the month is Paid.
+    settle_period_if_all_paid(&mut tx, *id).await?;
+    audit(
+        &mut *tx,
+        org_id,
+        actor,
+        "period.generate",
+        "payroll_periods",
+        Some(*id),
+        None,
+        Some(*id),
+        None,
+        json!({ "people": employee_count, "total_net_piastres": grand_total }),
+    )
     .await?;
     tx.commit().await?;
 
@@ -1574,6 +1958,23 @@ pub async fn generate_period(
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(slips))
+}
+
+/// The month is Paid when every payslip is (PAY-7).
+pub(crate) async fn settle_period_if_all_paid(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    period_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE payroll_periods SET status = 'paid', paid_at = now(), updated_at = now() \
+          WHERE id = $1 AND status = 'generated' \
+            AND EXISTS (SELECT 1 FROM payslips WHERE payroll_period_id = $1) \
+            AND NOT EXISTS (SELECT 1 FROM payslips WHERE payroll_period_id = $1 AND paid_at IS NULL)",
+    )
+    .bind(period_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 #[utoipa::path(
@@ -1607,18 +2008,28 @@ pub async fn preview_period(
 
     let settings = load_settings(pool.get_ref(), org_id, None).await?;
     let mut conn = pool.acquire().await?;
-    let computed = compute_payslips(&mut conn, org_id, period.0, period.1, &settings).await?;
+    let computed = compute_payslips(&mut conn, org_id, period.0, period.1, &settings, None).await?;
     Ok(HttpResponse::Ok().json(computed))
 }
 
-/// The generated period as a bank-ready CSV.
+#[derive(Deserialize, IntoParams, Debug)]
+#[into_params(parameter_in = Query)]
+pub struct ExportQuery {
+    /// `bank` (a transfer file: name, account, amount) · `wallet` (numbers
+    /// and amounts) · `cash`; omitted = everyone, every figure (PAY-8).
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// The generated period as a CSV: the bank file, the wallet list, or the
+/// whole run.
 ///
 /// Deliberately serves the PAYSLIPS, not a fresh computation: the file handed to
 /// a bank must be exactly what was approved, even if a deduction has been edited
 /// since. A period that has not been generated has nothing to export.
 #[utoipa::path(
     get, path = "/staff/payroll/periods/{id}/export.csv", tag = "staff",
-    params(("id" = Uuid, Path, description = "Period ID")),
+    params(("id" = Uuid, Path, description = "Period ID"), ExportQuery),
     responses(
         (status = 200, description = "CSV of the period's payslips", content_type = "text/csv"),
         (status = 409, description = "The period has not been generated yet"),
@@ -1630,10 +2041,17 @@ pub async fn export_period_csv(
     req: HttpRequest,
     pool: crate::db::Db,
     id: web::Path<Uuid>,
+    query: web::Query<ExportQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRead).await?;
+    let method = query.method.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    if let Some(m) = method
+        && !matches!(m, "bank" | "wallet" | "cash")
+    {
+        return Err(AppError::BadRequest("method is bank, wallet or cash".into()));
+    }
 
     let period: (String, String) =
         sqlx::query_as("SELECT name, status FROM payroll_periods WHERE id = $1 AND org_id = $2")
@@ -1649,9 +2067,12 @@ pub async fn export_period_csv(
     }
 
     let slips = sqlx::query_as::<_, Payslip>(&format!(
-        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(e.name)"
+        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 \
+            AND ($2::text IS NULL OR e.pay_method = $2) \
+          ORDER BY lower(e.name)"
     ))
     .bind(*id)
+    .bind(method)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -1662,27 +2083,63 @@ pub async fn export_period_csv(
     let esc = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
     let money = |piastres: i64| format!("{}.{:02}", piastres / 100, (piastres % 100).abs());
 
-    let mut csv = String::from(
-        "employee,employee_id,base,overtime,bonuses,deductions,advance,net,worked_days,absent_days\n",
-    );
-    for slip in &slips {
-        csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{}\n",
-            esc(slip.employee_name.as_deref().unwrap_or("")),
-            esc(&slip.employee_id.to_string()),
-            money(slip.base_salary_piastres),
-            money(slip.overtime_piastres),
-            money(slip.bonuses_piastres),
-            money(slip.deductions_piastres),
-            money(slip.advance_installment_piastres),
-            money(slip.net_piastres),
-            slip.worked_days,
-            slip.absent_days,
-        ));
+    let mut csv = String::new();
+    match method {
+        // The bank file: who, where, how much. Nothing a bank does not need.
+        Some("bank") => {
+            csv.push_str("employee,account,amount\n");
+            for slip in slips.iter().filter(|s| s.net_piastres > 0) {
+                csv.push_str(&format!(
+                    "{},{},{}\n",
+                    esc(slip.employee_name.as_deref().unwrap_or("")),
+                    esc(slip.pay_account.as_deref().unwrap_or("")),
+                    money(slip.net_piastres),
+                ));
+            }
+        }
+        Some("wallet") => {
+            csv.push_str("employee,wallet_number,amount\n");
+            for slip in slips.iter().filter(|s| s.net_piastres > 0) {
+                csv.push_str(&format!(
+                    "{},{},{}\n",
+                    esc(slip.employee_name.as_deref().unwrap_or("")),
+                    esc(slip.pay_account.as_deref().unwrap_or("")),
+                    money(slip.net_piastres),
+                ));
+            }
+        }
+        _ => {
+            csv.push_str(
+                "employee,employee_id,pay_method,account,base,overtime,bonuses,deductions,advance,net,carry_out,worked_days,absent_days,paid_method\n",
+            );
+            for slip in &slips {
+                csv.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    esc(slip.employee_name.as_deref().unwrap_or("")),
+                    esc(&slip.employee_id.to_string()),
+                    esc(slip.pay_method.as_deref().unwrap_or("")),
+                    esc(slip.pay_account.as_deref().unwrap_or("")),
+                    money(slip.base_salary_piastres),
+                    money(slip.overtime_piastres),
+                    money(slip.bonuses_piastres),
+                    money(slip.deductions_piastres),
+                    money(slip.advance_installment_piastres),
+                    money(slip.net_piastres),
+                    money(slip.carry_out_piastres),
+                    slip.worked_days,
+                    slip.absent_days,
+                    esc(slip.paid_method.as_deref().unwrap_or("")),
+                ));
+            }
+        }
     }
 
     // A quoted filename: period names carry spaces ("July 2026").
-    let filename = format!("payroll-{}.csv", period.0.replace(['"', '\\', '/'], "-"));
+    let filename = format!(
+        "payroll-{}{}.csv",
+        period.0.replace(['"', '\\', '/'], "-"),
+        method.map(|m| format!("-{m}")).unwrap_or_default()
+    );
     Ok(HttpResponse::Ok()
         .content_type("text/csv; charset=utf-8")
         .insert_header((
@@ -1732,8 +2189,9 @@ pub async fn my_payslips(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
     // otherwise flash half-computed numbers at the employee.
     let rows = sqlx::query_as::<_, Payslip>(&format!(
         "{PAYSLIP_SELECT} \
-          WHERE s.employee_id = $1 AND pp.status IN ('generated', 'paid', 'closed') \
-          ORDER BY pp.start_date DESC"
+          WHERE s.employee_id = $1 AND pp.status IN ({}) \
+          ORDER BY pp.start_date DESC",
+        period_lock::CLOSED
     ))
     .bind(me.employee_id)
     .fetch_all(pool.get_ref())
@@ -1742,44 +2200,32 @@ pub async fn my_payslips(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
 }
 
 /// The people whose money lines a caller may list: payroll readers for their
-/// branches, and whoever holds `also` (the act the list backs) for theirs
-/// (audit B15: a manager must see the lines and advances they decide).
+/// branches, and whoever holds any of `also` (the acts the list backs) for
+/// theirs (audit B15: a manager must see the lines and advances they decide).
 pub(crate) async fn money_scope(
     pool: &PgPool,
     claims: &Claims,
     org_id: Uuid,
-    also: Cap,
+    also: &[Cap],
 ) -> Result<Option<Vec<Uuid>>, AppError> {
-    let read = access::scope(pool, claims, org_id, Cap::HrPayrollRead).await;
-    let act = access::scope(pool, claims, org_id, also).await;
-    match (read, act) {
-        (Ok(None), _) | (_, Ok(None)) => Ok(None),
-        (Ok(Some(mut a)), Ok(Some(b))) => {
-            a.extend(b);
-            a.sort();
-            a.dedup();
-            Ok(Some(a))
+    let mut union: BTreeMap<Uuid, ()> = BTreeMap::new();
+    let mut any = false;
+    let mut last_err = None;
+    for cap in std::iter::once(Cap::HrPayrollRead).chain(also.iter().copied()) {
+        match access::scope(pool, claims, org_id, cap).await {
+            Ok(None) => return Ok(None),
+            Ok(Some(at)) => {
+                any = true;
+                for b in at {
+                    union.insert(b, ());
+                }
+            }
+            Err(e) => last_err = Some(e),
         }
-        (Ok(Some(a)), Err(_)) | (Err(_), Ok(Some(a))) => Ok(Some(a)),
-        (Err(e), Err(_)) => Err(e),
     }
-}
-
-/// Waiving or overriding a deduction is a payroll edit for that person.
-async fn require_deduction_edit(
-    pool: &PgPool,
-    claims: &Claims,
-    org_id: Uuid,
-    id: Uuid,
-) -> Result<(), AppError> {
-    let owner: Uuid = sqlx::query_scalar(
-        "SELECT employee_id FROM payroll_deductions WHERE id = $1 AND org_id = $2",
-    )
-    .bind(id)
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Deduction not found".into()))?;
-    let subject = access::subject(pool, org_id, owner).await?;
-    access::require_for(pool, claims, Cap::HrPayrollEdit, &subject).await
+    if any {
+        Ok(Some(union.into_keys().collect()))
+    } else {
+        Err(last_err.unwrap_or_else(|| crate::authz::require::denied(Cap::HrPayrollRead)))
+    }
 }

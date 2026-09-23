@@ -1,0 +1,1857 @@
+//! Dawam money (Phase B, audit 05): a frozen month, the advance ledger, the
+//! one shift-pricing function under branch rules, limits, caps, exports, the
+//! audit log, and the punch → sweep → penalty → waive → approve → payslip
+//! path (AT-12). Every figure is checked against a hand computation.
+//!
+//! Fixture: 26 working days a month, ladder 1–15 → 15 min, 16–30 → 60 min,
+//! 31+ → half a day; overtime automatic at 1.35 / 1.70 (night 22–06).
+//! Amal (branch A) earns 600,000 pt: a day is 23,076.92 pt, a minute of an
+//! 8-hour day 48.0769 pt. Bassem (branch B) earns 500,000 pt.
+
+use actix_web::{App, test, web};
+use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::models::UserRole;
+
+mod common;
+use common::employees::{authed, phone_token};
+
+fn secret() -> JwtSecret {
+    JwtSecret("secret".to_string())
+}
+
+fn token_for(user: Uuid, org: Uuid, role: UserRole) -> String {
+    madar_rust::auth::jwt::create_token(&secret(), user, Some(org), role, None, 24).unwrap()
+}
+
+macro_rules! app {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(secret()))
+                .configure(madar_rust::staff::routes::configure),
+        )
+        .await
+    };
+}
+
+macro_rules! call {
+    ($app:expr, $method:ident, $uri:expr, $token:expr) => {{
+        let req = authed(test::TestRequest::$method().uri(&$uri), &$token).to_request();
+        test::call_service(&$app, req).await
+    }};
+    ($app:expr, $method:ident, $uri:expr, $token:expr, $body:expr) => {{
+        let req = authed(test::TestRequest::$method().uri(&$uri), &$token)
+            .set_json(&$body)
+            .to_request();
+        test::call_service(&$app, req).await
+    }};
+}
+
+async fn json_of(resp: actix_web::dev::ServiceResponse) -> Value {
+    test::read_body_json(resp).await
+}
+
+async fn text_of(resp: actix_web::dev::ServiceResponse) -> String {
+    String::from_utf8(test::read_body(resp).await.to_vec()).unwrap()
+}
+
+const LAT: f64 = 29.9792;
+const LNG: f64 = 31.1342;
+
+struct F {
+    org: Uuid,
+    a: Uuid,
+    b: Uuid,
+    owner: Uuid,
+    mgr: Uuid,
+    amal: Uuid,
+    bassem: Uuid,
+    /// The current period (the org's start day is the 1st): first and last day.
+    start: NaiveDate,
+    end: NaiveDate,
+    period: Uuid,
+}
+
+impl F {
+    fn owner(&self) -> String {
+        token_for(self.owner, self.org, UserRole::OrgAdmin)
+    }
+    fn mgr(&self) -> String {
+        token_for(self.mgr, self.org, UserRole::BranchManager)
+    }
+}
+
+async fn user(pool: &PgPool, org: Uuid, name: &str, role: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, org_id, name, email, password_hash, role) \
+         VALUES ($1, $2, $3, $4, 'hash', $5::user_role)",
+    )
+    .bind(id)
+    .bind(org)
+    .bind(name)
+    .bind(format!("{id}@test.com"))
+    .bind(role)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+async fn assign(pool: &PgPool, user: Uuid, branch: Uuid) {
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(user)
+        .bind(branch)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn branch(pool: &PgPool, org: Uuid, name: &str, tz: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO branches (id, org_id, name, timezone, latitude, longitude, geo_radius_meters) \
+         VALUES ($1, $2, $3, $4::timezone_name, $5, $6, 200)",
+    )
+    .bind(id)
+    .bind(org)
+    .bind(name)
+    .bind(tz)
+    .bind(LAT)
+    .bind(LNG)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+const LADDER: &str = r#"[{"from_minutes":1,"to_minutes":15,"kind":"minutes","value":15},
+    {"from_minutes":16,"to_minutes":30,"kind":"minutes","value":60},
+    {"from_minutes":31,"to_minutes":null,"kind":"day_fraction","value":0.5}]"#;
+
+async fn seed_with_zone(pool: &PgPool, tz: &str) -> F {
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
+        .await
+        .unwrap();
+    // The owner's legacy payroll cells, before the org's roles are made.
+    for act in ["create", "read", "update", "delete"] {
+        sqlx::query(
+            "INSERT INTO role_permissions (role, resource, action, granted) \
+             VALUES ('org_admin'::user_role, 'payroll'::permission_resource, $1::permission_action, true) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(act)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let org = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO organizations (id, name, slug, modules) VALUES ($1, 'Cafe', $2, '{pos,dawam}')",
+    )
+    .bind(org)
+    .bind(format!("org-{org}"))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO attendance_settings (org_id, rules_saved_at, working_days_per_month, \
+             overtime_mode, period_start_day, late_deduction_tiers, absence_deduction_days) \
+         VALUES ($1, now(), 26, 'automatic', 1, $2::jsonb, 1)",
+    )
+    .bind(org)
+    .bind(LADDER)
+    .execute(pool)
+    .await
+    .unwrap();
+    let a = branch(pool, org, "A", tz).await;
+    let b = branch(pool, org, "B", tz).await;
+    let owner = user(pool, org, "Owner", "org_admin").await;
+    let mgr = user(pool, org, "Manager", "branch_manager").await;
+    assign(pool, mgr, a).await;
+    let amal = common::employees::employee(
+        pool,
+        org,
+        "Amal",
+        None,
+        Some("+201012345678"),
+        true,
+        &[a],
+        600_000,
+    )
+    .await;
+    let bassem = common::employees::employee(
+        pool,
+        org,
+        "Bassem",
+        None,
+        Some("+201012345679"),
+        true,
+        &[b],
+        500_000,
+    )
+    .await;
+    // The period the org's clock is in (start day 1 = the calendar month).
+    let today: NaiveDate = sqlx::query_scalar("SELECT (now() AT TIME ZONE $1)::date")
+        .bind(tz)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let (start, end) = madar_rust::staff::dawam::pay::period_window(today, 1);
+    let period: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date) \
+         VALUES ($1, 'This month', $2, $3) RETURNING id",
+    )
+    .bind(org)
+    .bind(start)
+    .bind(end)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    F {
+        org,
+        a,
+        b,
+        owner,
+        mgr,
+        amal,
+        bassem,
+        start,
+        end,
+        period,
+    }
+}
+
+async fn seed(pool: &PgPool) -> F {
+    seed_with_zone(pool, "UTC").await
+}
+
+/// One attendance day, inserted as the clock would have left it: an 8-hour
+/// shift from `start_hour` UTC, with `late` minutes late and `ot` minutes
+/// past the end.
+#[allow(clippy::too_many_arguments)]
+async fn day(
+    pool: &PgPool,
+    f: &F,
+    emp: Uuid,
+    branch: Uuid,
+    date: NaiveDate,
+    status: &str,
+    start_hour: u32,
+    sched_minutes: i64,
+    late: i32,
+    ot: i32,
+) -> Uuid {
+    let start = date.and_hms_opt(start_hour, 0, 0).unwrap().and_utc();
+    let end = start + Duration::minutes(sched_minutes);
+    let (check_in, check_out) = if status == "absent" || status == "on_leave" {
+        (None, None)
+    } else {
+        (
+            Some(start + Duration::minutes(i64::from(late))),
+            Some(end + Duration::minutes(i64::from(ot))),
+        )
+    };
+    let worked = if let (Some(i), Some(o)) = (check_in, check_out) {
+        (o - i).num_minutes() as i32
+    } else {
+        0
+    };
+    sqlx::query_scalar(
+        "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, status, \
+             scheduled_start_at, scheduled_end_at, check_in_at, check_out_at, late_minutes, \
+             worked_minutes, overtime_minutes, overtime_status) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, \
+                 CASE WHEN $12 > 0 THEN 'pending' END) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(emp)
+    .bind(branch)
+    .bind(date)
+    .bind(status)
+    .bind(start)
+    .bind(end)
+    .bind(check_in)
+    .bind(check_out)
+    .bind(late)
+    .bind(worked)
+    .bind(ot)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn generate(app: &impl ServiceT, f: &F) -> actix_web::dev::ServiceResponse {
+    call!(
+        app,
+        post,
+        format!("/staff/payroll/periods/{}/generate", f.period),
+        f.owner(),
+        json!({})
+    )
+}
+
+async fn reopen(app: &impl ServiceT, f: &F) -> actix_web::dev::ServiceResponse {
+    call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/status", f.period),
+        f.owner(),
+        json!({ "status": "draft", "reason": "a line was missing" })
+    )
+}
+
+trait ServiceT:
+    actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >
+{
+}
+impl<T> ServiceT for T where
+    T: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >
+{
+}
+
+async fn slip_of(app: &impl ServiceT, f: &F, emp: Uuid) -> Value {
+    let cur = json_of(call!(app, get, "/staff/payroll/current", f.owner())).await;
+    let list = if cur["payslips"].as_array().is_some_and(|a| !a.is_empty()) {
+        &cur["payslips"]
+    } else {
+        &cur["preview"]
+    };
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["employee_id"] == json!(emp))
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+async fn period_status(pool: &PgPool, id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM payroll_periods WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn remaining(pool: &PgPool, advance: Uuid) -> (i64, String) {
+    sqlx::query_as("SELECT remaining_piastres, status FROM salary_advances WHERE id = $1")
+        .bind(advance)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn approved_advance(pool: &PgPool, f: &F, emp: Uuid, amount: i64, installments: i32) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO salary_advances (org_id, employee_id, amount_piastres, installments, \
+             monthly_installment_piastres, remaining_piastres, status) \
+         VALUES ($1, $2, $3, $4, $5, $3, 'approved') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(emp)
+    .bind(amount)
+    .bind(installments)
+    .bind((amount as u64).div_ceil(installments as u64) as i64)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn audit_actions(pool: &PgPool, org: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT action FROM payroll_audit_log WHERE org_id = $1 ORDER BY created_at, action",
+    )
+    .bind(org)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+// ── the frozen month (P0: PAY-5, PAY-6, AD-7, AD-10, B3, B7) ───────────────
+
+#[sqlx::test]
+async fn an_approved_month_is_frozen_until_reopened(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    // One late day (24 min → 60 min of pay = 600000×60/12480 = 2884.6 → 2885)
+    // priced by the sweep's function, and a manual bonus.
+    let rec = day(&pool, &f, f.amal, f.a, f.start, "late", 9, 480, 24, 0).await;
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &settings)
+        .await
+        .unwrap();
+    drop(conn);
+    let (penalty_id, penalty): (Uuid, i64) = sqlx::query_as(
+        "SELECT id, amount_piastres FROM payroll_deductions WHERE attendance_record_id = $1",
+    )
+    .bind(rec)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(penalty, 2_885);
+    let bonus = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 10_000,
+                "reason": "Great week", "effective_date": f.start })
+    ))
+    .await;
+    assert_eq!(bonus["status"], "approved");
+    let bonus_id = bonus["id"].as_str().unwrap().to_string();
+
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 200);
+    let slip = slip_of(&app, &f, f.amal).await;
+    // 600000 + 10000 − 2885
+    assert_eq!(slip["net_piastres"], 607_115);
+    assert_eq!(period_status(&pool, f.period).await, "generated");
+
+    // ── closed to everything dated inside it ──
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 5_000,
+                "reason": "Late add", "effective_date": f.start })
+    );
+    assert_eq!(resp.status(), 409, "a pay line in an approved month");
+    assert!(text_of(resp).await.contains("PERIOD_CLOSED"));
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{penalty_id}/waive"),
+        owner,
+        json!({ "reason": "Traffic" })
+    );
+    assert_eq!(resp.status(), 409, "a waiver in an approved month");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{penalty_id}/override"),
+        owner,
+        json!({ "amount_piastres": 100, "reason": "Half" })
+    );
+    assert_eq!(resp.status(), 409, "an override in an approved month");
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/payroll/bonuses/{bonus_id}"),
+        owner
+    );
+    assert_eq!(resp.status(), 409, "deleting a manual line in an approved month");
+    assert_eq!(generate(&app, &f).await.status(), 409, "no regenerate without a reopen");
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/payroll/periods/{}", f.period),
+        owner
+    );
+    assert_eq!(resp.status(), 409, "no delete of an approved month");
+    // A correction's recompute leaves the frozen penalty alone.
+    sqlx::query("UPDATE attendance_records SET late_minutes = 0 WHERE id = $1")
+        .bind(rec)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let touched = madar_rust::staff::penalties::recompute_record(&mut conn, rec, &settings)
+        .await
+        .unwrap();
+    drop(conn);
+    assert_eq!(touched, 0);
+    let still: i64 = sqlx::query_scalar("SELECT amount_piastres FROM payroll_deductions WHERE id = $1")
+        .bind(penalty_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(still, 2_885, "the approved month's penalty is a snapshot");
+    // The status route never approves or pays by hand.
+    for target in ["generated", "paid"] {
+        let resp = call!(
+            app,
+            patch,
+            format!("/staff/payroll/periods/{}/status", f.period),
+            owner,
+            json!({ "status": target })
+        );
+        assert_eq!(resp.status(), 409, "{target} by hand");
+    }
+
+    // ── reopen (with a reason): the month is live again ──
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/status", f.period),
+        owner,
+        json!({ "status": "draft" })
+    );
+    assert_eq!(resp.status(), 400, "reopening needs a reason");
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    assert_eq!(period_status(&pool, f.period).await, "draft");
+    let slips: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payslips WHERE payroll_period_id = $1")
+        .bind(f.period)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(slips, 0, "a draft holds no frozen payslips");
+    // Now the penalty recomputes (the record was corrected to 0 late).
+    let mut conn = pool.acquire().await.unwrap();
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &settings)
+        .await
+        .unwrap();
+    drop(conn);
+    let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE id = $1")
+        .bind(penalty_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(gone, 0);
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/payroll/bonuses/{bonus_id}"),
+        owner
+    );
+    assert_eq!(resp.status(), 204, "manual lines can go while the month is open");
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["net_piastres"], 600_000);
+    let actions = audit_actions(&pool, f.org).await;
+    assert!(actions.contains(&"period.generate".into()));
+    assert!(actions.contains(&"period.reopen".into()));
+    assert!(actions.contains(&"adjustment.delete".into()));
+}
+
+#[sqlx::test]
+async fn reopening_refunds_through_the_ledger_and_reapproving_collects_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // 100,000 over 2 installments: 50,000 a month.
+    let adv = approved_advance(&pool, &f, f.amal, 100_000, 2).await;
+    let owner = f.owner();
+
+    // The preview before, and what approving produces, agree (PAY-2).
+    let before = slip_of(&app, &f, f.amal).await;
+    assert_eq!(before["advance_installment_piastres"], 50_000);
+    assert_eq!(before["net_piastres"], 550_000);
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    assert_eq!(remaining(&pool, adv).await, (50_000, "approved".into()));
+    let ledger: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM salary_advance_collections WHERE advance_id = $1")
+            .bind(adv)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ledger, 1);
+
+    // Reopen: the collection goes with the payslip, the balance comes back,
+    // and the preview shows the installment again (audit B7).
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    assert_eq!(remaining(&pool, adv).await, (100_000, "approved".into()));
+    let again = slip_of(&app, &f, f.amal).await;
+    assert_eq!(again["advance_installment_piastres"], 50_000);
+    assert_eq!(again["net_piastres"], 550_000, "the preview is what re-approving produces");
+
+    // Approve, reopen, approve, reopen, approve: still exactly one installment.
+    for _ in 0..2 {
+        assert_eq!(generate(&app, &f).await.status(), 200);
+        assert_eq!(reopen(&app, &f).await.status(), 200);
+    }
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    assert_eq!(remaining(&pool, adv).await, (50_000, "approved".into()));
+
+    // The balance is rebuildable from the ledger alone (AV-6).
+    sqlx::query("UPDATE salary_advances SET remaining_piastres = 7 WHERE id = $1")
+        .bind(adv)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT salary_advance_sync_remaining($1)")
+        .bind(adv)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining(&pool, adv).await.0, 50_000);
+
+    // A one-installment advance settles, and a reopen un-settles it.
+    let one = approved_advance(&pool, &f, f.bassem, 30_000, 1).await;
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    assert_eq!(remaining(&pool, one).await, (0, "settled".into()));
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    assert_eq!(remaining(&pool, one).await, (30_000, "approved".into()));
+    // Deleting the draft refunds too.
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/payroll/periods/{}", f.period),
+        owner
+    );
+    assert_eq!(resp.status(), 204);
+    assert_eq!(remaining(&pool, adv).await.0, 100_000);
+}
+
+#[sqlx::test]
+async fn a_paid_person_locks_reopen_and_delete_and_the_month_pays_itself(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    // Someone with nothing to pay: a 0-salary owner-employee on payroll.
+    let nobody = common::employees::employee(&pool, f.org, "Zero", None, None, false, &[f.a], 0).await;
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let (method, by): (Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT paid_method, paid_by FROM payslips WHERE employee_id = $1",
+    )
+    .bind(nobody)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(method.as_deref(), Some("none"), "a 0-net payslip is marked by the run");
+    assert_eq!(by, Some(f.owner));
+    // That mark is not a payment: the month can still be reopened…
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    assert_eq!(generate(&app, &f).await.status(), 200);
+
+    // …until a real person is paid.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/payslips/{}/paid", f.period, f.amal),
+        owner,
+        json!({ "method": "cash" })
+    );
+    assert_eq!(resp.status(), 200);
+    let paid = json_of(resp).await;
+    assert_eq!(paid["paid_method"], "cash");
+    assert_eq!(paid["paid_by"], json!(f.owner));
+    assert_eq!(reopen(&app, &f).await.status(), 409);
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/payroll/periods/{}", f.period),
+        owner
+    );
+    assert_eq!(resp.status(), 409);
+    assert_eq!(generate(&app, &f).await.status(), 409);
+    // 'none' is the run's mark, never a client's.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/payslips/{}/paid", f.period, f.bassem),
+        owner,
+        json!({ "method": "none" })
+    );
+    assert_eq!(resp.status(), 400);
+    assert_eq!(period_status(&pool, f.period).await, "generated");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/payslips/{}/paid", f.period, f.bassem),
+        owner,
+        json!({ "method": "wallet" })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        period_status(&pool, f.period).await,
+        "paid",
+        "the 0-net payslip never blocks the month reaching Paid (PAY-7)"
+    );
+    // A paid month closes, and only closes.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/status", f.period),
+        owner,
+        json!({ "status": "draft", "reason": "oops" })
+    );
+    assert_eq!(resp.status(), 409);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/status", f.period),
+        owner,
+        json!({ "status": "closed" })
+    );
+    assert_eq!(resp.status(), 200);
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner)).await;
+    assert_eq!(cur["paid_count"], 3);
+    assert_eq!(cur["totals"]["net_piastres"], 1_100_000);
+    assert_eq!(cur["totals"]["people"], 3);
+    let actions = audit_actions(&pool, f.org).await;
+    assert_eq!(actions.iter().filter(|a| *a == "payslip.paid").count(), 2);
+    assert!(actions.contains(&"period.close".into()));
+}
+
+// ── not on payroll (owner decision 2026-09-23) ─────────────────────────────
+
+#[sqlx::test]
+async fn people_not_on_payroll_are_skipped_but_keep_the_app(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let get_flag = || async {
+        sqlx::query_scalar::<_, bool>("SELECT on_payroll FROM employees WHERE id = $1")
+            .bind(f.amal)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert!(get_flag().await, "on payroll by default");
+    let me = json_of(call!(app, get, "/staff/employees", owner)).await;
+    let amal = me.as_array().unwrap().iter().find(|e| e["id"] == json!(f.amal)).unwrap();
+    assert_eq!(amal["on_payroll"], true);
+
+    // A branch manager (no hr.payroll.edit everywhere) cannot flip it: the
+    // field is ignored like the salary.
+    let resp = call!(
+        app,
+        put,
+        format!("/staff/employees/{}", f.amal),
+        f.mgr(),
+        json!({ "name": "Amal", "on_payroll": false })
+    );
+    assert_eq!(resp.status(), 200);
+    assert!(get_flag().await, "a manager's flip is ignored");
+    let resp = call!(
+        app,
+        put,
+        format!("/staff/employees/{}", f.amal),
+        owner,
+        json!({ "name": "Amal", "on_payroll": false })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(json_of(resp).await["on_payroll"], false);
+    assert!(!get_flag().await);
+
+    // Skipped by the preview, the estimate and the payslips; still an
+    // employee the roster and the clock know.
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner)).await;
+    let ids: Vec<Value> = cur["preview"].as_array().unwrap().iter().map(|s| s["employee_id"].clone()).collect();
+    assert!(!ids.contains(&json!(f.amal)));
+    assert!(ids.contains(&json!(f.bassem)));
+    let est = json_of(call!(app, get, "/staff/me/pay/estimate", phone_token(&pool, f.amal).await)).await;
+    assert_eq!(est["on_payroll"], false);
+    assert!(est["slip"].is_null());
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let slips: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payslips WHERE employee_id = $1")
+        .bind(f.amal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(slips, 0);
+    let ctx = json_of(call!(app, get, "/staff/me/context", phone_token(&pool, f.amal).await)).await;
+    assert_eq!(ctx["employee_id"], json!(f.amal), "the app still boots");
+}
+
+// ── advances (AV-2, AV-5, B10) ─────────────────────────────────────────────
+
+#[sqlx::test]
+async fn advances_over_the_cap_wait_for_the_owner_and_record_is_atomic(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let mgr = f.mgr();
+    // Cap: 50% of 600,000 = 300,000 outstanding.
+    let ask = |amount: i64| async move {
+        let s = phone_token(&pool, f.amal).await;
+        json_of(call!(app, post, "/staff/me/advances", s, json!({ "amount_piastres": amount, "installments": 3 }))).await
+    };
+    let first = ask(200_000).await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/advances/{}/review", first["id"].as_str().unwrap()),
+        mgr,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 200, "within the cap and within 50%");
+    let row = json_of(resp).await;
+    assert_eq!(row["cap_piastres"], 300_000, "the server's cap figure rides on the row");
+    assert_eq!(row["outstanding_piastres"], 200_000);
+    assert_eq!(row["monthly_installment_piastres"], 66_667, "200000/3 rounded up");
+
+    // 200,000 more would put 400,000 outstanding: over the cap for the manager.
+    let second = ask(200_000).await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/advances/{}/review", second["id"].as_str().unwrap()),
+        mgr,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 409);
+    assert!(text_of(resp).await.contains("ADVANCE_OVER_CAP"));
+    assert_eq!(remaining(&pool, Uuid::parse_str(second["id"].as_str().unwrap()).unwrap()).await.1, "pending");
+    // The manager may approve less: 100,000 keeps it at the cap exactly.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/advances/{}/review", second["id"].as_str().unwrap()),
+        mgr,
+        json!({ "approve": true, "amount_piastres": 100_000 })
+    );
+    assert_eq!(resp.status(), 200);
+    // Over the cap needs the owner (AV-5).
+    let third = ask(50_000).await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/advances/{}/review", third["id"].as_str().unwrap()),
+        mgr,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 409);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/advances/{}/review", third["id"].as_str().unwrap()),
+        owner,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 200, "the owner goes over the cap");
+
+    // Recording directly is ONE call: refused, nothing is left behind.
+    let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM salary_advances WHERE employee_id = $1")
+        .bind(f.bassem)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let resp = call!(
+        app,
+        post,
+        "/staff/advances/record",
+        owner,
+        json!({ "employee_id": f.bassem, "amount_piastres": 100_000, "installments": 25 })
+    );
+    assert_eq!(resp.status(), 400, "installments are 1–24 everywhere");
+    let resp = call!(
+        app,
+        post,
+        "/staff/advances/record",
+        mgr,
+        json!({ "employee_id": f.bassem, "amount_piastres": 100_000, "installments": 2 })
+    );
+    assert_eq!(resp.status(), 403, "Bassem is at branch B, not the manager's");
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM salary_advances WHERE employee_id = $1")
+        .bind(f.bassem)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after, "a refused record leaves no stray pending advance");
+    let resp = call!(
+        app,
+        post,
+        "/staff/advances/record",
+        owner,
+        json!({ "employee_id": f.bassem, "amount_piastres": 100_000, "installments": 4, "reason": "Rent" })
+    );
+    assert_eq!(resp.status(), 201);
+    let rec = json_of(resp).await;
+    assert_eq!(rec["status"], "approved");
+    assert_eq!(rec["monthly_installment_piastres"], 25_000);
+    assert_eq!(rec["decided_by"], json!(f.owner));
+    // The retired legacy decide route is gone.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/advances/{}/decision", rec["id"].as_str().unwrap()),
+        owner,
+        json!({ "status": "approved" })
+    );
+    assert_eq!(resp.status(), 404);
+    let actions = audit_actions(&pool, f.org).await;
+    assert!(actions.contains(&"advance.record".into()));
+    assert_eq!(actions.iter().filter(|a| *a == "advance.decide").count(), 3);
+}
+
+// ── limits (AD-5, B5) ──────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn bonus_and_deduction_limits_are_separate_and_percent_lines_are_valued(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let mgr = f.mgr();
+    // The manager's deduction ceiling drops to 200 EGP; bonuses stay at 1,000.
+    sqlx::query(
+        "UPDATE org_role_grants g SET limits = '{\"max_amount\": 20000}'::jsonb \
+           FROM org_roles r WHERE r.id = g.org_role_id AND r.org_id = $1 \
+            AND r.kind::text = 'branch_manager' AND g.capability_id = 245",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SELECT authz_bump_epoch($1)")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx_mgr_employee =
+        common::employees::employee(&pool, f.org, "Mgr", Some(f.mgr), None, false, &[f.a], 0).await;
+    let ctx = json_of(call!(app, get, "/staff/me/context", phone_token(&pool, ctx_mgr_employee).await)).await;
+    assert_eq!(ctx["adjustment_limit_piastres"], 100_000);
+    assert_eq!(ctx["deduction_limit_piastres"], 20_000);
+
+    let bonus = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        mgr,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 50_000, "reason": "Sales" })
+    ))
+    .await;
+    assert_eq!(bonus["status"], "approved", "50 EGP... 500 EGP under the 1,000 bonus limit");
+    let ded = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        mgr,
+        json!({ "employee_id": f.amal, "kind": "deduction", "amount_piastres": 50_000, "reason": "Breakage" })
+    ))
+    .await;
+    assert_eq!(ded["status"], "pending", "the same 500 EGP is over the 200 EGP deduction limit");
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        mgr,
+        json!({ "employee_id": f.amal, "kind": "deduction", "percent_of_base": 5, "reason": "x" })
+    );
+    assert_eq!(resp.status(), 400, "a deduction is an amount (AD-2)");
+
+    // A 20% bonus on 600,000 is 120,000: over the manager's 1,000 EGP, so it
+    // waits — and another manager with the same limit can't settle it (B5).
+    let pct = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        mgr,
+        json!({ "employee_id": f.amal, "kind": "bonus", "percent_of_base": 20, "reason": "Target" })
+    ))
+    .await;
+    assert_eq!(pct["status"], "pending");
+    assert_eq!(pct["value_piastres"], 120_000, "the server values the percent line");
+    let mgr2 = user(&pool, f.org, "Manager 2", "branch_manager").await;
+    assign(&pool, mgr2, f.a).await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/adjustments/bonus/{}/decision", pct["id"].as_str().unwrap()),
+        token_for(mgr2, f.org, UserRole::BranchManager),
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 403, "a percent line is judged at its value, not skipped");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/adjustments/bonus/{}/decision", pct["id"].as_str().unwrap()),
+        owner,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(json_of(resp).await["status"], "approved");
+    // 1.5% of 600,000 = 9,000; 0.75% of 600,001 = 4500.0075 → 4500.
+    let small = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "percent_of_base": 1.5, "reason": "Tip" })
+    ))
+    .await;
+    assert_eq!(small["value_piastres"], 9_000);
+    // The retired legacy creates are gone.
+    for path in ["/staff/payroll/bonuses", "/staff/payroll/deductions"] {
+        let resp = call!(
+            app,
+            post,
+            path,
+            owner,
+            json!({ "employee_id": f.amal, "amount_piastres": 1, "reason": "x", "effective_date": f.start })
+        );
+        assert_eq!(resp.status(), 404, "{path}");
+    }
+}
+
+// ── the one pricing function (AT-9, RU-2, RU-6, RU-8, B2, PAY-13) ──────────
+
+#[sqlx::test]
+async fn overtime_is_valued_at_the_night_rate_under_the_branch_rules(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    // Branch B overrides: 30 working days and a 2.0 day rate, night 1.7.
+    sqlx::query(
+        "INSERT INTO attendance_settings (org_id, branch_id, rules_saved_at, working_days_per_month, \
+             overtime_mode, overtime_day_multiplier, overtime_night_multiplier, late_deduction_tiers) \
+         VALUES ($1, $2, now(), 30, 'approval', 2.0, 1.7, $3::jsonb)",
+    )
+    .bind(f.org)
+    .bind(f.b)
+    .bind(LADDER)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Amal (A, business rules): a 14:00–22:00 shift, 30 min past the end,
+    // all inside the night window → 600000×30×1.7/12480 = 2451.9 → 2452.
+    let d1 = f.start + Duration::days(1);
+    let rec_a = day(&pool, &f, f.amal, f.a, d1, "present", 14, 480, 0, 30).await;
+    // Bassem (B): 09:00–17:00, 60 min of day overtime, approval mode →
+    // nothing until approved, then 500000×60×2.0/(30×480) = 4166.67 → 4167.
+    let rec_b = day(&pool, &f, f.bassem, f.b, d1, "present", 9, 480, 0, 60).await;
+
+    let slip = slip_of(&app, &f, f.bassem).await;
+    assert_eq!(slip["overtime_piastres"], 0, "approval mode: pending pays nothing");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{rec_b}/overtime"),
+        owner,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 200);
+    let slip = slip_of(&app, &f, f.bassem).await;
+    assert_eq!(slip["overtime_piastres"], 4_167, "the BRANCH's days and rate (RU-2)");
+    assert_eq!(slip["overtime_minutes"], 60);
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["overtime_piastres"], 2_452, "night minutes at the night rate (RU-8)");
+    assert_eq!(slip["breakdown"]["night_overtime_minutes"], 30);
+    assert_eq!(slip["breakdown"]["overtime_shifts"][0]["piastres"], 2_452);
+    // A shift template's own rate wins over the branch's (RU-8): 2.5 by day.
+    let tpl: Uuid = sqlx::query_scalar(
+        "INSERT INTO work_shifts (org_id, branch_id, name, start_time, end_time, ot_day_multiplier) \
+         VALUES ($1, $2, 'Special', '09:00', '17:00', 2.5) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let d2 = f.start + Duration::days(2);
+    let rec_c = day(&pool, &f, f.amal, f.a, d2, "present", 9, 480, 0, 60).await;
+    sqlx::query("UPDATE attendance_records SET work_shift_id = $2 WHERE id = $1")
+        .bind(rec_c)
+        .bind(tpl)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 600000×60×2.5/12480 = 7211.5 → 7212, plus the 2452 night one.
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["overtime_piastres"], 2_452 + 7_212);
+    // The approval's own valuation used the night rate too: it went through
+    // the manager's overtime limit as 2452 (well under 100000). A record in
+    // an approved month can no longer be decided.
+    let _ = rec_a;
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let rec_d = day(&pool, &f, f.bassem, f.b, f.start, "present", 9, 480, 0, 15).await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{rec_d}/overtime"),
+        owner,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 409, "overtime in an approved month is decided");
+}
+
+#[sqlx::test]
+async fn late_penalties_use_the_branch_rules_and_that_days_rostered_minutes(pool: PgPool) {
+    let pool2 = pool.clone();
+    let f = seed(&pool).await;
+    // Branch B: 30 working days, and a ladder where 1–30 min costs 30 min.
+    sqlx::query(
+        "INSERT INTO attendance_settings (org_id, branch_id, rules_saved_at, working_days_per_month, \
+             late_deduction_tiers) VALUES ($1, $2, now(), 30, \
+             '[{\"from_minutes\":1,\"to_minutes\":30,\"kind\":\"minutes\",\"value\":30}]'::jsonb)",
+    )
+    .bind(f.org)
+    .bind(f.b)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Bassem, 6-hour day, 10 min late → 30 min of pay at the 6-hour minute
+    // rate: 500000×30/(30×360) = 1388.9 → 1389 (not the 8-hour 1042).
+    let rec = day(&pool, &f, f.bassem, f.b, f.start, "late", 9, 360, 10, 0).await;
+    // The caller passes the BUSINESS rules; the record's branch's apply.
+    let org_settings = madar_rust::staff::attendance::load_settings(&pool2, f.org, None)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &org_settings)
+        .await
+        .unwrap();
+    let amount: i64 = sqlx::query_scalar(
+        "SELECT amount_piastres FROM payroll_deductions WHERE attendance_record_id = $1",
+    )
+    .bind(rec)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(amount, 1_389);
+    // Amal, absent under the business rules: 600000/26 = 23076.9 → 23077.
+    let rec = day(&pool, &f, f.amal, f.a, f.start, "absent", 9, 480, 0, 0).await;
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &org_settings)
+        .await
+        .unwrap();
+    let (amount, source): (i64, String) = sqlx::query_as(
+        "SELECT amount_piastres, source FROM payroll_deductions WHERE attendance_record_id = $1",
+    )
+    .bind(rec)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((amount, source.as_str()), (23_077, "absence"));
+}
+
+#[sqlx::test]
+async fn a_joiner_mid_period_earns_overtime_at_the_full_rate(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Audit B2's worked example on this period: joined on day 16 of the
+    // month; 600 minutes of day overtime.
+    let window = (f.end - f.start).num_days() + 1;
+    let hired = f.start + Duration::days(15);
+    sqlx::query("UPDATE employees SET hire_date = $2 WHERE id = $1")
+        .bind(f.amal)
+        .bind(hired)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The history starts at the hire date too (the seed dated it a year back).
+    sqlx::query("UPDATE employee_salary_history SET effective_from = $2 WHERE employee_id = $1")
+        .bind(f.amal)
+        .bind(hired)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for i in 0..5 {
+        day(&pool, &f, f.amal, f.a, hired + Duration::days(i), "present", 9, 480, 0, 120).await;
+    }
+    let slip = slip_of(&app, &f, f.amal).await;
+    let paid_days = window - 15;
+    // base = 600000 × paid_days / window, rounded once.
+    let expected_base = ((600_000i128 * paid_days as i128 * 2 + window as i128) / (2 * window as i128)) as i64;
+    assert_eq!(slip["base_piastres"], expected_base);
+    assert_eq!(slip["breakdown"]["paid_days"], paid_days);
+    // 600000×600×1.35/12480 = 38942.3 → 38942, on the FULL salary.
+    assert_eq!(slip["overtime_piastres"], 38_942);
+    assert_eq!(slip["net_piastres"], expected_base + 38_942);
+}
+
+#[sqlx::test]
+async fn a_salary_change_mid_period_pays_each_day_at_its_rate(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    // A raise to 660,000 from day 17 (day index 16), recorded by the
+    // salary-history trigger when the salary changes…
+    let raise_day = f.start + Duration::days(16);
+    let resp = call!(
+        app,
+        put,
+        format!("/staff/employees/{}", f.amal),
+        owner,
+        json!({ "name": "Amal", "base_salary_piastres": 660_000 })
+    );
+    assert_eq!(resp.status(), 200);
+    // …dated today by the trigger; the test moves it to the raise day.
+    sqlx::query(
+        "UPDATE employee_salary_history SET effective_from = $2 \
+          WHERE employee_id = $1 AND base_salary_piastres = 660000",
+    )
+    .bind(f.amal)
+    .bind(raise_day)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let window = (f.end - f.start).num_days() + 1;
+    let slip = slip_of(&app, &f, f.amal).await;
+    // (16 × 600000 + (window − 16) × 660000) / window, rounded once.
+    let sum = 16i128 * 600_000 + (window as i128 - 16) * 660_000;
+    let expected = ((sum * 2 + window as i128) / (2 * window as i128)) as i64;
+    assert_eq!(slip["base_piastres"], expected);
+    assert_eq!(slip["base_salary_piastres"], 660_000, "the salary in force at the end");
+    // A late day before the raise is priced at the OLD salary: 24 min → 2885.
+    let rec = day(&pool, &f, f.amal, f.a, f.start, "late", 9, 480, 24, 0).await;
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &settings)
+        .await
+        .unwrap();
+    let amount: i64 = sqlx::query_scalar(
+        "SELECT amount_piastres FROM payroll_deductions WHERE attendance_record_id = $1",
+    )
+    .bind(rec)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(amount, 2_885);
+    // And overtime after the raise at the NEW one: 60 min → 660000×60×1.35/12480 = 4283.65 → 4284.
+    day(&pool, &f, f.amal, f.a, raise_day, "present", 9, 480, 0, 60).await;
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["overtime_piastres"], 4_284);
+}
+
+// ── overrides and waivers (AD-7, AD-8, AT-7, B6) ───────────────────────────
+
+#[sqlx::test]
+async fn overrides_are_limited_zero_is_allowed_and_a_waiver_is_final(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let mgr = f.mgr();
+    let rec = day(&pool, &f, f.amal, f.a, f.start, "absent", 9, 480, 0, 0).await;
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &settings)
+        .await
+        .unwrap();
+    drop(conn);
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM payroll_deductions WHERE attendance_record_id = $1")
+        .bind(rec)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    // 23077 → lowering to 10000 is fine for the manager (a partial waiver).
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/override"),
+        mgr,
+        json!({ "amount_piastres": 10_000, "reason": "Half a day was covered" })
+    );
+    assert_eq!(resp.status(), 200);
+    let row = json_of(resp).await;
+    assert_eq!(row["original_amount_piastres"], 23_077);
+    assert_eq!(row["amount_piastres"], 10_000);
+    // Raising it by 150,000 is over the manager's 1,000 EGP deduction limit.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/override"),
+        mgr,
+        json!({ "amount_piastres": 160_000, "reason": "Broke the machine" })
+    );
+    assert_eq!(resp.status(), 403);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/override"),
+        owner,
+        json!({ "amount_piastres": 160_000, "reason": "Broke the machine" })
+    );
+    assert_eq!(resp.status(), 200, "the owner has no limit");
+    // Zero is allowed (B6) and the original survives a second override.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/override"),
+        owner,
+        json!({ "amount_piastres": 0, "reason": "Forgiven" })
+    );
+    assert_eq!(resp.status(), 200);
+    let row = json_of(resp).await;
+    assert_eq!(row["amount_piastres"], 0);
+    assert_eq!(row["original_amount_piastres"], 23_077);
+    // A recompute never brings it back (AD-8).
+    let mut conn = pool.acquire().await.unwrap();
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &settings)
+        .await
+        .unwrap();
+    drop(conn);
+    let amount: i64 = sqlx::query_scalar("SELECT amount_piastres FROM payroll_deductions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(amount, 0);
+    // Waive, then no override; unwaive with a reason counts it again.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/waive"),
+        owner,
+        json!({ "reason": "Sick" })
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/override"),
+        owner,
+        json!({ "amount_piastres": 5, "reason": "x" })
+    );
+    assert_eq!(resp.status(), 409, "a waiver is final");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/unwaive"),
+        owner,
+        json!({ "reason": "" })
+    );
+    assert_eq!(resp.status(), 400);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/unwaive"),
+        owner,
+        json!({ "reason": "Wasn't sick after all" })
+    );
+    assert_eq!(resp.status(), 200);
+    assert!(json_of(resp).await["waived_at"].is_null());
+    // The employee's own list shows the override and waiver state (AD-6).
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/waive"),
+        owner,
+        json!({ "reason": "Sick" })
+    );
+    assert_eq!(resp.status(), 200);
+    let mine = json_of(call!(app, get, "/staff/me/adjustments", phone_token(&pool, f.amal).await)).await;
+    let line = mine.as_array().unwrap().iter().find(|l| l["id"] == json!(id)).unwrap();
+    assert!(line["waived_at"].is_string());
+    assert_eq!(line["original_amount_piastres"], 23_077);
+    let actions = audit_actions(&pool, f.org).await;
+    assert_eq!(actions.iter().filter(|a| *a == "deduction.override").count(), 3);
+    assert_eq!(actions.iter().filter(|a| *a == "deduction.waive").count(), 2);
+    assert_eq!(actions.iter().filter(|a| *a == "deduction.unwaive").count(), 1);
+    let log = json_of(call!(app, get, "/staff/payroll/audit", owner)).await;
+    assert!(log.as_array().unwrap().iter().any(|r| r["action"] == "deduction.unwaive" && r["reason"] == "Wasn't sick after all"));
+    let resp = call!(app, get, "/staff/payroll/audit", mgr);
+    assert_eq!(resp.status(), 403, "the log is the owner's");
+}
+
+// ── expense advances (AV-7, AV-10) ─────────────────────────────────────────
+
+#[sqlx::test]
+async fn expense_advances_carry_a_date_and_a_branch_and_never_a_till(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner,
+        json!({ "employee_id": f.amal, "amount_piastres": 20_000, "purpose": "Milk", "via": "till" })
+    );
+    assert_eq!(resp.status(), 400, "a till pay-out is tagged on the till (AV-10)");
+    let given = f.start;
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner,
+        json!({ "employee_id": f.amal, "amount_piastres": 20_000, "purpose": "Milk", "via": "safe",
+                "given_on": given, "branch_id": f.b })
+    );
+    assert_eq!(resp.status(), 201);
+    let row = json_of(resp).await;
+    assert_eq!(row["given_on"], json!(given));
+    assert_eq!(row["branch_id"], json!(f.b));
+    assert_eq!(row["handed_by"], json!(f.owner));
+    // The manager of A cannot log at B.
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        f.mgr(),
+        json!({ "employee_id": f.amal, "amount_piastres": 1_000, "purpose": "Tea", "via": "bank", "branch_id": f.b })
+    );
+    assert_eq!(resp.status(), 403);
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner,
+        json!({ "employee_id": f.amal, "amount_piastres": 1_000, "purpose": "Tea", "via": "bank",
+                "given_on": f.end + Duration::days(40) })
+    );
+    assert_eq!(resp.status(), 400, "not in the future");
+    // Per branch in the report, and never on a payslip.
+    let rep = json_of(call!(
+        app,
+        get,
+        format!("/staff/reports/advances?from={}&to={}&branch_id={}", f.start, f.end, f.b),
+        owner
+    ))
+    .await;
+    assert_eq!(rep["expense_given_piastres"], 20_000);
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["net_piastres"], 600_000);
+}
+
+// ── exports (PAY-8) ────────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn the_bank_file_and_wallet_list_come_from_the_server(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    sqlx::query("UPDATE employees SET pay_method = 'bank', pay_account = 'EG12BANK' WHERE id = $1")
+        .bind(f.amal)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE employees SET pay_method = 'wallet', pay_account = '01000000000' WHERE id = $1")
+        .bind(f.bassem)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv?method=bank", f.period),
+        owner
+    );
+    assert_eq!(resp.status(), 409, "nothing to export before approval");
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let bank = text_of(call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv?method=bank", f.period),
+        owner
+    ))
+    .await;
+    assert_eq!(bank, "employee,account,amount\n\"Amal\",\"EG12BANK\",6000.00\n");
+    let wallet = text_of(call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv?method=wallet", f.period),
+        owner
+    ))
+    .await;
+    assert_eq!(wallet, "employee,wallet_number,amount\n\"Bassem\",\"01000000000\",5000.00\n");
+    let all = text_of(call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv", f.period),
+        owner
+    ))
+    .await;
+    assert!(all.starts_with("employee,employee_id,pay_method,account,base,"));
+    assert_eq!(all.lines().count(), 3);
+    let resp = call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv?method=cheque", f.period),
+        owner
+    );
+    assert_eq!(resp.status(), 400);
+    let slips = json_of(call!(app, get, format!("/staff/payroll/periods/{}/payslips", f.period), owner)).await;
+    assert_eq!(slips[0]["pay_method"], "bank");
+    assert_eq!(slips[0]["pay_account"], "EG12BANK");
+}
+
+// ── the money path end to end (AT-12) ──────────────────────────────────────
+
+fn stable_zone() -> String {
+    // POSIX sign convention: `Etc/GMT-2` is two hours AHEAD of UTC. Pick the
+    // zone where it is midday now, so a shift around now stays on one date.
+    let shift = 12 - Utc::now().hour() as i64;
+    format!("Etc/GMT{}{}", if shift > 0 { '-' } else { '+' }, shift.abs())
+}
+
+fn local_time(minutes: i64) -> NaiveTime {
+    let shift = 12 - Utc::now().hour() as i64;
+    let local = (Utc::now() + Duration::hours(shift) + Duration::minutes(minutes)).naive_utc();
+    NaiveTime::from_hms_opt(local.hour(), local.minute(), 0).unwrap()
+}
+
+#[sqlx::test]
+async fn the_money_path_from_punch_to_payslip(pool: PgPool) {
+    let app = app!(pool);
+    let tz = stable_zone();
+    let f = seed_with_zone(&pool, &tz).await;
+    let owner = f.owner();
+    // Amal's shift started 60 minutes ago with 15 minutes of grace: 45 late,
+    // the half-day rung → 600000 × 0.5 / 26 = 11538.46 → 11538.
+    let shift: Uuid = sqlx::query_scalar(
+        "INSERT INTO work_shifts (org_id, branch_id, name, start_time, end_time, grace_minutes) \
+         VALUES ($1, $2, 'Day', $3, $4, 15) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(local_time(-60))
+    .bind(local_time(420))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, effective_from) \
+         VALUES ($1, $2, $3, CURRENT_DATE - 60)",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(shift)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let phone = phone_token(&pool, f.amal).await;
+
+    // 1. Punch in (late) and out.
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/check-in",
+        phone,
+        json!({ "branch_id": f.a, "latitude": LAT, "longitude": LNG })
+    );
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/check-out",
+        phone,
+        json!({ "latitude": LAT, "longitude": LNG })
+    );
+    assert_eq!(resp.status(), 200);
+
+    // 2. The penalty row exists at the ladder's figure…
+    let (id, amount, source): (Uuid, i64, String) = sqlx::query_as(
+        "SELECT id, amount_piastres, source FROM payroll_deductions WHERE employee_id = $1",
+    )
+    .bind(f.amal)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((amount, source.as_str()), (11_538, "late_penalty"));
+    // …and the estimate already shows it.
+    let est = json_of(call!(app, get, "/staff/me/pay/estimate", phone)).await;
+    assert_eq!(est["slip"]["deductions_piastres"], 11_538);
+    assert_eq!(est["slip"]["net_piastres"], 600_000 - 11_538);
+
+    // 3. The nightly sweep changes nothing.
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE employee_id = $1")
+        .bind(f.amal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    // 4. The manager waives it; the sweep leaves the waiver alone.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{id}/waive"),
+        f.mgr(),
+        json!({ "reason": "Bus strike" })
+    );
+    assert_eq!(resp.status(), 200);
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let waived: bool = sqlx::query_scalar("SELECT waived_at IS NOT NULL FROM payroll_deductions WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(waived);
+
+    // 5. Approve: the payslip carries the struck-through line and full pay.
+    let period = json_of(call!(app, get, "/staff/payroll/current", owner)).await["period"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = call!(app, post, format!("/staff/payroll/periods/{period}/generate"), owner, json!({}));
+    assert_eq!(resp.status(), 200);
+    let mine = json_of(call!(app, get, "/staff/me/payslips", phone)).await;
+    let slip = &mine[0];
+    assert_eq!(slip["net_piastres"], 600_000);
+    assert_eq!(slip["deductions_piastres"], 0);
+    let lines = slip["breakdown"]["deductions"].as_array().unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["waived"], true);
+    assert_eq!(lines[0]["piastres"], 11_538);
+    let actions = audit_actions(&pool, f.org).await;
+    assert!(actions.contains(&"deduction.waive".into()));
+    assert!(actions.contains(&"period.generate".into()));
+}
+
+// ── periods (PAY-1, B8, AT-8) ──────────────────────────────────────────────
+
+#[sqlx::test]
+async fn overlapping_periods_are_refused_and_the_sweep_opens_the_month(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let resp = call!(
+        app,
+        post,
+        "/staff/payroll/periods",
+        owner,
+        json!({ "name": "Overlap", "start_date": f.start + Duration::days(10), "end_date": f.end + Duration::days(10) })
+    );
+    assert_eq!(resp.status(), 409);
+    // The database refuses it even without the handler.
+    let raw = sqlx::query(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date) VALUES ($1, 'x', $2, $3)",
+    )
+    .bind(f.org)
+    .bind(f.start - Duration::days(3))
+    .bind(f.start)
+    .execute(&pool)
+    .await;
+    assert!(raw.is_err());
+    // A fresh org: the sweep opens its period on its start day (PAY-1), once.
+    sqlx::query("DELETE FROM payroll_periods WHERE org_id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    madar_rust::staff::jobs::open_pay_periods(&pool).await.unwrap();
+    madar_rust::staff::jobs::open_pay_periods(&pool).await.unwrap();
+    let periods: Vec<(NaiveDate, NaiveDate)> =
+        sqlx::query_as("SELECT start_date, end_date FROM payroll_periods WHERE org_id = $1")
+            .bind(f.org)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(periods, vec![(f.start, f.end)]);
+}
+
+// ── recurring lines (AD-3, AD-9) ───────────────────────────────────────────
+
+#[sqlx::test]
+async fn stopping_a_recurring_line_records_who_and_why_and_ends_it_from_next_month(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    // A meal allowance from a month AGO, and a transport one from THIS month.
+    let last_month = f.start - Duration::days(1);
+    let meal = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 30_000, "reason": "Meals",
+                "recurring": true, "effective_date": last_month })
+    ))
+    .await;
+    let transport = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 20_000, "reason": "Transport",
+                "recurring": true, "effective_date": f.start })
+    ))
+    .await;
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["bonuses_piastres"], 50_000);
+    // A recurring line dated NEXT month is not in this one (AD-3 start month).
+    let next = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 1, "reason": "Future",
+                "recurring": true, "effective_date": f.end + Duration::days(1) })
+    ))
+    .await;
+    assert_eq!(next["status"], "approved");
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["bonuses_piastres"], 50_000);
+
+    // Stopping while this month is open ends BOTH from this month on — the
+    // one that started this month included (audit AD-3).
+    for id in [meal["id"].as_str().unwrap(), transport["id"].as_str().unwrap()] {
+        let resp = call!(
+            app,
+            post,
+            format!("/staff/adjustments/bonus/{id}/stop"),
+            owner,
+            json!({ "reason": "Canteen opened" })
+        );
+        assert_eq!(resp.status(), 200);
+        let row = json_of(resp).await;
+        assert_eq!(row["ends_on"], json!(last_month));
+        assert_eq!(row["stop_reason"], "Canteen opened");
+        assert!(row["stopped_at"].is_string());
+    }
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["bonuses_piastres"], 0);
+    let (by, reason): (Option<Uuid>, Option<String>) =
+        sqlx::query_as("SELECT stopped_by, stop_reason FROM payroll_bonuses WHERE id = $1::uuid")
+            .bind(meal["id"].as_str().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((by, reason.as_deref()), (Some(f.owner), Some("Canteen opened")));
+    assert_eq!(audit_actions(&pool, f.org).await.iter().filter(|a| *a == "adjustment.stop").count(), 2);
+}
+
+// ── carry-over (PAY-12) ────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn deductions_past_earnings_carry_to_the_next_month_and_are_named(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    // 700,000 of manual deductions against 600,000 of pay, plus a 50,000
+    // advance installment that cannot be collected this month.
+    let adv = approved_advance(&pool, &f, f.amal, 50_000, 1).await;
+    for amount in [400_000, 300_000] {
+        let resp = call!(
+            app,
+            post,
+            "/staff/adjustments",
+            owner,
+            json!({ "employee_id": f.amal, "kind": "deduction", "amount_piastres": amount, "reason": "Damage",
+                    "effective_date": f.start })
+        );
+        assert_eq!(resp.status(), 201);
+    }
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["deductions_piastres"], 600_000, "capped at earnings");
+    assert_eq!(slip["net_piastres"], 0);
+    assert_eq!(slip["carry_out_piastres"], 100_000);
+    assert_eq!(slip["breakdown"]["capped_piastres"], 100_000, "the lines do not add up to the net; this says by how much");
+    assert_eq!(slip["advance_installment_piastres"], 0, "nothing left for the advance (AV-4)");
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    assert_eq!(remaining(&pool, adv).await.0, 50_000, "the advance stays owed");
+    // Next month carries it in as its first deduction.
+    let next_start = f.end + Duration::days(1);
+    let next_end = (next_start + Duration::days(32)).with_day(1).unwrap() - Duration::days(1);
+    let next: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date) VALUES ($1, 'Next', $2, $3) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(next_start)
+    .bind(next_end)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let preview = json_of(call!(app, get, format!("/staff/payroll/periods/{next}/preview"), owner)).await;
+    let amal = preview.as_array().unwrap().iter().find(|s| s["employee_id"] == json!(f.amal)).unwrap();
+    let carry = amal["breakdown"]["deductions"].as_array().unwrap().iter().find(|l| l["kind"] == "carry").unwrap();
+    assert_eq!(carry["piastres"], 100_000);
+    // 600000 − 100000 carry − 50000 advance.
+    assert_eq!(amal["net_piastres"], 450_000);
+    assert_eq!(amal["advance_installment_piastres"], 50_000);
+    // A reopened month leaks no carry: reopen this month, and next month's
+    // preview reads none.
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    let preview = json_of(call!(app, get, format!("/staff/payroll/periods/{next}/preview"), owner)).await;
+    let amal = preview.as_array().unwrap().iter().find(|s| s["employee_id"] == json!(f.amal)).unwrap();
+    assert!(amal["breakdown"]["deductions"].as_array().unwrap().iter().all(|l| l["kind"] != "carry"));
+}
+
+// ── refusals (AT-11) ───────────────────────────────────────────────────────
+
+#[sqlx::test]
+async fn every_new_money_act_refuses_the_wrong_person(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let mgr = f.mgr();
+    let teller = user(&pool, f.org, "Teller", "teller").await;
+    assign(&pool, teller, f.a).await;
+    let teller = token_for(teller, f.org, UserRole::Teller);
+    let rec = day(&pool, &f, f.bassem, f.b, f.start, "absent", 9, 480, 0, 0).await;
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    madar_rust::staff::penalties::recompute_record(&mut conn, rec, &settings)
+        .await
+        .unwrap();
+    drop(conn);
+    let ded: Uuid = sqlx::query_scalar("SELECT id FROM payroll_deductions WHERE attendance_record_id = $1")
+        .bind(rec)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let manual = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.bassem, "kind": "deduction", "amount_piastres": 1_000, "reason": "x" })
+    ))
+    .await;
+    let manual_id = manual["id"].as_str().unwrap();
+
+    // A teller holds none of it.
+    for (m, path, body) in [
+        ("patch", format!("/staff/payroll/deductions/{ded}/unwaive"), json!({ "reason": "r" })),
+        ("post", "/staff/advances/record".to_string(), json!({ "employee_id": f.amal, "amount_piastres": 1 })),
+        ("get", "/staff/payroll/audit".to_string(), Value::Null),
+        ("delete", format!("/staff/payroll/deductions/{manual_id}"), Value::Null),
+        ("patch", format!("/staff/payroll/periods/{}/status", f.period), json!({ "status": "draft", "reason": "r" })),
+    ] {
+        let resp = match m {
+            "patch" => call!(app, patch, path, teller, body),
+            "post" => call!(app, post, path, teller, body),
+            "delete" => call!(app, delete, path, teller),
+            _ => call!(app, get, path, teller),
+        };
+        assert_eq!(resp.status(), 403, "teller {m} {path}");
+    }
+    // The manager of A: not for B's people, and never the org-wide acts.
+    let resp = call!(app, delete, format!("/staff/payroll/deductions/{manual_id}"), mgr);
+    assert_eq!(resp.status(), 403, "Bassem is at B");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{ded}/unwaive"),
+        mgr,
+        json!({ "reason": "r" })
+    );
+    assert_eq!(resp.status(), 403);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{}/status", f.period),
+        mgr,
+        json!({ "status": "draft", "reason": "r" })
+    );
+    assert_eq!(resp.status(), 403, "reopening is the whole business's");
+    let resp = call!(app, delete, format!("/staff/payroll/periods/{}", f.period), mgr);
+    assert_eq!(resp.status(), 403);
+    let resp = call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv?method=bank", f.period),
+        mgr
+    );
+    assert_eq!(resp.status(), 403);
+    // A rule-made line is never deleted, by anyone.
+    let resp = call!(app, delete, format!("/staff/payroll/deductions/{ded}"), owner);
+    assert_eq!(resp.status(), 409);
+    // Nobody adds a pay line for themselves.
+    let mgr_emp = common::employees::employee(&pool, f.org, "Mgr", Some(f.mgr), None, false, &[f.a], 100).await;
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        mgr,
+        json!({ "employee_id": mgr_emp, "kind": "bonus", "amount_piastres": 1, "reason": "me" })
+    );
+    assert_eq!(resp.status(), 403);
+}
