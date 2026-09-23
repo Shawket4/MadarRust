@@ -251,6 +251,25 @@ Publish **after** `tx.commit()`, never inside the transaction.
   opening snapshot. Ingredient categories are a table keyed by `slug`; `milk` and
   `coffee_bean` slugs drive the menu swap logic.
 
+### Dawam: employees and the staff token (Phase A, `dawam-fix/PHASE_A_DESIGN.md`)
+- **An employee is its own entity** (`employees`), optionally linked to a user
+  (`employees.user_id`). Every HR/Dawam subject column is `employee_id`; actor
+  columns (`created_by`, `decided_by`, …) stay users. Never key a staff record
+  by a user id, and never assume `employee.id == user.id` (only rows migrated
+  from `staff_profiles` share it). Creating an employee never creates a user.
+- **The staff app's session is a staff token** (`staff::principal`): subject =
+  employee, device-bound, 60 minutes, refreshed through `POST /auth/staff/refresh`
+  with `X-Staff-Device`. Only `/staff/*` (behind `StaffAuth`) accepts it; the
+  `Claims` verifier refuses it everywhere else. `/staff/me/*` handlers take the
+  `Me` extractor; management handlers take `principal::caller(&req)` (a linked
+  manager's phone acts through their account).
+- **Branch scope goes through `staff::access`**: `gate` (held somewhere, before
+  any lookup), `require_for` (at one of the employee's branches), `require_at`,
+  `require_everywhere` (org-wide acts: payroll run, rules, holidays, roster
+  settings), `scope` + `in_scope` for lists. No `check_permission` on `/staff`.
+- A new Dawam table needs `GRANT SELECT, INSERT, UPDATE, DELETE … TO madar_app`
+  in its migration and RLS; `tests/dawam_migration.rs` fails otherwise.
+
 ### Permissions (architecture E — PERMISSIONS_ARCHITECTURE.md)
 - **One registry.** Every permission is a capability in `authz/spec/capabilities.toml`
   (stable id, key, legacy cell, group, tier, risk, role defaults, core roles, EN/AR).

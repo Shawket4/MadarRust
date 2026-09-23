@@ -1950,6 +1950,98 @@
         }
       }
     },
+    "/auth/staff/refresh": {
+      "post": {
+        "tags": [
+          "staff-auth"
+        ],
+        "summary": "A fresh staff token for the phone that sends its device token in\n`X-Staff-Device` (RO-3). The device is the refresh credential: once it is\nrevoked (a new phone, a new number, the employee deactivated) this answers\n401 `DEVICE_REVOKED` and the app signs out. The same checks as every\n`/staff/*` call: the employee is active with app access, the business is\nactive and has Dawam on.",
+        "operationId": "staff_token_refresh",
+        "parameters": [
+          {
+            "name": "X-Staff-Device",
+            "in": "header",
+            "description": "The device token from sign-in",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffTokenRefresh"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/authz/explain": {
       "get": {
         "tags": [
@@ -28848,6 +28940,104 @@
         ]
       }
     },
+    "/orgs/{id}/modules": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The org's modules, for anyone who works there: the dashboard routes by\nthe server's answer (PS-3), and a branch manager cannot read the org\nitself (`orgs:read` is the owner's). Switching them is `PATCH /orgs/{id}`,\na super admin's alone (SA-1).",
+        "operationId": "get_org_modules",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's switched-on modules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgModules"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/orgs/{id}/offline-auth-bundle": {
       "get": {
         "tags": [
@@ -45154,7 +45344,7 @@
         "operationId": "list_adjustments",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -45709,7 +45899,7 @@
             }
           },
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -46221,7 +46411,7 @@
             }
           },
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -46830,7 +47020,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Active staff at a branch, names only: what a till shows to tag a pay-out\nas someone's expense advance (AV-8). Anyone who works the branch may read\nit; nothing about pay is in it.",
+        "summary": "Active employees at a branch, names only: what a till shows to tag a\npay-out as someone's expense advance (AV-8). Anyone who works the branch\nmay read it; nothing about pay is in it.",
         "operationId": "branch_people",
         "parameters": [
           {
@@ -47539,11 +47729,30 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Only the people of this branch.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`linked` · `app` · `manual`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Employees in the org",
+            "description": "Employees at the caller's branches",
             "content": {
               "application/json": {
                 "schema": {
@@ -47626,7 +47835,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Add a Dawam employee: a user who signs in with a WhatsApp code, so no\npassword or till PIN (a manager can give them a PIN later to work a till).\nUsed by the Add Employee form and the spreadsheet import (DSH-7).",
+        "summary": "Add an employee: linked to an existing user, or without one (with or\nwithout the staff app). Used by the Employees page, the set-up wizard and\nthe spreadsheet import (DSH-7). Never creates a login.",
         "operationId": "create_employee",
         "requestBody": {
           "content": {
@@ -47717,7 +47926,96 @@
         ]
       }
     },
-    "/staff/employees/{user_id}": {
+    "/staff/employees/linkable": {
+      "get": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "The org's users who are not employees yet: the \"make this user an\nemployee\" picker.",
+        "operationId": "linkable_users",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LinkableUser"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/employees/{employee_id}": {
       "get": {
         "tags": [
           "staff"
@@ -47725,9 +48023,9 @@
         "operationId": "get_employee",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "path",
-            "description": "The employee's user ID",
+            "description": "The employee's id",
             "required": true,
             "schema": {
               "type": "string",
@@ -47820,9 +48118,9 @@
         "operationId": "put_employee",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "path",
-            "description": "The employee's user ID",
+            "description": "The employee's id",
             "required": true,
             "schema": {
               "type": "string",
@@ -47842,7 +48140,7 @@
         },
         "responses": {
           "200": {
-            "description": "Employee profile saved",
+            "description": "Employee saved",
             "content": {
               "application/json": {
                 "schema": {
@@ -47925,9 +48223,9 @@
         "operationId": "delete_employee",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "path",
-            "description": "The employee's user ID",
+            "description": "The employee's id",
             "required": true,
             "schema": {
               "type": "string",
@@ -47937,7 +48235,7 @@
         ],
         "responses": {
           "204": {
-            "description": "Profile removed; the user account is untouched"
+            "description": "Employee terminated; their records stay"
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -48007,16 +48305,16 @@
         ]
       }
     },
-    "/staff/employees/{user_id}/device": {
+    "/staff/employees/{employee_id}/device": {
       "delete": {
         "tags": [
           "staff"
         ],
-        "summary": "Sign a person's phone out now (RO-4).",
+        "summary": "Sign a person's phone out now (RO-4): the device, every staff token minted\nfor it, and its pushes.",
         "operationId": "revoke_device",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "path",
             "required": true,
             "schema": {
@@ -48097,7 +48395,7 @@
         ]
       }
     },
-    "/staff/employees/{user_id}/documents": {
+    "/staff/employees/{employee_id}/documents": {
       "get": {
         "tags": [
           "staff"
@@ -48105,9 +48403,9 @@
         "operationId": "list_documents",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "path",
-            "description": "The employee's user ID",
+            "description": "The employee's id",
             "required": true,
             "schema": {
               "type": "string",
@@ -48203,9 +48501,9 @@
         "operationId": "create_document",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "path",
-            "description": "The employee's user ID",
+            "description": "The employee's id",
             "required": true,
             "schema": {
               "type": "string",
@@ -48310,7 +48608,7 @@
         "operationId": "list_expense_advances",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -48824,7 +49122,7 @@
         "operationId": "list_balances",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -50326,7 +50624,7 @@
         "operationId": "my_leave_balances",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -50967,7 +51265,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "`PUT /staff/me/push-token` — kept for old app builds; registers through\nthe same `push_devices` table as `PUT /push/token` (app = `\"dawam\"`).",
+        "summary": "`PUT /staff/me/push-token` — the staff app registers its phone for the\nemployee through the same `push_devices` table as `PUT /push/token`\n(app = `\"dawam\"`).",
         "operationId": "set_staff_push_token",
         "requestBody": {
           "content": {
@@ -52143,7 +52441,7 @@
         "operationId": "list_advances",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -52460,7 +52758,7 @@
         "operationId": "list_bonuses",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -52846,7 +53144,7 @@
         "operationId": "list_deductions",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -53918,7 +54216,7 @@
         ]
       }
     },
-    "/staff/payroll/periods/{id}/payslips/{user_id}/paid": {
+    "/staff/payroll/periods/{id}/payslips/{employee_id}/paid": {
       "patch": {
         "tags": [
           "staff"
@@ -53936,7 +54234,7 @@
             }
           },
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "path",
             "required": true,
             "schema": {
@@ -54600,7 +54898,7 @@
         "operationId": "list_requests",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": false,
             "schema": {
@@ -55614,7 +55912,7 @@
         "operationId": "list_assignments",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "description": "Omit for the WHOLE org's roster — what a schedule grid needs, and the\nonly way to draw one without a request per employee.",
             "required": false,
@@ -55807,7 +56105,7 @@
         "operationId": "get_scheduled_day",
         "parameters": [
           {
-            "name": "user_id",
+            "name": "employee_id",
             "in": "query",
             "required": true,
             "schema": {
@@ -61935,8 +62233,8 @@
         "required": [
           "id",
           "kind",
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "reason",
           "effective_date",
           "source",
@@ -61966,6 +62264,13 @@
           "effective_date": {
             "type": "string",
             "format": "date"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
           },
           "ends_on": {
             "type": [
@@ -62001,13 +62306,6 @@
           "status": {
             "type": "string",
             "description": "`pending` (waits for the owner) · `approved` · `rejected`"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
           }
         }
       },
@@ -62723,8 +63021,8 @@
         "type": "object",
         "required": [
           "id",
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "kind",
           "minutes_away",
           "detected_at",
@@ -62748,6 +63046,13 @@
           "detected_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
           },
           "id": {
             "type": "string",
@@ -62778,13 +63083,6 @@
             "type": "integer",
             "format": "int64",
             "description": "Time away × the person's minute rate, rounded to the nearest 5 EGP (CL-7)."
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
           }
         }
       },
@@ -62793,7 +63091,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "branch_id",
           "business_date",
           "status",
@@ -62890,7 +63188,7 @@
             ],
             "description": "`pending` · `confirmed` · `rejected` for a cover."
           },
-          "covered_user_id": {
+          "covered_employee_id": {
             "type": [
               "string",
               "null"
@@ -62925,6 +63223,16 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "type": "string",
@@ -62988,16 +63296,6 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "work_shift_id": {
             "type": [
@@ -63190,8 +63488,8 @@
         "type": "object",
         "description": "One employee's totals over a reporting window.",
         "required": [
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "present_days",
           "late_days",
           "absent_days",
@@ -63205,6 +63503,13 @@
           "absent_days": {
             "type": "integer",
             "format": "int64"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
           },
           "half_days": {
             "type": "integer",
@@ -63233,13 +63538,6 @@
           "total_worked_minutes": {
             "type": "integer",
             "format": "int64"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
           }
         }
       },
@@ -64438,16 +64736,16 @@
       "BranchPerson": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "name"
         ],
         "properties": {
-          "name": {
-            "type": "string"
-          },
-          "user_id": {
+          "employee_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -66773,7 +67071,7 @@
         "type": "object",
         "description": "One employee's pay for a period, computed but not yet written.\n\nPREVIEW AND GENERATE SHARE THIS. The preview endpoint exists so a manager can\nsee what payroll is about to do — a figure that would be worthless if it came\nfrom a second implementation that could drift from the real one. So the\ngenerator computes these first and then persists them, and the preview\ncomputes exactly the same values and persists nothing.",
         "required": [
-          "user_id",
+          "employee_id",
           "name",
           "base_salary_piastres",
           "worked_days",
@@ -66825,6 +67123,10 @@
             "type": "integer",
             "format": "int64"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "late_minutes": {
             "type": "integer",
             "format": "int64"
@@ -66847,10 +67149,6 @@
           "overtime_piastres": {
             "type": "integer",
             "format": "int64"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           },
           "worked_days": {
             "type": "number",
@@ -66936,7 +67234,7 @@
       "ContextPerson": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "name",
           "role",
           "branch_ids",
@@ -66979,6 +67277,10 @@
             ],
             "format": "date-time"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "gender": {
             "type": [
               "string",
@@ -67018,11 +67320,15 @@
           },
           "role": {
             "type": "string",
-            "description": "`owner` · `manager` · `employee`"
+            "description": "`owner` · `manager` · `employee` (from the linked account; an employee\nwith no account is `employee`)."
           },
           "user_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Their Madar account, when they have one."
           }
         }
       },
@@ -67197,8 +67503,8 @@
       "CoverableShift": {
         "type": "object",
         "required": [
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "branch_id",
           "work_shift_id",
           "shift_name",
@@ -67215,6 +67521,13 @@
             "type": "string",
             "format": "date"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
+          },
           "scheduled_end_at": {
             "type": "string",
             "format": "date-time"
@@ -67224,13 +67537,6 @@
             "format": "date-time"
           },
           "shift_name": {
-            "type": "string"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
             "type": "string"
           },
           "work_shift_id": {
@@ -67414,7 +67720,7 @@
       "CreateAdjustmentRequest": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "reason",
           "effective_date"
         ],
@@ -67431,6 +67737,10 @@
             "type": "string",
             "format": "date"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "percent_of_base": {
             "type": [
               "number",
@@ -67440,10 +67750,6 @@
           },
           "reason": {
             "type": "string"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
@@ -67456,6 +67762,14 @@
           "amount_piastres": {
             "type": "integer",
             "format": "int64"
+          },
+          "employee_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Admin-only; omitted on `/staff/me/*`."
           },
           "installments": {
             "type": [
@@ -67470,21 +67784,13 @@
               "string",
               "null"
             ]
-          },
-          "user_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Admin-only; omitted on `/staff/me/*`."
           }
         }
       },
       "CreateAssignmentRequest": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "work_shift_id"
         ],
         "properties": {
@@ -67510,7 +67816,7 @@
             ],
             "format": "date"
           },
-          "user_id": {
+          "employee_id": {
             "type": "string",
             "format": "uuid"
           },
@@ -68067,23 +68373,50 @@
       },
       "CreateEmployeeRequest": {
         "type": "object",
-        "required": [
-          "name",
-          "phone",
-          "branch_id"
-        ],
+        "description": "Add an employee of any kind (see the module docs).",
         "properties": {
+          "app_access": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "May sign in to the staff app. Defaults to \"has a phone\"."
+          },
           "base_salary_piastres": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Piastres. Ignored without `payroll:update`, as on the profile."
+            "description": "Piastres. Ignored without `hr.payroll.edit` for every branch."
           },
           "branch_id": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "uuid"
+          },
+          "branch_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Where they work (at least one). `branch_id` is the older one-branch form."
+          },
+          "department_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "employee_code": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "gender": {
             "type": [
@@ -68092,6 +68425,14 @@
             ],
             "description": "`m` · `f`"
           },
+          "hire_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Defaults to today."
+          },
           "job_title": {
             "type": [
               "string",
@@ -68099,11 +68440,26 @@
             ]
           },
           "name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Required unless `user_id` is given."
           },
           "phone": {
-            "type": "string",
-            "description": "Their WhatsApp number: how they sign in to Dawam."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Their WhatsApp number: how they sign in to the staff app."
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Make this existing Madar user an employee (kind `linked`). Their name\nand number are the defaults for the employee's."
           }
         }
       },
@@ -69319,6 +69675,14 @@
             "format": "uuid",
             "description": "`correction` only — the record whose punch is wrong."
           },
+          "employee_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Admin-only. Omitted on `/staff/me/*`, where it is always the caller."
+          },
           "end_date": {
             "type": [
               "string",
@@ -69376,14 +69740,6 @@
               "string",
               "null"
             ]
-          },
-          "user_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Admin-only. Omitted on `/staff/me/*`, where it is always the caller."
           }
         }
       },
@@ -71570,8 +71926,8 @@
       "DisciplineRow": {
         "type": "object",
         "required": [
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "present_days",
           "late_days",
           "absent_days",
@@ -71597,6 +71953,13 @@
               "null"
             ]
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
+          },
           "late_days": {
             "type": "integer",
             "format": "int64"
@@ -71613,13 +71976,6 @@
           "total_late_minutes": {
             "type": "integer",
             "format": "int64"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
           }
         }
       },
@@ -71874,24 +72230,46 @@
       "Employee": {
         "type": "object",
         "required": [
-          "user_id",
+          "id",
           "org_id",
+          "kind",
           "name",
-          "role",
-          "is_active",
+          "app_access",
           "employment_status",
           "pay_method",
+          "cant_work_days",
+          "branch_ids",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "app_access": {
+            "type": "boolean",
+            "description": "May sign in to the staff app with a WhatsApp code."
+          },
           "base_salary_piastres": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "`None` when the caller lacks `payroll:read` — see the module docs."
+            "description": "`None` when the caller may not read this person's pay — see the module docs."
+          },
+          "branch_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Where they work; managers see the people of their branches (RO-6)."
+          },
+          "cant_work_days": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "Days they can't work: 0 = Sunday … 6 = Saturday."
           },
           "created_at": {
             "type": "string",
@@ -71909,6 +72287,27 @@
               "string",
               "null"
             ]
+          },
+          "device_last_seen": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "device_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The live phone signed in to the staff app, if any."
+          },
+          "device_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           },
           "email": {
             "type": [
@@ -71935,7 +72334,8 @@
             ]
           },
           "employment_status": {
-            "type": "string"
+            "type": "string",
+            "description": "`active` · `suspended` · `terminated`"
           },
           "gender": {
             "type": [
@@ -71951,8 +72351,9 @@
             ],
             "format": "date"
           },
-          "is_active": {
-            "type": "boolean"
+          "id": {
+            "type": "string",
+            "format": "uuid"
           },
           "job_title": {
             "type": [
@@ -71960,9 +72361,12 @@
               "null"
             ]
           },
-          "name": {
+          "kind": {
             "type": "string",
-            "description": "From `users` — the employee's name IS their user name; there is no\nsecond copy to drift."
+            "description": "`linked` · `app` (signs in to the staff app, no Madar account) ·\n`manual` (records only, no app)."
+          },
+          "name": {
+            "type": "string"
           },
           "national_id": {
             "type": [
@@ -72002,9 +72406,19 @@
               "null"
             ]
           },
+          "pref_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`morning` · `evening` · null"
+          },
           "role": {
-            "type": "string",
-            "description": "The POS role. Orthogonal to employment: a cleaner is a `teller`-role user\nwith the POS permissions revoked."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The linked user's POS role; null for an unlinked employee."
           },
           "termination_date": {
             "type": [
@@ -72018,8 +72432,12 @@
             "format": "date-time"
           },
           "user_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The linked Madar user, when this employee is one (a cashier, a manager,\nthe owner). Null for someone who is only on payroll."
           }
         }
       },
@@ -72064,8 +72482,8 @@
         "type": "object",
         "required": [
           "id",
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "amount_piastres",
           "purpose",
           "via",
@@ -72087,6 +72505,13 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
           },
           "given_on": {
             "type": "string",
@@ -72112,13 +72537,6 @@
           "purpose": {
             "type": "string"
           },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
-          },
           "via": {
             "type": "string",
             "description": "`safe` · `bank` · `till`"
@@ -72129,8 +72547,8 @@
         "type": "object",
         "required": [
           "id",
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "amount_piastres",
           "purpose",
           "via",
@@ -72141,6 +72559,13 @@
             "type": "integer",
             "format": "int64"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
+          },
           "given_on": {
             "type": "string",
             "format": "date"
@@ -72150,13 +72575,6 @@
             "format": "uuid"
           },
           "purpose": {
-            "type": "string"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
             "type": "string"
           },
           "via": {
@@ -74158,7 +74576,7 @@
         "type": "object",
         "description": "A roster past a labour limit. Warns, never blocks (RU-13).",
         "required": [
-          "user_id",
+          "employee_id",
           "date",
           "kind",
           "minutes",
@@ -74169,6 +74587,10 @@
             "type": "string",
             "format": "date",
             "description": "The day (or, for a week's limit, the Saturday it starts)."
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "kind": {
             "type": "string",
@@ -74181,10 +74603,6 @@
           "minutes": {
             "type": "integer",
             "format": "int64"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
@@ -74257,7 +74675,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "leave_type_id",
           "year",
           "entitled_days",
@@ -74269,6 +74687,10 @@
           "carried_over_days": {
             "type": "number",
             "format": "double"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "entitled_days": {
             "type": "number",
@@ -74300,10 +74722,6 @@
           "used_days": {
             "type": "number",
             "format": "double"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           },
           "year": {
             "type": "integer",
@@ -74662,6 +75080,40 @@
               "null"
             ],
             "description": "Only the person's own work. Absent means unrestricted, so a dashboard\nthat predates the field keeps meaning what it always meant."
+          }
+        }
+      },
+      "LinkableUser": {
+        "type": "object",
+        "description": "A Madar user who can be made an employee.",
+        "required": [
+          "user_id",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "description": "Their POS role (`org_admin`, `branch_manager`, `teller`, …)."
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -75291,7 +75743,7 @@
       "ManualRecordRequest": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "branch_id",
           "business_date",
           "reason"
@@ -75319,6 +75771,10 @@
             ],
             "format": "date-time"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "notes": {
             "type": [
               "string",
@@ -75335,10 +75791,6 @@
               "null"
             ],
             "description": "Force a status instead of deriving one — the only way to record an\n`absent` or `on_leave` day by hand."
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           },
           "work_shift_id": {
             "type": [
@@ -76637,7 +77089,7 @@
       "NewAdjustment": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "kind",
           "reason"
         ],
@@ -76655,6 +77107,10 @@
               "null"
             ],
             "format": "date"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "kind": {
             "type": "string",
@@ -76674,17 +77130,13 @@
           "recurring": {
             "type": "boolean",
             "description": "Every month until stopped (AD-3)."
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
       "NewExpenseAdvance": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "amount_piastres",
           "purpose",
           "via"
@@ -76694,12 +77146,12 @@
             "type": "integer",
             "format": "int64"
           },
-          "purpose": {
-            "type": "string"
-          },
-          "user_id": {
+          "employee_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "purpose": {
+            "type": "string"
           },
           "via": {
             "type": "string",
@@ -76941,10 +77393,15 @@
       "OpenCover": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "work_shift_id"
         ],
         "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Whose shift."
+          },
           "latitude": {
             "type": [
               "number",
@@ -76958,11 +77415,6 @@
               "null"
             ],
             "format": "double"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Whose shift."
           },
           "work_shift_id": {
             "type": "string",
@@ -76990,7 +77442,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The employee who claimed it."
           },
           "claimed_by_name": {
             "type": [
@@ -79293,6 +79746,27 @@
           }
         }
       },
+      "OrgModules": {
+        "type": "object",
+        "description": "Which modules an org has switched on.",
+        "required": [
+          "org_id",
+          "modules"
+        ],
+        "properties": {
+          "modules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`pos`, `dawam` (PS-2)."
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "OrgPaymentMethod": {
         "type": "object",
         "required": [
@@ -80324,7 +80798,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "reason",
           "effective_date",
           "source",
@@ -80354,6 +80828,16 @@
           "effective_date": {
             "type": "string",
             "format": "date"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "type": "string",
@@ -80403,16 +80887,6 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "waive_reason": {
             "type": [
@@ -80589,7 +81063,7 @@
           "id",
           "org_id",
           "payroll_period_id",
-          "user_id",
+          "employee_id",
           "base_salary_piastres",
           "worked_days",
           "absent_days",
@@ -80631,6 +81105,16 @@
           "deductions_piastres": {
             "type": "integer",
             "format": "int64"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "generated_at": {
             "type": "string",
@@ -80702,16 +81186,6 @@
               "null"
             ],
             "format": "date"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "worked_days": {
             "type": "number",
@@ -81473,8 +81947,8 @@
         "type": "object",
         "description": "One person's state right now, for the manager's live team list.",
         "required": [
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "state",
           "late_minutes",
           "worked_minutes",
@@ -81501,6 +81975,13 @@
             ],
             "format": "date-time"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
+          },
           "job_title": {
             "type": [
               "string",
@@ -81519,13 +82000,6 @@
           "state": {
             "type": "string",
             "description": "`in` | `late` | `absent` | `on_leave` | `off` | `done`."
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
           },
           "worked_minutes": {
             "type": "integer",
@@ -82066,7 +82540,7 @@
             "items": {
               "type": "string"
             },
-            "description": "`pos`, `dawam`; default both. A Dawam-only customer is `[\"dawam\"]` (SA-1)."
+            "description": "`pos`, `dawam`; default POS only — Dawam is switched on per org. A\nDawam-only customer is `[\"dawam\"]` (SA-1)."
           },
           "name": {
             "type": "string",
@@ -82944,17 +83418,17 @@
       "PunchFor": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "reason"
         ],
         "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "reason": {
             "type": "string",
             "description": "Required (CL-13): a dead phone, a forgotten one."
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
@@ -83339,7 +83813,7 @@
       "PutBalanceRequest": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "leave_type_id",
           "year",
           "entitled_days"
@@ -83352,15 +83826,15 @@
             ],
             "format": "double"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "entitled_days": {
             "type": "number",
             "format": "double"
           },
           "leave_type_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_id": {
             "type": "string",
             "format": "uuid"
           },
@@ -83415,15 +83889,33 @@
       },
       "PutEmployeeRequest": {
         "type": "object",
-        "description": "Full replace of an employee's HR profile. A PUT rather than a POST because\nthe key is the user id: writing a profile for a user who has none promotes\nthem to staff, and writing it again edits them.",
+        "description": "Replace an employee's HR profile. Profile fields are a full replace (null\nclears them); `name`, `phone`, `app_access` and `branch_ids` are kept when\nomitted.",
         "properties": {
+          "app_access": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Turning it off signs the phone out."
+          },
           "base_salary_piastres": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Piastres. Ignored unless the caller has `payroll:update` — a branch\nmanager editing a job title must not be able to award a raise."
+            "description": "Piastres. Ignored unless the caller has `hr.payroll.edit` for every\nbranch — a branch manager editing a job title must not award a raise."
+          },
+          "branch_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The whole set of branches."
           },
           "department_id": {
             "type": [
@@ -83455,7 +83947,7 @@
               "string",
               "null"
             ],
-            "description": "`active` | `suspended` | `terminated`. Defaults to `active`."
+            "description": "`active` | `suspended` | `terminated`. Defaults to `active`. Anything\nbut `active` signs the phone out (RO-10)."
           },
           "gender": {
             "type": [
@@ -83472,6 +83964,12 @@
             "format": "date"
           },
           "job_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
             "type": [
               "string",
               "null"
@@ -83501,6 +83999,13 @@
               "null"
             ],
             "description": "`cash` · `bank` · `wallet`; omitted keeps what is there."
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new number signs the old phone out (RO-10). Empty clears it."
           },
           "photo_url": {
             "type": [
@@ -83548,10 +84053,14 @@
       "PutOverrideRequest": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "on_date"
         ],
         "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "on_date": {
             "type": "string",
             "format": "date"
@@ -83561,10 +84070,6 @@
               "string",
               "null"
             ]
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           },
           "work_shift_id": {
             "type": [
@@ -85974,7 +86479,7 @@
       "RosterPerson": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "name",
           "cant_work_days"
         ],
@@ -85993,6 +86498,10 @@
             ],
             "format": "uuid"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "gender": {
             "type": [
               "string",
@@ -86007,18 +86516,14 @@
               "string",
               "null"
             ]
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
       "RosterShift": {
         "type": "object",
         "required": [
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "date",
           "branch_id",
           "work_shift_id",
@@ -86041,6 +86546,13 @@
             "type": "string",
             "format": "date"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
+          },
           "end_at": {
             "type": "string",
             "format": "date-time"
@@ -86055,13 +86567,6 @@
           "start_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
           },
           "work_shift_id": {
             "type": "string",
@@ -86172,7 +86677,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "amount_piastres",
           "installments",
           "monthly_installment_piastres",
@@ -86210,6 +86715,16 @@
               "null"
             ]
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -86242,16 +86757,6 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
       },
@@ -86259,8 +86764,8 @@
         "type": "object",
         "required": [
           "id",
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "amount_piastres",
           "remaining_piastres",
           "installments",
@@ -86271,6 +86776,13 @@
           "amount_piastres": {
             "type": "integer",
             "format": "int64"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": "string"
           },
           "given_on": {
             "type": "string",
@@ -86291,13 +86803,6 @@
           "status": {
             "type": "string",
             "description": "`pending` · `approved` · `rejected` · …"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": "string"
           }
         }
       },
@@ -86372,7 +86877,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "work_shift_id",
           "effective_from",
           "created_at"
@@ -86401,15 +86906,15 @@
             ],
             "format": "date"
           },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "id": {
             "type": "string",
             "format": "uuid"
           },
           "org_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_id": {
             "type": "string",
             "format": "uuid"
           },
@@ -86430,7 +86935,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "on_date",
           "created_at"
         ],
@@ -86444,6 +86949,10 @@
               "string",
               "null"
             ],
+            "format": "uuid"
+          },
+          "employee_id": {
+            "type": "string",
             "format": "uuid"
           },
           "id": {
@@ -86463,10 +86972,6 @@
               "string",
               "null"
             ]
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           },
           "work_shift_id": {
             "type": [
@@ -87604,7 +88109,8 @@
       "StaffContext": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
+          "name",
           "org_id",
           "org_name",
           "modules",
@@ -87642,7 +88148,12 @@
             "items": {
               "type": "string"
             },
-            "description": "The HR capabilities I hold (`hr.*` keys)."
+            "description": "The HR capabilities I hold (`hr.*` keys) — through my Madar account;\nempty for an employee with none. The app gates tabs on these (PM-4)."
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who is signed in: the employee."
           },
           "modules": {
             "type": "array",
@@ -87650,6 +88161,9 @@
               "type": "string"
             },
             "description": "The org's modules (`pos`, `dawam`); POS on means till punches (CL-13)."
+          },
+          "name": {
+            "type": "string"
           },
           "org_id": {
             "type": "string",
@@ -87672,8 +88186,12 @@
             "$ref": "#/components/schemas/ContextSettings"
           },
           "user_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Their Madar account, when they have one; manager acts go through it."
           },
           "work_shifts": {
             "type": "array",
@@ -87688,7 +88206,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "kind",
           "title",
           "created_at"
@@ -87697,6 +88215,10 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
           },
           "expires_on": {
             "type": [
@@ -87730,10 +88252,6 @@
               "string",
               "null"
             ],
-            "format": "uuid"
-          },
-          "user_id": {
-            "type": "string",
             "format": "uuid"
           }
         }
@@ -88156,7 +88674,7 @@
         "required": [
           "id",
           "org_id",
-          "user_id",
+          "employee_id",
           "kind",
           "on_date",
           "is_half_day",
@@ -88192,6 +88710,16 @@
             "format": "uuid"
           },
           "decision_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "employee_name": {
             "type": [
               "string",
               "null"
@@ -88282,16 +88810,6 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "user_name": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
       },
@@ -88308,7 +88826,15 @@
               "string",
               "null"
             ],
-            "description": "Kept in the phone's secure storage and sent as `X-Staff-Device` on every\npunch and ping (RO-3)."
+            "description": "Kept in the phone's secure storage and sent as `X-Staff-Device` on\nevery call (RO-3). It is what refreshes the session."
+          },
+          "employee_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who signed in: the employee."
           },
           "name": {
             "type": [
@@ -88343,7 +88869,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/UserRole"
+                "$ref": "#/components/schemas/UserRole",
+                "description": "The linked account's role; null for an employee with no account."
               }
             ]
           },
@@ -88352,14 +88879,49 @@
               "string",
               "null"
             ],
-            "description": "`Authorization: Bearer` for every other call."
+            "description": "The staff token: `Authorization: Bearer` on `/staff/*` only. It lives\nan hour; refresh it with `POST /auth/staff/refresh`."
+          },
+          "token_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           },
           "user_id": {
             "type": [
               "string",
               "null"
             ],
+            "format": "uuid",
+            "description": "Their Madar account when they have one (a manager, a cashier). Manager\nacts in the app go through it."
+          }
+        }
+      },
+      "StaffTokenRefresh": {
+        "type": "object",
+        "required": [
+          "token",
+          "expires_at",
+          "employee_id",
+          "org_id"
+        ],
+        "properties": {
+          "employee_id": {
+            "type": "string",
             "format": "uuid"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "token": {
+            "type": "string",
+            "description": "A fresh staff token for `/staff/*`."
           }
         }
       },
@@ -89164,8 +89726,8 @@
           "date",
           "work_shift_id",
           "shift_name",
-          "user_id",
-          "user_name",
+          "employee_id",
+          "employee_name",
           "reason_key",
           "reason_args",
           "confidence",
@@ -89185,7 +89747,15 @@
             "type": "string",
             "format": "date"
           },
-          "from_user_id": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who the suggestion puts on the shift."
+          },
+          "employee_name": {
+            "type": "string"
+          },
+          "from_employee_id": {
             "type": [
               "string",
               "null"
@@ -89193,7 +89763,7 @@
             "format": "uuid",
             "description": "Who it takes off it, for a reassignment."
           },
-          "from_user_name": {
+          "from_employee_name": {
             "type": [
               "string",
               "null"
@@ -89209,14 +89779,6 @@
             "description": "A core i18n key for the one-line reason, and its arguments."
           },
           "shift_name": {
-            "type": "string"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Who the suggestion puts on the shift."
-          },
-          "user_name": {
             "type": "string"
           },
           "work_shift_id": {
@@ -90560,12 +91122,17 @@
       "TillPunchResult": {
         "type": "object",
         "required": [
-          "user_id",
+          "employee_id",
           "name",
           "punched",
           "record"
         ],
         "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The employee the PIN's owner is."
+          },
           "name": {
             "type": "string"
           },
@@ -90575,10 +91142,6 @@
           },
           "record": {
             "$ref": "#/components/schemas/AttendanceRecord"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
