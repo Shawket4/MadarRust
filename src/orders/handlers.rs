@@ -399,6 +399,17 @@ pub struct OrderItem {
     #[sqlx(default)]
     #[serde(default)]
     pub reward_covered: i32,
+    /// A staff drink: what the branch's pool comped on this line, in minor
+    /// units, size part and required-choice part together. ALREADY taken off
+    /// `line_total` (the size part) and the add-ons' `line_total` (their part):
+    /// print it as a line discount, never subtract it again. 0 on a paid line.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub staff_comp_minor: i32,
+    /// The `staff_drinks` row this line is (`GET /staff-pool/drinks`).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub staff_drink_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -415,6 +426,11 @@ pub struct OrderItemAddon {
     /// Ingredient cost of this addon line in piastres. `null` ⟺ unknown, or
     /// a swap addon (its cost lives in the item's recipe cost).
     pub line_cost: Option<i64>,
+    /// The part of a staff drink's comp this pick absorbed (whole line), already
+    /// taken off `line_total`. 0 everywhere else.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub staff_comp_minor: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -571,6 +587,14 @@ pub struct OrderItemInput {
     /// exists to let anyone try.
     #[serde(default)]
     pub unit_price: Option<i32>,
+    /// Put this line on the branch's STAFF POOL: a normal sale whose base
+    /// configuration (cheapest size + the default of each required choice) is
+    /// comped, extras still charged. Needs `orders.staff_drink.record`. The
+    /// server prices the comp; see `docs/staff-drink-comp-contract.md`.
+    /// Additive — a client that omits it rings an ordinary paid line. Not
+    /// carried by a bundle line (`item_not_eligible`) nor by a ticket's line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staff_drink: Option<crate::staff_pool::order_line::StaffDrinkLine>,
 }
 
 #[derive(Deserialize, Serialize, Default, ToSchema)]
@@ -936,6 +960,9 @@ pub(crate) struct ResolvedItem {
     pub(crate) bundle_unit_price: Option<i32>,
     pub(crate) bundle_components: Vec<ResolvedBundleComponent>,
     pub(crate) component_surcharge: i32,
+    /// The line is a staff drink: its comp, priced. Like the reward fields,
+    /// not the resolver's business — the caller sets it.
+    pub(crate) staff: Option<crate::staff_pool::order_line::LineComp>,
 }
 
 pub(crate) struct ResolvedAddon {
@@ -1456,6 +1483,7 @@ pub(crate) async fn resolve_order_line(
         bundle_unit_price,
         bundle_components,
         component_surcharge,
+        staff: None,
     })
 }
 
@@ -1636,6 +1664,52 @@ pub async fn create_order(
                 "create_order_live",
                 chrono::Utc::now(),
                 &Ok(ask.cap),
+            )
+            .await;
+        }
+    }
+
+    // A line put on the STAFF POOL is its own act (`orders.staff_drink.record`,
+    // approval = true): held outright, or unlocked on the spot by a manager's
+    // PIN riding `live_approval` — the same one helper a live discount uses.
+    // Without either it is the 403 the record-only endpoint gives.
+    if body.items.iter().any(|i| i.staff_drink.is_some())
+        && let Some(org) = claims.org_id()
+    {
+        let cap = crate::authz::Cap::OrdersStaffDrinkRecord;
+        let eff = crate::authz::require::effective_for_claims(
+            pool.get_ref(),
+            &claims,
+            Some(body.branch_id),
+        )
+        .await?;
+        let decision = if eff.can(cap) {
+            crate::authz::Decision::Allow
+        } else {
+            crate::authz::decide(&eff, &madar_authz::Request::of(cap))
+        };
+        let outright = crate::sync::handlers::allow_or_approved_live(
+            pool.get_ref(),
+            decision,
+            cap,
+            body.live_approval.as_ref(),
+            claims.user_id(),
+            org,
+            None,
+            None,
+        )
+        .await?;
+        if !outright && let Some(a) = body.live_approval.clone() {
+            crate::sync::handlers::record_approval(
+                pool.get_ref(),
+                &a,
+                org,
+                Some(body.branch_id),
+                None,
+                claims.user_id(),
+                "create_order_live",
+                chrono::Utc::now(),
+                &Ok(cap),
             )
             .await;
         }
@@ -2036,6 +2110,24 @@ pub(crate) async fn create_order_inner(
     } else {
         ClientPrices::Ignore
     };
+    // ── The staff pool ──────────────────────────────────────────────────────
+    // A line may be put on the branch's pool. Its comp is priced HERE, by the
+    // same rule the till mirrors (`staff_comp_vectors.json`). A ticket's lines
+    // never carry one (`tickets::resolve_ticket_lines` refuses or strips it),
+    // so a settle is left alone.
+    let staff_ctx = if ticket.is_none() && body.items.iter().any(|i| i.staff_drink.is_some()) {
+        Some(
+            crate::staff_pool::order_line::pool_context(
+                pool.get_ref(),
+                org_id,
+                body.branch_id,
+                order_time,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     for (line_index, item_input) in body.items.iter().enumerate() {
         let mut resolved = resolve_order_line(
             pool.get_ref(),
@@ -2058,7 +2150,86 @@ pub(crate) async fn create_order_inner(
             charged_line_subtotal as i64,
             reward_units as i64,
         ) as i32;
-        let charged_line_subtotal = charged_line_subtotal - covered;
+        // A STAFF DRINK: the base configuration is comped, before the reward
+        // and before anything is computed on the subtotal — so tax, service
+        // and an order-level discount see the CHARGED part only.
+        let mut staff_line = None;
+        if let (Some(ctx), Some(sd)) = (&staff_ctx, &item_input.staff_drink) {
+            use crate::staff_pool::order_line as sp;
+            let refusal = sp::refusal_of(ctx, resolved.menu_item_id, &sd.note);
+            if !actor.replay {
+                // Nothing has happened yet: an honest refusal, by its token.
+                if let Some(r) = refusal {
+                    return Err(sp::refused(r));
+                }
+                if reward_units > 0 {
+                    return Err(AppError::BadRequest(
+                        "A line cannot be both a loyalty reward and a staff drink".into(),
+                    ));
+                }
+            }
+            let (input, base_line, addon_lines) = match resolved.menu_item_id {
+                Some(item) => {
+                    let picks: Vec<sp::RungPick> = resolved
+                        .addons
+                        .iter()
+                        .map(|a| sp::RungPick {
+                            option_id: a.addon_item_id,
+                            unit_price: a.unit_price,
+                            quantity: a.quantity,
+                        })
+                        .collect();
+                    let input = sp::comp_input(
+                        pool.get_ref(),
+                        body.branch_id,
+                        item,
+                        resolved.size_label.as_deref(),
+                        refusal.is_none(),
+                        resolved.unit_price,
+                        &picks,
+                        resolved.optional_per_unit(),
+                        resolved.quantity,
+                    )
+                    .await?;
+                    let addon_lines: Vec<i32> = resolved
+                        .addons
+                        .iter()
+                        .map(|a| a.unit_price * a.quantity * resolved.quantity)
+                        .collect();
+                    (input, resolved.unit_price * resolved.quantity, addon_lines)
+                }
+                // A bundle, which only a replay can bring this far: the
+                // server's verdict is that nothing of it is free.
+                None => (
+                    crate::staff_pool::comp::CompInput {
+                        eligible: false,
+                        unit_price: resolved.charged_per_unit(),
+                        sizes: Vec::new(),
+                        groups: Vec::new(),
+                        picks: Vec::new(),
+                        optionals_per_unit: 0,
+                        quantity: resolved.quantity,
+                    },
+                    charged_line_subtotal,
+                    Vec::new(),
+                ),
+            };
+            staff_line = Some(sp::LineComp::settle(
+                sd.clone(),
+                refusal,
+                sp::run(&input),
+                actor.replay,
+                resolved.quantity,
+                base_line,
+                &addon_lines,
+            ));
+        }
+        let staff_applied = staff_line.as_ref().map_or(0, |l| l.applied);
+        let expected_line_subtotal = (expected_line_subtotal
+            - staff_line.as_ref().map_or(0, |l| l.server.line_comp))
+        .max(0);
+        let covered = covered.min((charged_line_subtotal - staff_applied).max(0));
+        let charged_line_subtotal = charged_line_subtotal - staff_applied - covered;
         let is_reward_line = covered > 0;
 
         // NO LINE MAY BE NEGATIVE (owner, 2026-09-18). A line goes below zero
@@ -2094,6 +2265,7 @@ pub(crate) async fn create_order_inner(
         resolved.is_reward = is_reward_line;
         resolved.reward_covered = covered;
         resolved.reward_units = if is_reward_line { reward_units } else { 0 };
+        resolved.staff = staff_line;
 
         subtotal += charged_line_subtotal;
         expected_subtotal += expected_line_subtotal;
@@ -2137,6 +2309,19 @@ pub(crate) async fn create_order_inner(
     // the till's subtotal and reducing it would be reducing a figure whose
     // discount and tax were computed over the un-reduced one.
     let claimed = !redemption_plan.is_empty();
+    // A STAFF DRINK is the other thing the till does not get to price — live.
+    // The server computed the comp and the whole bill follows from it, exactly
+    // as it does for a reward: a client-sent subtotal or total is not compared,
+    // and a rule discount is applied AFTER the comp, to what remains. On REPLAY
+    // the till's own comp was accepted line by line above, so its figures stand
+    // as they always do — unless it named a staff line and no comp at all, in
+    // which case the server's is the only comp there is.
+    let staff_priced_here = resolved_items.iter().any(|r| {
+        r.staff
+            .as_ref()
+            .is_some_and(|l| !actor.replay || l.reported.is_none())
+    });
+    let claimed = claimed || staff_priced_here;
 
     // WHAT WAS SOLD is the till's to state; WHAT IT ADDS UP TO is not.
     //
@@ -2911,8 +3096,19 @@ pub(crate) async fn create_order_inner(
             .collect()
     };
 
+    // Flags a pooled line raises (overspend, a till comp the server disagrees
+    // with…). Written for the owner after the commit, and only on replay: live,
+    // anything flag-worthy was either refused above or is on the row itself.
+    let mut staff_flags: Vec<String> = Vec::new();
+    let mut staff_day_locked = false;
+
     for resolved in resolved_items {
+        // The SIZE part of a staff comp comes off the line itself; the part a
+        // required pick earned comes off that pick's row below. `unit_price`
+        // stays the normal price, so a receipt can show both.
+        let staff_base = resolved.staff.as_ref().map_or(0, |l| l.applied_base);
         let line_total = (resolved.unit_price * resolved.quantity + resolved.component_surcharge
+            - staff_base
             - resolved.reward_covered)
             .max(0);
         let snapshot = serde_json::to_value(&resolved.deductions)
@@ -2934,12 +3130,14 @@ pub(crate) async fn create_order_inner(
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
                  bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
-                 price_flagged, is_reward, reward_units, reward_covered)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+                 price_flagged, is_reward, reward_units, reward_covered,
+                 staff_comp_minor, staff_drink_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                       $20, $21)
                RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
                          bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
-                         is_reward, reward_units, reward_covered"#,
+                         is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id"#,
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
@@ -2960,8 +3158,48 @@ pub(crate) async fn create_order_inner(
         .bind(resolved.is_reward)
         .bind(resolved.reward_units)
         .bind(resolved.reward_covered)
+        .bind(resolved.staff.as_ref().map_or(0, |l| l.applied))
+        .bind(resolved.staff.as_ref().map(|l| l.drink.id))
         .fetch_one(&mut *tx)
         .await?;
+
+        // The staff drink's own row, in the sale's transaction: the comp and
+        // the record of it commit together or not at all.
+        if let (Some(line), Some(ctx)) = (&resolved.staff, &staff_ctx) {
+            use crate::staff_pool::order_line as sp;
+            if !staff_day_locked {
+                sp::lock_day(&mut tx, shift_branch_id, ctx.day).await?;
+                staff_day_locked = true;
+            }
+            let rang = resolved.charged_subtotal();
+            let recorded = sp::record_line(
+                &mut tx,
+                ctx,
+                actor.org_id,
+                shift_branch_id,
+                body.till_id,
+                order.id,
+                actor.teller_id,
+                body.device_id,
+                created_at,
+                actor.replay,
+                line,
+                resolved.menu_item_id,
+                &resolved.item_name,
+                resolved.size_label.as_deref(),
+                resolved.quantity,
+                (rang - line.applied).max(0),
+                costs.line_cost.and_then(|c| i32::try_from(c).ok()),
+            )
+            .await?;
+            if recorded.overspent {
+                warnings.push(format!(
+                    "{} is past today's staff drinks allowance — recorded and marked",
+                    resolved.item_name
+                ));
+            }
+            staff_flags.extend(recorded.flags);
+        }
 
         if let Some(_b_id) = resolved.bundle_id {
             for comp in &resolved.bundle_components {
@@ -3045,8 +3283,14 @@ pub(crate) async fn create_order_inner(
 
         // Addons
         let mut addon_rows: Vec<OrderItemAddon> = Vec::new();
-        for addon in &resolved.addons {
-            let addon_line = addon.unit_price * addon.quantity * resolved.quantity;
+        for (addon_index, addon) in resolved.addons.iter().enumerate() {
+            let addon_comp = resolved
+                .staff
+                .as_ref()
+                .and_then(|l| l.applied_addons.get(addon_index).copied())
+                .unwrap_or(0);
+            let addon_line =
+                (addon.unit_price * addon.quantity * resolved.quantity - addon_comp).max(0);
 
             // Additive addons: rollup of their attributed deduction entries.
             // Swap addons keep NULL — their cost lives in the recipe scope.
@@ -3071,10 +3315,11 @@ pub(crate) async fn create_order_inner(
 
             let row = sqlx::query_as::<_, OrderItemAddon>(
                 r#"INSERT INTO order_item_addons
-                    (order_item_id, addon_item_id, addon_name, name_translations, unit_price, quantity, line_total, line_cost)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    (order_item_id, addon_item_id, addon_name, name_translations, unit_price, quantity, line_total, line_cost,
+                     staff_comp_minor)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                    RETURNING id, order_item_id, addon_item_id, addon_name, name_translations,
-                             unit_price, quantity, line_total, line_cost"#,
+                             unit_price, quantity, line_total, line_cost, staff_comp_minor"#,
             )
             .bind(order_item.id)
             .bind(addon.addon_item_id)
@@ -3084,6 +3329,7 @@ pub(crate) async fn create_order_inner(
             .bind(addon.quantity)
             .bind(addon_line)
             .bind(addon_cost)
+            .bind(addon_comp)
             .fetch_one(&mut *tx)
             .await?;
             addon_rows.push(row);
@@ -3243,6 +3489,21 @@ pub(crate) async fn create_order_inner(
     order.payment_legs = legs.0;
 
     tx.commit().await?;
+    // Accept and flag (§4.4.5): the sale is on the books, now the owner is told
+    // what about its staff drinks the server would have decided differently.
+    if actor.replay && !staff_flags.is_empty() {
+        crate::sync::handlers::record_replay_flags(
+            pool.get_ref(),
+            actor.org_id,
+            Some(shift_branch_id),
+            "CreateOrder",
+            actor.teller_id,
+            &staff_flags,
+            created_at,
+            Some(order.id),
+        )
+        .await;
+    }
     // The balance on the customer's phone must not outlive the sale that spent
     // it. After the commit, never inside — the same rule realtime follows.
     if let Some(member) = &redemption_plan.member
@@ -4154,7 +4415,7 @@ async fn fetch_order_items_full(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
-                is_reward, reward_units, reward_covered \
+                is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id \
          FROM order_items WHERE order_id = $1 ORDER BY id",
     )
     .bind(order_id)
@@ -4165,7 +4426,7 @@ async fn fetch_order_items_full(
     for item in items {
         let addons = sqlx::query_as::<_, OrderItemAddon>(
             "SELECT id, order_item_id, addon_item_id, addon_name, name_translations, \
-                    unit_price, quantity, line_total, line_cost \
+                    unit_price, quantity, line_total, line_cost, staff_comp_minor \
              FROM order_item_addons WHERE order_item_id = $1 ORDER BY id",
         )
         .bind(item.id)
@@ -4274,7 +4535,7 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
-                is_reward, reward_units, reward_covered \
+                is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id \
          FROM order_items WHERE order_id = ANY($1) ORDER BY id",
     )
     .bind(order_ids)
@@ -4286,7 +4547,7 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
     let mut addons_by_item: HashMap<Uuid, Vec<OrderItemAddon>> = HashMap::new();
     for a in sqlx::query_as::<_, OrderItemAddon>(
         "SELECT id, order_item_id, addon_item_id, addon_name, name_translations, \
-                unit_price, quantity, line_total, line_cost \
+                unit_price, quantity, line_total, line_cost, staff_comp_minor \
          FROM order_item_addons WHERE order_item_id = ANY($1) ORDER BY id",
     )
     .bind(&item_ids)

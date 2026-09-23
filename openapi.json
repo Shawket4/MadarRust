@@ -22877,113 +22877,6 @@
         ]
       }
     },
-    "/menu-items/{id}/linked-copy": {
-      "post": {
-        "tags": [
-          "menu"
-        ],
-        "operationId": "create_linked_copy",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Source menu item ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateLinkedCopyRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Copy created with a recipe that follows the source",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LinkedCopyResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
     "/menu-items/{id}/modifier-groups": {
       "put": {
         "tags": [
@@ -44672,6 +44565,131 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StaffDrink"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff-pool/drinks/summary": {
+      "get": {
+        "tags": [
+          "staff_pool"
+        ],
+        "summary": "Totals for the same range and filter as `GET /staff-pool/drinks`.",
+        "operationId": "summarize_staff_drinks",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Business days, inclusive. Both default to the branch's today.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "overspent_only",
+            "in": "query",
+            "description": "Only the drinks that went past the allowance.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaffDrinksSummary"
                 }
               }
             }
@@ -68300,31 +68318,6 @@
           }
         }
       },
-      "CreateLinkedCopyRequest": {
-        "type": "object",
-        "required": [
-          "name",
-          "price"
-        ],
-        "properties": {
-          "category_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "Menu category of the copy; `null` keeps the source's category."
-          },
-          "name": {
-            "type": "string"
-          },
-          "price": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Price in piastres for every size of the copy (0 for a staff drink)."
-          }
-        }
-      },
       "CreateMarketingLinkRequest": {
         "type": "object",
         "required": [
@@ -74672,27 +74665,6 @@
           }
         }
       },
-      "LinkedCopyResult": {
-        "type": "object",
-        "required": [
-          "menu_item_id",
-          "link",
-          "catalog_revision"
-        ],
-        "properties": {
-          "catalog_revision": {
-            "type": "integer",
-            "format": "int64"
-          },
-          "link": {
-            "$ref": "#/components/schemas/RecipeLinkInfo"
-          },
-          "menu_item_id": {
-            "type": "string",
-            "format": "uuid"
-          }
-        }
-      },
       "LintIssue": {
         "type": "object",
         "description": "One finding. `entity_type` is `attachment` | `item` | `option` | `ingredient`.",
@@ -78425,6 +78397,19 @@
               "null"
             ]
           },
+          "staff_comp_minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "A staff drink: what the branch's pool comped on this line, in minor\nunits, size part and required-choice part together. ALREADY taken off\n`line_total` (the size part) and the add-ons' `line_total` (their part):\nprint it as a line discount, never subtract it again. 0 on a paid line."
+          },
+          "staff_drink_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The `staff_drinks` row this line is (`GET /staff-pool/drinks`)."
+          },
           "unit_cost": {
             "type": [
               "integer",
@@ -78485,6 +78470,11 @@
           "quantity": {
             "type": "integer",
             "format": "int32"
+          },
+          "staff_comp_minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The part of a staff drink's comp this pick absorbed (whole line), already\ntaken off `line_total`. 0 everywhere else."
           },
           "unit_price": {
             "type": "integer",
@@ -78579,6 +78569,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "staff_drink": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StaffDrinkLine",
+                "description": "Put this line on the branch's STAFF POOL: a normal sale whose base\nconfiguration (cheapest size + the default of each required choice) is\ncomped, extras still charged. Needs `orders.staff_drink.record`. The\nserver prices the comp; see `docs/staff-drink-comp-contract.md`.\nAdditive — a client that omits it rings an ordinary paid line. Not\ncarried by a bundle line (`item_not_eligible`) nor by a ticket's line."
+              }
             ]
           },
           "unit_price": {
@@ -87766,12 +87767,36 @@
             "type": "string",
             "format": "date"
           },
+          "comp_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the pool comped on the sale's line, minor units, as the SERVER\nprices it. `null` on a record-only drink (no priced line behind it)."
+          },
+          "comp_minor_reported": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the TILL said the comp was, on a replayed sale. Differs from\n`comp_minor` exactly when `orders.staff_drink.record:comp_mismatch` was\nflagged."
+          },
           "cost_minor": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int32"
+          },
+          "extras_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What that line was still charged: a bigger size, extras, pricier picks."
           },
           "id": {
             "type": "string",
@@ -87829,6 +87854,96 @@
           "used_before": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "StaffDrinkLine": {
+        "type": "object",
+        "description": "`staff_drink` on an order line. Additive: a client that never heard of it\nomits it and the line is an ordinary paid line.",
+        "required": [
+          "id",
+          "note"
+        ],
+        "properties": {
+          "comp_minor": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "What the TILL comped on this line (whole line, minor units). Read ONLY\nwhen a queued offline sale is replayed; live, the server prices the comp\nand this is ignored."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Client-minted; the idempotency key AND the `staff_drinks` row's id. A\nrow an older flow already recorded under this id is reused and the\norder attached to it — never a second drink off the allowance."
+          },
+          "note": {
+            "type": "string",
+            "description": "REQUIRED. Who the drink is for and why, in the teller's own words."
+          },
+          "overspent": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the till believed this drink went past the allowance. Replay\nonly, and only to tell a convergence from a surprise."
+          }
+        }
+      },
+      "StaffDrinksSummary": {
+        "type": "object",
+        "description": "What the staff pool gave away and took in over a range of business days.",
+        "required": [
+          "drinks",
+          "quantity",
+          "overspent",
+          "comp_minor",
+          "extras_minor",
+          "cost_minor",
+          "comp_mismatches",
+          "unpriced"
+        ],
+        "properties": {
+          "comp_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What the pool comped, minor units (server-priced)."
+          },
+          "comp_mismatches": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows whose till-reported comp differs from the server's."
+          },
+          "cost_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What the drinks cost to make, where known. Counts in FULL: the drink\nwas made whether or not anyone paid for it."
+          },
+          "drinks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows (lines put on the pool)."
+          },
+          "extras_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What those lines were still charged — the only part that is revenue."
+          },
+          "overspent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those rows, how many went past the allowance."
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Drinks (the sum of their quantities) — what the allowance is measured in."
+          },
+          "unpriced": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Record-only rows (no priced sale line behind them; POS ≤ v0.7.12)."
           }
         }
       },

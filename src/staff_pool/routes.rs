@@ -15,6 +15,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/settings", web::put().to(settings::put_settings))
             .route("/settings", web::delete().to(settings::delete_settings))
             .route("/today", web::get().to(record::get_today))
+            .route("/drinks/summary", web::get().to(record::summary))
             .route("/drinks", web::get().to(record::list))
             .route("/drinks", web::post().to(record::record)),
     );

@@ -837,6 +837,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 259
           }
         ],
@@ -928,6 +930,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 500
           }
         ],
@@ -1019,6 +1023,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 333
           }
         ],
@@ -1110,6 +1116,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 500
           }
         ],
@@ -1201,6 +1209,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 400
           }
         ],
@@ -1292,6 +1302,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 333
           },
           {
@@ -1312,6 +1324,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 500
           }
         ],
@@ -1408,6 +1422,8 @@
             "reward_covered": 0,
             "reward_units": 0,
             "size_label": null,
+            "staff_comp_minor": 0,
+            "staff_drink_id": null,
             "unit_price": 250
           }
         ],

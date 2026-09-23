@@ -78,11 +78,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}/cost", web::get().to(modifiers::get_item_cost))
                 // Dry-run: price + deductions + warnings for one configuration (B5)
                 .route("/{id}/preview", web::post().to(preview::preview_menu_item))
-                // Linked copies (recipe follows a source item)
-                .route(
-                    "/{id}/linked-copy",
-                    web::post().to(linked::create_linked_copy),
-                )
+                // Linked copies (recipe follows a source item): read + unlink only;
+                // creating one is retired.
                 .route("/{id}/recipe-link", web::get().to(linked::get_recipe_link))
                 .route(
                     "/{id}/recipe-link",

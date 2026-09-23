@@ -6,7 +6,9 @@
 //! * [`settings`] is the org-wide allowance and eligible-item list, overridden
 //!   per branch, scoped exactly as `loyalty_settings` is.
 
+pub mod comp;
 pub mod engine;
+pub mod order_line;
 pub mod record;
 pub mod routes;
 pub mod settings;

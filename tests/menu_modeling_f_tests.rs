@@ -666,6 +666,42 @@ async fn the_resolver_prefers_the_sized_option_amount_and_the_shim_hides_it(pool
 
 // ── B10 linked copies ────────────────────────────────────────────────
 
+/// A linked copy as the retired `POST /menu-items/{id}/linked-copy` left it in the
+/// database: an item following `src`, with the source's size labels at one price
+/// and `source='linked'` recipe lines. Existing copies must keep working, so the
+/// fixture is written with SQL now that nothing over HTTP creates one.
+async fn seed_linked_copy(pool: &PgPool, src: Uuid, name: &str, price: i32, cat: Uuid) -> Uuid {
+    let mut tx = pool.begin().await.unwrap();
+    let copy: Uuid = sqlx::query_scalar(
+        "INSERT INTO menu_items (org_id, category_id, name, description, base_price, is_active, recipe_source_item_id) \
+         SELECT org_id, $2, $3, description, $4, is_active, id FROM menu_items WHERE id = $1 RETURNING id",
+    )
+    .bind(src)
+    .bind(cat)
+    .bind(name)
+    .bind(price)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active) \
+         SELECT $1, label, $2, sort, is_active FROM menu_item_sizes WHERE menu_item_id = $3 \
+         ON CONFLICT (menu_item_id, label) DO UPDATE \
+             SET price = EXCLUDED.price, sort = EXCLUDED.sort, is_active = EXCLUDED.is_active",
+    )
+    .bind(copy)
+    .bind(price)
+    .bind(src)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    madar_rust::menu::recipe_expand::rebuild_item(&mut tx, copy)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    copy
+}
+
 #[sqlx::test]
 async fn a_linked_copy_follows_its_source_until_unlinked(pool: PgPool) {
     let o = setup(&pool).await;
@@ -709,17 +745,18 @@ async fn a_linked_copy_follows_its_source_until_unlinked(pool: PgPool) {
         "rule applied on save"
     );
 
+    let copy = seed_linked_copy(&pool, src, "Iced latte staff", 0, staff).await;
     let (st, r) = call!(
         pool,
         o.token,
-        post,
-        format!("/menu-items/{src}/linked-copy"),
-        json!({"name": "Iced latte staff", "price": 0, "category_id": staff})
+        get,
+        format!("/menu-items/{copy}/recipe-link")
     );
-    assert_eq!(st, 201, "{r}");
-    let copy: Uuid = r["menu_item_id"].as_str().unwrap().parse().unwrap();
-    assert_eq!(r["link"]["recipe_source_item_id"], json!(src));
-    assert_eq!(r["link"]["in_sync"], true);
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["recipe_source_item_id"], json!(src));
+    assert_eq!(r["in_sync"], true);
+    let (_, r) = call!(pool, o.token, get, format!("/menu-items/{src}/recipe-link"));
+    assert_eq!(r["linked_copy_ids"], json!([copy]));
     let copy_sizes: Vec<(Uuid, String, i32)> = sqlx::query_as(
         "SELECT id, label, price FROM menu_item_sizes WHERE menu_item_id = $1 ORDER BY sort",
     )
@@ -773,16 +810,6 @@ async fn a_linked_copy_follows_its_source_until_unlinked(pool: PgPool) {
     );
     assert_eq!(st, 409);
 
-    // A copy of the copy follows the root.
-    let (_, r2) = call!(
-        pool,
-        o.token,
-        post,
-        format!("/menu-items/{copy}/linked-copy"),
-        json!({"name": "Loyalty iced latte", "price": 0})
-    );
-    assert_eq!(r2["link"]["recipe_source_item_id"], json!(src));
-
     // Unlink: lines become own and stop following.
     let (st, u) = call!(
         pool,
@@ -829,18 +856,26 @@ async fn staff_token(pool: &PgPool, org: Uuid, role: &str, kind: UserRole) -> St
     .fetch_one(pool)
     .await
     .unwrap();
-    madar_rust::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
-        .unwrap()
+    madar_rust::auth::jwt::create_token(
+        &JwtSecret("secret".into()),
+        user,
+        Some(org),
+        kind,
+        None,
+        24,
+    )
+    .unwrap()
 }
 
 /// Apply is `menu.packaging_rules.apply` (owner-only); base line edits are
-/// `menu.items.edit` and linked copies `menu.items.create` (both owner-only by
+/// `menu.items.edit`, and so is unlinking a linked copy (both owner-only by
 /// default). A teller and a branch manager are refused all three; reading the
 /// rules is `menu.items.read`, core for tellers and managers.
 #[sqlx::test]
 async fn modeling_writes_are_refused_to_tellers_and_managers(pool: PgPool) {
     let o = setup(&pool).await;
     let (src, _) = item(&pool, o.org, o.cat, "Latte", &["Cup"]).await;
+    let copy = seed_linked_copy(&pool, src, "Latte staff", 0, o.cat).await;
     let base = Uuid::new_v4();
     let teller = staff_token(&pool, o.org, "teller", UserRole::Teller).await;
     let manager = staff_token(&pool, o.org, "branch_manager", UserRole::BranchManager).await;
@@ -856,14 +891,8 @@ async fn modeling_writes_are_refused_to_tellers_and_managers(pool: PgPool) {
             json!({"lines": []})
         );
         assert_eq!(st, 403, "{who} base lines: {r}");
-        let (st, r) = call!(
-            pool,
-            t,
-            post,
-            format!("/menu-items/{src}/linked-copy"),
-            json!({"name": "Copy", "price": 0, "category_id": o.cat})
-        );
-        assert_eq!(st, 403, "{who} linked copy: {r}");
+        let (st, r) = call!(pool, t, delete, format!("/menu-items/{copy}/recipe-link"));
+        assert_eq!(st, 403, "{who} unlink: {r}");
         let (st, r) = call!(pool, t, get, "/packaging-rules".to_string());
         assert_eq!(st, 200, "{who} reads the rules: {r}");
     }

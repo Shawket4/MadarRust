@@ -566,9 +566,25 @@ pub(crate) async fn resolve_ticket_lines(
     let fired_at = Utc::now();
     let mut out = Vec::with_capacity(items.len());
     for it in items {
+        // A STAFF DRINK IS A COUNTER SALE. A table's bill is priced when each
+        // round is fired and settled hours later, under a frozen policy; the
+        // pool is counted per business day at the moment of sale. The two
+        // clocks do not agree, so a ticket line never goes on the pool. Live,
+        // that is said; a round fired OFFLINE already reached the kitchen, so
+        // it lands as an ordinary paid line and the settle charges it in full.
+        if it.staff_drink.is_some() && prices == crate::orders::handlers::ClientPrices::Ignore {
+            return Err(AppError::Coded {
+                status: 400,
+                code: "staff_drink_not_on_ticket",
+                reason: "A staff drink is rung at the till, not on a table's bill".into(),
+            });
+        }
         let resolved = resolve_order_line(pool, org_id, branch_id, fired_at, it, prices).await?;
 
         let mut frozen = it.clone();
+        if frozen.staff_drink.take().is_some() {
+            tracing::warn!(%branch_id, "a replayed ticket line named the staff pool; rung as a paid line");
+        }
         frozen.unit_price = Some(resolved.unit_price);
         // Bundle-component addons are server-priced through the surcharge and
         // the resolver ignores a client price for them; a plain item's addons
