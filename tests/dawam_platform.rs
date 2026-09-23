@@ -6,6 +6,9 @@
 //!   Only the phone's own staff session may sign out (refusals).
 //! - A flag seen again on every ping tells each manager once, not once a ping
 //!   (APP-6, audit 06 B7); a new flag after the first is resolved tells again.
+//! - A flag's acts each need their own right too (PM-4, AT-11): confirming a
+//!   cover is `hr.shift_cover.confirm`, signing a new phone out is
+//!   `hr.staff.edit` — the same rights as the covers list and the employee.
 
 use actix_web::{App, test, web};
 use chrono::{Duration, NaiveTime, Utc};
@@ -354,4 +357,140 @@ async fn a_flag_seen_on_every_ping_tells_the_manager_once(pool: PgPool) {
     // The person who left never hears about their own flag.
     assert_eq!(flag_notices(&pool, f.a).await, 0);
     let _ = f.b;
+}
+
+// ── a flag's acts on their own capabilities ────────────────────────────────
+
+/// A branch manager at `branch`, with `caps` taken away from managers.
+async fn manager_without(pool: &PgPool, f: &F, caps: &[&str]) -> String {
+    let m = user(pool, f.org, "Manager", "branch_manager").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(m)
+        .bind(f.branch)
+        .execute(pool)
+        .await
+        .unwrap();
+    for cap in caps {
+        sqlx::query(
+            "DELETE FROM org_role_grants g USING org_roles r \
+              WHERE r.id = g.org_role_id AND r.org_id = $1 AND r.kind::text = 'branch_manager' \
+                AND g.capability_id = (SELECT id FROM capabilities WHERE key = $2)",
+        )
+        .bind(f.org)
+        .bind(*cap)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("SELECT authz_bump_epoch($1)")
+        .bind(f.org)
+        .execute(pool)
+        .await
+        .unwrap();
+    token_for(m, f.org, UserRole::BranchManager)
+}
+
+async fn open_flag(pool: &PgPool, f: &F, who: Uuid, kind: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(who)
+    .bind(f.branch)
+    .bind(kind)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn resolution(pool: &PgPool, flag: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT resolution FROM attendance_flags WHERE id = $1")
+        .bind(flag)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test]
+async fn confirming_a_cover_flag_needs_the_cover_right(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let flag = open_flag(&pool, &f, f.a, "cover").await;
+    let m = manager_without(&pool, &f, &["hr.shift_cover.confirm"]).await;
+    let uri = format!("/staff/flags/{flag}");
+
+    let resp = call!(app, patch, uri, m, json!({ "action": "confirm" }));
+    assert_eq!(
+        resp.status(),
+        403,
+        "attendance.edit alone does not confirm a cover"
+    );
+    assert_eq!(resolution(&pool, flag).await, None, "nothing was written");
+    // What attendance.edit does allow still works for him.
+    let resp = call!(app, patch, uri, m, json!({ "action": "ignore" }));
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resolution(&pool, flag).await.as_deref(), Some("ignored"));
+
+    // A manager who holds it (the default) confirms.
+    let flag = open_flag(&pool, &f, f.b, "cover").await;
+    let m2 = {
+        let id = user(&pool, f.org, "Manager 2", "branch_manager").await;
+        sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+            .bind(id)
+            .bind(f.branch)
+            .execute(&pool)
+            .await
+            .unwrap();
+        id
+    };
+    // Give it back to managers, then confirm.
+    sqlx::query(
+        "INSERT INTO org_role_grants (org_role_id, org_id, capability_id, source) \
+         SELECT r.id, r.org_id, c.id, 'custom' FROM org_roles r, capabilities c \
+          WHERE r.org_id = $1 AND r.kind::text = 'branch_manager' AND c.key = 'hr.shift_cover.confirm'",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SELECT authz_bump_epoch($1)")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let m2 = token_for(m2, f.org, UserRole::BranchManager);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/flags/{flag}"),
+        m2,
+        json!({ "action": "confirm" })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resolution(&pool, flag).await.as_deref(), Some("confirmed"));
+}
+
+#[sqlx::test]
+async fn revoking_a_new_phone_from_a_flag_needs_the_staff_edit_right(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let flag = open_flag(&pool, &f, f.a, "new_phone").await;
+    let tok = phone_token(&pool, f.a).await;
+    let m = manager_without(&pool, &f, &["hr.staff.edit"]).await;
+    let uri = format!("/staff/flags/{flag}");
+
+    let resp = call!(app, patch, uri, m, json!({ "action": "revoke" }));
+    assert_eq!(resp.status(), 403);
+    assert_eq!(resolution(&pool, flag).await, None);
+    let resp = call!(app, get, "/staff/me/context", tok);
+    assert_eq!(resp.status(), 200, "the phone still works");
+
+    // The owner (who holds it) signs the phone out.
+    let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
+    let resp = call!(app, patch, uri, owner, json!({ "action": "revoke" }));
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resolution(&pool, flag).await.as_deref(), Some("revoked"));
+    let resp = call!(app, get, "/staff/me/context", tok);
+    assert_eq!(resp.status(), 401, "the revoked phone is refused");
 }

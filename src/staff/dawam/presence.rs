@@ -722,6 +722,20 @@ pub async fn resolve_flag(
         Some(b) => access::require_at(pool, &claims, org_id, Cap::HrAttendanceEdit, b).await?,
         None => access::require_for(pool, &claims, Cap::HrAttendanceEdit, &subject).await?,
     }
+    // Each act on its own right as well (PM-4): confirming a cover is the
+    // cover-confirm right (as on the covers list), signing a phone out is the
+    // staff-edit right (as on the employee). A deduction asks its own below.
+    let own = match (body.action.as_str(), kind.as_str()) {
+        ("confirm", "cover") => Some(Cap::HrShiftCoverConfirm),
+        ("revoke", _) => Some(Cap::HrStaffEdit),
+        _ => None,
+    };
+    if let Some(cap) = own {
+        match branch_id {
+            Some(b) => access::require_at(pool, &claims, org_id, cap, b).await?,
+            None => access::require_for(pool, &claims, cap, &subject).await?,
+        }
+    }
     let date: Option<NaiveDate> = match record_id {
         Some(r) => {
             sqlx::query_scalar("SELECT business_date FROM attendance_records WHERE id = $1")
