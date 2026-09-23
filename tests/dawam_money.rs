@@ -2336,10 +2336,18 @@ async fn rostered_day(
     id
 }
 
+/// The day's deduction lines: the sweep's rows keyed to the record, and a
+/// manager's own lines for that person and day (a flag's deduction is not
+/// keyed to the record — the flag keeps the link, so a second flag on the
+/// same shift can still be deducted and the sweep never touches it).
 async fn rows_of(pool: &PgPool, rec: Uuid) -> Vec<(String, i64)> {
     sqlx::query_as(
-        "SELECT source, amount_piastres FROM payroll_deductions \
-          WHERE attendance_record_id = $1 ORDER BY source",
+        "SELECT d.source, d.amount_piastres FROM payroll_deductions d \
+           JOIN attendance_records r ON r.id = $1 \
+          WHERE d.attendance_record_id = r.id \
+             OR (d.attendance_record_id IS NULL AND d.employee_id = r.employee_id \
+                 AND d.effective_date = r.business_date AND d.source <> 'manual') \
+          ORDER BY d.source",
     )
     .bind(rec)
     .fetch_all(pool)

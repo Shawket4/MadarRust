@@ -474,10 +474,12 @@ async fn schema_has_no_stray_shift_identifiers(pool: PgPool) {
           UNION ALL SELECT 'policy', tablename || '.' || policyname FROM pg_policies WHERE schemaname = 'public' AND (qual ~ 'shift' OR policyname ~ 'shift')
           UNION ALL SELECT 'view', viewname::text FROM pg_views WHERE schemaname = 'public' AND regexp_replace(definition, 'work_shift', '', 'g') ~ 'shift'
         ) x
-        -- Work shifts, not tills: the roster's schedules, Dawam's open shifts
-        -- and swaps (which name the work shifts they trade).
+        -- Work shifts, not tills: the roster's schedules, Dawam's open shifts,
+        -- swaps (which name the work shifts they trade) and shift-tied requests.
         WHERE name !~ 'work_shift' AND name !~ '^staff_schedules' AND name <> 'shift_counts'
           AND name !~ '^_?staff_open_shifts' AND name !~ '^staff_swaps'
+          -- Requests tied to a work shift (a split day's own block, RQ-9).
+          AND name !~ '^staff_requests_'
         ORDER BY 1").await;
     assert!(stray.is_empty(), "stray shift identifiers: {stray:?}");
 }

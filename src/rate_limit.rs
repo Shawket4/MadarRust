@@ -351,7 +351,11 @@ mod tests {
         .await;
         let per_person = global_per_minute() as usize;
         let ceiling = per_address_per_minute() as usize;
-        let accounts = ceiling / per_person + 2;
+        // Enough extra accounts that the bucket's refill during a slow run
+        // (~167 a second at 10,000 a minute) cannot cover them: with only +2
+        // (400 requests) a run slower than ~2.4 s — a loaded CI box — let
+        // every request through and failed "did not multiply".
+        let accounts = ceiling / per_person + 10;
         let mut ok = 0usize;
         let mut paced = 0usize;
         let started = std::time::Instant::now();

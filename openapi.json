@@ -45446,7 +45446,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Add a bonus or deduction. Over the caller's limit it is created pending\nand waits for the owner (AD-5).",
+        "summary": "Add a bonus or deduction. Over the caller's limit it is created pending\nand waits for the owner (AD-5). Bonuses and deductions have separate limits.",
         "operationId": "create_adjustment",
         "requestBody": {
           "content": {
@@ -45542,7 +45542,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "The owner (or anyone whose limit covers it) decides a pending line.",
+        "summary": "The owner (or anyone whose limit covers it) decides a pending line. A\npercent line is judged at its value in piastres (audit B5).",
         "operationId": "decide_adjustment",
         "parameters": [
           {
@@ -45678,6 +45678,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopAdjustment"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "",
@@ -45757,12 +45767,108 @@
         ]
       }
     },
+    "/staff/advances/record": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "A manager hands an advance over directly (AV-2): recorded and approved in\nONE call under the same cap and limit as a review, so a refusal never\nleaves a stray pending advance behind (audit B10).",
+        "operationId": "record_advance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordAdvance"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SalaryAdvance"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/advances/{id}/review": {
       "patch": {
         "tags": [
           "staff"
         ],
-        "summary": "Decide an advance within the cap: the approver's limit is a % of the\nemployee's salary (AV-4, AV-5).",
+        "summary": "Decide an advance within the cap: the approver's limit is a % of the\nemployee's salary owed after this one (AV-4, AV-5).",
         "operationId": "review_advance",
         "parameters": [
           {
@@ -46096,7 +46202,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Clock someone in, or out if they are in, now; marked as made by the\nmanager with the reason (CL-13, CL-16).",
+        "summary": "Clock someone in, or out if they are in; marked as made by the manager\n(`manager`) with the reason (CL-13, CL-16). The check-in window, the\nnight shift's business date and the shift's own branch apply exactly as\nfor the app.",
         "operationId": "punch_for",
         "requestBody": {
           "content": {
@@ -46206,7 +46312,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Effective attendance settings",
+            "description": "Effective attendance settings: the business's, or a branch's with its overrides",
             "content": {
               "application/json": {
                 "schema": {
@@ -46299,7 +46405,7 @@
         },
         "responses": {
           "200": {
-            "description": "Settings saved",
+            "description": "Settings saved; the effective settings",
             "content": {
               "application/json": {
                 "schema": {
@@ -46307,6 +46413,184 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/attendance/settings/branches": {
+      "get": {
+        "tags": [
+          "staff"
+        ],
+        "operationId": "list_branch_rules",
+        "responses": {
+          "200": {
+            "description": "The caller's branches and which rules each overrides",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BranchRules"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/attendance/settings/branches/{branch_id}": {
+      "delete": {
+        "tags": [
+          "staff"
+        ],
+        "operationId": "delete_branch_rules",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch whose overrides go",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The branch follows the business's rules again"
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -46515,8 +46799,31 @@
         "tags": [
           "staff"
         ],
-        "summary": "A dead or forgotten phone in a Madar org: the person clocks in or out on\nthe branch till with their till PIN (CL-13). Marked `till` (CL-16). The\ntill is at the branch, so there is no geofence to check. Online only: a\nPIN is never queued.",
+        "summary": "A dead or forgotten phone in a Madar org: the person clocks in or out on\nthe branch till with their till PIN (CL-13). Marked `till` (CL-16). The\ntill is at the branch, so there is no geofence to check — which is why\nit is accepted ONLY from a real till (audit 03 P0): a POS session (never\nthe Dawam app's) on the branch's registered POS device, proven by its\ncredential when it has one, with a till session open on that device at\nthat branch. Online only: a PIN is never queued. Wrong PINs slow down\nlike the till's own sign-in, and the branch's managers are told.",
         "operationId": "till_punch",
+        "parameters": [
+          {
+            "name": "X-Madar-Device",
+            "in": "header",
+            "description": "The till's device id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Madar-Device-Token",
+            "in": "header",
+            "description": "The device credential, when it has one",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -46621,6 +46928,15 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "Why the day goes (kept with the tombstone the absence sweep honours).",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -48600,6 +48916,206 @@
         ]
       }
     },
+    "/staff/employees/{id}/preferences": {
+      "put": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "A manager overrides someone's preferences (SC-12). Logged, and the\nperson is told.",
+        "operationId": "put_employee_preferences",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Preferences"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/employees/{id}/preferences/log": {
+      "get": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Who changed someone's preferences, and when (SC-12, newest first).",
+        "operationId": "preference_log",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PreferenceChange"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/expense-advances": {
       "get": {
         "tags": [
@@ -49042,584 +49558,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HolidayView"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
-    "/staff/leave/balances": {
-      "get": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "list_balances",
-        "parameters": [
-          {
-            "name": "employee_id",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "year",
-            "in": "query",
-            "description": "Defaults to the current calendar year.",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int32"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Leave balances",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/LeaveBalance"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "put_balance",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/PutBalanceRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Balance saved",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LeaveBalance"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
-    "/staff/leave/types": {
-      "get": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "list_leave_types",
-        "responses": {
-          "200": {
-            "description": "Leave types",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/LeaveType"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "create_leave_type",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpsertLeaveTypeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Leave type created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LeaveType"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      }
-    },
-    "/staff/leave/types/{id}": {
-      "delete": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "delete_leave_type",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Leave type ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Leave type deleted"
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
-      "patch": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "update_leave_type",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "Leave type ID",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/UpsertLeaveTypeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Leave type updated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LeaveType"
                 }
               }
             }
@@ -50621,6 +50559,7 @@
         "tags": [
           "staff"
         ],
+        "summary": "Deprecated (RQ-3): Dawam has no leave balances. This shows what older data\nholds and is never written any more.",
         "operationId": "my_leave_balances",
         "parameters": [
           {
@@ -51176,7 +51115,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Preferred times and days I can't work; managers see them (SC-12).",
+        "summary": "Preferred times and days I can't work; managers see them (SC-12). Logged.",
         "operationId": "put_preferences",
         "requestBody": {
           "content": {
@@ -51191,6 +51130,92 @@
         "responses": {
           "204": {
             "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/me/privacy": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "The employee accepted the location notice on this phone (AT-5). Kept on\nthe device row: a new phone asks again.",
+        "operationId": "accept_staff_privacy",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivacyAccepted"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -51453,7 +51478,7 @@
         },
         "responses": {
           "201": {
-            "description": "Request filed",
+            "description": "Request filed; `status` says whether it was approved as filed (RQ-5)",
             "content": {
               "application/json": {
                 "schema": {
@@ -51641,7 +51666,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "The employee's OWN roster for a date range — what the app's Shifts tab shows.",
+        "summary": "The employee's OWN roster for a date range, published weeks only (SC-3).",
         "description": "Own-row scoped like the rest of `/staff/me/*`: it needs no permission grant,\nbecause seeing when you are expected at work is not an admin capability.",
         "operationId": "my_schedule",
         "parameters": [
@@ -51746,12 +51771,91 @@
         ]
       }
     },
+    "/staff/me/sign-out": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "`POST /staff/me/sign-out` — the staff app signs out (APP-6, 06 B3): this\nphone's device is revoked, so its token can't be refreshed again, and the\nemployee's Dawam pushes stop at once — a signed-out phone never shows the\nnext person's names or amounts. Idempotent.",
+        "operationId": "staff_sign_out",
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/me/swaps": {
       "post": {
         "tags": [
           "staff"
         ],
-        "summary": "Ask a colleague to swap: they agree first, then the manager (SC-8).",
+        "summary": "Ask a colleague to swap: they agree first, then the manager (SC-8). Both\nshifts must be on the published roster, ahead, at a branch both work at,\nand must fit where they land.",
         "operationId": "ask_swap",
         "requestBody": {
           "content": {
@@ -51870,6 +51974,103 @@
           },
           "required": true
         },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Swap"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/me/swaps/{id}/cancel": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "The one who asked takes it back before the manager decides.",
+        "operationId": "cancel_swap",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
@@ -52236,12 +52437,102 @@
         ]
       }
     },
+    "/staff/open-shifts/{id}/cancel": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Take an open shift back (open or claimed, never filled). A claimer hears.",
+        "operationId": "cancel_open_shift",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/open-shifts/{id}/claim": {
       "post": {
         "tags": [
           "staff"
         ],
-        "summary": "Claim an open shift; the manager approves the claim (SC-9).",
+        "summary": "Claim an open shift; the manager approves the claim (SC-9). Only a\npublished week's, and only one that fits beside the person's own shifts.",
         "operationId": "claim_open_shift",
         "parameters": [
           {
@@ -52338,7 +52629,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Approve a claim: the shift becomes theirs for that date. Rejecting reopens it.",
+        "summary": "Approve a claim: the shift becomes theirs for that date, beside the rest\nof their day. Rejecting reopens it. One decision only.",
         "operationId": "decide_claim",
         "parameters": [
           {
@@ -52553,6 +52844,7 @@
         "tags": [
           "staff"
         ],
+        "summary": "Record an ask on someone's behalf: it still waits for a decision\n(`PATCH /staff/advances/{id}/review`). To hand one over at once, use\n`POST /staff/advances/record`.",
         "operationId": "create_advance_admin",
         "requestBody": {
           "content": {
@@ -52566,7 +52858,7 @@
         },
         "responses": {
           "201": {
-            "description": "Advance created",
+            "description": "Advance created (pending)",
             "content": {
               "application/json": {
                 "schema": {
@@ -52643,41 +52935,43 @@
         ]
       }
     },
-    "/staff/payroll/advances/{id}/decision": {
-      "patch": {
+    "/staff/payroll/audit": {
+      "get": {
         "tags": [
           "staff"
         ],
-        "operationId": "decide_advance",
+        "summary": "The money audit log: every delete, stop, waive, override, reopen and\npayment, with who and why (AD-9, AT-10).",
+        "operationId": "list_audit",
         "parameters": [
           {
-            "name": "id",
-            "in": "path",
-            "description": "Advance ID",
-            "required": true,
+            "name": "employee_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "period_id",
+            "in": "query",
+            "required": false,
             "schema": {
               "type": "string",
               "format": "uuid"
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AdvanceDecision"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
-            "description": "Decision recorded",
+            "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SalaryAdvance"
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AuditRow"
+                  }
                 }
               }
             }
@@ -52795,99 +53089,6 @@
                   "items": {
                     "$ref": "#/components/schemas/PayrollAdjustment"
                   }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
-      },
-      "post": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "create_bonus",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateAdjustmentRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Bonus created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PayrollAdjustment"
                 }
               }
             }
@@ -53251,99 +53452,6 @@
             "bearer_jwt": []
           }
         ]
-      },
-      "post": {
-        "tags": [
-          "staff"
-        ],
-        "operationId": "create_deduction",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateAdjustmentRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Deduction created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PayrollAdjustment"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Bad request — validation failed or malformed input",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized — missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Forbidden — insufficient permission or wrong org",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Conflict — FK or domain invariant violation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer_jwt": []
-          }
-        ]
       }
     },
     "/staff/payroll/deductions/{id}": {
@@ -53467,6 +53575,114 @@
         "responses": {
           "200": {
             "description": "Deduction overridden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PayrollAdjustment"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/payroll/deductions/{id}/unwaive": {
+      "patch": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Undo a waiver, with a reason (AT-7): the line counts again at the amount\nit had. Only while the month is open.",
+        "operationId": "unwaive_deduction",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deduction ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WaiveDeductionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Waiver undone",
             "content": {
               "application/json": {
                 "schema": {
@@ -53836,6 +54052,7 @@
         "tags": [
           "staff"
         ],
+        "summary": "Delete a DRAFT period. An approved month is reopened first (which is\nrefused once anyone is paid), so a paid payslip can never be wiped (B3).",
         "operationId": "delete_period",
         "parameters": [
           {
@@ -53926,7 +54143,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "The generated period as a bank-ready CSV.",
+        "summary": "The generated period as a CSV: the bank file, the wallet list, or the\nwhole run.",
         "description": "Deliberately serves the PAYSLIPS, not a fresh computation: the file handed to\na bank must be exactly what was approved, even if a deduction has been edited\nsince. A period that has not been generated has nothing to export.",
         "operationId": "export_period_csv",
         "parameters": [
@@ -53938,6 +54155,15 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "method",
+            "in": "query",
+            "description": "`bank` (a transfer file: name, account, amount) · `wallet` (numbers\nand amounts) · `cash`; omitted = everyone, every figure (PAY-8).",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -54021,6 +54247,7 @@
         "tags": [
           "staff"
         ],
+        "summary": "Approve a DRAFT month: freeze every payslip and collect the advance\ninstallments in the ledger. An approved month is not regenerated — it is\nreopened (before anyone is paid) and approved again.",
         "operationId": "generate_period",
         "parameters": [
           {
@@ -54437,6 +54664,8 @@
         "tags": [
           "staff"
         ],
+        "summary": "Reopen an approved month (before anyone is paid) or close a paid one.",
+        "description": "Reopening DROPS the frozen payslips: their advance collections go with\nthem (the ledger trigger refunds), so the live preview reads exactly what\nre-approving will collect (PAY-2, PAY-6, audit B7).",
         "operationId": "set_period_status",
         "parameters": [
           {
@@ -55039,7 +55268,7 @@
         },
         "responses": {
           "201": {
-            "description": "Request filed",
+            "description": "Request filed (approved at once when it is the filer's own and they approve their own)",
             "content": {
               "application/json": {
                 "schema": {
@@ -55525,7 +55754,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Owner only, monthly: who works the nights, by gender, against who said\nthey want them.",
+        "summary": "Owner only, monthly: who works the nights, by gender, against who said\nthey want them — for the business and branch by branch.",
         "operationId": "fairness",
         "parameters": [
           {
@@ -55536,6 +55765,16 @@
             "schema": {
               "type": "string",
               "format": "date"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "One branch; omit for every branch and the business as a whole.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -55618,12 +55857,101 @@
         ]
       }
     },
+    "/staff/roster/fairness/audits": {
+      "get": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "The kept monthly audits, newest first (owner).",
+        "operationId": "fairness_audits",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FairnessAudit"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/roster/publish": {
       "post": {
         "tags": [
           "staff"
         ],
-        "summary": "Publish a week: staff see it and are told (SC-3).",
+        "summary": "Publish a week: staff see it and are told (SC-3), and the week's open\nshifts are announced now that people can see them (SC-9).",
         "operationId": "publish",
         "requestBody": {
           "content": {
@@ -55820,7 +56148,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Accept (changes that date only) or reject; either way it is remembered.",
+        "summary": "Accept (changes that date only) or reject; either way it is remembered.\nOnly a suggestion the engine actually made for that branch-week is taken\n(a crafted id is refused), and accepting touches only the block it names.",
         "operationId": "decide_suggestion",
         "requestBody": {
           "content": {
@@ -56215,11 +56543,404 @@
         ]
       }
     },
+    "/staff/schedules/days": {
+      "put": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Set every shift a person works on a date: a split day, one shift with its\nown times, or a day off (SC-5, SC-11).",
+        "operationId": "put_day",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutDayRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DayView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Put a date back on the standing pattern.",
+        "operationId": "reset_day",
+        "parameters": [
+          {
+            "name": "employee_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "on_date",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DayView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/schedules/days/move": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Give one person's shift on a date to someone else; both keep the rest of\ntheir day.",
+        "operationId": "move_shift",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveShiftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/schedules/days/times": {
+      "put": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "One assignment's own from/to (one person, one date, one block), without\nchanging the block. Both null = back to the block's times.",
+        "operationId": "put_times",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutTimesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DayView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/schedules/overrides": {
       "put": {
         "tags": [
           "staff"
         ],
+        "summary": "Set a date to exactly one shift, or a day off (the older single-shift\nform of `PUT /staff/schedules/days`).",
         "operationId": "put_override",
         "requestBody": {
           "content": {
@@ -56315,6 +57036,7 @@
         "tags": [
           "staff"
         ],
+        "summary": "Remove one row of a date's set: one block of a split day, or the date's\nlast change (back to the pattern).",
         "operationId": "delete_override",
         "parameters": [
           {
@@ -56593,7 +57315,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "The manager approves: both rosters update for those dates (SC-8).",
+        "summary": "The manager approves: both rosters update for those dates (SC-8), in one\ntransaction, once, and only if both shifts are still where they were.",
         "operationId": "decide_swap",
         "parameters": [
           {
@@ -62235,6 +62957,7 @@
           "kind",
           "employee_id",
           "employee_name",
+          "value_piastres",
           "reason",
           "effective_date",
           "source",
@@ -62263,7 +62986,8 @@
           },
           "effective_date": {
             "type": "string",
-            "format": "date"
+            "format": "date",
+            "description": "The month it lands in (the first day of a recurring line, AD-1/AD-3)."
           },
           "employee_id": {
             "type": "string",
@@ -62287,6 +63011,20 @@
             "type": "string",
             "description": "`bonus` · `deduction`"
           },
+          "original_amount_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "overridden_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
           "percent_of_base": {
             "type": [
               "number",
@@ -62306,25 +63044,32 @@
           "status": {
             "type": "string",
             "description": "`pending` (waits for the owner) · `approved` · `rejected`"
-          }
-        }
-      },
-      "AdvanceDecision": {
-        "type": "object",
-        "description": "Deciding a SALARY ADVANCE. Deliberately not called `DecisionRequest`: staff\nrequests have their own decision body carrying `is_paid`, and two structs\nsharing a name collapse into one OpenAPI schema — which silently gave every\ngenerated client the wrong shape for one of them.",
-        "required": [
-          "status"
-        ],
-        "properties": {
-          "note": {
+          },
+          "stop_reason": {
             "type": [
               "string",
               "null"
             ]
           },
-          "status": {
-            "type": "string",
-            "description": "`approved` | `rejected` | `cancelled`."
+          "stopped_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "value_piastres": {
+            "type": "integer",
+            "format": "int64",
+            "description": "A percent line valued against the salary, in piastres — the server's\nfigure (AT-3); equals `amount_piastres` for a flat line."
+          },
+          "waived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "A rule-made deduction the manager forgave: shown, counted for nothing (AD-6/AD-8)."
           }
         }
       },
@@ -62752,15 +63497,18 @@
         "properties": {
           "my_date": {
             "type": "string",
-            "format": "date"
+            "format": "date",
+            "description": "The date of MY shift I give away."
           },
           "my_shift_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "MY shift (a block I'm rostered on that date)."
           },
           "peer_date": {
             "type": "string",
-            "format": "date"
+            "format": "date",
+            "description": "The date of the colleague's shift I take."
           },
           "peer_id": {
             "type": "string",
@@ -62768,7 +63516,8 @@
           },
           "peer_shift_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The COLLEAGUE's shift."
           }
         }
       },
@@ -63290,6 +64039,10 @@
           "status": {
             "type": "string"
           },
+          "status_overridden": {
+            "type": "boolean",
+            "description": "A manager set this day's status by hand; automation keeps it (AT-7)."
+          },
           "tracking_off": {
             "type": "boolean"
           },
@@ -63435,6 +64188,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "overridden": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For a branch: the rules it sets itself (every other field is the\nbusiness's, RU-2). Empty for the business."
+          },
           "overtime_day_multiplier": {
             "type": "number",
             "format": "double"
@@ -63462,6 +64222,13 @@
             ],
             "format": "date-time",
             "description": "When the business saved its rules; nobody clocks in before (RU-1)."
+          },
+          "suggested_tiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LateTier"
+            },
+            "description": "The ladder the set-up step suggests (RU-1). Never used for pricing."
           },
           "updated_at": {
             "type": "string",
@@ -63624,6 +64391,79 @@
           "total_count": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "AuditRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "action",
+          "entity",
+          "details",
+          "created_at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "actor_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "details": {},
+          "employee_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entity": {
+            "type": "string"
+          },
+          "entity_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "period_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -64653,6 +65493,61 @@
           }
         }
       },
+      "BranchFairness": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "branch_name",
+          "rows",
+          "gap_points",
+          "flagged",
+          "by_default_decided",
+          "decided",
+          "accepted",
+          "learning_frozen"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "by_default_decided": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Suggestions the gender default decided, of those decided in the month."
+          },
+          "decided": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "flagged": {
+            "type": "boolean",
+            "description": "Over 20 points (design §4.2)."
+          },
+          "gap_points": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The widest gap, in percentage points, between a gender's share of the\nnight shifts and its share of stated willingness (of headcount when\nnobody stated any)."
+          },
+          "learning_frozen": {
+            "type": "boolean",
+            "description": "Learning is paused at this branch: under 40% accepted over 4 weeks."
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FairnessRow"
+            }
+          }
+        }
+      },
       "BranchMenuOverride": {
         "type": "object",
         "required": [
@@ -64746,6 +65641,38 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "BranchRules": {
+        "type": "object",
+        "description": "A branch and which of its rules it overrides.",
+        "required": [
+          "branch_id",
+          "branch_name",
+          "overridden"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "overridden": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The fields this branch sets itself; every other one is the business's."
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           }
         }
       },
@@ -66637,9 +67564,24 @@
           "branch_id"
         ],
         "properties": {
+          "accuracy_meters": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The fix's reported accuracy, metres (CL-9: a perfect one is suspicious)."
+          },
           "branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "is_mock": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The OS's mock-location marker for this fix (CL-9)."
           },
           "latitude": {
             "type": [
@@ -66679,6 +67621,21 @@
       "CheckOutRequest": {
         "type": "object",
         "properties": {
+          "accuracy_meters": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The fix's reported accuracy, metres (CL-9)."
+          },
+          "is_mock": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The OS's mock-location marker for this fix (CL-9)."
+          },
           "latitude": {
             "type": [
               "number",
@@ -67101,11 +68058,12 @@
           "base_piastres": {
             "type": "integer",
             "format": "int64",
-            "description": "After the attendance proration — what the days actually worked earn."
+            "description": "After the calendar-day proration — what the days employed earn, at\neach day's salary (PAY-13)."
           },
           "base_salary_piastres": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "The monthly salary in force at the end of the window."
           },
           "bonuses_piastres": {
             "type": "integer",
@@ -67714,42 +68672,6 @@
               "null"
             ],
             "format": "int32"
-          }
-        }
-      },
-      "CreateAdjustmentRequest": {
-        "type": "object",
-        "required": [
-          "employee_id",
-          "reason",
-          "effective_date"
-        ],
-        "properties": {
-          "amount_piastres": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Exactly one of `amount_piastres` or `percent_of_base`."
-          },
-          "effective_date": {
-            "type": "string",
-            "format": "date"
-          },
-          "employee_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "percent_of_base": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "reason": {
-            "type": "string"
           }
         }
       },
@@ -69694,7 +70616,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Branch-local wall clock."
           },
           "is_half_day": {
             "type": [
@@ -69702,16 +70625,31 @@
               "null"
             ]
           },
+          "is_paid": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Only when the request is approved as it is filed (the filer holds\n`hr.requests.self_approve`): leave paid or unpaid, an excuse's pay.\nOmitted: leave is paid, an excuse follows the rule."
+          },
           "kind": {
             "type": "string",
             "description": "One of `leave`, `late_arrival`, `early_departure`, `excuse`, `mission`,\n`correction`."
+          },
+          "leave_half": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`first` | `second`: which half of the day a half-day leave takes off.\nOmitted on a half day = the first."
           },
           "leave_type_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Deprecated (RQ-2): ignored. Leave has no types."
           },
           "location": {
             "type": [
@@ -69733,13 +70671,23 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "A mission's title; when omitted the note is used."
           },
           "to_time": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Branch-local wall clock. An excuse ending at or before it starts runs\npast midnight."
+          },
+          "work_shift_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The shift a late arrival, early departure or excuse is for. Omitted =\nthe shift of the day its time falls in."
           }
         }
       },
@@ -70084,7 +71032,9 @@
           "period",
           "preview",
           "payslips",
-          "history"
+          "history",
+          "totals",
+          "paid_count"
         ],
         "properties": {
           "history": {
@@ -70093,6 +71043,11 @@
               "$ref": "#/components/schemas/PayrollPeriod"
             },
             "description": "Earlier periods, newest first."
+          },
+          "paid_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many payslips are marked paid (a 'none' mark counts)."
           },
           "payslips": {
             "type": "array",
@@ -70110,6 +71065,10 @@
               "$ref": "#/components/schemas/ComputedPayslip"
             },
             "description": "A live computation while the period is still a draft."
+          },
+          "totals": {
+            "$ref": "#/components/schemas/PayrollTotals",
+            "description": "The run added up by the server (AT-3)."
           }
         }
       },
@@ -70457,6 +71416,116 @@
           },
           "title": {
             "type": "string"
+          }
+        }
+      },
+      "DateSet": {
+        "type": "object",
+        "description": "A person's date that holds its own set (a date change), not the pattern.",
+        "required": [
+          "employee_id",
+          "date",
+          "day_off"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "day_off": {
+            "type": "boolean",
+            "description": "The date is a day off by date change (it holds no shift)."
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "DayBlock": {
+        "type": "object",
+        "description": "One block on a date, with its own from/to if it has one.",
+        "required": [
+          "work_shift_id"
+        ],
+        "properties": {
+          "end_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "work_shift_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "DayTime": {
+        "type": "object",
+        "description": "A block's own start/end on one weekday, on top of its default times.",
+        "required": [
+          "day_of_week",
+          "start_time",
+          "end_time"
+        ],
+        "properties": {
+          "day_of_week": {
+            "type": "integer",
+            "format": "int32",
+            "description": "0 = Sunday … 6 = Saturday."
+          },
+          "end_time": {
+            "type": "string",
+            "description": "At or before the start = ends the next day."
+          },
+          "start_time": {
+            "type": "string"
+          }
+        }
+      },
+      "DayView": {
+        "type": "object",
+        "description": "One person's date after a change.",
+        "required": [
+          "employee_id",
+          "on_date",
+          "shifts",
+          "follows_pattern",
+          "warnings"
+        ],
+        "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "follows_pattern": {
+            "type": "boolean",
+            "description": "The date follows the standing pattern (no date change)."
+          },
+          "on_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "shifts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResolvedShift"
+            },
+            "description": "Empty = a day off (or nothing rostered)."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabourWarning"
+            },
+            "description": "Labour limits the person's week now goes past. Warnings, never blocks."
           }
         }
       },
@@ -71939,6 +73008,21 @@
             "type": "integer",
             "format": "int64"
           },
+          "covered_by_others": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Their own shifts a colleague covered (not rejected): the absence stays\ntheirs (CV-6), this says someone stepped in."
+          },
+          "covers_given": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Colleagues' shifts this person covered, confirmed by a manager (CV-7).\nA cover is never a present day of the coverer's own."
+          },
+          "covers_pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Covers still waiting for the manager."
+          },
           "department_id": {
             "type": [
               "string",
@@ -72237,12 +73321,21 @@
           "app_access",
           "employment_status",
           "pay_method",
+          "on_payroll",
           "cant_work_days",
           "branch_ids",
           "created_at",
           "updated_at"
         ],
         "properties": {
+          "advance_cap_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The owner's cap on what this person may owe in salary advances, in\npiastres (AV-5): the server's figure, so no client recomputes it.\nHidden with the salary."
+          },
           "app_access": {
             "type": "boolean",
             "description": "May sign in to the staff app with a WhatsApp code."
@@ -72379,6 +73472,10 @@
               "string",
               "null"
             ]
+          },
+          "on_payroll": {
+            "type": "boolean",
+            "description": "Paid through Dawam (the default). Off for someone who uses the app\nand is rostered but is not paid here (an owner, say): the payroll\nrun, the estimate and the payslips skip them."
           },
           "org_id": {
             "type": "string",
@@ -72709,6 +73806,36 @@
           }
         }
       },
+      "FairnessAudit": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "month",
+          "flagged",
+          "computed_at",
+          "report"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "computed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "flagged": {
+            "type": "boolean"
+          },
+          "month": {
+            "type": "string",
+            "format": "date"
+          },
+          "report": {
+            "$ref": "#/components/schemas/BranchFairness"
+          }
+        }
+      },
       "FairnessRow": {
         "type": "object",
         "required": [
@@ -72718,6 +73845,10 @@
           "night_shifts"
         ],
         "properties": {
+          "accepted": {
+            "type": "integer",
+            "format": "int64"
+          },
           "gender": {
             "type": [
               "string",
@@ -72737,6 +73868,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "suggested": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Suggestions for people of this gender decided in the month, and\naccepted."
+          },
           "willing": {
             "type": "integer",
             "format": "int64",
@@ -72751,12 +73887,20 @@
           "rows",
           "decided_4w",
           "accepted_4w",
-          "learning_frozen"
+          "learning_frozen",
+          "branches"
         ],
         "properties": {
           "accepted_4w": {
             "type": "integer",
             "format": "int64"
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BranchFairness"
+            },
+            "description": "The same, branch by branch, each with its own gap flag."
           },
           "decided_4w": {
             "type": "integer",
@@ -72765,7 +73909,7 @@
           },
           "learning_frozen": {
             "type": "boolean",
-            "description": "Learning is paused: under 40% accepted over 4 weeks."
+            "description": "Learning is paused at some branch."
           },
           "month": {
             "type": "string",
@@ -72776,7 +73920,7 @@
             "items": {
               "$ref": "#/components/schemas/FairnessRow"
             },
-            "description": "Night share by gender against stated willingness."
+            "description": "Night share by gender against stated willingness, the whole business."
           }
         }
       },
@@ -74726,56 +75870,6 @@
           "year": {
             "type": "integer",
             "format": "int32"
-          }
-        }
-      },
-      "LeaveType": {
-        "type": "object",
-        "required": [
-          "id",
-          "org_id",
-          "name",
-          "is_paid",
-          "requires_approval",
-          "is_active",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "annual_quota_days": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "is_active": {
-            "type": "boolean"
-          },
-          "is_paid": {
-            "type": "boolean"
-          },
-          "name": {
-            "type": "string"
-          },
-          "org_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "requires_approval": {
-            "type": "boolean"
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
           }
         }
       },
@@ -76850,6 +77944,35 @@
           }
         }
       },
+      "MoveShiftRequest": {
+        "type": "object",
+        "required": [
+          "employee_id",
+          "to_employee_id",
+          "on_date",
+          "work_shift_id"
+        ],
+        "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who has the shift now."
+          },
+          "on_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "to_employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who gets it."
+          },
+          "work_shift_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "MoveTicketTableRequest": {
         "type": "object",
         "required": [
@@ -76860,6 +77983,21 @@
             "type": "string",
             "format": "uuid",
             "description": "The table to move this ticket onto."
+          }
+        }
+      },
+      "MoveView": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/DayView"
+          },
+          "to": {
+            "$ref": "#/components/schemas/DayView"
           }
         }
       },
@@ -77025,7 +78163,8 @@
           "open_shifts",
           "swaps",
           "team",
-          "cant_work_days"
+          "cant_work_days",
+          "prefs_set_by"
         ],
         "properties": {
           "cant_work_days": {
@@ -77051,6 +78190,10 @@
               "string",
               "null"
             ]
+          },
+          "prefs_set_by": {
+            "type": "string",
+            "description": "`employee` or `manager`: who set my preferences last."
           },
           "shifts": {
             "type": "array",
@@ -77106,7 +78249,8 @@
               "string",
               "null"
             ],
-            "format": "date"
+            "format": "date",
+            "description": "The month it lands in (AD-1): any day of that month; the first month\nof a recurring line (AD-3). Defaults to today. Must be an open month."
           },
           "employee_id": {
             "type": "string",
@@ -77146,16 +78290,32 @@
             "type": "integer",
             "format": "int64"
           },
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Where it was handed over; defaults to the person's first branch. Must\nbe a branch the caller may log at."
+          },
           "employee_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "given_on": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "When the cash changed hands; defaults to today (AV-7)."
           },
           "purpose": {
             "type": "string"
           },
           "via": {
             "type": "string",
-            "description": "`safe` · `bank` · `till`"
+            "description": "`safe` · `bank`. A till pay-out is tagged on the POS (AV-8), never\nlogged here by hand (AV-10)."
           }
         }
       },
@@ -77196,6 +78356,13 @@
           "elapsed_ms"
         ],
         "properties": {
+          "anchor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `X-Dawam-Time` value of the last response the phone saw (signed)."
+          },
           "elapsed_ms": {
             "type": "integer",
             "format": "int64",
@@ -77207,7 +78374,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "The GPS fix's own satellite time, when it had one."
+            "description": "The GPS fix's own satellite time, when the platform gives one (Android's\nGNSS provider; iOS gives none)."
           },
           "rebooted": {
             "type": "boolean",
@@ -77216,7 +78383,7 @@
           "server_time": {
             "type": "string",
             "format": "date-time",
-            "description": "The last server time the phone saw (a response's `Date`)."
+            "description": "The last server time the phone saw. Only a guide: a valid `anchor`\nreplaces it, and without one the punch is marked unverified."
           }
         }
       },
@@ -77397,10 +78564,25 @@
           "work_shift_id"
         ],
         "properties": {
+          "accuracy_meters": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The fix's reported accuracy, metres (CL-9)."
+          },
           "employee_id": {
             "type": "string",
             "format": "uuid",
             "description": "Whose shift."
+          },
+          "is_mock": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The OS's mock-location marker for this fix (CL-9)."
           },
           "latitude": {
             "type": [
@@ -77415,6 +78597,17 @@
               "null"
             ],
             "format": "double"
+          },
+          "offline": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OfflineStamp",
+                "description": "Set when the cover was queued offline: it starts at its own time, not\nwhen the phone got a signal back (CL-11, audit 03 bug 6)."
+              }
+            ]
           },
           "work_shift_id": {
             "type": "string",
@@ -80663,13 +81856,28 @@
         "required": [
           "period_start",
           "period_end",
-          "advance_room_piastres"
+          "advance_room_piastres",
+          "advance_cap_piastres",
+          "advance_outstanding_piastres",
+          "on_payroll"
         ],
         "properties": {
+          "advance_cap_piastres": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The owner's cap on what this person may owe (AV-5), server-computed."
+          },
+          "advance_outstanding_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
           "advance_room_piastres": {
             "type": "integer",
             "format": "int64",
             "description": "How much more can be asked for as an advance (AV-5)."
+          },
+          "on_payroll": {
+            "type": "boolean"
           },
           "period_end": {
             "type": "string",
@@ -80686,7 +81894,7 @@
               },
               {
                 "$ref": "#/components/schemas/ComputedPayslip",
-                "description": "So far this period, from the same engine payroll uses (PAY-11)."
+                "description": "So far this period, from the same engine payroll uses (PAY-9). Null\nfor someone not on payroll."
               }
             ]
           }
@@ -81057,6 +82265,54 @@
           }
         }
       },
+      "PayrollTotals": {
+        "type": "object",
+        "description": "The whole run's figures, added up by the server (AT-3).",
+        "required": [
+          "people",
+          "base_piastres",
+          "overtime_piastres",
+          "bonuses_piastres",
+          "deductions_piastres",
+          "advances_piastres",
+          "net_piastres",
+          "carry_out_piastres"
+        ],
+        "properties": {
+          "advances_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "base_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "bonuses_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "carry_out_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "deductions_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "net_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "overtime_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "people": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "Payslip": {
         "type": "object",
         "required": [
@@ -81155,12 +82411,33 @@
             ],
             "format": "date-time"
           },
+          "paid_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who marked it paid (AT-10)."
+          },
           "paid_method": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Paid by `cash` · `bank` · `wallet` (PAY-7); null until marked paid."
+            "description": "Paid by `cash` · `bank` · `wallet` (PAY-7), or `none` for a payslip\nwith nothing to pay, marked by the run itself; null until marked paid."
+          },
+          "pay_account": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pay_method": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The person's pay method and account at the time of reading, for the\nbank and wallet lists (PAY-8)."
           },
           "payroll_period_id": {
             "type": "string",
@@ -81415,9 +82692,16 @@
           "status"
         ],
         "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (AD-9). Required to reopen."
+          },
           "status": {
             "type": "string",
-            "description": "`draft` | `generated` | `paid` | `closed`."
+            "description": "`draft` (reopen an approved month, before anyone is paid) or `closed`\n(archive a paid month). Approving is `POST …/generate`; Paid is\nreached by marking everyone paid (PAY-7), never by hand."
           }
         }
       },
@@ -81910,6 +83194,50 @@
           }
         }
       },
+      "PreferenceChange": {
+        "type": "object",
+        "required": [
+          "source",
+          "cant_work_days",
+          "created_at"
+        ],
+        "properties": {
+          "cant_work_days": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          "changed_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The manager's name, for a manager's change."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pref_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "description": "`employee` or `manager`."
+          }
+        }
+      },
       "Preferences": {
         "type": "object",
         "properties": {
@@ -81920,6 +83248,13 @@
               "format": "int32"
             },
             "description": "Days I can't work: 0 = Sunday … 6 = Saturday."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (a manager's override)."
           },
           "pref_time": {
             "type": [
@@ -82462,6 +83797,18 @@
           "star",
           "epson"
         ]
+      },
+      "PrivacyAccepted": {
+        "type": "object",
+        "required": [
+          "accepted_at"
+        ],
+        "properties": {
+          "accepted_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "ProcessingGroupRef": {
         "type": "object",
@@ -83426,6 +84773,17 @@
             "type": "string",
             "format": "uuid"
           },
+          "offline": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/OfflineStamp",
+                "description": "Set when the manager's phone queued the punch offline: it is dated at\nits own time, not when the phone got a signal back (audit 03 bug 6)."
+              }
+            ]
+          },
           "reason": {
             "type": "string",
             "description": "Required (CL-13): a dead phone, a forgotten one."
@@ -83704,6 +85062,16 @@
             ],
             "format": "double"
           },
+          "inherit": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Branch only: rules to take from the business again (field names, as\nin `overridden`)."
+          },
           "late_deduction_tiers": {
             "type": [
               "array",
@@ -83810,40 +85178,6 @@
           }
         }
       },
-      "PutBalanceRequest": {
-        "type": "object",
-        "required": [
-          "employee_id",
-          "leave_type_id",
-          "year",
-          "entitled_days"
-        ],
-        "properties": {
-          "carried_over_days": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "employee_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "entitled_days": {
-            "type": "number",
-            "format": "double"
-          },
-          "leave_type_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "year": {
-            "type": "integer",
-            "format": "int32"
-          }
-        }
-      },
       "PutCoverage": {
         "type": "object",
         "required": [
@@ -83861,6 +85195,37 @@
               "$ref": "#/components/schemas/CoverageNeed"
             },
             "description": "The whole grid; an empty list clears it."
+          }
+        }
+      },
+      "PutDayRequest": {
+        "type": "object",
+        "required": [
+          "employee_id",
+          "on_date",
+          "shifts"
+        ],
+        "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "on_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shifts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DayBlock"
+            },
+            "description": "Every shift the person works that date; empty = a day off."
           }
         }
       },
@@ -83987,6 +85352,13 @@
               "null"
             ]
           },
+          "on_payroll": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Paid through Dawam. Like the salary, ignored unless the caller has\n`hr.payroll.edit` for every branch."
+          },
           "pay_account": {
             "type": [
               "string",
@@ -84061,6 +85433,12 @@
             "type": "string",
             "format": "uuid"
           },
+          "end_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "on_date": {
             "type": "string",
             "format": "date"
@@ -84071,13 +85449,20 @@
               "null"
             ]
           },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "This assignment's own from/to (both or neither)."
+          },
           "work_shift_id": {
             "type": [
               "string",
               "null"
             ],
             "format": "uuid",
-            "description": "Omit (or send null) to mark the date an explicit day off."
+            "description": "Omit (or send null) to mark the date an explicit day off. Otherwise the\nwhole date becomes this one shift; `PUT /staff/schedules/days` sets a\nsplit day."
           }
         }
       },
@@ -84190,6 +85575,41 @@
           "target_pct": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "PutTimesRequest": {
+        "type": "object",
+        "required": [
+          "employee_id",
+          "on_date",
+          "work_shift_id"
+        ],
+        "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "end_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "on_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Both, or neither to go back to the block's own times."
+          },
+          "work_shift_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -85022,6 +86442,37 @@
           "status": {
             "type": "string",
             "description": "`checked` | `disagreed`"
+          }
+        }
+      },
+      "RecordAdvance": {
+        "type": "object",
+        "required": [
+          "employee_id",
+          "amount_piastres"
+        ],
+        "properties": {
+          "amount_piastres": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "installments": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "1 = in full from the next payslip (AV-3)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -85994,13 +87445,14 @@
               "boolean",
               "null"
             ],
-            "description": "Whether the excused time is paid. Applies to `excuse` and\n`early_departure`; omitted falls back to the org's\n`excused_time_paid_default`."
+            "description": "Paid or unpaid. REQUIRED when approving leave (RQ-2). For `excuse` and\n`early_departure`, omitted falls back to the rule\n(`excused_time_paid_default`, branch then business, RQ-7)."
           },
           "note": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Required when cancelling someone else's request, or any approved one\n(AT-7)."
           },
           "status": {
             "type": "string",
@@ -86072,6 +87524,13 @@
             ],
             "format": "int64",
             "description": "For `deduct`: the amount the manager typed (CL-7)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `deduct`: why, on the pay line the employee sees (AD-9)."
           }
         }
       },
@@ -86105,9 +87564,24 @@
           "overtime_multiplier",
           "checkin_window_minutes",
           "scheduled_start_at",
-          "scheduled_end_at"
+          "scheduled_end_at",
+          "employee_id",
+          "on_date",
+          "start_time",
+          "end_time",
+          "crosses_midnight",
+          "times_edited",
+          "from_override"
         ],
         "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch it is worked at (the block's, else the person's first)."
+          },
           "break_minutes": {
             "type": "integer",
             "format": "int32"
@@ -86115,6 +87589,22 @@
           "checkin_window_minutes": {
             "type": "integer",
             "format": "int32"
+          },
+          "crosses_midnight": {
+            "type": "boolean",
+            "description": "Ends on the following date."
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Whose assignment this is."
+          },
+          "end_time": {
+            "type": "string"
+          },
+          "from_override": {
+            "type": "boolean",
+            "description": "The date holds its own set (a date change), not the pattern."
           },
           "grace_minutes": {
             "type": "integer",
@@ -86129,6 +87619,11 @@
           },
           "name": {
             "type": "string"
+          },
+          "on_date": {
+            "type": "string",
+            "format": "date",
+            "description": "The business date: the day the shift starts on (SC-10)."
           },
           "overtime_multiplier": {
             "type": "number",
@@ -86147,7 +87642,16 @@
           },
           "scheduled_start_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "The EFFECTIVE window: the assignment's own times, else the block's time\nfor that weekday, else its default."
+          },
+          "start_time": {
+            "type": "string",
+            "description": "Effective wall-clock times in the branch's zone."
+          },
+          "times_edited": {
+            "type": "boolean",
+            "description": "This assignment has its own from/to (shown as edited)."
           },
           "work_shift_id": {
             "type": "string",
@@ -86481,7 +87985,8 @@
         "required": [
           "employee_id",
           "name",
-          "cant_work_days"
+          "cant_work_days",
+          "prefs_set_by"
         ],
         "properties": {
           "cant_work_days": {
@@ -86516,6 +88021,10 @@
               "string",
               "null"
             ]
+          },
+          "prefs_set_by": {
+            "type": "string",
+            "description": "Who set the preferences last: `employee` or `manager` (SC-12)."
           }
         }
       },
@@ -86530,6 +88039,11 @@
           "shift_name",
           "start_at",
           "end_at",
+          "start_time",
+          "end_time",
+          "crosses_midnight",
+          "times_edited",
+          "from_override",
           "changed",
           "on_leave"
         ],
@@ -86541,6 +88055,10 @@
           "changed": {
             "type": "boolean",
             "description": "Changed after its week was published (SC-4)."
+          },
+          "crosses_midnight": {
+            "type": "boolean",
+            "description": "Ends the next day."
           },
           "date": {
             "type": "string",
@@ -86557,6 +88075,13 @@
             "type": "string",
             "format": "date-time"
           },
+          "end_time": {
+            "type": "string"
+          },
+          "from_override": {
+            "type": "boolean",
+            "description": "The date holds its own set, not the standing pattern."
+          },
           "on_leave": {
             "type": "boolean",
             "description": "On approved leave or a mission that day."
@@ -86567,6 +88092,14 @@
           "start_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "start_time": {
+            "type": "string",
+            "description": "Effective wall-clock times at the branch (the assignment's own, else\nthe block's for that weekday, else its default)."
+          },
+          "times_edited": {
+            "type": "boolean",
+            "description": "This assignment has its own from/to (show it as edited)."
           },
           "work_shift_id": {
             "type": "string",
@@ -86593,6 +88126,13 @@
           "branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "date_sets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DateSet"
+            },
+            "description": "The dates that hold their own set (a date change), a day off included:\nthe ones \"back to the pattern\" applies to."
           },
           "from": {
             "type": "string",
@@ -86684,12 +88224,19 @@
           "remaining_piastres",
           "status",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "cap_piastres",
+          "outstanding_piastres"
         ],
         "properties": {
           "amount_piastres": {
             "type": "integer",
             "format": "int64"
+          },
+          "cap_piastres": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The owner's cap on what this person may owe in advances, in piastres\n(AV-5) — the server's figure, so no client recomputes it."
           },
           "created_at": {
             "type": "string",
@@ -86741,6 +88288,11 @@
             "type": "string",
             "format": "uuid"
           },
+          "outstanding_piastres": {
+            "type": "integer",
+            "format": "int64",
+            "description": "What the person owes across their live advances (pending ones count)."
+          },
           "reason": {
             "type": [
               "string",
@@ -86749,7 +88301,8 @@
           },
           "remaining_piastres": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Derived from the collection ledger (AV-6)."
           },
           "status": {
             "type": "string"
@@ -86955,6 +88508,12 @@
             "type": "string",
             "format": "uuid"
           },
+          "end_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -86972,6 +88531,20 @@
               "string",
               "null"
             ]
+          },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "This assignment's own from/to, when it has one (the block is unchanged)."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabourWarning"
+            },
+            "description": "Labour limits the person's week now goes past. Warnings, never blocks."
           },
           "work_shift_id": {
             "type": [
@@ -87008,12 +88581,16 @@
             "type": "string",
             "format": "date"
           },
+          "published": {
+            "type": "boolean",
+            "description": "The week is published at the person's branch. Unpublished weeks are\ndrafts: they come back empty (SC-3)."
+          },
           "shifts": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ResolvedShift"
             },
-            "description": "Empty = a rest day."
+            "description": "Empty = a rest day, or a week not published yet."
           }
         }
       },
@@ -88128,7 +89705,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "My ceiling on a bonus/deduction before it waits for the owner; null = none."
+            "description": "My ceiling on a bonus before it waits for the owner; null = none."
           },
           "advance_limit_percent": {
             "type": [
@@ -88149,6 +89726,14 @@
               "type": "string"
             },
             "description": "The HR capabilities I hold (`hr.*` keys) — through my Madar account;\nempty for an employee with none. The app gates tabs on these (PM-4)."
+          },
+          "deduction_limit_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "My ceiling on a deduction (AD-5: separate from the bonus limit)."
           },
           "employee_id": {
             "type": "string",
@@ -88177,6 +89762,14 @@
             "items": {
               "$ref": "#/components/schemas/ContextPerson"
             }
+          },
+          "privacy_accepted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When THIS phone accepted the location notice; null = show it before\nany location is taken (AT-5). A new phone, or a restored session on\none that never accepted, starts null."
           },
           "role": {
             "type": "string",
@@ -88691,6 +90284,10 @@
             "format": "uuid",
             "description": "The record a `correction` proposes to fix. `None` for every other kind."
           },
+          "can_decide": {
+            "type": "boolean",
+            "description": "The caller may approve or reject it now: it is pending, not their own,\nat one of their branches, and — a manager's request — they outrank\nthe requester (RQ-5). The same checks the decision makes."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -88731,14 +90328,14 @@
               "null"
             ],
             "format": "date",
-            "description": "Set for `leave` and `mission`; the span's last day."
+            "description": "Set for `leave` and `mission`: the span's last day. For an `excuse`\nthat runs past midnight, the next day (its end is then on that day)."
           },
           "from_time": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Start of the excused window. `None` = open to the shift's start."
+            "description": "Start of the excused window. `None` = open to the shift's start.\nFor a `correction`: the proposed check-in, branch-local."
           },
           "id": {
             "type": "string",
@@ -88746,6 +90343,10 @@
           },
           "is_half_day": {
             "type": "boolean"
+          },
+          "is_own": {
+            "type": "boolean",
+            "description": "The request is the CALLER's own (worked out for whoever asks)."
           },
           "is_paid": {
             "type": [
@@ -88756,14 +90357,22 @@
           },
           "kind": {
             "type": "string",
-            "description": "`leave` | `late_arrival` | `early_departure` | `excuse` | `mission`."
+            "description": "`leave` | `late_arrival` | `early_departure` | `excuse` | `mission` | `correction`."
+          },
+          "leave_half": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A half-day leave: `first` or `second` half of the day off (RQ-8)."
           },
           "leave_type_id": {
             "type": [
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Deprecated (RQ-2): older rows only; never set on new requests."
           },
           "leave_type_name": {
             "type": [
@@ -88785,11 +90394,33 @@
             "type": "string",
             "format": "uuid"
           },
+          "paid_default": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "For a pending excuse or early departure: the business's (or branch's)\nrule, which the approve dialog starts from (RQ-7)."
+          },
           "reason": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "record_check_in_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "For a correction: the record's current punches, so an approver sees\nwhat the proposal changes."
+          },
+          "record_check_out_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           },
           "status": {
             "type": "string"
@@ -88800,16 +90431,28 @@
               "null"
             ]
           },
+          "to_owner": {
+            "type": "boolean",
+            "description": "A manager's own request waiting for someone above them (RQ-5): the\nowner decides it. Worked out by the server from capabilities."
+          },
           "to_time": {
             "type": [
               "string",
               "null"
             ],
-            "description": "End of the excused window. `None` = open to the shift's end."
+            "description": "End of the excused window. `None` = open to the shift's end.\nFor a `correction`: the proposed check-out, branch-local (earlier on the\nclock than the check-in = the next morning, a night shift)."
           },
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "work_shift_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The shift a late arrival, early departure or excuse is for (split days)."
           }
         }
       },
@@ -89530,6 +91173,18 @@
           }
         }
       },
+      "StopAdjustment": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it stops (AD-9)."
+          }
+        }
+      },
       "StoredTurn": {
         "type": "object",
         "description": "One stored exchange.",
@@ -89736,12 +91391,12 @@
         "properties": {
           "by_default": {
             "type": "boolean",
-            "description": "The gender default decided it (it says so)."
+            "description": "The gender default decided it: without it someone else would have\nbeen suggested (it says so)."
           },
           "confidence": {
             "type": "integer",
             "format": "int32",
-            "description": "0–100."
+            "description": "0–100. Low (≤ 40) whenever the gender default decided it."
           },
           "date": {
             "type": "string",
@@ -89754,6 +91409,12 @@
           },
           "employee_name": {
             "type": "string"
+          },
+          "end_time": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "from_employee_id": {
             "type": [
@@ -89780,6 +91441,13 @@
           },
           "shift_name": {
             "type": "string"
+          },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The shift's times that day (a day-scoped block's own, else its default)."
           },
           "work_shift_id": {
             "type": "string",
@@ -93374,42 +95042,6 @@
           }
         }
       },
-      "UpsertLeaveTypeRequest": {
-        "type": "object",
-        "required": [
-          "name"
-        ],
-        "properties": {
-          "annual_quota_days": {
-            "type": [
-              "number",
-              "null"
-            ],
-            "format": "double"
-          },
-          "is_active": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "is_paid": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "name": {
-            "type": "string"
-          },
-          "requires_approval": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          }
-        }
-      },
       "UpsertPermissionRequest": {
         "type": "object",
         "required": [
@@ -93502,6 +95134,16 @@
             ],
             "format": "int32"
           },
+          "day_times": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/DayTime"
+            },
+            "description": "Its own times on some weekdays (each must be a valid day). Omit to keep\nthem; an empty list clears them."
+          },
           "end_time": {
             "type": "string"
           },
@@ -93528,6 +95170,22 @@
           "name": {
             "type": "string"
           },
+          "ot_day_multiplier": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The block's own day-overtime rate (RU-8). Omit to keep it, null to go\nback to the branch's rules."
+          },
+          "ot_night_multiplier": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The block's own night-overtime rate. Omit to keep, null to clear."
+          },
           "overtime_multiplier": {
             "type": [
               "number",
@@ -93550,6 +95208,17 @@
           },
           "start_time": {
             "type": "string"
+          },
+          "valid_days": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "Weekdays it may be rostered on (0 = Sunday … 6 = Saturday). Omit to\nkeep them (all days for a new block)."
           }
         }
       },
@@ -94597,6 +96266,7 @@
           "overtime_multiplier",
           "checkin_window_minutes",
           "is_active",
+          "valid_days",
           "created_at",
           "updated_at"
         ],
@@ -94624,6 +96294,13 @@
           "crosses_midnight": {
             "type": "boolean",
             "description": "Derived by the database from `end_time <= start_time`."
+          },
+          "day_times": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DayTime"
+            },
+            "description": "Its own times on some weekdays; other valid days use the default."
           },
           "end_time": {
             "type": "string"
@@ -94653,6 +96330,26 @@
             "type": "string",
             "format": "uuid"
           },
+          "ot_day_multiplier": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "This block's own day-overtime rate; `None` = the branch's rules (RU-8)."
+          },
+          "ot_night_multiplier": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "This block's own night-overtime rate; `None` = the branch's rules."
+          },
+          "over_presence_cap": {
+            "type": "boolean",
+            "description": "Some version of it (default or a weekday's) is longer than the labour\npresence cap. A warning, never a block (RU-13)."
+          },
           "overtime_multiplier": {
             "type": "number",
             "format": "double"
@@ -94670,6 +96367,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "valid_days": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "The weekdays the block may be rostered on (0 = Sunday … 6 = Saturday)."
           }
         }
       },
@@ -94681,7 +96386,9 @@
           "start_time",
           "end_time",
           "crosses_midnight",
-          "grace_minutes"
+          "grace_minutes",
+          "valid_days",
+          "day_times"
         ],
         "properties": {
           "branch_id": {
@@ -94693,6 +96400,13 @@
           },
           "crosses_midnight": {
             "type": "boolean"
+          },
+          "day_times": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DayTime"
+            },
+            "description": "Its own times on some weekdays; show that day's times."
           },
           "end_time": {
             "type": "string"
@@ -94710,6 +96424,14 @@
           },
           "start_time": {
             "type": "string"
+          },
+          "valid_days": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "Weekdays it may be rostered on (0 = Sunday … 6 = Saturday): offer it\nonly on those."
           }
         }
       },
