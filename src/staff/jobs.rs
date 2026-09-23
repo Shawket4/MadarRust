@@ -142,7 +142,9 @@ pub async fn open_pay_periods(pool: &PgPool) -> Result<(), crate::errors::AppErr
     .fetch_all(pool)
     .await?;
     for (org_id, start_day, tz) in orgs {
-        let today = crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo")).await?;
+        let today =
+            crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo"))
+                .await?;
         crate::staff::dawam::pay::ensure_period_for(pool, org_id, today, start_day.max(1) as u32)
             .await?;
     }
