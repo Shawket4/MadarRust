@@ -497,7 +497,7 @@ pub(crate) async fn day_adjustments(
         r#"
         SELECT r.kind, r.is_half_day, r.leave_half, r.work_shift_id,
                COALESCE(r.is_paid, lt.is_paid) AS is_paid,
-               (r.kind = 'excuse' AND r.end_date = r.on_date + 1) AS crosses,
+               COALESCE(r.kind = 'excuse' AND r.end_date = r.on_date + 1, false) AS crosses,
                ($2::date + r.from_time) AT TIME ZONE $3     AS from0,
                ($2::date + 1 + r.from_time) AT TIME ZONE $3 AS from1,
                ($2::date + r.to_time) AT TIME ZONE $3       AS to0,
