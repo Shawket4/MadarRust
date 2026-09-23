@@ -28,12 +28,13 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
+    authz::Cap,
     errors::{AppError, AppErrorResponse},
     geo::osrm::{LatLng, haversine_meters},
-    orgs::handlers::extract_claims,
-    permissions::checker::check_permission,
     staff::{
-        branch_timezone, require_user_in_org,
+        access, branch_timezone,
+        principal::{Me, caller},
+        require_employee_in_org,
         rules::{self, AttendanceStatus, LateTier},
         schedules::{ResolvedShift, pick_shift_for_instant, resolve_shifts_for},
         scope_org, validate_range,
@@ -49,9 +50,9 @@ const MAX_RANGE_DAYS: i64 = 400;
 pub struct AttendanceRecord {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     #[sqlx(default)]
-    pub user_name: Option<String>,
+    pub employee_name: Option<String>,
     pub branch_id: Uuid,
     pub work_shift_id: Option<Uuid>,
     #[sqlx(default)]
@@ -83,7 +84,7 @@ pub struct AttendanceRecord {
     pub updated_at: DateTime<Utc>,
     /// A cover: whose shift this person worked (CV-*).
     #[sqlx(default)]
-    pub covered_user_id: Option<Uuid>,
+    pub covered_employee_id: Option<Uuid>,
     /// `pending` · `confirmed` · `rejected` for a cover.
     #[sqlx(default)]
     pub cover_status: Option<String>,
@@ -100,7 +101,7 @@ pub struct AttendanceRecord {
 /// Every attendance column plus the two denormalised names, in `AttendanceRecord`
 /// field order. One constant so list, single, and returning queries cannot drift.
 const RECORD_COLS: &str = r#"
-    a.id, a.org_id, a.user_id, u.name AS user_name, a.branch_id, a.work_shift_id,
+    a.id, a.org_id, a.employee_id, emp.name AS employee_name, a.branch_id, a.work_shift_id,
     ws.name AS work_shift_name, a.business_date, a.status,
     a.scheduled_start_at, a.scheduled_end_at,
     a.check_in_at, a.check_in_latitude, a.check_in_longitude,
@@ -109,12 +110,12 @@ const RECORD_COLS: &str = r#"
     a.check_out_distance_meters, a.check_out_method,
     a.late_minutes, a.early_leave_minutes, a.overtime_minutes, a.worked_minutes,
     a.is_manual, a.notes, a.edit_reason, a.created_by, a.edited_by,
-    a.created_at, a.updated_at, a.covered_user_id, a.cover_status,
+    a.created_at, a.updated_at, a.covered_employee_id, a.cover_status,
     a.overtime_status, a.tracking_off, a.punch_reason
 "#;
 
 const RECORD_JOINS: &str = "FROM attendance_records a \
-     JOIN users u ON u.id = a.user_id \
+     JOIN employees emp ON emp.id = a.employee_id \
      LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id";
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -183,8 +184,8 @@ impl AttendanceSettings {
 /// One employee's totals over a reporting window.
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct AttendanceSummary {
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub present_days: i64,
     pub late_days: i64,
     pub absent_days: i64,
@@ -257,7 +258,7 @@ pub struct CheckOutRequest {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct ManualRecordRequest {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub branch_id: Uuid,
     pub business_date: NaiveDate,
     #[serde(default)]
@@ -354,7 +355,7 @@ pub struct AttendanceQuery {
     #[serde(default)]
     pub branch_id: Option<Uuid>,
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
     #[serde(default)]
     pub status: Option<String>,
 }
@@ -594,9 +595,16 @@ pub async fn get_attendance_settings(
     pool: crate::db::Db,
     query: web::Query<SettingsQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::scope_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAttendanceRead,
+        query.branch_id,
+    )
+    .await?;
     let settings = load_settings(pool.get_ref(), org_id, query.branch_id).await?;
     Ok(HttpResponse::Ok().json(settings))
 }
@@ -612,9 +620,15 @@ pub async fn put_attendance_settings(
     pool: crate::db::Db,
     body: web::Json<PutAttendanceSettingsRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // The rules are the business's, set by the owner for every branch (RO-9,
+    // audit B2): the lateness ladder, absence cost, working days, overtime,
+    // the pay period and the advance cap. A branch override is the same call.
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit).await?;
+    if let Some(b) = body.branch_id {
+        access::require_at(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit, b).await?;
+    }
 
     // A bad ladder must never reach payroll, so it is rejected at the door.
     if let Some(tiers) = body.late_deduction_tiers.as_deref() {
@@ -627,13 +641,7 @@ pub async fn put_attendance_settings(
             ));
         }
         // Roster settings are the owner's (hr.roster.settings).
-        crate::authz::require::require(
-            pool.get_ref(),
-            &claims,
-            crate::authz::Cap::HrRosterSettings,
-            None,
-        )
-        .await?;
+        access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrRosterSettings).await?;
     }
     if body
         .working_days_per_month
@@ -818,12 +826,16 @@ pub(crate) async fn check_geofence(
 
 // ── Self-service ──────────────────────────────────────────────
 
-/// The caller's own live, active staff profile. Anything else is a 403: a
-/// suspended or terminated employee must not be able to clock in.
-pub(crate) async fn require_active_profile(pool: &PgPool, user_id: Uuid) -> Result<Uuid, AppError> {
+/// An active employee's org. Anything else is a 403: a suspended or
+/// terminated employee must not be able to clock in (the till punch; the
+/// staff app's own session is checked on every request by `StaffAuth`).
+pub(crate) async fn require_active_employee(
+    pool: &PgPool,
+    employee_id: Uuid,
+) -> Result<Uuid, AppError> {
     let row: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT org_id, employment_status FROM staff_profiles WHERE user_id = $1")
-            .bind(user_id)
+        sqlx::query_as("SELECT org_id, employment_status FROM employees WHERE id = $1")
+            .bind(employee_id)
             .fetch_optional(pool)
             .await?;
     match row {
@@ -832,7 +844,7 @@ pub(crate) async fn require_active_profile(pool: &PgPool, user_id: Uuid) -> Resu
             "Your employment is {status} — contact your manager"
         ))),
         None => Err(AppError::Forbidden(
-            "You do not have an employee profile yet — ask your manager to set one up".into(),
+            "You're not an employee here — ask your manager to add you".into(),
         )),
     }
 }
@@ -891,13 +903,13 @@ pub(crate) async fn today_in(pool: &PgPool, timezone: &str) -> Result<NaiveDate,
 async fn adjustments_for(
     pool: &PgPool,
     settings: &AttendanceSettings,
-    user_id: Uuid,
+    employee_id: Uuid,
     date: NaiveDate,
     timezone: &str,
 ) -> Result<DayAdjustments, AppError> {
     crate::staff::requests::day_adjustments(
         pool,
-        user_id,
+        employee_id,
         date,
         timezone,
         settings.excused_time_paid_default,
@@ -910,7 +922,7 @@ async fn adjustments_for(
 /// the shift started. Returns the shift and the business date it belongs to.
 async fn resolve_punch_shift(
     pool: &PgPool,
-    user_id: Uuid,
+    employee_id: Uuid,
     today: NaiveDate,
     timezone: &str,
     now: DateTime<Utc>,
@@ -918,7 +930,7 @@ async fn resolve_punch_shift(
     let mut best: Option<(ResolvedShift, NaiveDate)> = None;
 
     for date in [today, today.pred_opt().unwrap_or(today)] {
-        let candidates = resolve_shifts_for(pool, user_id, date, timezone).await?;
+        let candidates = resolve_shifts_for(pool, employee_id, date, timezone).await?;
         // Yesterday only ever contributes a shift that actually runs into today.
         let candidates: Vec<ResolvedShift> = if date == today {
             candidates
@@ -958,21 +970,26 @@ async fn resolve_punch_shift(
     security(("bearer_jwt" = []))
 )]
 pub async fn check_in(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<CheckInRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
-    // Only from the person's live phone (CL-1).
-    crate::staff::dawam::require_device(&req, pool.get_ref(), user_id).await?;
+    // Only from the employee's live phone (CL-1): `Me` is a staff-app session
+    // whose device, employee, org and module `StaffAuth` checked just now.
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     require_rules(pool.get_ref(), org_id).await?;
 
     let branch_org = crate::staff::resolve_branch_org(pool.get_ref(), body.branch_id).await?;
     if branch_org != org_id {
         return Err(AppError::Forbidden(
             "That branch belongs to a different organization".into(),
+        ));
+    }
+    let mine = crate::staff::access::branches_of(pool.get_ref(), employee_id).await?;
+    if !mine.contains(&body.branch_id) {
+        return Err(AppError::Forbidden(
+            "You don't work at that branch — ask your manager to add you to it.".into(),
         ));
     }
 
@@ -991,7 +1008,7 @@ pub async fn check_in(
     let now = stamped.at;
     let today = day_in(pool.get_ref(), now, &tz).await?;
     let (shift, business_date) =
-        resolve_punch_shift(pool.get_ref(), user_id, today, &tz, now).await?;
+        resolve_punch_shift(pool.get_ref(), employee_id, today, &tz, now).await?;
 
     // Arriving before the shift's check-in window is a mistake, not a punch —
     // otherwise an early bird opens the record that the real shift needs.
@@ -1013,7 +1030,7 @@ pub async fn check_in(
     }
 
     let adjustments =
-        adjustments_for(pool.get_ref(), &settings, user_id, business_date, &tz).await?;
+        adjustments_for(pool.get_ref(), &settings, employee_id, business_date, &tz).await?;
     let derived = derive(
         Some(now),
         None,
@@ -1026,20 +1043,20 @@ pub async fn check_in(
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO attendance_records (
-            org_id, user_id, branch_id, work_shift_id, business_date, status,
+            org_id, employee_id, branch_id, work_shift_id, business_date, status,
             scheduled_start_at, scheduled_end_at,
             check_in_at, check_in_latitude, check_in_longitude,
             check_in_distance_meters, check_in_method,
             late_minutes, created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $13, $2)
-        ON CONFLICT (user_id, business_date,
-                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_user_id IS NULL
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $13, $15)
+        ON CONFLICT (employee_id, business_date,
+                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL
         DO NOTHING
         RETURNING id
         "#,
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(body.branch_id)
     .bind(shift.as_ref().map(|s| s.work_shift_id))
     .bind(business_date)
@@ -1052,6 +1069,7 @@ pub async fn check_in(
     .bind(distance)
     .bind(derived.late_minutes as i32)
     .bind(if stamped.offline { "offline" } else { "mobile_gps" })
+    .bind(me.user_id)
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -1064,7 +1082,7 @@ pub async fn check_in(
         crate::staff::dawam::presence::raise_flag(
             pool.get_ref(),
             org_id,
-            user_id,
+            employee_id,
             Some(body.branch_id),
             Some(id),
             "time_unverified",
@@ -1076,7 +1094,7 @@ pub async fn check_in(
         crate::staff::dawam::presence::mark_tracking_off(
             pool.get_ref(),
             org_id,
-            user_id,
+            employee_id,
             body.branch_id,
             id,
         )
@@ -1097,14 +1115,12 @@ pub async fn check_in(
     security(("bearer_jwt" = []))
 )]
 pub async fn check_out(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<CheckOutRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
-    crate::staff::dawam::require_device(&req, pool.get_ref(), user_id).await?;
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
 
     #[derive(sqlx::FromRow)]
     struct Open {
@@ -1121,10 +1137,10 @@ pub async fn check_out(
         "SELECT id, branch_id, business_date, work_shift_id, check_in_at, \
                 scheduled_start_at, scheduled_end_at \
            FROM attendance_records \
-          WHERE user_id = $1 AND check_in_at IS NOT NULL AND check_out_at IS NULL \
+          WHERE employee_id = $1 AND check_in_at IS NOT NULL AND check_out_at IS NULL \
           ORDER BY check_in_at DESC LIMIT 1",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("You are not checked in".into()))?;
@@ -1157,8 +1173,14 @@ pub async fn check_out(
             }
             s
         });
-    let adjustments =
-        adjustments_for(pool.get_ref(), &settings, user_id, open.business_date, &tz).await?;
+    let adjustments = adjustments_for(
+        pool.get_ref(),
+        &settings,
+        employee_id,
+        open.business_date,
+        &tz,
+    )
+    .await?;
 
     let derived = derive(
         open.check_in_at,
@@ -1198,7 +1220,7 @@ pub async fn check_out(
         crate::staff::dawam::presence::raise_flag(
             pool.get_ref(),
             org_id,
-            user_id,
+            employee_id,
             Some(open.branch_id),
             Some(open.id),
             "time_unverified",
@@ -1257,20 +1279,20 @@ pub(crate) async fn load_shift_snapshot(
     responses((status = 200, description = "The employee's own status right now", body = MyAttendanceToday), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_today(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+pub async fn my_today(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
 
-    let tz = crate::staff::schedules::employee_timezone(pool.get_ref(), org_id, user_id).await?;
+    let tz =
+        crate::staff::schedules::employee_timezone(pool.get_ref(), org_id, employee_id).await?;
     let today = today_in(pool.get_ref(), &tz).await?;
-    let scheduled = resolve_shifts_for(pool.get_ref(), user_id, today, &tz).await?;
+    let scheduled = resolve_shifts_for(pool.get_ref(), employee_id, today, &tz).await?;
 
     let records = sqlx::query_as::<_, AttendanceRecord>(&format!(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
-          WHERE a.user_id = $1 AND a.business_date = $2 ORDER BY a.check_in_at NULLS LAST"
+          WHERE a.employee_id = $1 AND a.business_date = $2 ORDER BY a.check_in_at NULLS LAST"
     ))
-    .bind(user_id)
+    .bind(employee_id)
     .bind(today)
     .fetch_all(pool.get_ref())
     .await?;
@@ -1279,10 +1301,10 @@ pub async fn my_today(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespo
     // so it is looked up independently of today's rows.
     let open_record = sqlx::query_as::<_, AttendanceRecord>(&format!(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
-          WHERE a.user_id = $1 AND a.check_in_at IS NOT NULL AND a.check_out_at IS NULL \
+          WHERE a.employee_id = $1 AND a.check_in_at IS NOT NULL AND a.check_out_at IS NULL \
           ORDER BY a.check_in_at DESC LIMIT 1"
     ))
-    .bind(user_id)
+    .bind(employee_id)
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -1296,7 +1318,7 @@ pub async fn my_today(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespo
     let branch_id = resolve_my_branch(
         pool.get_ref(),
         org_id,
-        user_id,
+        employee_id,
         open_record.as_ref(),
         &scheduled,
     )
@@ -1350,7 +1372,7 @@ pub async fn my_today(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespo
 async fn resolve_my_branch(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     open_record: Option<&AttendanceRecord>,
     scheduled: &[ResolvedShift],
 ) -> Result<Option<Uuid>, AppError> {
@@ -1375,16 +1397,16 @@ async fn resolve_my_branch(
     // has exactly ONE live branch, which is what "their branch" means.
     Ok(sqlx::query_scalar::<_, Uuid>(
         "SELECT branch_id FROM (
-             SELECT uba.branch_id, COUNT(*) OVER () AS n
-               FROM user_branch_assignments uba
-               JOIN branches b ON b.id = uba.branch_id
+             SELECT eb.branch_id, COUNT(*) OVER () AS n
+               FROM employee_branches eb
+               JOIN branches b ON b.id = eb.branch_id
                               AND b.deleted_at IS NULL
                               AND b.org_id = $2
-              WHERE uba.user_id = $1
+              WHERE eb.employee_id = $1
          ) assignments
           WHERE n = 1",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(org_id)
     .fetch_optional(pool)
     .await?)
@@ -1397,21 +1419,18 @@ async fn resolve_my_branch(
     security(("bearer_jwt" = []))
 )]
 pub async fn my_attendance(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     query: web::Query<RangeQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    require_active_profile(pool.get_ref(), user_id).await?;
     validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
 
     let rows = sqlx::query_as::<_, AttendanceRecord>(&format!(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
-          WHERE a.user_id = $1 AND a.business_date BETWEEN $2 AND $3 \
+          WHERE a.employee_id = $1 AND a.business_date BETWEEN $2 AND $3 \
           ORDER BY a.business_date DESC, a.check_in_at DESC NULLS LAST"
     ))
-    .bind(user_id)
+    .bind(me.employee_id)
     .bind(query.from)
     .bind(query.to)
     .fetch_all(pool.get_ref())
@@ -1447,9 +1466,17 @@ pub async fn list_attendance(
     pool: crate::db::Db,
     query: web::Query<AttendanceQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // A manager reads the records of their branches only (RO-6).
+    let scope = access::scope_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAttendanceRead,
+        query.branch_id,
+    )
+    .await?;
     validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
     if let Some(status) = query.status.as_deref() {
         AttendanceStatus::parse(status)?;
@@ -1459,16 +1486,16 @@ pub async fn list_attendance(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
           WHERE a.org_id = $1 \
             AND a.business_date BETWEEN $2 AND $3 \
-            AND ($4::uuid IS NULL OR a.branch_id = $4) \
-            AND ($5::uuid IS NULL OR a.user_id = $5) \
+            AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4)) \
+            AND ($5::uuid IS NULL OR a.employee_id = $5) \
             AND ($6::text IS NULL OR a.status = $6) \
-          ORDER BY a.business_date DESC, lower(u.name)"
+          ORDER BY a.business_date DESC, lower(emp.name)"
     ))
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
-    .bind(query.branch_id)
-    .bind(query.user_id)
+    .bind(scope.as_deref())
+    .bind(query.employee_id)
     .bind(query.status.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
@@ -1486,14 +1513,21 @@ pub async fn attendance_summary(
     pool: crate::db::Db,
     query: web::Query<AttendanceQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    let scope = access::scope_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAttendanceRead,
+        query.branch_id,
+    )
+    .await?;
     validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
 
     let rows = sqlx::query_as::<_, AttendanceSummary>(
         r#"
-        SELECT a.user_id, u.name AS user_name,
+        SELECT a.employee_id, emp.name AS employee_name,
                COUNT(*) FILTER (WHERE a.status = 'present')  AS present_days,
                COUNT(*) FILTER (WHERE a.status = 'late')     AS late_days,
                COUNT(*) FILTER (WHERE a.status = 'absent')   AS absent_days,
@@ -1503,20 +1537,20 @@ pub async fn attendance_summary(
                COALESCE(SUM(a.overtime_minutes), 0)::bigint AS total_overtime_minutes,
                COALESCE(SUM(a.worked_minutes), 0)::bigint   AS total_worked_minutes
           FROM attendance_records a
-          JOIN users u ON u.id = a.user_id
+          JOIN employees emp ON emp.id = a.employee_id
          WHERE a.org_id = $1
            AND a.business_date BETWEEN $2 AND $3
-           AND ($4::uuid IS NULL OR a.branch_id = $4)
-           AND ($5::uuid IS NULL OR a.user_id = $5)
-         GROUP BY a.user_id, u.name
-         ORDER BY lower(u.name)
+           AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4))
+           AND ($5::uuid IS NULL OR a.employee_id = $5)
+         GROUP BY a.employee_id, emp.name
+         ORDER BY lower(emp.name)
         "#,
     )
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
-    .bind(query.branch_id)
-    .bind(query.user_id)
+    .bind(scope.as_deref())
+    .bind(query.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -1525,8 +1559,8 @@ pub async fn attendance_summary(
 /// One person's state right now, for the manager's live team list.
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct PresenceRow {
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub job_title: Option<String>,
     pub branch_name: Option<String>,
     /// `in` | `late` | `absent` | `on_leave` | `off` | `done`.
@@ -1585,9 +1619,17 @@ pub async fn team_presence(
     pool: crate::db::Db,
     query: web::Query<PresenceQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // A manager sees the people of their branches only (RO-6).
+    let scope = access::scope_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAttendanceRead,
+        query.branch_id,
+    )
+    .await?;
 
     let tz = crate::staff::schedules::org_timezone(pool.get_ref(), org_id).await?;
     let today = today_in(pool.get_ref(), &tz).await?;
@@ -1597,15 +1639,16 @@ pub async fn team_presence(
         WITH roster AS (
             -- Everyone active, with the minutes they are rostered for today and
             -- when that shift was due to start.
-            SELECT p.user_id,
-                   u.name AS user_name,
+            SELECT p.id AS employee_id,
+                   p.name AS employee_name,
                    p.job_title,
                    (SELECT b.name
-                      FROM user_branch_assignments uba
-                      JOIN branches b ON b.id = uba.branch_id
+                      FROM employee_branches eb
+                      JOIN branches b ON b.id = eb.branch_id
                                      AND b.deleted_at IS NULL
                                      AND b.org_id = p.org_id
-                     WHERE uba.user_id = p.user_id
+                     WHERE eb.employee_id = p.id
+                     ORDER BY eb.assigned_at
                      LIMIT 1)                                     AS branch_name,
                    COALESCE((
                        SELECT SUM(EXTRACT(EPOCH FROM (
@@ -1615,7 +1658,7 @@ pub async fn team_presence(
                               )) / 60)::bigint
                          FROM staff_schedules s
                          JOIN work_shifts ws ON ws.id = s.work_shift_id AND ws.is_active
-                        WHERE s.user_id = p.user_id
+                        WHERE s.employee_id = p.id
                           AND s.effective_from <= $2
                           AND (s.effective_to IS NULL OR s.effective_to >= $2)
                           AND (s.day_of_week IS NULL
@@ -1624,25 +1667,24 @@ pub async fn team_presence(
                    (SELECT MIN(($2::date + ws.start_time) AT TIME ZONE $3)
                       FROM staff_schedules s
                       JOIN work_shifts ws ON ws.id = s.work_shift_id AND ws.is_active
-                     WHERE s.user_id = p.user_id
+                     WHERE s.employee_id = p.id
                        AND s.effective_from <= $2
                        AND (s.effective_to IS NULL OR s.effective_to >= $2)
                        AND (s.day_of_week IS NULL
                             OR s.day_of_week = EXTRACT(DOW FROM $2::date)::smallint)
                    )                                              AS due_at
-              FROM staff_profiles p
-              JOIN users u ON u.id = p.user_id AND u.deleted_at IS NULL
+              FROM employees p
              WHERE p.org_id = $1 AND p.employment_status = 'active'
         ),
         today AS (
-            SELECT DISTINCT ON (a.user_id)
-                   a.user_id, a.check_in_at, a.check_out_at, a.status,
+            SELECT DISTINCT ON (a.employee_id)
+                   a.employee_id, a.check_in_at, a.check_out_at, a.status,
                    a.late_minutes, a.worked_minutes, a.branch_id
               FROM attendance_records a
              WHERE a.org_id = $1 AND a.business_date = $2
-             ORDER BY a.user_id, a.check_in_at DESC NULLS LAST
+             ORDER BY a.employee_id, a.check_in_at DESC NULLS LAST
         )
-        SELECT r.user_id, r.user_name, r.job_title, r.branch_name,
+        SELECT r.employee_id, r.employee_name, r.job_title, r.branch_name,
                COALESCE(t.check_in_at, NULL)  AS check_in_at,
                COALESCE(t.check_out_at, NULL) AS check_out_at,
                COALESCE(t.late_minutes, 0)    AS late_minutes,
@@ -1662,18 +1704,18 @@ pub async fn team_presence(
                    ELSE 'off'
                END AS state
           FROM roster r
-          LEFT JOIN today t ON t.user_id = r.user_id
-         WHERE ($4::uuid IS NULL
-                OR t.branch_id = $4
-                OR EXISTS (SELECT 1 FROM user_branch_assignments uba
-                            WHERE uba.user_id = r.user_id AND uba.branch_id = $4))
-         ORDER BY lower(r.user_name)
+          LEFT JOIN today t ON t.employee_id = r.employee_id
+         WHERE ($4::uuid[] IS NULL
+                OR t.branch_id = ANY($4)
+                OR EXISTS (SELECT 1 FROM employee_branches eb
+                            WHERE eb.employee_id = r.employee_id AND eb.branch_id = ANY($4)))
+         ORDER BY lower(r.employee_name)
         "#,
     )
     .bind(org_id)
     .bind(today)
     .bind(&tz)
-    .bind(query.branch_id)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -1708,10 +1750,19 @@ pub async fn create_manual_record(
     pool: crate::db::Db,
     body: web::Json<ManualRecordRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, body.user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrAttendanceCreate).await?;
+    // At the branch the day is recorded at (RO-6).
+    access::require_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAttendanceCreate,
+        body.branch_id,
+    )
+    .await?;
+    require_employee_in_org(pool.get_ref(), org_id, body.employee_id).await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
@@ -1741,7 +1792,7 @@ pub async fn create_manual_record(
     let adjustments = adjustments_for(
         pool.get_ref(),
         &settings,
-        body.user_id,
+        body.employee_id,
         body.business_date,
         &tz,
     )
@@ -1765,7 +1816,7 @@ pub async fn create_manual_record(
     let inserted = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO attendance_records (
-            org_id, user_id, branch_id, work_shift_id, business_date, status,
+            org_id, employee_id, branch_id, work_shift_id, business_date, status,
             scheduled_start_at, scheduled_end_at,
             check_in_at, check_in_method, check_out_at, check_out_method,
             late_minutes, early_leave_minutes, overtime_minutes, worked_minutes,
@@ -1776,14 +1827,14 @@ pub async fn create_manual_record(
             $10, CASE WHEN $10::timestamptz IS NULL THEN NULL ELSE 'manual' END,
             $11, $12, $13, $14, TRUE, $15, $16, $17, $17
         )
-        ON CONFLICT (user_id, business_date,
-                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_user_id IS NULL
+        ON CONFLICT (employee_id, business_date,
+                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL
         DO NOTHING
         RETURNING id
         "#,
     )
     .bind(org_id)
-    .bind(body.user_id)
+    .bind(body.employee_id)
     .bind(body.branch_id)
     .bind(body.work_shift_id)
     .bind(body.business_date)
@@ -1803,7 +1854,7 @@ pub async fn create_manual_record(
             .filter(|n| !n.is_empty()),
     )
     .bind(reason)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -1834,9 +1885,18 @@ pub async fn correct_record(
     id: web::Path<Uuid>,
     body: web::Json<CorrectRecordRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrAttendanceEdit).await?;
+    let existing = load_record(pool.get_ref(), org_id, *id).await?;
+    access::require_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAttendanceEdit,
+        existing.branch_id,
+    )
+    .await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
@@ -1852,7 +1912,7 @@ pub async fn correct_record(
         body.status.as_deref(),
         body.notes.as_deref(),
         reason,
-        Some(claims.user_id()),
+        claims.user_id_safe().ok(),
     )
     .await?;
 
@@ -1894,7 +1954,7 @@ pub(crate) async fn apply_punch_correction(
     let adjustments = adjustments_for(
         pool,
         &settings,
-        existing.user_id,
+        existing.employee_id,
         existing.business_date,
         &tz,
     )
@@ -1958,9 +2018,18 @@ pub async fn delete_record(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "attendance", "delete").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrAttendanceDelete).await?;
+    let existing = load_record(pool.get_ref(), org_id, *id).await?;
+    access::require_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAttendanceDelete,
+        existing.branch_id,
+    )
+    .await?;
 
     let deleted = sqlx::query("DELETE FROM attendance_records WHERE id = $1 AND org_id = $2")
         .bind(*id)

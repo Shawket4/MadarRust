@@ -1,11 +1,12 @@
 //! Staff, attendance, leave, and payroll.
 //!
-//! An EMPLOYEE IS A USER — there is no parallel person entity. A `users` row with
-//! a `staff_profiles` row attached is staff; without one it is only a login. That
-//! is why no `user_role` was added: the admin surface is gated by the `staff` /
-//! `work_shifts` / `attendance` / `leave` / `payroll` permission resources, while
-//! `/staff/me/*` is own-row scoped and needs no grant at all. A teller can clock
-//! in and read their own payslip without being able to see anyone else's salary.
+//! AN EMPLOYEE IS ITS OWN ENTITY (`employees`, Dawam Phase A), optionally linked
+//! to a Madar user: a till worker or a manager who is also on payroll is linked;
+//! someone who only clocks in and gets paid has no `users` row at all. Adding an
+//! employee never creates a login, and creating a login never makes an employee.
+//! The admin surface is gated by `hr.*` capabilities at the right branch
+//! ([`access`]); `/staff/me/*` is the staff app's own employee ([`principal`])
+//! and needs no grant at all.
 //!
 //! NAMING: `shifts` in this codebase is a TELLER CASH-DRAWER SESSION. HR
 //! schedules are `work_shifts` everywhere. Never overload `shifts`.
@@ -23,7 +24,10 @@
 //!   deductions, and the thing that refuses to overwrite a human's override.
 //! - [`payroll`]    — deductions, bonuses, advances, periods, payslips.
 //! - [`jobs`]       — the nightly sweep: mark absences, close forgotten checkouts.
+//! - [`principal`]  — who is calling: the staff token and its checks.
+//! - [`access`]     — branch scope: may the caller act, and where.
 
+pub mod access;
 pub mod attendance;
 pub mod dawam;
 pub mod directory;
@@ -31,6 +35,7 @@ pub mod discipline;
 pub mod jobs;
 pub mod payroll;
 pub mod penalties;
+pub mod principal;
 pub mod requests;
 pub mod routes;
 pub mod rules;
@@ -59,8 +64,8 @@ pub(crate) fn scope_org(req: &HttpRequest, claims: &Claims) -> Result<Uuid, AppE
         })
 }
 
-/// Confirm `user_id` is a live user in `org_id`, so a handler addressing an
-/// employee by id gets a 404 rather than silently doing nothing.
+/// Confirm `user_id` is a live user in `org_id` (a department's manager, an
+/// account being linked), so a handler gets a 404 rather than doing nothing.
 ///
 /// RLS already makes another tenant's rows invisible; this turns that invisibility
 /// into an explicit, testable status code.
@@ -76,6 +81,26 @@ pub(crate) async fn require_user_in_org(
     .bind(org_id)
     .fetch_one(pool)
     .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::NotFound("User not found".into()))
+    }
+}
+
+/// Confirm `employee_id` is an employee of `org_id` (any status: history is
+/// still addressable), 404 otherwise.
+pub(crate) async fn require_employee_in_org(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+) -> Result<(), AppError> {
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM employees WHERE id = $1 AND org_id = $2)")
+            .bind(employee_id)
+            .bind(org_id)
+            .fetch_one(pool)
+            .await?;
     if exists {
         Ok(())
     } else {

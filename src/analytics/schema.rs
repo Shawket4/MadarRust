@@ -1607,11 +1607,11 @@ const ATT_JOINS: &[Join] = &[
     },
     Join {
         id: "employee",
-        sql: "LEFT JOIN users u ON u.id = ar.user_id",
+        sql: "LEFT JOIN employees u ON u.id = ar.employee_id",
     },
     Join {
         id: "profile",
-        sql: "LEFT JOIN staff_profiles sp ON sp.user_id = ar.user_id",
+        sql: "LEFT JOIN employees sp ON sp.id = ar.employee_id",
     },
     Join {
         id: "department",
@@ -1707,7 +1707,7 @@ const ATT_MEASURES: &[Meas] = &[
     Meas {
         id: "employee_count",
         label: "Employees",
-        expr: "COUNT(DISTINCT ar.user_id)",
+        expr: "COUNT(DISTINCT ar.employee_id)",
         kind: ColumnKind::Count,
         joins: &[],
         help: "Distinct employees.",

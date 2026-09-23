@@ -11,6 +11,9 @@ use madar_rust::auth::jwt::JwtSecret;
 use madar_rust::models::UserRole;
 use madar_rust::staff::dawam::{signin, week_start};
 
+mod common;
+use common::employees::{authed, phone_token};
+
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
 }
@@ -30,24 +33,21 @@ macro_rules! app {
                     web::post().to(signin::otp_request),
                 )
                 .route("/auth/staff/otp/verify", web::post().to(signin::otp_verify))
+                .route("/auth/staff/refresh", web::post().to(signin::refresh))
                 .configure(madar_rust::staff::routes::configure),
         )
         .await
     };
 }
 
+/// `$token` is a user's JWT, or a staff-app phone's `token|device`.
 macro_rules! call {
     ($app:expr, $method:ident, $uri:expr, $token:expr) => {{
-        let req = test::TestRequest::$method()
-            .uri(&$uri)
-            .insert_header(("Authorization", format!("Bearer {}", $token)))
-            .to_request();
+        let req = authed(test::TestRequest::$method().uri(&$uri), &$token).to_request();
         test::call_service(&$app, req).await
     }};
     ($app:expr, $method:ident, $uri:expr, $token:expr, $body:expr) => {{
-        let req = test::TestRequest::$method()
-            .uri(&$uri)
-            .insert_header(("Authorization", format!("Bearer {}", $token)))
+        let req = authed(test::TestRequest::$method().uri(&$uri), &$token)
             .set_json(&$body)
             .to_request();
         test::call_service(&$app, req).await
@@ -58,11 +58,15 @@ async fn json_of(resp: actix_web::dev::ServiceResponse) -> Value {
     test::read_body_json(resp).await
 }
 
+/// `a` is a cashier who is also on payroll (a LINKED employee, `a_user` her
+/// account); `b` has no Madar account at all and signs in to the app with his
+/// number (an APP employee). Both work at `branch`.
 struct F {
     org: Uuid,
     branch: Uuid,
     owner: Uuid,
     a: Uuid,
+    a_user: Uuid,
     b: Uuid,
 }
 
@@ -87,23 +91,19 @@ async fn user(pool: &PgPool, org: Uuid, name: &str, role: &str, phone: Option<&s
     id
 }
 
-async fn staff(pool: &PgPool, f_org: Uuid, branch: Uuid, u: Uuid, salary: i64) {
-    sqlx::query(
-        "INSERT INTO staff_profiles (user_id, org_id, base_salary_piastres, hire_date) \
-         VALUES ($1, $2, $3, CURRENT_DATE - 365)",
+/// The owner on payroll too, so the owner's app inbox can be read.
+async fn owner_employee(pool: &PgPool, f: &F) -> Uuid {
+    common::employees::employee(
+        pool,
+        f.org,
+        "Owner",
+        Some(f.owner),
+        None,
+        false,
+        &[f.branch],
+        0,
     )
-    .bind(u)
-    .bind(f_org)
-    .bind(salary)
-    .execute(pool)
     .await
-    .unwrap();
-    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
-        .bind(u)
-        .bind(branch)
-        .execute(pool)
-        .await
-        .unwrap();
 }
 
 async fn seed(pool: &PgPool) -> F {
@@ -111,7 +111,9 @@ async fn seed(pool: &PgPool) -> F {
         .await
         .unwrap();
     let org = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Cafe', $2)")
+    sqlx::query(
+        "INSERT INTO organizations (id, name, slug, modules) VALUES ($1, 'Cafe', $2, '{pos,dawam}')",
+    )
         .bind(org)
         .bind(format!("org-{org}"))
         .execute(pool)
@@ -137,16 +139,41 @@ async fn seed(pool: &PgPool) -> F {
     .await
     .unwrap();
     let owner = user(pool, org, "Owner", "org_admin", None).await;
-    let a = user(pool, org, "Amal", "teller", Some("+201012345678")).await;
-    let b = user(pool, org, "Bassem", "teller", None).await;
-    for u in [a, b] {
-        staff(pool, org, branch, u, 600_000).await;
-    }
+    let a_user = user(pool, org, "Amal", "teller", Some("+201012345678")).await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(a_user)
+        .bind(branch)
+        .execute(pool)
+        .await
+        .unwrap();
+    let a = common::employees::employee(
+        pool,
+        org,
+        "Amal",
+        Some(a_user),
+        Some("+201012345678"),
+        true,
+        &[branch],
+        600_000,
+    )
+    .await;
+    let b = common::employees::employee(
+        pool,
+        org,
+        "Bassem",
+        None,
+        Some("+201012345679"),
+        true,
+        &[branch],
+        600_000,
+    )
+    .await;
     F {
         org,
         branch,
         owner,
         a,
+        a_user,
         b,
     }
 }
@@ -168,7 +195,7 @@ async fn shift(pool: &PgPool, f: &F, name: &str, start: NaiveTime, end: NaiveTim
 
 async fn every_day(pool: &PgPool, f: &F, u: Uuid, shift: Uuid) {
     sqlx::query(
-        "INSERT INTO staff_schedules (org_id, user_id, work_shift_id, effective_from) \
+        "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, effective_from) \
          VALUES ($1, $2, $3, CURRENT_DATE - 60)",
     )
     .bind(f.org)
@@ -184,11 +211,13 @@ fn t(h: u32) -> NaiveTime {
 }
 
 async fn keys_for(pool: &PgPool, u: Uuid) -> Vec<String> {
-    sqlx::query_scalar("SELECT key FROM staff_notifications WHERE user_id = $1 ORDER BY created_at")
-        .bind(u)
-        .fetch_all(pool)
-        .await
-        .unwrap()
+    sqlx::query_scalar(
+        "SELECT key FROM staff_notifications WHERE employee_id = $1 ORDER BY created_at",
+    )
+    .bind(u)
+    .fetch_all(pool)
+    .await
+    .unwrap()
 }
 
 // ── sign-in ────────────────────────────────────────────────────────────────
@@ -197,6 +226,7 @@ async fn keys_for(pool: &PgPool, u: Uuid) -> Vec<String> {
 async fn a_phone_code_signs_in_and_binds_one_phone(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
+    let owner_e = owner_employee(&pool, &f).await;
 
     let unknown = test::TestRequest::post()
         .uri("/auth/staff/otp/request")
@@ -238,7 +268,7 @@ async fn a_phone_code_signs_in_and_binds_one_phone(pool: PgPool) {
     };
 
     let first = sign_in("Pixel").await;
-    assert_eq!(first["user_id"], json!(f.a));
+    assert_eq!(first["employee_id"], json!(f.a));
     let token = first["token"].as_str().unwrap().to_string();
     let device = first["device_token"].as_str().unwrap().to_string();
 
@@ -272,7 +302,7 @@ async fn a_phone_code_signs_in_and_binds_one_phone(pool: PgPool) {
         "the old phone is signed out"
     );
     let flagged: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM attendance_flags WHERE user_id = $1 AND kind = 'new_phone'",
+        "SELECT COUNT(*) FROM attendance_flags WHERE employee_id = $1 AND kind = 'new_phone'",
     )
     .bind(f.a)
     .fetch_one(&pool)
@@ -280,7 +310,7 @@ async fn a_phone_code_signs_in_and_binds_one_phone(pool: PgPool) {
     .unwrap();
     assert_eq!(flagged, 1);
     assert!(
-        keys_for(&pool, f.owner)
+        keys_for(&pool, owner_e)
             .await
             .contains(&"staff.n_new_phone".to_string())
     );
@@ -300,7 +330,7 @@ async fn leaving_mid_shift_raises_a_flag_the_manager_can_deduct(pool: PgPool) {
     }
     let s = shift(&pool, &f, "Day", start, end).await;
     every_day(&pool, &f, f.a, s).await;
-    let tok = token_for(f.a, f.org, UserRole::Teller);
+    let tok = phone_token(&pool, f.a).await;
     let resp = call!(
         app,
         post,
@@ -350,7 +380,7 @@ async fn leaving_mid_shift_raises_a_flag_the_manager_can_deduct(pool: PgPool) {
     );
     assert_eq!(resp.status(), 200);
     let deducted: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(amount_piastres), 0)::bigint FROM payroll_deductions WHERE user_id = $1",
+        "SELECT COALESCE(SUM(amount_piastres), 0)::bigint FROM payroll_deductions WHERE employee_id = $1",
     )
     .bind(f.a)
     .fetch_one(&pool)
@@ -374,7 +404,7 @@ async fn staff_see_only_published_weeks_and_hear_about_changes(pool: PgPool) {
     every_day(&pool, &f, f.a, s).await;
     let ws = week_start(Utc::now().date_naive());
     let to = ws + Duration::days(6);
-    let me = token_for(f.a, f.org, UserRole::Teller);
+    let me = phone_token(&pool, f.a).await;
     let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
     let uri = format!("/staff/me/roster?from={ws}&to={to}");
 
@@ -418,7 +448,7 @@ async fn staff_see_only_published_weeks_and_hear_about_changes(pool: PgPool) {
         put,
         "/staff/schedules/overrides",
         owner,
-        json!({ "user_id": f.a, "on_date": day, "work_shift_id": null, "reason": "Day off" })
+        json!({ "employee_id": f.a, "on_date": day, "work_shift_id": null, "reason": "Day off" })
     );
     assert_eq!(resp.status(), 200);
     let body = json_of(call!(app, get, uri, me)).await;
@@ -439,10 +469,7 @@ async fn a_swap_needs_the_colleague_then_the_manager(pool: PgPool) {
     every_day(&pool, &f, f.a, morning).await;
     every_day(&pool, &f, f.b, evening).await;
     let day = Utc::now().date_naive() + Duration::days(3);
-    let (ta, tb) = (
-        token_for(f.a, f.org, UserRole::Teller),
-        token_for(f.b, f.org, UserRole::Teller),
-    );
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
     let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
 
     let resp = call!(
@@ -494,7 +521,7 @@ async fn a_swap_needs_the_colleague_then_the_manager(pool: PgPool) {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|s| s["user_id"] == json!(u))
+            .filter(|s| s["employee_id"] == json!(u))
             .map(|s| s["shift_name"].as_str().unwrap().to_string())
             .collect()
     };
@@ -509,10 +536,7 @@ async fn a_claimed_open_shift_is_the_claimers_once_approved(pool: PgPool) {
     let s = shift(&pool, &f, "Extra", t(10), t(18)).await;
     let day = Utc::now().date_naive() + Duration::days(2);
     let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
-    let (ta, tb) = (
-        token_for(f.a, f.org, UserRole::Teller),
-        token_for(f.b, f.org, UserRole::Teller),
-    );
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
     let resp = call!(
         app,
         post,
@@ -586,7 +610,7 @@ async fn a_claimed_open_shift_is_the_claimers_once_approved(pool: PgPool) {
     .await;
     let shifts = view["shifts"].as_array().unwrap();
     assert_eq!(shifts.len(), 1);
-    assert_eq!(shifts[0]["user_id"], json!(f.a));
+    assert_eq!(shifts[0]["employee_id"], json!(f.a));
 }
 
 // ── pay ───────────────────────────────────────────────────────────────────
@@ -595,6 +619,7 @@ async fn a_claimed_open_shift_is_the_claimers_once_approved(pool: PgPool) {
 async fn a_managers_pay_line_over_the_limit_waits_for_the_owner(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
+    let owner_e = owner_employee(&pool, &f).await;
     let mgr = user(&pool, f.org, "Manager", "branch_manager", None).await;
     sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
         .bind(mgr)
@@ -611,7 +636,7 @@ async fn a_managers_pay_line_over_the_limit_waits_for_the_owner(pool: PgPool) {
         "/staff/adjustments",
         tm,
         json!({
-        "user_id": f.a, "kind": "bonus", "amount_piastres": 50_000, "reason": "Great week" })
+        "employee_id": f.a, "kind": "bonus", "amount_piastres": 50_000, "reason": "Great week" })
     );
     assert_eq!(small.status(), 201);
     assert_eq!(json_of(small).await["status"], "approved");
@@ -622,13 +647,13 @@ async fn a_managers_pay_line_over_the_limit_waits_for_the_owner(pool: PgPool) {
         "/staff/adjustments",
         tm,
         json!({
-        "user_id": f.a, "kind": "deduction", "amount_piastres": 200_000, "reason": "Broken machine", "recurring": true })
+        "employee_id": f.a, "kind": "deduction", "amount_piastres": 200_000, "reason": "Broken machine", "recurring": true })
     );
     assert_eq!(big.status(), 201);
     let big = json_of(big).await;
     assert_eq!(big["status"], "pending");
     assert!(
-        keys_for(&pool, f.owner)
+        keys_for(&pool, owner_e)
             .await
             .contains(&"staff.n_adjustment_pending".to_string())
     );
@@ -689,9 +714,9 @@ async fn paying_everyone_pays_the_period_and_locks_reopening(pool: PgPool) {
     assert_eq!(current["preview"].as_array().unwrap().len(), 2);
     let id = current["period"]["id"].as_str().unwrap().to_string();
 
-    let me = token_for(f.a, f.org, UserRole::Teller);
+    let me = phone_token(&pool, f.a).await;
     let est = json_of(call!(app, get, "/staff/me/pay/estimate", me)).await;
-    assert_eq!(est["slip"]["user_id"], json!(f.a));
+    assert_eq!(est["slip"]["employee_id"], json!(f.a));
     assert_eq!(
         est["advance_room_piastres"], 300_000,
         "half the salary by default"
@@ -762,19 +787,19 @@ async fn expense_advances_are_logged_never_deducted(pool: PgPool) {
         "/staff/expense-advances",
         owner,
         json!({
-        "user_id": f.a, "amount_piastres": 20_000, "purpose": "Milk", "via": "till" })
+        "employee_id": f.a, "amount_piastres": 20_000, "purpose": "Milk", "via": "till" })
     );
     assert_eq!(resp.status(), 201);
     let mine = json_of(call!(
         app,
         get,
         "/staff/me/expense-advances",
-        token_for(f.a, f.org, UserRole::Teller)
+        phone_token(&pool, f.a).await
     ))
     .await;
     assert_eq!(mine.as_array().unwrap().len(), 1);
     let deductions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE user_id = $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE employee_id = $1")
             .bind(f.a)
             .fetch_one(&pool)
             .await
@@ -792,19 +817,25 @@ async fn the_app_boots_from_one_context_call(pool: PgPool) {
         app,
         get,
         "/staff/me/context",
-        token_for(f.a, f.org, UserRole::Teller)
+        phone_token(&pool, f.a).await
     ))
     .await;
     assert_eq!(me["role"], "employee");
     assert_eq!(me["branches"].as_array().unwrap().len(), 1);
     assert_eq!(me["work_shifts"].as_array().unwrap().len(), 1);
     let people = me["people"].as_array().unwrap();
-    let colleague = people.iter().find(|p| p["user_id"] == json!(f.b)).unwrap();
+    let colleague = people
+        .iter()
+        .find(|p| p["employee_id"] == json!(f.b))
+        .unwrap();
     assert!(
         colleague["base_salary_piastres"].is_null(),
         "no colleague's pay"
     );
-    let myself = people.iter().find(|p| p["user_id"] == json!(f.a)).unwrap();
+    let myself = people
+        .iter()
+        .find(|p| p["employee_id"] == json!(f.a))
+        .unwrap();
     assert_eq!(myself["base_salary_piastres"], 600_000);
     assert_eq!(me["settings"]["period_start_day"], 26);
 }
@@ -826,7 +857,7 @@ async fn a_colleague_can_cover_the_shift_template_they_already_worked(pool: PgPo
     let s = shift(&pool, &f, "Morning", start, end).await;
     every_day(&pool, &f, f.a, s).await;
     every_day(&pool, &f, f.b, s).await;
-    let tok = token_for(f.a, f.org, UserRole::Teller);
+    let tok = phone_token(&pool, f.a).await;
     let here = json!({ "branch_id": f.branch, "latitude": LAT, "longitude": LNG });
     assert!(
         call!(app, post, "/staff/me/check-in", tok, here)
@@ -852,7 +883,7 @@ async fn a_colleague_can_cover_the_shift_template_they_already_worked(pool: PgPo
         post,
         "/staff/me/cover",
         tok,
-        json!({ "user_id": f.b, "work_shift_id": s, "latitude": LAT, "longitude": LNG })
+        json!({ "employee_id": f.b, "work_shift_id": s, "latitude": LAT, "longitude": LNG })
     );
     assert_eq!(resp.status(), 201, "{:?}", test::read_body(resp).await);
     let resp = call!(
@@ -860,7 +891,7 @@ async fn a_colleague_can_cover_the_shift_template_they_already_worked(pool: PgPo
         post,
         "/staff/me/cover",
         tok,
-        json!({ "user_id": f.b, "work_shift_id": s, "latitude": LAT, "longitude": LNG })
+        json!({ "employee_id": f.b, "work_shift_id": s, "latitude": LAT, "longitude": LNG })
     );
     assert_eq!(resp.status(), 409, "one cover per shift covered");
 }
@@ -882,7 +913,7 @@ async fn an_offline_punch_is_dated_by_the_server_not_the_phone(pool: PgPool) {
     }
     let s = shift(&pool, &f, "Morning", start, end).await;
     every_day(&pool, &f, f.a, s).await;
-    let tok = token_for(f.a, f.org, UserRole::Teller);
+    let tok = phone_token(&pool, f.a).await;
     let seen = now - Duration::minutes(40);
     let stamp = |mins: i64, rebooted: bool| json!({ "server_time": seen, "elapsed_ms": mins * 60_000, "rebooted": rebooted });
     let rec = json_of(call!(
@@ -927,7 +958,7 @@ async fn an_offline_punch_is_dated_by_the_server_not_the_phone(pool: PgPool) {
     .await;
     assert_eq!(out["check_out_method"], "offline");
     let flagged: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM attendance_flags WHERE user_id = $1 AND kind = 'time_unverified')",
+        "SELECT EXISTS(SELECT 1 FROM attendance_flags WHERE employee_id = $1 AND kind = 'time_unverified')",
     )
     .bind(f.a)
     .fetch_one(&pool)
@@ -943,7 +974,7 @@ async fn an_offline_punch_is_dated_by_the_server_not_the_phone(pool: PgPool) {
 async fn overlapping_requests_are_refused_by_the_database(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
-    let tok = token_for(f.a, f.org, UserRole::Teller);
+    let tok = phone_token(&pool, f.a).await;
     let day = (Utc::now() + Duration::days(3)).date_naive();
     let file = |body: serde_json::Value| body;
     let leave = file(
@@ -997,7 +1028,7 @@ async fn overlapping_requests_are_refused_by_the_database(pool: PgPool) {
     // Written straight to the table, the way two concurrent requests would
     // land: the constraint itself refuses the second.
     let raw = sqlx::query(
-        "INSERT INTO staff_requests (org_id, user_id, kind, on_date, status) VALUES ($1, $2, 'leave', $3, 'pending')",
+        "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, status) VALUES ($1, $2, 'leave', $3, 'pending')",
     )
     .bind(f.org)
     .bind(f.a)
@@ -1028,7 +1059,7 @@ async fn nobody_clocks_in_before_the_rules_are_saved(pool: PgPool) {
     )
     .await;
     every_day(&pool, &f, f.a, s).await;
-    let tok = token_for(f.a, f.org, UserRole::Teller);
+    let tok = phone_token(&pool, f.a).await;
     let here = json!({ "branch_id": f.branch, "latitude": LAT, "longitude": LNG });
     let resp = call!(app, post, "/staff/me/check-in", tok, here.clone());
     assert_eq!(resp.status(), 409);
@@ -1076,7 +1107,7 @@ async fn night_overtime_is_the_overtime_inside_the_night_window(pool: PgPool) {
     ] {
         let at = |h: u32, m: u32| Utc.from_utc_datetime(&day.and_hms_opt(h, m, 0).unwrap());
         sqlx::query(
-            "INSERT INTO attendance_records (org_id, user_id, branch_id, work_shift_id, business_date, status, \
+            "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
                 scheduled_start_at, scheduled_end_at, check_in_at, check_out_at, check_in_method, check_out_method, \
                 overtime_minutes, worked_minutes) \
              VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, $6, $8, 'mobile_gps', 'mobile_gps', 60, 540)",
@@ -1098,7 +1129,7 @@ async fn night_overtime_is_the_overtime_inside_the_night_window(pool: PgPool) {
         .as_array()
         .unwrap()
         .iter()
-        .find(|p| p["user_id"] == json!(f.a))
+        .find(|p| p["employee_id"] == json!(f.a))
         .unwrap();
     assert_eq!(sara["overtime_minutes"], 120);
     let m: f64 = sara["breakdown"]["overtime_multiplier"]
@@ -1116,7 +1147,7 @@ async fn night_overtime_is_the_overtime_inside_the_night_window(pool: PgPool) {
 // ── the roster engine (SC-12, SC-13, RU-13, PS-2) ────────────────────────────
 
 async fn set_gender(pool: &PgPool, u: Uuid, g: &str) {
-    sqlx::query("UPDATE staff_profiles SET gender = $2 WHERE user_id = $1")
+    sqlx::query("UPDATE employees SET gender = $2 WHERE id = $1")
         .bind(u)
         .bind(g)
         .execute(pool)
@@ -1182,9 +1213,9 @@ async fn suggestions_fill_the_coverage_grid_by_the_gender_mode(pool: PgPool) {
     let soft = suggestions_for(&app, &f, ws).await;
     assert_eq!(soft.len(), 7, "one per evening: {soft:?}");
     assert!(soft.iter().all(|s| s["reason_key"] == "staff.sg_coverage"));
-    assert_eq!(soft[0]["user_id"], json!(f.b));
+    assert_eq!(soft[0]["employee_id"], json!(f.b));
     assert_eq!(soft[0]["by_default"], true);
-    assert!(soft.iter().any(|s| s["user_id"] == json!(f.a)));
+    assert!(soft.iter().any(|s| s["employee_id"] == json!(f.a)));
     assert!(
         sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM staff_suggestion_cache WHERE branch_id = $1)"
@@ -1205,16 +1236,16 @@ async fn suggestions_fill_the_coverage_grid_by_the_gender_mode(pool: PgPool) {
         .unwrap();
     let hard = suggestions_for(&app, &f, ws).await;
     assert_eq!(hard.len(), 6, "{hard:?}");
-    assert!(hard.iter().all(|s| s["user_id"] == json!(f.b)));
+    assert!(hard.iter().all(|s| s["employee_id"] == json!(f.b)));
 
     // She says she prefers evenings: she is back, on her own preference.
-    sqlx::query("UPDATE staff_profiles SET pref_time = 'evening' WHERE user_id = $1")
+    sqlx::query("UPDATE employees SET pref_time = 'evening' WHERE id = $1")
         .bind(f.a)
         .execute(&pool)
         .await
         .unwrap();
     let pref = suggestions_for(&app, &f, ws).await;
-    assert_eq!(pref[0]["user_id"], json!(f.a));
+    assert_eq!(pref[0]["employee_id"], json!(f.a));
     assert_eq!(pref[0]["by_default"], false);
 
     // Off: no gender weight at all.
@@ -1223,7 +1254,7 @@ async fn suggestions_fill_the_coverage_grid_by_the_gender_mode(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE staff_profiles SET pref_time = NULL WHERE user_id = $1")
+    sqlx::query("UPDATE employees SET pref_time = NULL WHERE id = $1")
         .bind(f.a)
         .execute(&pool)
         .await
@@ -1286,7 +1317,7 @@ async fn the_roster_warns_past_labour_limits(pool: PgPool) {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|w| w["user_id"] == json!(f.a))
+        .filter(|w| w["employee_id"] == json!(f.a))
         .map(|w| w["kind"].as_str().unwrap().to_string())
         .collect();
     for k in ["day_hours", "presence", "week_hours", "weekly_rest"] {
@@ -1297,7 +1328,7 @@ async fn the_roster_warns_past_labour_limits(pool: PgPool) {
             .as_array()
             .unwrap()
             .iter()
-            .any(|w| w["user_id"] == json!(f.b))
+            .any(|w| w["employee_id"] == json!(f.b))
     );
 }
 
@@ -1313,7 +1344,7 @@ async fn four_identical_weeks_suggest_changing_the_pattern(pool: PgPool) {
     let monday = ws + Duration::days(2);
     for k in 1..=4 {
         sqlx::query(
-            "INSERT INTO staff_schedule_overrides (org_id, user_id, on_date, work_shift_id, reason) \
+            "INSERT INTO staff_schedule_overrides (org_id, employee_id, on_date, work_shift_id, reason) \
              VALUES ($1, $2, $3, $4, 'swap')",
         )
         .bind(f.org)
@@ -1385,7 +1416,7 @@ async fn four_identical_weeks_suggest_changing_the_pattern(pool: PgPool) {
 async fn switching_dawam_off_hides_it_and_keeps_the_records(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
-    let me = token_for(f.a, f.org, UserRole::Teller);
+    let me = phone_token(&pool, f.a).await;
     let ctx = json_of(call!(app, get, "/staff/me/context", me)).await;
     assert_eq!(ctx["modules"], json!(["pos", "dawam"]));
 
@@ -1438,7 +1469,7 @@ async fn the_fairness_audit_is_the_owners(pool: PgPool) {
     .await;
     assert_eq!(body["rows"].as_array().unwrap().len(), 2, "{body}");
     assert_eq!(body["learning_frozen"], false);
-    let me = token_for(f.a, f.org, UserRole::Teller);
+    let me = phone_token(&pool, f.a).await;
     assert_eq!(
         call!(
             app,
@@ -1455,6 +1486,7 @@ async fn the_fairness_audit_is_the_owners(pool: PgPool) {
 async fn a_low_battery_warns_once_and_silence_reads_phone_died(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
+    let owner_e = owner_employee(&pool, &f).await;
     let now = Utc::now().time();
     let start = (Utc::now() - Duration::minutes(30)).time();
     let end = (Utc::now() + Duration::hours(4)).time();
@@ -1463,7 +1495,7 @@ async fn a_low_battery_warns_once_and_silence_reads_phone_died(pool: PgPool) {
     }
     let s = shift(&pool, &f, "Day", start, end).await;
     every_day(&pool, &f, f.a, s).await;
-    let tok = token_for(f.a, f.org, UserRole::Teller);
+    let tok = phone_token(&pool, f.a).await;
     let resp = call!(
         app,
         post,
@@ -1492,11 +1524,13 @@ async fn a_low_battery_warns_once_and_silence_reads_phone_died(pool: PgPool) {
     assert_eq!(warned, 1, "told once per shift");
 
     // Then nothing for 50 minutes.
-    sqlx::query("UPDATE attendance_pings SET at = at - INTERVAL '50 minutes' WHERE user_id = $1")
-        .bind(f.a)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE attendance_pings SET at = at - INTERVAL '50 minutes' WHERE employee_id = $1",
+    )
+    .bind(f.a)
+    .execute(&pool)
+    .await
+    .unwrap();
     madar_rust::staff::jobs::phones_that_died(&pool)
         .await
         .unwrap();
@@ -1504,14 +1538,14 @@ async fn a_low_battery_warns_once_and_silence_reads_phone_died(pool: PgPool) {
         .await
         .unwrap();
     let kinds: Vec<String> =
-        sqlx::query_scalar("SELECT kind FROM attendance_flags WHERE user_id = $1")
+        sqlx::query_scalar("SELECT kind FROM attendance_flags WHERE employee_id = $1")
             .bind(f.a)
             .fetch_all(&pool)
             .await
             .unwrap();
     assert_eq!(kinds, ["phone_died"], "never left_mid_shift, and only once");
     assert_eq!(
-        keys_for(&pool, f.owner)
+        keys_for(&pool, owner_e)
             .await
             .iter()
             .filter(|k| *k == "staff.n_flag_phone_died")
@@ -1525,8 +1559,9 @@ async fn a_forgotten_phone_punches_on_the_till_with_a_pin(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
     let hash = bcrypt::hash("4321", 4).unwrap();
+    // The PIN is her till account's; the punch is for the employee linked to it.
     sqlx::query("UPDATE users SET pin_hash = $2 WHERE id = $1")
-        .bind(f.a)
+        .bind(f.a_user)
         .bind(&hash)
         .execute(&pool)
         .await
@@ -1551,7 +1586,7 @@ async fn a_forgotten_phone_punches_on_the_till_with_a_pin(pool: PgPool) {
         punch("4321")
     ))
     .await;
-    assert_eq!(body["user_id"], json!(f.a));
+    assert_eq!(body["employee_id"], json!(f.a));
     assert_eq!(body["punched"], "in");
     assert_eq!(body["record"]["check_in_method"], "till");
     let body = json_of(call!(
@@ -1621,7 +1656,7 @@ async fn a_till_pay_out_can_be_an_expense_advance(pool: PgPool) {
     assert_eq!(resp.status(), 201);
     let movement = json_of(resp).await["id"].as_str().unwrap().to_string();
     let logged: (i64, String, String) = sqlx::query_as(
-        "SELECT amount_piastres, via, purpose FROM expense_advances WHERE user_id = $1",
+        "SELECT amount_piastres, via, purpose FROM expense_advances WHERE employee_id = $1",
     )
     .bind(f.a)
     .fetch_one(&pool)
@@ -1637,15 +1672,16 @@ async fn a_till_pay_out_can_be_an_expense_advance(pool: PgPool) {
         json!({ "amount": 20000, "kind": "correction", "corrects_id": movement, "note": "wrong till" })
     );
     assert_eq!(resp.status(), 201);
-    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM expense_advances WHERE user_id = $1")
-        .bind(f.a)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let left: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM expense_advances WHERE employee_id = $1")
+            .bind(f.a)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(left, 0, "undoing the pay-out undoes the advance");
 
     // The till's picker: names of the branch's staff, for anyone who works there.
-    let teller = token_for(f.b, f.org, UserRole::Teller);
+    let teller = token_for(f.a_user, f.org, UserRole::Teller);
     let people = json_of(call!(
         app,
         get,
@@ -1673,12 +1709,15 @@ async fn an_employee_is_added_with_a_whatsapp_number_and_no_pin(pool: PgPool) {
     assert_eq!(resp.status(), 201);
     let e = json_of(resp).await;
     assert_eq!(e["base_salary_piastres"], 700000);
-    let (phone, pin): (String, Option<String>) =
-        sqlx::query_as("SELECT phone, pin_hash FROM users WHERE name = 'Sara'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!((phone.as_str(), pin), ("+201098765432", None));
+    assert_eq!(e["kind"], "app");
+    assert_eq!(e["phone"], "+201098765432");
+    assert!(e["user_id"].is_null(), "no Madar account is made: {e}");
+    // No login, no till PIN, no POS cashier: an employee is not a user.
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE name = 'Sara'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(users, 0);
     // Same number again: refused.
     let resp = call!(app, post, "/staff/employees", owner, body);
     assert_eq!(resp.status(), 409);
@@ -1689,7 +1728,7 @@ async fn an_employee_is_added_with_a_whatsapp_number_and_no_pin(pool: PgPool) {
         .to_request();
     assert!(test::call_service(&app, req).await.status().is_success());
     // A teller can't add people.
-    let me = token_for(f.a, f.org, UserRole::Teller);
+    let me = phone_token(&pool, f.a).await;
     let resp = call!(
         app,
         post,
@@ -1708,7 +1747,7 @@ async fn the_reports_read_the_clock_the_till_and_the_payslips(pool: PgPool) {
     let today = Utc::now().date_naive();
     // Amal worked 8 hours today at 6000 EGP a month over 30 days: 200 EGP.
     sqlx::query(
-        "INSERT INTO attendance_records (org_id, user_id, branch_id, business_date, status, \
+        "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, status, \
             scheduled_start_at, scheduled_end_at, check_in_at, check_out_at, worked_minutes) \
          VALUES ($1, $2, $3, $4, 'present', now() - INTERVAL '8 hours', now(), \
                  now() - INTERVAL '8 hours', now(), 480)",
@@ -1721,7 +1760,7 @@ async fn the_reports_read_the_clock_the_till_and_the_payslips(pool: PgPool) {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO expense_advances (org_id, user_id, amount_piastres, purpose, given_on) \
+        "INSERT INTO expense_advances (org_id, employee_id, amount_piastres, purpose, given_on) \
          VALUES ($1, $2, 15000, 'Cups', $3)",
     )
     .bind(f.org)
@@ -1777,7 +1816,7 @@ async fn the_reports_read_the_clock_the_till_and_the_payslips(pool: PgPool) {
         owner
     );
     assert_eq!(resp.status(), 403);
-    let me = token_for(f.a, f.org, UserRole::Teller);
+    let me = phone_token(&pool, f.a).await;
     assert_eq!(
         call!(app, get, format!("/staff/reports/advances?{q}"), me).status(),
         403

@@ -16,7 +16,6 @@ use uuid::Uuid;
 
 use crate::{
     errors::{AppError, AppErrorResponse},
-    orgs::handlers::extract_claims,
     staff::{scope_org, validate_range},
 };
 
@@ -35,8 +34,8 @@ pub struct DisciplineQuery {
 
 #[derive(Debug, Serialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct DisciplineRow {
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     /// `None` for a person with no department set — grouped as "Unassigned".
     pub department_id: Option<Uuid>,
     pub department_name: Option<String>,
@@ -68,40 +67,37 @@ pub async fn discipline_report(
     pool: crate::db::Db,
     query: web::Query<DisciplineQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    crate::authz::require::require(
+    let claims = crate::staff::principal::caller(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    // Only the branches the caller reads attendance at: a branch manager ranks
+    // their own branches' staff, never the whole org's.
+    let branches = crate::staff::access::scope_at(
         pool.get_ref(),
         &claims,
+        org_id,
         crate::authz::Cap::HrAttendanceRead,
         query.branch_id,
     )
     .await?;
-    let org_id = scope_org(&req, &claims)?;
-    // Only the branches the caller works at: a branch manager ranks their own
-    // branches' staff, never the whole org's.
-    let branches =
-        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, query.branch_id)
-            .await?;
     validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
 
     let rows = sqlx::query_as::<_, DisciplineRow>(
         r#"
         WITH per_user AS (
-            SELECT a.user_id, u.name AS user_name,
+            SELECT a.employee_id, sp.name AS employee_name,
                    sp.department_id, d.name AS department_name,
                    COUNT(*) FILTER (WHERE a.status = 'present') AS present_days,
                    COUNT(*) FILTER (WHERE a.status = 'late')    AS late_days,
                    COUNT(*) FILTER (WHERE a.status = 'absent')  AS absent_days,
                    COALESCE(SUM(a.late_minutes), 0)::bigint     AS total_late_minutes
               FROM attendance_records a
-              JOIN users u ON u.id = a.user_id
-              LEFT JOIN staff_profiles sp ON sp.user_id = a.user_id
+              JOIN employees sp ON sp.id = a.employee_id
               LEFT JOIN departments d ON d.id = sp.department_id
              WHERE a.org_id = $1
                AND a.business_date BETWEEN $2 AND $3
                AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4))
-               AND (sp.employment_status IS NULL OR sp.employment_status = 'active')
-             GROUP BY a.user_id, u.name, sp.department_id, d.name
+               AND sp.employment_status = 'active'
+             GROUP BY a.employee_id, sp.name, sp.department_id, d.name
         )
         SELECT *,
                RANK() OVER (
@@ -109,7 +105,7 @@ pub async fn discipline_report(
                    ORDER BY absent_days ASC, late_days ASC, total_late_minutes ASC
                ) AS rank_in_department
           FROM per_user
-         ORDER BY department_name IS NULL, department_name, rank_in_department, lower(user_name)
+         ORDER BY department_name IS NULL, department_name, rank_in_department, lower(employee_name)
         "#,
     )
     .bind(org_id)

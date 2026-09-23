@@ -304,18 +304,26 @@ impl FromRequest for Db {
     fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
         let req = req.clone();
         Box::pin(async move {
-            let claims = req
-                .extensions()
-                .get::<Claims>()
-                .cloned()
-                .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))?;
-
             // Innermost registered pool wins: inside the /reports scope this
             // is the read-replica pool, everywhere else the primary.
             let base = req
                 .app_data::<web::Data<PgPool>>()
                 .cloned()
                 .ok_or(AppError::Internal)?;
+
+            let claims = req.extensions().get::<Claims>().cloned();
+            let Some(claims) = claims else {
+                // The staff app's employee (a verified staff token, see
+                // `staff::principal`): scoped to the token's org like anyone.
+                let staff = req
+                    .extensions()
+                    .get::<crate::staff::principal::StaffPrincipal>()
+                    .map(|p| p.org_id);
+                return match staff {
+                    Some(org) => Ok(Db(tenant_pool(base.get_ref(), org).await)),
+                    None => Err(AppError::Unauthorized("Missing claims".into())),
+                };
+            };
 
             match claims.org_id() {
                 // Tenant identity comes from the *verified token*, never from

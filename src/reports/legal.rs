@@ -614,8 +614,8 @@ async fn guard_with(
 
 /// `pd` belongs to someone who works at one of the scoped branches.
 const DEDUCTION_IN_SCOPE: &str = "($4::uuid[] IS NULL OR EXISTS (
-    SELECT 1 FROM user_branch_assignments uba
-    WHERE uba.user_id = pd.user_id AND uba.branch_id = ANY($4)))";
+    SELECT 1 FROM employee_branches eb
+    WHERE eb.employee_id = pd.employee_id AND eb.branch_id = ANY($4)))";
 
 #[utoipa::path(
     get,

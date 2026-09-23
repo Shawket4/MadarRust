@@ -22,26 +22,46 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 
+/// Who a push registration belongs to: a Madar user (any app), or a Dawam
+/// employee (the staff app signs in as the employee, who may have no user).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recipient {
+    User(Uuid),
+    Employee(Uuid),
+}
+
+impl Recipient {
+    fn cols(self) -> (Option<Uuid>, Option<Uuid>) {
+        match self {
+            Recipient::User(u) => (Some(u), None),
+            Recipient::Employee(e) => (None, Some(e)),
+        }
+    }
+}
+
 /// Register or rebind a device's push token (PUT /push/token and the Dawam
 /// alias PUT /staff/me/push-token both call this).
 pub(crate) async fn register(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    who: Recipient,
     app: &str,
     token: &str,
     locale: &str,
     platform: &str,
 ) -> Result<(), AppError> {
+    let (user_id, employee_id) = who.cols();
     sqlx::query(
-        "INSERT INTO push_devices (org_id, user_id, app, token, locale, platform) \
-          VALUES ($1, $2, $3, $4, $5, $6) \
+        "INSERT INTO push_devices (org_id, user_id, employee_id, app, token, locale, platform) \
+          VALUES ($1, $2, $3, $4, $5, $6, $7) \
           ON CONFLICT (token) WHERE revoked_at IS NULL DO UPDATE SET \
-            org_id = EXCLUDED.org_id, user_id = EXCLUDED.user_id, app = EXCLUDED.app, \
+            org_id = EXCLUDED.org_id, user_id = EXCLUDED.user_id, \
+            employee_id = EXCLUDED.employee_id, app = EXCLUDED.app, \
             locale = EXCLUDED.locale, platform = EXCLUDED.platform, last_seen_at = now()",
     )
     .bind(org_id)
     .bind(user_id)
+    .bind(employee_id)
     .bind(app)
     .bind(token)
     .bind(locale)
@@ -52,33 +72,39 @@ pub(crate) async fn register(
 }
 
 /// Revoke one device's registration (sign-out). Idempotent: revoking a token
-/// that is not (or no longer) this user's is a no-op, never an error.
+/// that is not (or no longer) this recipient's is a no-op, never an error.
 pub(crate) async fn unregister(
     pool: &PgPool,
-    user_id: Uuid,
+    who: Recipient,
     app: &str,
     token: &str,
 ) -> Result<(), AppError> {
+    let (user_id, employee_id) = who.cols();
     sqlx::query(
         "UPDATE push_devices SET revoked_at = now() \
-          WHERE token = $1 AND user_id = $2 AND app = $3 AND revoked_at IS NULL",
+          WHERE token = $1 AND user_id IS NOT DISTINCT FROM $2 \
+            AND employee_id IS NOT DISTINCT FROM $3 AND app = $4 AND revoked_at IS NULL",
     )
     .bind(token)
     .bind(user_id)
+    .bind(employee_id)
     .bind(app)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// Revoke every device of `user_id` for `app` (used when a phone/account is
+/// Revoke every device of a recipient for `app` (used when a phone/account is
 /// force-revoked, e.g. Dawam's RO-4/RO-10).
-pub(crate) async fn revoke_all(pool: &PgPool, user_id: Uuid, app: &str) -> Result<(), AppError> {
+pub(crate) async fn revoke_all(pool: &PgPool, who: Recipient, app: &str) -> Result<(), AppError> {
+    let (user_id, employee_id) = who.cols();
     sqlx::query(
         "UPDATE push_devices SET revoked_at = now() \
-          WHERE user_id = $1 AND app = $2 AND revoked_at IS NULL",
+          WHERE user_id IS NOT DISTINCT FROM $1 AND employee_id IS NOT DISTINCT FROM $2 \
+            AND app = $3 AND revoked_at IS NULL",
     )
     .bind(user_id)
+    .bind(employee_id)
     .bind(app)
     .execute(pool)
     .await?;
@@ -162,10 +188,10 @@ pub fn configured() -> bool {
 /// An OAuth access token for the FCM API, reused for 50 minutes.
 async fn access_token(f: &Fcm, http: &reqwest::Client) -> Option<String> {
     let mut cached = f.token.lock().await;
-    if let Some((t, at)) = cached.as_ref() {
-        if at.elapsed() < Duration::from_secs(50 * 60) {
-            return Some(t.clone());
-        }
+    if let Some((t, at)) = cached.as_ref()
+        && at.elapsed() < Duration::from_secs(50 * 60)
+    {
+        return Some(t.clone());
     }
     let now = chrono::Utc::now().timestamp();
     let claims = json!({
@@ -217,14 +243,14 @@ async fn post_one(http: &reqwest::Client, url: &str, bearer: &str, msg: &Value) 
     }
 }
 
-/// Send a notification to every live device of `user_id` registered under
-/// any of `apps`, in the background. Runs even if the caller's transaction
+/// Send a notification to every live device of `who` registered under any of
+/// `apps`, in the background. Runs even if the caller's transaction
 /// later rolls back is not a concern here — call this only after the write
 /// it announces has committed. `title_key` is looked up the same way as
 /// `key` (so each app supplies its own app-name word).
 pub fn send(
     pool: &PgPool,
-    user_id: Uuid,
+    who: Recipient,
     apps: &'static [&'static str],
     title_key: &str,
     key: &str,
@@ -238,11 +264,14 @@ pub fn send(
         args.clone(),
     );
     tokio::spawn(async move {
+        let (user_id, employee_id) = who.cols();
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT token, locale FROM push_devices \
-              WHERE user_id = $1 AND app = ANY($2) AND revoked_at IS NULL",
+              WHERE user_id IS NOT DISTINCT FROM $1 AND employee_id IS NOT DISTINCT FROM $2 \
+                AND app = ANY($3) AND revoked_at IS NULL",
         )
         .bind(user_id)
+        .bind(employee_id)
         .bind(apps)
         .fetch_all(&pool)
         .await

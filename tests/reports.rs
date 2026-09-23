@@ -1780,8 +1780,14 @@ fn status_predicates_are_unified() {
             include_str!("../src/reports/handlers.rs"),
         ),
         ("reports/legal.rs", include_str!("../src/reports/legal.rs")),
-        ("orders/handlers.rs", include_str!("../src/orders/handlers.rs")),
-        ("tills/handlers.rs", include_str!("../src/tills/handlers.rs")),
+        (
+            "orders/handlers.rs",
+            include_str!("../src/orders/handlers.rs"),
+        ),
+        (
+            "tills/handlers.rs",
+            include_str!("../src/tills/handlers.rs"),
+        ),
         (
             "insights/handlers.rs",
             include_str!("../src/insights/handlers.rs"),
@@ -3353,6 +3359,29 @@ async fn new_legal_audits_add_up_and_are_scoped(pool: PgPool) {
     assign_user_to_branch(&pool, manager, mine).await;
     assign_user_to_branch(&pool, staff_mine, mine).await;
     assign_user_to_branch(&pool, staff_other, other).await;
+    // On payroll: each is a linked employee (a fresh id) at their branch.
+    let as_employee = async |user: Uuid, branch: Uuid| -> Uuid {
+        let e: Uuid = sqlx::query_scalar(
+            "INSERT INTO employees (org_id, user_id, name) VALUES ($1, $2, 'Staff') RETURNING id",
+        )
+        .bind(org_id)
+        .bind(user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO employee_branches (employee_id, branch_id, org_id) VALUES ($1, $2, $3)",
+        )
+        .bind(e)
+        .bind(branch)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        e
+    };
+    let staff_mine = as_employee(staff_mine, mine).await;
+    let staff_other = as_employee(staff_other, other).await;
 
     // Manual deductions: 500 fixed (mine), a 10% one (no amount), 700 (other).
     for (who, amount, pct) in [
@@ -3361,7 +3390,7 @@ async fn new_legal_audits_add_up_and_are_scoped(pool: PgPool) {
         (staff_other, Some(700), None),
     ] {
         sqlx::query(
-            "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, percent_of_base, reason, effective_date, source, created_by)
+            "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, percent_of_base, reason, effective_date, source, created_by)
              VALUES ($1, $2, $3, $4::numeric, 'uniform', CURRENT_DATE, 'manual', $5)",
         )
         .bind(org_id).bind(who).bind(amount).bind(pct).bind(admin)
@@ -3369,12 +3398,12 @@ async fn new_legal_audits_add_up_and_are_scoped(pool: PgPool) {
     }
     // Late penalty 300 waived (forgives 300); absence 400 overridden to 100 (forgives 300).
     sqlx::query(
-        "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, original_amount_piastres, reason, effective_date, source, waived_at, waived_by, waive_reason)
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, original_amount_piastres, reason, effective_date, source, waived_at, waived_by, waive_reason)
          VALUES ($1, $2, 300, 300, 'late', CURRENT_DATE, 'late_penalty', now(), $3, 'traffic')",
     )
     .bind(org_id).bind(staff_mine).bind(admin).execute(&pool).await.unwrap();
     sqlx::query(
-        "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, original_amount_piastres, reason, effective_date, source, overridden_at, overridden_by, override_reason)
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, original_amount_piastres, reason, effective_date, source, overridden_at, overridden_by, override_reason)
          VALUES ($1, $2, 100, 400, 'absent', CURRENT_DATE, 'absence', now(), $3, 'sick note')",
     )
     .bind(org_id).bind(staff_other).bind(admin).execute(&pool).await.unwrap();
@@ -3401,7 +3430,7 @@ async fn new_legal_audits_add_up_and_are_scoped(pool: PgPool) {
         (mine, staff_mine, false),
     ] {
         sqlx::query(
-            "INSERT INTO attendance_records (org_id, user_id, branch_id, business_date, edited_by, edit_reason)
+            "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, edited_by, edit_reason)
              VALUES ($1, $2, $3, CURRENT_DATE - (random() * 100)::int, $4, $5)",
         )
         .bind(org_id).bind(who).bind(branch)

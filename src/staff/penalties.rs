@@ -47,7 +47,7 @@ use crate::staff::rules::{
 pub struct PricedDay {
     pub record_id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub business_date: NaiveDate,
     pub status: AttendanceStatus,
     /// The day is `on_leave` under an UNPAID leave type. Excused (no disciplinary
@@ -144,7 +144,7 @@ async fn upsert_auto_deduction(
     // sweep must never resurrect a waived penalty or overwrite a corrected figure.
     let affected = sqlx::query(
         "INSERT INTO payroll_deductions \
-             (org_id, user_id, amount_piastres, original_amount_piastres, reason, \
+             (org_id, employee_id, amount_piastres, original_amount_piastres, reason, \
               effective_date, source, attendance_record_id) \
          VALUES ($1, $2, $3, $3, $4, $5, $6, $7) \
          ON CONFLICT (attendance_record_id, source) \
@@ -157,7 +157,7 @@ async fn upsert_auto_deduction(
                 AND payroll_deductions.overridden_at IS NULL",
     )
     .bind(day.org_id)
-    .bind(day.user_id)
+    .bind(day.employee_id)
     .bind(amount)
     .bind(reason)
     .bind(day.business_date)
@@ -184,7 +184,7 @@ pub async fn recompute_record(
     #[derive(sqlx::FromRow)]
     struct Row {
         org_id: Uuid,
-        user_id: Uuid,
+        employee_id: Uuid,
         business_date: NaiveDate,
         status: String,
         late_minutes: i32,
@@ -197,22 +197,22 @@ pub async fn recompute_record(
         // A cover is paid as extra time at the coverer's own rate (CV-4); the
         // shift it covered was someone else's, so it carries no lateness or
         // absence of its own.
-        "SELECT a.org_id, a.user_id, a.business_date, \
-                CASE WHEN a.covered_user_id IS NULL THEN a.status ELSE 'present' END AS status, \
-                CASE WHEN a.covered_user_id IS NULL THEN a.late_minutes ELSE 0 END AS late_minutes, \
+        "SELECT a.org_id, a.employee_id, a.business_date, \
+                CASE WHEN a.covered_employee_id IS NULL THEN a.status ELSE 'present' END AS status, \
+                CASE WHEN a.covered_employee_id IS NULL THEN a.late_minutes ELSE 0 END AS late_minutes, \
                 (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int \
                     AS scheduled_minutes, \
                 p.base_salary_piastres, \
                 EXISTS ( \
                     SELECT 1 FROM staff_requests r \
                       JOIN leave_types lt ON lt.id = r.leave_type_id \
-                     WHERE r.user_id = a.user_id AND r.kind = 'leave' \
+                     WHERE r.employee_id = a.employee_id AND r.kind = 'leave' \
                        AND r.status = 'approved' AND NOT COALESCE(r.is_paid, lt.is_paid) \
                        AND r.on_date <= a.business_date \
                        AND COALESCE(r.end_date, r.on_date) >= a.business_date \
                 ) AS unpaid_leave \
            FROM attendance_records a \
-           LEFT JOIN staff_profiles p ON p.user_id = a.user_id \
+           LEFT JOIN employees p ON p.id = a.employee_id \
           WHERE a.id = $1",
     )
     .bind(record_id)
@@ -225,7 +225,7 @@ pub async fn recompute_record(
     let day = PricedDay {
         record_id,
         org_id: row.org_id,
-        user_id: row.user_id,
+        employee_id: row.employee_id,
         business_date: row.business_date,
         status: rules::AttendanceStatus::parse(&row.status)?,
         unpaid_leave: row.unpaid_leave,

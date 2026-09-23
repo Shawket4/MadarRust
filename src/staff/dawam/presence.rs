@@ -10,12 +10,13 @@ use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::{branches_of, notify, notify_managers, require_device, user_name};
-use crate::authz::{Cap, Request as AuthzRequest};
+use super::{branches_of, employee_name, notify, notify_managers, owners, user_name};
+use crate::authz::{Cap, Decision, Request as AuthzRequest};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::geo::osrm::{LatLng, haversine_meters};
-use crate::orgs::handlers::extract_claims;
-use crate::staff::attendance::{AttendanceSettings, load_settings, require_active_profile};
+use crate::staff::access;
+use crate::staff::attendance::{AttendanceSettings, load_settings, require_active_employee};
+use crate::staff::principal::{Me, caller};
 use crate::staff::rules::PayRates;
 
 /// Two pings in a row outside the fence is "left" (CL-6).
@@ -26,7 +27,7 @@ const MAX_SPEED_MPS: f64 = 70.0;
 pub(crate) async fn mark_tracking_off(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     branch_id: Uuid,
     record_id: Uuid,
 ) -> Result<(), AppError> {
@@ -37,7 +38,7 @@ pub(crate) async fn mark_tracking_off(
     raise_flag(
         pool,
         org_id,
-        user_id,
+        employee_id,
         Some(branch_id),
         Some(record_id),
         "tracking_off",
@@ -54,20 +55,20 @@ pub(crate) const LOW_BATTERY: i16 = 15;
 pub(crate) async fn raise_flag(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     branch_id: Option<Uuid>,
     record_id: Option<Uuid>,
     kind: &str,
     minutes_away: i32,
 ) -> Result<(), AppError> {
     let inserted = sqlx::query(
-        "INSERT INTO attendance_flags (org_id, user_id, branch_id, attendance_record_id, kind, minutes_away) \
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind, minutes_away) \
          VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (attendance_record_id, kind) WHERE resolution IS NULL AND attendance_record_id IS NOT NULL \
          DO UPDATE SET minutes_away = GREATEST(attendance_flags.minutes_away, EXCLUDED.minutes_away)",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(branch_id)
     .bind(record_id)
     .bind(kind)
@@ -75,12 +76,13 @@ pub(crate) async fn raise_flag(
     .execute(pool)
     .await?;
     if inserted.rows_affected() > 0 {
-        let name = user_name(pool, user_id).await;
+        let name = employee_name(pool, employee_id).await;
         notify_managers(
             pool,
             org_id,
             branch_id,
-            Some(user_id),
+            Cap::HrAttendanceEdit,
+            Some(employee_id),
             &format!("staff.n_flag_{kind}"),
             json!({ "name": name, "minutes": minutes_away }),
         )
@@ -103,21 +105,22 @@ pub(crate) async fn after_check_out(
     };
     let row: Option<(Uuid, Uuid, i32)> = sqlx::query_as(
         "UPDATE attendance_records SET overtime_status = $2 \
-          WHERE id = $1 AND overtime_minutes > 0 AND covered_user_id IS NULL \
+          WHERE id = $1 AND overtime_minutes > 0 AND covered_employee_id IS NULL \
             AND overtime_status IS NULL \
-          RETURNING user_id, branch_id, overtime_minutes",
+          RETURNING employee_id, branch_id, overtime_minutes",
     )
     .bind(record_id)
     .bind(status)
     .fetch_optional(pool)
     .await?;
-    if let (Some((user_id, branch_id, minutes)), "pending") = (row, status) {
-        let name = user_name(pool, user_id).await;
+    if let (Some((employee_id, branch_id, minutes)), "pending") = (row, status) {
+        let name = employee_name(pool, employee_id).await;
         notify_managers(
             pool,
             org_id,
             Some(branch_id),
-            Some(user_id),
+            Cap::HrOvertimeApprove,
+            Some(employee_id),
             "staff.n_overtime",
             json!({ "name": name, "minutes": minutes }),
         )
@@ -171,14 +174,13 @@ struct PriorPing {
     security(("bearer_jwt" = []))
 )]
 pub async fn ping(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<PingRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
-    require_device(&req, pool.get_ref(), user_id).await?;
+    // From the employee's live phone only (CL-1, checked by StaffAuth).
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     let pool = pool.get_ref();
 
     let now = super::clock::rebuild(body.offline.as_ref(), Utc::now())?.at;
@@ -186,11 +188,11 @@ pub async fn ping(
     // queued ping belongs to the record that was open at ITS time.
     let open: Option<(Uuid, Uuid, NaiveDate)> = sqlx::query_as(
         "SELECT id, branch_id, business_date FROM attendance_records \
-          WHERE user_id = $1 AND check_in_at IS NOT NULL AND check_in_at <= $2 \
+          WHERE employee_id = $1 AND check_in_at IS NOT NULL AND check_in_at <= $2 \
             AND (check_out_at IS NULL OR check_out_at >= $2) \
           ORDER BY check_in_at DESC LIMIT 1",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(now)
     .fetch_optional(pool)
     .await?;
@@ -223,12 +225,12 @@ pub async fn ping(
     .fetch_all(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO attendance_pings (org_id, user_id, attendance_record_id, at, latitude, \
+        "INSERT INTO attendance_pings (org_id, employee_id, attendance_record_id, at, latitude, \
             longitude, accuracy_meters, distance_meters, inside, is_mock, battery_percent) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(record_id)
     .bind(now)
     .bind(body.latitude)
@@ -246,7 +248,8 @@ pub async fn ping(
     // Left mid-shift: two outside in a row, not covered by an approved excuse,
     // early departure or mission (CL-6). Nothing is charged here.
     let streak = 1 + prior.iter().take_while(|p| !p.inside).count();
-    if !inside && streak >= OUTSIDE_STREAK && !excused_now(pool, user_id, business_date).await? {
+    if !inside && streak >= OUTSIDE_STREAK && !excused_now(pool, employee_id, business_date).await?
+    {
         let first_out = prior
             .iter()
             .take_while(|p| !p.inside)
@@ -256,7 +259,7 @@ pub async fn ping(
         raise_flag(
             pool,
             org_id,
-            user_id,
+            employee_id,
             Some(branch_id),
             Some(record_id),
             "left_mid_shift",
@@ -286,7 +289,7 @@ pub async fn ping(
         raise_flag(
             pool,
             org_id,
-            user_id,
+            employee_id,
             Some(branch_id),
             Some(record_id),
             "suspicious",
@@ -310,7 +313,7 @@ pub async fn ping(
         .rows_affected()
             > 0;
         if first {
-            notify(pool, org_id, user_id, "staff.n_charge_phone", json!({})).await;
+            notify(pool, org_id, employee_id, "staff.n_charge_phone", json!({})).await;
         }
     }
 
@@ -323,14 +326,14 @@ pub async fn ping(
 }
 
 /// An approved excuse, early departure or mission covers being away now.
-async fn excused_now(pool: &PgPool, user_id: Uuid, date: NaiveDate) -> Result<bool, AppError> {
+async fn excused_now(pool: &PgPool, employee_id: Uuid, date: NaiveDate) -> Result<bool, AppError> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM staff_requests \
-          WHERE user_id = $1 AND status = 'approved' \
+          WHERE employee_id = $1 AND status = 'approved' \
             AND kind IN ('excuse', 'early_departure', 'mission') \
             AND on_date <= $2 AND COALESCE(end_date, on_date) >= $2)",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(date)
     .fetch_one(pool)
     .await?)
@@ -341,8 +344,8 @@ async fn excused_now(pool: &PgPool, user_id: Uuid, date: NaiveDate) -> Result<bo
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct AttendanceFlag {
     pub id: Uuid,
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub branch_id: Option<Uuid>,
     pub attendance_record_id: Option<Uuid>,
     /// `left_mid_shift` · `suspicious` · `tracking_off` · `time_unverified` ·
@@ -379,22 +382,20 @@ pub async fn list_flags(
     pool: crate::db::Db,
     query: web::Query<FlagQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::require::require(
+    let branches = access::scope_at(
         pool.get_ref(),
         &claims,
+        org_id,
         Cap::HrAttendanceRead,
         query.branch_id,
     )
     .await?;
-    let branches =
-        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, query.branch_id)
-            .await?;
     let mut rows: Vec<AttendanceFlag> = sqlx::query_as(
-        "SELECT f.id, f.user_id, u.name AS user_name, f.branch_id, f.attendance_record_id, \
+        "SELECT f.id, f.employee_id, e.name AS employee_name, f.branch_id, f.attendance_record_id, \
                 f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at \
-           FROM attendance_flags f JOIN users u ON u.id = f.user_id \
+           FROM attendance_flags f JOIN employees e ON e.id = f.employee_id \
           WHERE f.org_id = $1 AND ($2 OR f.resolution IS NULL) \
             AND ($3::uuid[] IS NULL OR f.branch_id = ANY($3)) \
           ORDER BY f.detected_at DESC LIMIT 200",
@@ -409,7 +410,7 @@ pub async fn list_flags(
             f.suggested_deduction_piastres = away_cost(
                 pool.get_ref(),
                 org_id,
-                f.user_id,
+                f.employee_id,
                 f.attendance_record_id,
                 f.minutes_away,
             )
@@ -423,13 +424,13 @@ pub async fn list_flags(
 async fn away_cost(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     record_id: Option<Uuid>,
     minutes: i32,
 ) -> Result<i64, AppError> {
     let salary: i64 =
-        sqlx::query_scalar("SELECT base_salary_piastres FROM staff_profiles WHERE user_id = $1")
-            .bind(user_id)
+        sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
+            .bind(employee_id)
             .fetch_optional(pool)
             .await?
             .unwrap_or(0);
@@ -479,23 +480,30 @@ pub async fn resolve_flag(
     id: web::Path<Uuid>,
     body: web::Json<ResolveFlag>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrAttendanceEdit).await?;
     #[allow(clippy::type_complexity)]
     let flag: Option<(Uuid, Option<Uuid>, Option<Uuid>, String, i32)> = sqlx::query_as(
-        "SELECT user_id, branch_id, attendance_record_id, kind, minutes_away \
+        "SELECT employee_id, branch_id, attendance_record_id, kind, minutes_away \
            FROM attendance_flags WHERE id = $1 AND org_id = $2 AND resolution IS NULL",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(pool)
     .await?;
-    let Some((user_id, branch_id, record_id, kind, minutes)) = flag else {
+    let Some((employee_id, branch_id, record_id, kind, minutes)) = flag else {
         return Err(AppError::NotFound("That flag is already handled.".into()));
     };
-    crate::authz::require::require(pool, &claims, Cap::HrAttendanceEdit, branch_id).await?;
+    let subject = access::subject(pool, org_id, employee_id).await?;
+    // At the flag's branch; a flag with none (a new phone before any branch)
+    // at one of the person's branches — never "anywhere" (RO-6).
+    match branch_id {
+        Some(b) => access::require_at(pool, &claims, org_id, Cap::HrAttendanceEdit, b).await?,
+        None => access::require_for(pool, &claims, Cap::HrAttendanceEdit, &subject).await?,
+    }
     let date: Option<NaiveDate> = match record_id {
         Some(r) => {
             sqlx::query_scalar("SELECT business_date FROM attendance_records WHERE id = $1")
@@ -511,7 +519,7 @@ pub async fn resolve_flag(
         "excuse_paid" => ("excused_paid", 0, ""),
         "excuse_unpaid" => (
             "excused_unpaid",
-            away_cost(pool, org_id, user_id, record_id, minutes).await?,
+            away_cost(pool, org_id, employee_id, record_id, minutes).await?,
             "Unpaid excuse",
         ),
         "deduct" => {
@@ -522,13 +530,31 @@ pub async fn resolve_flag(
             ("deducted", amount, "Left mid-shift")
         }
         "revoke" if kind == "new_phone" => {
-            super::revoke_devices(pool, user_id).await?;
+            super::revoke_devices(pool, employee_id).await?;
             ("revoked", 0, "")
         }
         _ => return Err(AppError::BadRequest("Unknown action".into())),
     };
     let mut deduction_id: Option<Uuid> = None;
     if amount > 0 {
+        // A deduction from a flag is a pay line like any other: nobody deducts
+        // from themselves, and above the manager's limit it waits for the owner
+        // (AD-5, audit B-8).
+        if subject.is(&claims) {
+            return Err(AppError::Forbidden(
+                "You can't add pay lines for yourself.".into(),
+            ));
+        }
+        let at = access::decision_branch(pool, &claims, Cap::HrAdjustmentsCreate, &subject).await?;
+        let mut ask = AuthzRequest::of(Cap::HrAdjustmentsCreate);
+        ask.amount = Some(amount);
+        let status = match crate::authz::require::decide_for(pool, by, &ask, at).await? {
+            Decision::Allow => "approved",
+            Decision::NeedsApproval(_) => "pending",
+            Decision::Deny(_) => {
+                return Err(crate::authz::require::denied(Cap::HrAdjustmentsCreate));
+            }
+        };
         let source = if resolution == "deducted" {
             "left_mid_shift"
         } else {
@@ -536,30 +562,46 @@ pub async fn resolve_flag(
         };
         deduction_id = Some(
             sqlx::query_scalar(
-                "INSERT INTO payroll_deductions (org_id, user_id, amount_piastres, reason, \
+                "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
                     effective_date, source, attendance_record_id, created_by, status) \
-                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, $7, $8, 'approved') \
+                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, $7, $8, $9) \
                  RETURNING id",
             )
             .bind(org_id)
-            .bind(user_id)
+            .bind(employee_id)
             .bind(amount)
             .bind(reason)
             .bind(date)
             .bind(source)
             .bind(record_id)
-            .bind(caller)
+            .bind(by)
+            .bind(status)
             .fetch_one(pool)
             .await?,
         );
-        notify(
-            pool,
-            org_id,
-            user_id,
-            "staff.n_deduction_added",
-            json!({ "reason": reason, "amount": amount }),
-        )
-        .await;
+        if status == "approved" {
+            notify(
+                pool,
+                org_id,
+                employee_id,
+                "staff.n_deduction_added",
+                json!({ "reason": reason, "amount": amount }),
+            )
+            .await;
+        } else {
+            let who = subject.name.clone();
+            let name = user_name(pool, by).await;
+            for o in owners(pool, org_id).await? {
+                notify(
+                    pool,
+                    org_id,
+                    o,
+                    "staff.n_adjustment_pending",
+                    json!({ "name": who, "by": name, "amount": amount }),
+                )
+                .await;
+            }
+        }
     }
     sqlx::query(
         "UPDATE attendance_flags SET resolution = $2, resolved_by = $3, resolved_at = now(), \
@@ -567,14 +609,14 @@ pub async fn resolve_flag(
     )
     .bind(*id)
     .bind(resolution)
-    .bind(caller)
+    .bind(by)
     .bind(deduction_id)
     .execute(pool)
     .await?;
     let row: AttendanceFlag = sqlx::query_as(
-        "SELECT f.id, f.user_id, u.name AS user_name, f.branch_id, f.attendance_record_id, \
+        "SELECT f.id, f.employee_id, e.name AS employee_name, f.branch_id, f.attendance_record_id, \
                 f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at \
-           FROM attendance_flags f JOIN users u ON u.id = f.user_id WHERE f.id = $1",
+           FROM attendance_flags f JOIN employees e ON e.id = f.employee_id WHERE f.id = $1",
     )
     .bind(*id)
     .fetch_one(pool)
@@ -586,8 +628,8 @@ pub async fn resolve_flag(
 
 #[derive(Serialize, ToSchema)]
 pub struct CoverableShift {
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub branch_id: Uuid,
     pub work_shift_id: Uuid,
     pub shift_name: String,
@@ -598,18 +640,17 @@ pub struct CoverableShift {
 
 /// Rostered shifts at my branches whose owner is past grace without a punch,
 /// until the shift ends (CV-1, CV-2).
-async fn coverable_for(pool: &PgPool, user_id: Uuid) -> Result<Vec<CoverableShift>, AppError> {
-    let mine = branches_of(pool, user_id).await?;
+async fn coverable_for(pool: &PgPool, employee_id: Uuid) -> Result<Vec<CoverableShift>, AppError> {
+    let mine = branches_of(pool, employee_id).await?;
     let mut out = Vec::new();
     let now = Utc::now();
     let colleagues: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
-        "SELECT DISTINCT u.id, u.name, a.branch_id FROM user_branch_assignments a \
-           JOIN users u ON u.id = a.user_id AND u.deleted_at IS NULL AND u.is_active \
-           JOIN staff_profiles p ON p.user_id = u.id AND p.employment_status = 'active' \
-          WHERE a.branch_id = ANY($1) AND u.id <> $2",
+        "SELECT DISTINCT e.id, e.name, a.branch_id FROM employee_branches a \
+           JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
+          WHERE a.branch_id = ANY($1) AND e.id <> $2",
     )
     .bind(&mine)
-    .bind(user_id)
+    .bind(employee_id)
     .fetch_all(pool)
     .await?;
     for (colleague, name, branch_id) in colleagues {
@@ -624,7 +665,7 @@ async fn coverable_for(pool: &PgPool, user_id: Uuid) -> Result<Vec<CoverableShif
             let punched: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM attendance_records \
                   WHERE business_date = $1 AND work_shift_id = $2 \
-                    AND (user_id = $3 OR covered_user_id = $3))",
+                    AND (employee_id = $3 OR covered_employee_id = $3))",
             )
             .bind(today)
             .bind(s.work_shift_id)
@@ -632,7 +673,7 @@ async fn coverable_for(pool: &PgPool, user_id: Uuid) -> Result<Vec<CoverableShif
             .fetch_one(pool)
             .await?;
             let on_leave: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM staff_requests WHERE user_id = $1 \
+                "SELECT EXISTS(SELECT 1 FROM staff_requests WHERE employee_id = $1 \
                    AND status = 'approved' AND kind IN ('leave', 'mission') \
                    AND on_date <= $2 AND COALESCE(end_date, on_date) >= $2)",
             )
@@ -642,8 +683,8 @@ async fn coverable_for(pool: &PgPool, user_id: Uuid) -> Result<Vec<CoverableShif
             .await?;
             if !punched && !on_leave {
                 out.push(CoverableShift {
-                    user_id: colleague,
-                    user_name: name.clone(),
+                    employee_id: colleague,
+                    employee_name: name.clone(),
                     branch_id,
                     work_shift_id: s.work_shift_id,
                     shift_name: s.name.clone(),
@@ -662,17 +703,14 @@ async fn coverable_for(pool: &PgPool, user_id: Uuid) -> Result<Vec<CoverableShif
     responses((status = 200, body = Vec<CoverableShift>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_coverable(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    require_active_profile(pool.get_ref(), user_id).await?;
-    Ok(HttpResponse::Ok().json(coverable_for(pool.get_ref(), user_id).await?))
+pub async fn my_coverable(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
+    Ok(HttpResponse::Ok().json(coverable_for(pool.get_ref(), me.employee_id).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct OpenCover {
     /// Whose shift.
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub work_shift_id: Uuid,
     #[serde(default)]
     pub latitude: Option<f64>,
@@ -689,20 +727,18 @@ pub struct OpenCover {
     security(("bearer_jwt" = []))
 )]
 pub async fn open_cover(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<OpenCover>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
-    require_device(&req, pool.get_ref(), user_id).await?;
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     let pool = pool.get_ref();
     crate::staff::attendance::require_rules(pool, org_id).await?;
-    let shift = coverable_for(pool, user_id)
+    let shift = coverable_for(pool, employee_id)
         .await?
         .into_iter()
-        .find(|c| c.user_id == body.user_id && c.work_shift_id == body.work_shift_id)
+        .find(|c| c.employee_id == body.employee_id && c.work_shift_id == body.work_shift_id)
         .ok_or_else(|| AppError::Conflict("That shift can't be covered now.".into()))?;
     let settings = load_settings(pool, org_id, Some(shift.branch_id)).await?;
     let distance = crate::staff::attendance::check_geofence(
@@ -714,10 +750,10 @@ pub async fn open_cover(
     )
     .await?;
     let open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM attendance_records WHERE user_id = $1 \
+        "SELECT EXISTS(SELECT 1 FROM attendance_records WHERE employee_id = $1 \
            AND check_in_at IS NOT NULL AND check_out_at IS NULL)",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .fetch_one(pool)
     .await?;
     if open {
@@ -726,15 +762,15 @@ pub async fn open_cover(
         ));
     }
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO attendance_records (org_id, user_id, branch_id, work_shift_id, business_date, \
+        "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, business_date, \
             status, scheduled_start_at, scheduled_end_at, check_in_at, check_in_latitude, \
-            check_in_longitude, check_in_distance_meters, check_in_method, covered_user_id, \
+            check_in_longitude, check_in_distance_meters, check_in_method, covered_employee_id, \
             cover_status, created_by) \
          VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, now(), $8, $9, $10, 'cover', $11, \
-            'pending', $2) RETURNING id",
+            'pending', $12) RETURNING id",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(shift.branch_id)
     .bind(shift.work_shift_id)
     .bind(shift.business_date)
@@ -743,27 +779,29 @@ pub async fn open_cover(
     .bind(body.latitude)
     .bind(body.longitude)
     .bind(distance)
-    .bind(body.user_id)
+    .bind(body.employee_id)
+    .bind(me.user_id)
     .fetch_one(pool)
     .await?;
     let _ = sqlx::query(
-        "INSERT INTO attendance_flags (org_id, user_id, branch_id, attendance_record_id, kind) \
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind) \
          VALUES ($1, $2, $3, $4, 'cover')",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(shift.branch_id)
     .bind(id)
     .execute(pool)
     .await?;
-    let name = user_name(pool, user_id).await;
+    let name = employee_name(pool, employee_id).await;
     notify_managers(
         pool,
         org_id,
         Some(shift.branch_id),
-        Some(user_id),
+        Cap::HrShiftCoverConfirm,
+        Some(employee_id),
         "staff.n_cover",
-        json!({ "name": name, "owner": shift.user_name }),
+        json!({ "name": name, "owner": shift.employee_name }),
     )
     .await;
     let record = crate::staff::attendance::load_record(pool, org_id, id).await?;
@@ -789,24 +827,29 @@ pub async fn decide_cover(
     id: web::Path<Uuid>,
     body: web::Json<Decide>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
-    let row: Option<(Uuid, Uuid, Option<Uuid>)> = sqlx::query_as(
-        "SELECT user_id, branch_id, covered_user_id FROM attendance_records \
-          WHERE id = $1 AND org_id = $2 AND cover_status = 'pending'",
+    access::gate(pool, &claims, org_id, Cap::HrShiftCoverConfirm).await?;
+    // The two people involved, and their accounts (if any).
+    #[allow(clippy::type_complexity)]
+    let row: Option<(Uuid, Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT a.employee_id, a.branch_id, a.covered_employee_id, c.user_id, o.user_id \
+           FROM attendance_records a \
+           JOIN employees c ON c.id = a.employee_id \
+           LEFT JOIN employees o ON o.id = a.covered_employee_id \
+          WHERE a.id = $1 AND a.org_id = $2 AND a.cover_status = 'pending'",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(pool)
     .await?;
-    let Some((coverer, branch_id, owner)) = row else {
+    let Some((coverer, branch_id, _owner, coverer_user, owner_user)) = row else {
         return Err(AppError::NotFound("No cover waiting here.".into()));
     };
-    crate::authz::require::require(pool, &claims, Cap::HrShiftCoverConfirm, Some(branch_id))
-        .await?;
-    if caller == coverer || Some(caller) == owner {
+    access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
+    if Some(by) == coverer_user || Some(by) == owner_user {
         return Err(AppError::Forbidden(
             "You can't confirm a cover you're part of.".into(),
         ));
@@ -819,7 +862,7 @@ pub async fn decide_cover(
     sqlx::query("UPDATE attendance_records SET cover_status = $2, edited_by = $3 WHERE id = $1")
         .bind(*id)
         .bind(status)
-        .bind(caller)
+        .bind(by)
         .execute(pool)
         .await?;
     sqlx::query(
@@ -827,7 +870,7 @@ pub async fn decide_cover(
           WHERE attendance_record_id = $1 AND kind = 'cover' AND resolution IS NULL",
     )
     .bind(*id)
-    .bind(caller)
+    .bind(by)
     .execute(pool)
     .await?;
     notify(
@@ -859,12 +902,13 @@ pub async fn decide_overtime(
     id: web::Path<Uuid>,
     body: web::Json<Decide>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrOvertimeApprove).await?;
     let row: Option<(Uuid, Uuid, i32, Option<i32>)> = sqlx::query_as(
-        "SELECT user_id, branch_id, overtime_minutes, \
+        "SELECT employee_id, branch_id, overtime_minutes, \
                 (EXTRACT(EPOCH FROM (scheduled_end_at - scheduled_start_at)) / 60)::int \
            FROM attendance_records WHERE id = $1 AND org_id = $2 AND overtime_status = 'pending'",
     )
@@ -872,22 +916,23 @@ pub async fn decide_overtime(
     .bind(org_id)
     .fetch_optional(pool)
     .await?;
-    let Some((user_id, branch_id, minutes, scheduled)) = row else {
+    let Some((employee_id, branch_id, minutes, scheduled)) = row else {
         return Err(AppError::NotFound("No overtime waiting here.".into()));
     };
-    if caller == user_id {
+    let subject = access::subject(pool, org_id, employee_id).await?;
+    if subject.is(&claims) {
         return Err(AppError::Forbidden(
             "You can't approve your own overtime.".into(),
         ));
     }
+    access::require_at(pool, &claims, org_id, Cap::HrOvertimeApprove, branch_id).await?;
     if body.approve {
-        let salary: i64 = sqlx::query_scalar(
-            "SELECT base_salary_piastres FROM staff_profiles WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?
-        .unwrap_or(0);
+        let salary: i64 =
+            sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
+                .bind(employee_id)
+                .fetch_optional(pool)
+                .await?
+                .unwrap_or(0);
         let settings = load_settings(pool, org_id, Some(branch_id)).await?;
         let rates = PayRates::from_base(
             salary,
@@ -901,25 +946,22 @@ pub async fn decide_overtime(
         ask.amount = Some(amount);
         let pending = crate::authz::Pending {
             request: ask,
-            subject_id: user_id.to_string(),
-            requested_by: user_id.to_string(),
+            subject_id: subject.authz_key(),
+            requested_by: subject.authz_key(),
             why: crate::authz::Why::NotHeld,
         };
-        crate::authz::require::settle(pool, caller, &pending, Some(branch_id)).await?;
-    } else {
-        crate::authz::require::require(pool, &claims, Cap::HrOvertimeApprove, Some(branch_id))
-            .await?;
+        crate::authz::require::settle(pool, by, &pending, Some(branch_id)).await?;
     }
     sqlx::query("UPDATE attendance_records SET overtime_status = $2, edited_by = $3 WHERE id = $1")
         .bind(*id)
         .bind(if body.approve { "approved" } else { "rejected" })
-        .bind(caller)
+        .bind(by)
         .execute(pool)
         .await?;
     notify(
         pool,
         org_id,
-        user_id,
+        employee_id,
         if body.approve {
             "staff.n_overtime_approved"
         } else {
@@ -936,7 +978,7 @@ pub async fn decide_overtime(
 
 #[derive(Deserialize, ToSchema)]
 pub struct PunchFor {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     /// Required (CL-13): a dead phone, a forgotten one.
     pub reason: String,
 }
@@ -953,62 +995,75 @@ pub async fn punch_for(
     pool: crate::db::Db,
     body: web::Json<PunchFor>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrAttendancePunchOthers).await?;
     let reason = body.reason.trim();
     if reason.is_empty() {
         return Err(AppError::BadRequest("A reason is required.".into()));
     }
-    crate::staff::require_user_in_org(pool, org_id, body.user_id).await?;
+    let subject = access::subject(pool, org_id, body.employee_id).await?;
+    if subject.employment_status != "active" {
+        return Err(AppError::Conflict(
+            "That person isn't an active employee.".into(),
+        ));
+    }
+    // Nobody punches for themselves: their own phone or the till does that.
+    if subject.is(&claims) {
+        return Err(AppError::Forbidden(
+            "Punch yourself in from your own phone.".into(),
+        ));
+    }
     crate::staff::attendance::require_rules(pool, org_id).await?;
-    let branch = branches_of(pool, body.user_id)
+    if subject.branches.is_empty() {
+        return Err(AppError::BadRequest("That person has no branch.".into()));
+    }
+    access::require_for(pool, &claims, Cap::HrAttendancePunchOthers, &subject).await?;
+    // At the branch the caller runs (one of theirs), else the first.
+    let branch = access::decision_branch(pool, &claims, Cap::HrAttendancePunchOthers, &subject)
         .await?
-        .first()
-        .copied()
         .ok_or_else(|| AppError::BadRequest("That person has no branch.".into()))?;
-    crate::authz::require::require(pool, &claims, Cap::HrAttendancePunchOthers, Some(branch))
-        .await?;
 
     let id = punch(
         pool,
         org_id,
-        body.user_id,
+        body.employee_id,
         branch,
         "manual",
         reason,
-        Some(caller),
+        Some(by),
     )
     .await?;
     notify(
         pool,
         org_id,
-        body.user_id,
+        body.employee_id,
         "staff.n_punched_for_you",
-        json!({ "name": user_name(pool, caller).await, "reason": reason }),
+        json!({ "name": user_name(pool, by).await, "reason": reason }),
     )
     .await;
     let record = crate::staff::attendance::load_record(pool, org_id, id).await?;
     Ok(HttpResponse::Ok().json(record))
 }
 
-/// Clock `user_id` in at `branch` now, or out if they are in; `method` says
-/// how (CL-13, CL-16), `by` who did it for them.
+/// Clock `employee_id` in at `branch` now, or out if they are in; `method`
+/// says how (CL-13, CL-16), `by` the user who did it for them.
 pub(crate) async fn punch(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     branch: Uuid,
     method: &str,
     reason: &str,
     by: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
     let open: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM attendance_records WHERE user_id = $1 AND check_in_at IS NOT NULL \
+        "SELECT id FROM attendance_records WHERE employee_id = $1 AND check_in_at IS NOT NULL \
             AND check_out_at IS NULL ORDER BY check_in_at DESC LIMIT 1",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .fetch_optional(pool)
     .await?;
     let id = match open {
@@ -1030,19 +1085,19 @@ pub(crate) async fn punch(
             let today = crate::staff::attendance::today_in(pool, &tz).await?;
             let now = Utc::now();
             let shifts =
-                crate::staff::schedules::resolve_shifts_for(pool, user_id, today, &tz).await?;
+                crate::staff::schedules::resolve_shifts_for(pool, employee_id, today, &tz).await?;
             let shift = crate::staff::schedules::pick_shift_for_instant(&shifts, now);
             sqlx::query_scalar(
-                "INSERT INTO attendance_records (org_id, user_id, branch_id, work_shift_id, \
+                "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                     business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, \
                     check_in_method, is_manual, punch_reason, created_by) \
                  VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, now(), $10, $11, $8, $9) \
-                 ON CONFLICT (user_id, business_date, \
-                    COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_user_id IS NULL \
+                 ON CONFLICT (employee_id, business_date, \
+                    COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL \
                  DO NOTHING RETURNING id",
             )
             .bind(org_id)
-            .bind(user_id)
+            .bind(employee_id)
             .bind(branch)
             .bind(shift.map(|s| s.work_shift_id))
             .bind(today)
@@ -1074,7 +1129,8 @@ pub struct TillPunch {
 
 #[derive(Serialize, ToSchema)]
 pub struct TillPunchResult {
-    pub user_id: Uuid,
+    /// The employee the PIN's owner is.
+    pub employee_id: Uuid,
     pub name: String,
     /// `in` · `out`
     pub punched: String,
@@ -1095,7 +1151,7 @@ pub async fn till_punch(
     pool: crate::db::Db,
     body: web::Json<TillPunch>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
     crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(body.branch_id)).await?;
@@ -1141,11 +1197,25 @@ pub async fn till_punch(
             return Err(AppError::Unauthorized("Wrong PIN".into()));
         }
     };
-    require_active_profile(pool, holder.id).await?;
+    // The PIN names a till user; the punch is for the employee linked to them.
+    let employee: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
+            .bind(holder.id)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(employee_id) = employee else {
+        return Err(AppError::Coded {
+            status: 403,
+            code: "NOT_AN_EMPLOYEE",
+            reason: format!("{} isn't set up as an employee in Dawam.", holder.name),
+        });
+    };
+    require_active_employee(pool, employee_id).await?;
     let id = punch(
         pool,
         org_id,
-        holder.id,
+        employee_id,
         body.branch_id,
         "till",
         "Till PIN",
@@ -1154,8 +1224,8 @@ pub async fn till_punch(
     .await?;
     let record = crate::staff::attendance::load_record(pool, org_id, id).await?;
     Ok(HttpResponse::Ok().json(TillPunchResult {
-        user_id: holder.id,
-        name: holder.name.clone(),
+        employee_id,
+        name: employee_name(pool, employee_id).await,
         punched: if record.check_out_at.is_some() {
             "out"
         } else {
@@ -1166,26 +1236,24 @@ pub async fn till_punch(
     }))
 }
 
-/// Sign a person's phone out now (RO-4).
+/// Sign a person's phone out now (RO-4): the device, every staff token minted
+/// for it, and its pushes.
 #[utoipa::path(
-    delete, path = "/staff/employees/{user_id}/device", tag = "staff",
-    params(("user_id" = Uuid, Path)),
+    delete, path = "/staff/employees/{employee_id}/device", tag = "staff",
+    params(("employee_id" = Uuid, Path)),
     responses((status = 204), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn revoke_device(
     req: HttpRequest,
     pool: crate::db::Db,
-    user_id: web::Path<Uuid>,
+    employee_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::staff::require_user_in_org(pool.get_ref(), org_id, *user_id).await?;
-    let branch = branches_of(pool.get_ref(), *user_id)
-        .await?
-        .first()
-        .copied();
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrStaffEdit, branch).await?;
-    super::revoke_devices(pool.get_ref(), *user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrStaffEdit).await?;
+    let subject = access::subject(pool.get_ref(), org_id, *employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrStaffEdit, &subject).await?;
+    super::revoke_devices(pool.get_ref(), *employee_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }

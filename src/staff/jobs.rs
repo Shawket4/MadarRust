@@ -24,6 +24,15 @@
 //! Runs on the OWNER pool, which bypasses RLS. That is the sanctioned path for
 //! cross-tenant background work (see `src/db.rs`); every query below is explicitly
 //! keyed by `org_id` regardless.
+//!
+//! ONLY LIVE DAWAM ORGS (PS-7, SA-3, audit B3). Every step that writes
+//! attendance or money skips an org that is suspended, deleted or has Dawam
+//! switched off, and an employee who is not active: switching Dawam back on
+//! must not show absences and penalties for the time it was off. The
+//! coordinate purge (step 4) is a privacy duty and runs for everyone.
+
+/// The SQL test for "this org's Dawam runs": join `organizations o` on it.
+const LIVE_ORG: &str = "o.is_active AND o.deleted_at IS NULL AND 'dawam' = ANY(o.modules)";
 
 use std::time::Duration;
 
@@ -63,7 +72,9 @@ pub fn spawn(pool: PgPool) {
     });
 }
 
-async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+/// One pass of the sweep (the tests drive it directly).
+#[doc(hidden)]
+pub async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     close_forgotten_checkouts(pool).await?;
     mark_absences(pool).await?;
     apply_pending_penalties(pool).await?;
@@ -78,8 +89,10 @@ async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
 /// quiet.
 #[doc(hidden)]
 pub async fn phones_that_died(pool: &PgPool) -> Result<(), crate::errors::AppError> {
-    let quiet: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
-        "SELECT a.org_id, a.user_id, a.branch_id, a.id FROM attendance_records a \
+    let quiet: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(&format!(
+        "SELECT a.org_id, a.employee_id, a.branch_id, a.id FROM attendance_records a \
+           JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
+           JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
            JOIN LATERAL (SELECT at, battery_percent FROM attendance_pings p \
                           WHERE p.attendance_record_id = a.id ORDER BY at DESC LIMIT 1) last ON true \
           WHERE a.check_in_at IS NOT NULL AND a.check_out_at IS NULL \
@@ -87,16 +100,16 @@ pub async fn phones_that_died(pool: &PgPool) -> Result<(), crate::errors::AppErr
             AND last.battery_percent <= $1 \
             AND NOT EXISTS (SELECT 1 FROM attendance_flags f \
                              WHERE f.attendance_record_id = a.id AND f.kind = 'phone_died') \
-          LIMIT 500",
-    )
+          LIMIT 500"
+    ))
     .bind(crate::staff::dawam::presence::LOW_BATTERY)
     .fetch_all(pool)
     .await?;
-    for (org_id, user_id, branch_id, record_id) in quiet {
+    for (org_id, employee_id, branch_id, record_id) in quiet {
         crate::staff::dawam::presence::raise_flag(
             pool,
             org_id,
-            user_id,
+            employee_id,
             Some(branch_id),
             Some(record_id),
             "phone_died",
@@ -126,7 +139,7 @@ pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), crate::errors::
            FROM b \
           WHERE ((EXTRACT(DOW FROM b.local) = 3 AND b.local::time >= '22:00') \
                  OR EXTRACT(DOW FROM b.local) IN (4, 5)) \
-            AND EXISTS (SELECT 1 FROM user_branch_assignments a WHERE a.branch_id = b.id) \
+            AND EXISTS (SELECT 1 FROM employee_branches a WHERE a.branch_id = b.id) \
             AND NOT EXISTS (SELECT 1 FROM staff_suggestion_cache c \
                              WHERE c.branch_id = b.id \
                                AND c.week_start = (b.local::date + (6 - EXTRACT(DOW FROM b.local)::int))) \
@@ -167,13 +180,15 @@ async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), crate::errors::A
     // Only rows with a known scheduled end can be auto-closed: an unrostered
     // check-in has no "supposed to finish" to close it at, so it stays open for a
     // human to resolve.
-    let stale: Vec<Open> = sqlx::query_as(
+    let stale: Vec<Open> = sqlx::query_as(&format!(
         "SELECT a.id, a.org_id, a.branch_id, a.check_in_at, a.scheduled_start_at, \
                 a.scheduled_end_at, \
                 COALESCE(ws.break_minutes, 0) AS break_minutes, \
                 COALESCE(ws.paid_break, TRUE) AS paid_break, \
                 ws.half_day_threshold_minutes \
            FROM attendance_records a \
+           JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
+           JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
            LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id \
           WHERE a.check_in_at IS NOT NULL \
             AND a.check_out_at IS NULL \
@@ -184,8 +199,8 @@ async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), crate::errors::A
                      WHERE s.org_id = a.org_id \
                        AND (s.branch_id = a.branch_id OR s.branch_id IS NULL) \
                      ORDER BY s.branch_id NULLS LAST LIMIT 1), 120)) \
-          LIMIT 500",
-    )
+          LIMIT 500"
+    ))
     .fetch_all(pool)
     .await?;
 
@@ -244,7 +259,7 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     #[derive(sqlx::FromRow)]
     struct Missing {
         org_id: Uuid,
-        user_id: Uuid,
+        employee_id: Uuid,
         branch_id: Uuid,
         work_shift_id: Uuid,
         business_date: NaiveDate,
@@ -255,7 +270,7 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
 
     // Yesterday and today only: a sweep that reached back further would resurrect
     // absences an operator had deliberately deleted.
-    let missing: Vec<Missing> = sqlx::query_as(
+    let missing: Vec<Missing> = sqlx::query_as(&format!(
         r#"
         WITH days AS (
             SELECT d::date AS business_date
@@ -263,21 +278,20 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
         ),
         rostered AS (
             SELECT p.org_id,
-                   p.user_id,
+                   p.id AS employee_id,
                    d.business_date,
                    ws.id AS work_shift_id,
                    COALESCE(ws.branch_id, (
-                       SELECT uba.branch_id FROM user_branch_assignments uba
-                        WHERE uba.user_id = p.user_id LIMIT 1
+                       SELECT eb.branch_id FROM employee_branches eb
+                        WHERE eb.employee_id = p.id ORDER BY eb.assigned_at LIMIT 1
                    )) AS branch_id,
                    COALESCE(b.timezone::text, o.timezone::text, 'Africa/Cairo') AS tz,
                    ws.start_time, ws.end_time, ws.crosses_midnight
-              FROM staff_profiles p
-              JOIN users u ON u.id = p.user_id AND u.deleted_at IS NULL
-              JOIN organizations o ON o.id = p.org_id
+              FROM employees p
+              JOIN organizations o ON o.id = p.org_id AND {LIVE_ORG}
               CROSS JOIN days d
               JOIN staff_schedules s
-                ON s.user_id = p.user_id
+                ON s.employee_id = p.id
                AND s.effective_from <= d.business_date
                AND (s.effective_to IS NULL OR s.effective_to >= d.business_date)
                AND (s.day_of_week IS NULL
@@ -289,7 +303,7 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                -- days are simply not rostered.
                AND NOT EXISTS (
                    SELECT 1 FROM staff_schedule_overrides ov
-                    WHERE ov.user_id = p.user_id AND ov.on_date = d.business_date
+                    WHERE ov.employee_id = p.id AND ov.on_date = d.business_date
                )
                -- A confirmed public holiday marks nobody absent (RU-10).
                AND NOT EXISTS (
@@ -298,7 +312,7 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                       AND h.decision = 'holiday'
                )
         )
-        SELECT r.org_id, r.user_id, r.branch_id, r.work_shift_id, r.business_date,
+        SELECT r.org_id, r.employee_id, r.branch_id, r.work_shift_id, r.business_date,
                (r.business_date + r.start_time) AT TIME ZONE r.tz AS scheduled_start_at,
                (r.business_date + r.end_time
                     + CASE WHEN r.crosses_midnight
@@ -308,7 +322,7 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                -- approvals, so a day either is excused or is an absence.
                EXISTS (
                    SELECT 1 FROM staff_requests sr
-                    WHERE sr.user_id = r.user_id AND sr.status = 'approved'
+                    WHERE sr.employee_id = r.employee_id AND sr.status = 'approved'
                       AND sr.kind IN ('leave', 'mission')
                       AND sr.on_date <= r.business_date
                       AND COALESCE(sr.end_date, sr.on_date) >= r.business_date
@@ -322,29 +336,29 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                ) AT TIME ZONE r.tz
            AND NOT EXISTS (
                SELECT 1 FROM attendance_records a
-                WHERE a.user_id = r.user_id
+                WHERE a.employee_id = r.employee_id
                   AND a.business_date = r.business_date
                   AND COALESCE(a.work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)
                       = r.work_shift_id
            )
          LIMIT 500
-        "#,
-    )
+        "#
+    ))
     .fetch_all(pool)
     .await?;
 
     for row in missing {
         sqlx::query(
             "INSERT INTO attendance_records \
-                 (org_id, user_id, branch_id, work_shift_id, business_date, status, \
+                 (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
                   scheduled_start_at, scheduled_end_at, is_manual, edit_reason) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, 'Marked automatically: no check-in') \
-             ON CONFLICT (user_id, business_date, \
-                          COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_user_id IS NULL \
+             ON CONFLICT (employee_id, business_date, \
+                          COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL \
              DO NOTHING",
         )
         .bind(row.org_id)
-        .bind(row.user_id)
+        .bind(row.employee_id)
         .bind(row.branch_id)
         .bind(row.work_shift_id)
         .bind(row.business_date)
@@ -377,9 +391,11 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::App
     // Closed days (or absences) from the last week that carry no deduction row
     // yet. A day whose penalty was already written and then waived is excluded by
     // the EXISTS, so it is never revisited.
-    let rows: Vec<Pending> = sqlx::query_as(
+    let rows: Vec<Pending> = sqlx::query_as(&format!(
         "SELECT a.id, a.org_id, a.branch_id \
            FROM attendance_records a \
+           JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
+           JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
           WHERE a.business_date >= CURRENT_DATE - 7 \
             AND (a.check_out_at IS NOT NULL OR a.status IN ('absent', 'on_leave')) \
             AND (a.late_minutes > 0 OR a.status IN ('absent', 'on_leave')) \
@@ -387,8 +403,8 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::App
                 SELECT 1 FROM payroll_deductions d \
                  WHERE d.attendance_record_id = a.id AND d.source <> 'manual' \
             ) \
-          LIMIT 500",
-    )
+          LIMIT 500"
+    ))
     .fetch_all(pool)
     .await?;
 

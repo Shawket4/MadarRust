@@ -12,11 +12,11 @@ use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::{branches_of, engine, notify, notify_managers, user_name, week_start};
+use super::{branches_of, employee_name, engine, notify, notify_managers, week_start};
 use crate::authz::Cap;
 use crate::errors::{AppError, AppErrorResponse};
-use crate::orgs::handlers::extract_claims;
-use crate::staff::attendance::require_active_profile;
+use crate::staff::access;
+use crate::staff::principal::{Me, caller};
 use crate::staff::schedules::resolve_shifts_for;
 
 const MAX_DAYS: i64 = 62;
@@ -38,8 +38,8 @@ pub struct MyRosterQuery {
 
 #[derive(Serialize, ToSchema, Clone)]
 pub struct RosterShift {
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub date: NaiveDate,
     pub branch_id: Uuid,
     pub work_shift_id: Uuid,
@@ -61,6 +61,7 @@ pub struct OpenShift {
     pub on_date: NaiveDate,
     /// `open` · `claimed` · `filled` · `cancelled`
     pub status: String,
+    /// The employee who claimed it.
     pub claimed_by: Option<Uuid>,
     #[sqlx(default)]
     pub claimed_by_name: Option<String>,
@@ -83,7 +84,7 @@ pub struct WorkShiftBrief {
 
 #[derive(Serialize, ToSchema, sqlx::FromRow, Clone)]
 pub struct RosterPerson {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub name: String,
     pub gender: Option<String>,
     pub pref_time: Option<String>,
@@ -158,11 +159,10 @@ async fn work_shifts_of(pool: &PgPool, org_id: Uuid) -> Result<Vec<WorkShiftBrie
 
 async fn staff_at(pool: &PgPool, branch_id: Uuid) -> Result<Vec<RosterPerson>, AppError> {
     Ok(sqlx::query_as(
-        "SELECT u.id AS user_id, u.name, p.gender, p.pref_time, p.cant_work_days, p.department_id \
-           FROM user_branch_assignments a \
-           JOIN users u ON u.id = a.user_id AND u.deleted_at IS NULL AND u.is_active \
-           JOIN staff_profiles p ON p.user_id = u.id AND p.employment_status = 'active' \
-          WHERE a.branch_id = $1 ORDER BY lower(u.name)",
+        "SELECT e.id AS employee_id, e.name, e.gender, e.pref_time, e.cant_work_days, e.department_id \
+           FROM employee_branches a \
+           JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
+          WHERE a.branch_id = $1 ORDER BY lower(e.name)",
     )
     .bind(branch_id)
     .fetch_all(pool)
@@ -171,16 +171,16 @@ async fn staff_at(pool: &PgPool, branch_id: Uuid) -> Result<Vec<RosterPerson>, A
 
 async fn on_leave_days(
     pool: &PgPool,
-    user_id: Uuid,
+    employee_id: Uuid,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<HashSet<NaiveDate>, AppError> {
     let rows: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as(
         "SELECT on_date, COALESCE(end_date, on_date) FROM staff_requests \
-          WHERE user_id = $1 AND status = 'approved' AND kind IN ('leave', 'mission') \
+          WHERE employee_id = $1 AND status = 'approved' AND kind IN ('leave', 'mission') \
             AND on_date <= $3 AND COALESCE(end_date, on_date) >= $2",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(from)
     .bind(to)
     .fetch_all(pool)
@@ -208,7 +208,7 @@ async fn shifts_of(
 ) -> Result<Vec<RosterShift>, AppError> {
     let changed: HashSet<NaiveDate> = sqlx::query_scalar::<_, NaiveDate>(
         "SELECT on_date FROM staff_schedule_overrides \
-          WHERE user_id = $1 AND changed_after_publish AND on_date BETWEEN $2 AND $3",
+          WHERE employee_id = $1 AND changed_after_publish AND on_date BETWEEN $2 AND $3",
     )
     .bind(person.0)
     .bind(from)
@@ -227,8 +227,8 @@ async fn shifts_of(
                 continue;
             }
             out.push(RosterShift {
-                user_id: person.0,
-                user_name: person.1.to_string(),
+                employee_id: person.0,
+                employee_name: person.1.to_string(),
                 date: d,
                 branch_id,
                 work_shift_id: s.work_shift_id,
@@ -252,10 +252,10 @@ async fn open_shifts_at(
 ) -> Result<Vec<OpenShift>, AppError> {
     let mut rows: Vec<OpenShift> = sqlx::query_as(
         "SELECT o.id, o.branch_id, o.work_shift_id, ws.name AS shift_name, o.on_date, o.status, \
-                o.claimed_by, u.name AS claimed_by_name \
+                o.claimed_by, e.name AS claimed_by_name \
            FROM staff_open_shifts o \
            JOIN work_shifts ws ON ws.id = o.work_shift_id \
-           LEFT JOIN users u ON u.id = o.claimed_by \
+           LEFT JOIN employees e ON e.id = o.claimed_by \
           WHERE o.branch_id = ANY($1) AND o.on_date BETWEEN $2 AND $3 \
             AND o.status IN ('open', 'claimed') \
           ORDER BY o.on_date",
@@ -295,13 +295,11 @@ pub async fn roster(
     pool: crate::db::Db,
     query: web::Query<RosterQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     check_range(query.from, query.to)?;
     let pool = pool.get_ref();
-    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(query.branch_id)).await?;
-    crate::authz::require::require(pool, &claims, Cap::HrScheduleRead, Some(query.branch_id))
-        .await?;
+    access::require_at(pool, &claims, org_id, Cap::HrScheduleRead, query.branch_id).await?;
     let tz = crate::staff::branch_timezone(pool, query.branch_id).await?;
     let work_shifts = work_shifts_of(pool, org_id).await?;
     let shift_branch: HashMap<Uuid, Option<Uuid>> =
@@ -312,7 +310,7 @@ pub async fn roster(
         shifts.extend(
             shifts_of(
                 pool,
-                (p.user_id, &p.name),
+                (p.employee_id, &p.name),
                 query.branch_id,
                 &shift_branch,
                 query.from,
@@ -360,23 +358,23 @@ async fn labour_warnings(
     for p in staff {
         let spans: Vec<engine::Span> = shifts
             .iter()
-            .filter(|s| s.user_id == p.user_id && !s.on_leave)
+            .filter(|s| s.employee_id == p.employee_id && !s.on_leave)
             .map(|s| engine::Span {
                 date: s.date,
                 start: s.start_at,
                 end: s.end_at,
             })
             .collect();
-        out.extend(engine::breaks(p.user_id, &spans, &limits));
+        out.extend(engine::breaks(p.employee_id, &spans, &limits));
     }
     let cap = (settings.limit_overtime_day_hours * rust_decimal::Decimal::from(60))
         .round()
         .try_into()
         .unwrap_or(i64::MAX);
-    let ids: Vec<Uuid> = staff.iter().map(|p| p.user_id).collect();
+    let ids: Vec<Uuid> = staff.iter().map(|p| p.employee_id).collect();
     let over: Vec<(Uuid, NaiveDate, i64)> = sqlx::query_as(
-        "SELECT user_id, business_date, SUM(overtime_minutes)::int8 FROM attendance_records \
-          WHERE user_id = ANY($1) AND business_date BETWEEN $2 AND $3 \
+        "SELECT employee_id, business_date, SUM(overtime_minutes)::int8 FROM attendance_records \
+          WHERE employee_id = ANY($1) AND business_date BETWEEN $2 AND $3 \
           GROUP BY 1, 2 HAVING SUM(overtime_minutes) > $4",
     )
     .bind(&ids)
@@ -387,8 +385,8 @@ async fn labour_warnings(
     .await?;
     out.extend(
         over.into_iter()
-            .map(|(user_id, date, minutes)| engine::LabourWarning {
-                user_id,
+            .map(|(employee_id, date, minutes)| engine::LabourWarning {
+                employee_id,
                 date,
                 kind: "overtime_day".into(),
                 minutes,
@@ -422,16 +420,15 @@ pub struct MyRosterView {
     security(("bearer_jwt" = []))
 )]
 pub async fn my_roster(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     query: web::Query<MyRosterQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     check_range(query.from, query.to)?;
     let pool = pool.get_ref();
-    let branches = branches_of(pool, user_id).await?;
+    let branches = branches_of(pool, employee_id).await?;
     let Some(&home) = branches.first() else {
         return Err(AppError::BadRequest(
             "You have no branch yet — ask your manager.".into(),
@@ -442,12 +439,12 @@ pub async fn my_roster(
     let shift_branch: HashMap<Uuid, Option<Uuid>> =
         work_shifts.iter().map(|w| (w.id, w.branch_id)).collect();
     let published = published_weeks(pool, &branches, query.from, query.to).await?;
-    let name = user_name(pool, user_id).await;
+    let name = employee_name(pool, employee_id).await;
     let mut shifts = Vec::new();
     for &b in &branches {
         for mut s in shifts_of(
             pool,
-            (user_id, &name),
+            (employee_id, &name),
             b,
             &shift_branch,
             query.from,
@@ -474,12 +471,12 @@ pub async fn my_roster(
     let mut team = Vec::new();
     for &b in &branches {
         for p in staff_at(pool, b).await? {
-            if p.user_id == user_id {
+            if p.employee_id == employee_id {
                 continue;
             }
             for s in shifts_of(
                 pool,
-                (p.user_id, &p.name),
+                (p.employee_id, &p.name),
                 b,
                 &shift_branch,
                 query.from,
@@ -508,8 +505,8 @@ pub async fn my_roster(
         .filter(|o| published.contains(&(o.branch_id, week_start(o.on_date))))
         .collect();
     let (pref_time, cant_work_days): (Option<String>, Vec<i16>) =
-        sqlx::query_as("SELECT pref_time, cant_work_days FROM staff_profiles WHERE user_id = $1")
-            .bind(user_id)
+        sqlx::query_as("SELECT pref_time, cant_work_days FROM employees WHERE id = $1")
+            .bind(employee_id)
             .fetch_one(pool)
             .await?;
     Ok(HttpResponse::Ok().json(MyRosterView {
@@ -518,7 +515,7 @@ pub async fn my_roster(
         shifts,
         unpublished_weeks: unpublished,
         open_shifts,
-        swaps: swaps_of(pool, org_id, Some(user_id), None).await?,
+        swaps: swaps_of(pool, org_id, Some(employee_id), None, None).await?,
         team,
         pref_time,
         cant_work_days,
@@ -529,10 +526,10 @@ pub async fn my_roster(
 pub(crate) async fn after_day_change(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     on_date: NaiveDate,
 ) -> Result<(), AppError> {
-    let branches = branches_of(pool, user_id).await?;
+    let branches = branches_of(pool, employee_id).await?;
     let published: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM staff_week_publications \
                         WHERE branch_id = ANY($1) AND week_start = $2)",
@@ -544,16 +541,16 @@ pub(crate) async fn after_day_change(
     if published {
         sqlx::query(
             "UPDATE staff_schedule_overrides SET changed_after_publish = true \
-              WHERE user_id = $1 AND on_date = $2",
+              WHERE employee_id = $1 AND on_date = $2",
         )
-        .bind(user_id)
+        .bind(employee_id)
         .bind(on_date)
         .execute(pool)
         .await?;
         notify(
             pool,
             org_id,
-            user_id,
+            employee_id,
             "staff.n_shift_changed",
             json!({ "date": on_date }),
         )
@@ -565,27 +562,27 @@ pub(crate) async fn after_day_change(
 async fn set_day(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     on_date: NaiveDate,
     work_shift_id: Option<Uuid>,
     reason: &str,
     by: Uuid,
 ) -> Result<(), AppError> {
     sqlx::query(
-        "INSERT INTO staff_schedule_overrides (org_id, user_id, on_date, work_shift_id, reason, created_by) \
+        "INSERT INTO staff_schedule_overrides (org_id, employee_id, on_date, work_shift_id, reason, created_by) \
          VALUES ($1, $2, $3, $4, $5, $6) \
-         ON CONFLICT (user_id, on_date) DO UPDATE SET work_shift_id = EXCLUDED.work_shift_id, \
+         ON CONFLICT (employee_id, on_date) DO UPDATE SET work_shift_id = EXCLUDED.work_shift_id, \
              reason = EXCLUDED.reason, created_by = EXCLUDED.created_by",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(on_date)
     .bind(work_shift_id)
     .bind(reason)
     .bind(by)
     .execute(pool)
     .await?;
-    after_day_change(pool, org_id, user_id, on_date).await
+    after_day_change(pool, org_id, employee_id, on_date).await
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -606,12 +603,18 @@ pub async fn publish(
     pool: crate::db::Db,
     body: web::Json<PublishWeek>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(body.branch_id)).await?;
-    crate::authz::require::require(pool, &claims, Cap::HrSchedulePublish, Some(body.branch_id))
-        .await?;
+    access::gate(pool, &claims, org_id, Cap::HrSchedulePublish).await?;
+    access::require_at(
+        pool,
+        &claims,
+        org_id,
+        Cap::HrSchedulePublish,
+        body.branch_id,
+    )
+    .await?;
     let ws = week_start(body.week_start);
     let fresh = sqlx::query(
         "INSERT INTO staff_week_publications (org_id, branch_id, week_start, published_by) \
@@ -620,7 +623,7 @@ pub async fn publish(
     .bind(org_id)
     .bind(body.branch_id)
     .bind(ws)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .execute(pool)
     .await?
     .rows_affected();
@@ -629,7 +632,7 @@ pub async fn publish(
             notify(
                 pool,
                 org_id,
-                p.user_id,
+                p.employee_id,
                 "staff.n_week_published",
                 json!({ "date": ws }),
             )
@@ -658,12 +661,11 @@ pub async fn post_open_shift(
     pool: crate::db::Db,
     body: web::Json<PostOpenShift>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(body.branch_id)).await?;
-    crate::authz::require::require(pool, &claims, Cap::HrScheduleEdit, Some(body.branch_id))
-        .await?;
+    access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
+    access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, body.branch_id).await?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date, posted_by) \
          SELECT $1, $2, ws.id, $4, $5 FROM work_shifts ws WHERE ws.id = $3 AND ws.org_id = $1 \
@@ -673,7 +675,7 @@ pub async fn post_open_shift(
     .bind(body.branch_id)
     .bind(body.work_shift_id)
     .bind(body.on_date)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Work shift not found".into()))?;
@@ -689,7 +691,7 @@ pub async fn post_open_shift(
             notify(
                 pool,
                 org_id,
-                p.user_id,
+                p.employee_id,
                 "staff.n_open_shift",
                 json!({ "date": body.on_date }),
             )
@@ -712,22 +714,21 @@ pub async fn post_open_shift(
     security(("bearer_jwt" = []))
 )]
 pub async fn claim_open_shift(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     let pool = pool.get_ref();
-    let branches = branches_of(pool, user_id).await?;
+    let branches = branches_of(pool, employee_id).await?;
     let row: Option<(Uuid, NaiveDate)> = sqlx::query_as(
         "UPDATE staff_open_shifts SET status = 'claimed', claimed_by = $2, claimed_at = now() \
           WHERE id = $1 AND org_id = $3 AND status = 'open' AND branch_id = ANY($4) \
           RETURNING branch_id, on_date",
     )
     .bind(*id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(org_id)
     .bind(&branches)
     .fetch_optional(pool)
@@ -737,12 +738,13 @@ pub async fn claim_open_shift(
             "Someone already claimed that shift.".into(),
         ));
     };
-    let name = user_name(pool, user_id).await;
+    let name = employee_name(pool, employee_id).await;
     notify_managers(
         pool,
         org_id,
         Some(branch_id),
-        Some(user_id),
+        Cap::HrScheduleEdit,
+        Some(employee_id),
         "staff.n_claim",
         json!({ "name": name, "date": on_date }),
     )
@@ -773,10 +775,11 @@ pub async fn decide_claim(
     id: web::Path<Uuid>,
     body: web::Json<DecideRoster>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     let row: Option<(Uuid, Uuid, NaiveDate, Option<Uuid>)> = sqlx::query_as(
         "SELECT branch_id, work_shift_id, on_date, claimed_by FROM staff_open_shifts \
           WHERE id = $1 AND org_id = $2 AND status = 'claimed'",
@@ -788,13 +791,13 @@ pub async fn decide_claim(
     let Some((branch_id, shift_id, on_date, Some(claimer))) = row else {
         return Err(AppError::NotFound("No claim waiting here.".into()));
     };
-    crate::authz::require::require(pool, &claims, Cap::HrScheduleEdit, Some(branch_id)).await?;
+    access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
     if body.approve {
         sqlx::query(
             "UPDATE staff_open_shifts SET status = 'filled', decided_by = $2 WHERE id = $1",
         )
         .bind(*id)
-        .bind(caller)
+        .bind(by)
         .execute(pool)
         .await?;
         set_day(
@@ -804,7 +807,7 @@ pub async fn decide_claim(
             on_date,
             Some(shift_id),
             "Open shift claimed",
-            caller,
+            by,
         )
         .await?;
         notify(
@@ -855,29 +858,36 @@ pub struct Swap {
     pub created_at: DateTime<Utc>,
 }
 
+/// Swaps in the org: one person's, or those touching a set of branches
+/// (`None` = all).
 async fn swaps_of(
     pool: &PgPool,
     org_id: Uuid,
     person: Option<Uuid>,
     status: Option<&str>,
+    branches: Option<&[Uuid]>,
 ) -> Result<Vec<Swap>, AppError> {
-    Ok(sqlx::query_as(
+    Ok(sqlx::query_as(&format!(
         "SELECT s.id, s.requester_id, ru.name AS requester_name, s.requester_date, \
                 s.requester_shift_id, rs.name AS requester_shift_name, s.peer_id, \
                 pu.name AS peer_name, s.peer_date, s.peer_shift_id, ps.name AS peer_shift_name, \
                 s.status, s.created_at \
            FROM staff_swaps s \
-           JOIN users ru ON ru.id = s.requester_id JOIN users pu ON pu.id = s.peer_id \
+           JOIN employees ru ON ru.id = s.requester_id JOIN employees pu ON pu.id = s.peer_id \
            JOIN work_shifts rs ON rs.id = s.requester_shift_id \
            JOIN work_shifts ps ON ps.id = s.peer_shift_id \
           WHERE s.org_id = $1 \
             AND ($2::uuid IS NULL OR s.requester_id = $2 OR s.peer_id = $2) \
             AND ($3::text IS NULL OR s.status = $3) \
+            AND ({} OR {}) \
           ORDER BY s.created_at DESC LIMIT 100",
-    )
+        access::in_scope("s.requester_id", 4),
+        access::in_scope("s.peer_id", 4)
+    ))
     .bind(org_id)
     .bind(person)
     .bind(status)
+    .bind(branches)
     .fetch_all(pool)
     .await?)
 }
@@ -898,20 +908,22 @@ pub struct AskSwap {
     security(("bearer_jwt" = []))
 )]
 pub async fn ask_swap(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<AskSwap>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     let pool = pool.get_ref();
-    if body.peer_id == user_id {
+    if body.peer_id == employee_id {
         return Err(AppError::BadRequest("Pick a colleague.".into()));
     }
-    crate::staff::require_user_in_org(pool, org_id, body.peer_id).await?;
-    let tz = crate::staff::schedules::employee_timezone(pool, org_id, user_id).await?;
-    let mine = resolve_shifts_for(pool, user_id, body.my_date, &tz).await?;
+    let peer = access::subject(pool, org_id, body.peer_id).await?;
+    if peer.employment_status != "active" {
+        return Err(AppError::NotFound("Employee not found".into()));
+    }
+    let tz = crate::staff::schedules::employee_timezone(pool, org_id, employee_id).await?;
+    let mine = resolve_shifts_for(pool, employee_id, body.my_date, &tz).await?;
     let theirs = resolve_shifts_for(pool, body.peer_id, body.peer_date, &tz).await?;
     if !mine.iter().any(|s| s.work_shift_id == body.my_shift_id)
         || !theirs.iter().any(|s| s.work_shift_id == body.peer_shift_id)
@@ -925,7 +937,7 @@ pub async fn ask_swap(
             peer_id, peer_date, peer_shift_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(body.my_date)
     .bind(body.my_shift_id)
     .bind(body.peer_id)
@@ -933,7 +945,7 @@ pub async fn ask_swap(
     .bind(body.peer_shift_id)
     .fetch_one(pool)
     .await?;
-    let name = user_name(pool, user_id).await;
+    let name = employee_name(pool, employee_id).await;
     notify(
         pool,
         org_id,
@@ -942,7 +954,7 @@ pub async fn ask_swap(
         json!({ "name": name }),
     )
     .await;
-    let row = swaps_of(pool, org_id, Some(user_id), None)
+    let row = swaps_of(pool, org_id, Some(employee_id), None, None)
         .await?
         .into_iter()
         .find(|s| s.id == id)
@@ -958,28 +970,27 @@ pub async fn ask_swap(
     security(("bearer_jwt" = []))
 )]
 pub async fn answer_swap(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     id: web::Path<Uuid>,
     body: web::Json<DecideRoster>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     let pool = pool.get_ref();
     let row: Option<Uuid> = sqlx::query_scalar(
         "UPDATE staff_swaps SET status = $3 WHERE id = $1 AND peer_id = $2 \
             AND status = 'awaiting_peer' RETURNING requester_id",
     )
     .bind(*id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(if body.approve { "pending" } else { "rejected" })
     .fetch_optional(pool)
     .await?;
     let Some(requester) = row else {
         return Err(AppError::NotFound("No swap waiting for you here.".into()));
     };
-    let name = user_name(pool, user_id).await;
+    let name = employee_name(pool, employee_id).await;
     notify(
         pool,
         org_id,
@@ -998,13 +1009,14 @@ pub async fn answer_swap(
             pool,
             org_id,
             branch,
+            Cap::HrScheduleEdit,
             None,
             "staff.n_swap_pending",
             json!({}),
         )
         .await;
     }
-    let row = swaps_of(pool, org_id, Some(user_id), None)
+    let row = swaps_of(pool, org_id, Some(employee_id), None, None)
         .await?
         .into_iter()
         .find(|s| s.id == *id)
@@ -1029,22 +1041,17 @@ pub async fn list_swaps(
     pool: crate::db::Db,
     query: web::Query<SwapQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrScheduleEdit, None).await?;
-    let branches =
-        crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, None).await?;
-    let mut rows = swaps_of(pool.get_ref(), org_id, None, query.status.as_deref()).await?;
-    if let Some(mine) = branches {
-        let mut keep = Vec::new();
-        for s in rows {
-            let b = branches_of(pool.get_ref(), s.requester_id).await?;
-            if b.iter().any(|x| mine.contains(x)) {
-                keep.push(s);
-            }
-        }
-        rows = keep;
-    }
+    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
+    let rows = swaps_of(
+        pool.get_ref(),
+        org_id,
+        None,
+        query.status.as_deref(),
+        scope.as_deref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -1067,16 +1074,9 @@ pub async fn list_open_shifts(
     pool: crate::db::Db,
     query: web::Query<OpenShiftQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrScheduleEdit, None).await?;
-    let branches = match crate::authz::scope::org_read_branches(
-        pool.get_ref(),
-        &claims,
-        org_id,
-        None,
-    )
-    .await?
+    let branches = match access::scope(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?
     {
         Some(b) => b,
         None => {
@@ -1103,18 +1103,22 @@ pub async fn decide_swap(
     id: web::Path<Uuid>,
     body: web::Json<DecideRoster>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
-    let s = swaps_of(pool, org_id, None, Some("pending"))
+    access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
+    let s = swaps_of(pool, org_id, None, Some("pending"), None)
         .await?
         .into_iter()
         .find(|s| s.id == *id)
         .ok_or_else(|| AppError::NotFound("No swap waiting here.".into()))?;
-    let branch = branches_of(pool, s.requester_id).await?.first().copied();
-    crate::authz::require::require(pool, &claims, Cap::HrScheduleEdit, branch).await?;
-    if caller == s.requester_id || caller == s.peer_id {
+    // Both rosters change, so both sides' manager rights count (RO-6).
+    let requester = access::subject(pool, org_id, s.requester_id).await?;
+    let peer = access::subject(pool, org_id, s.peer_id).await?;
+    access::require_for(pool, &claims, Cap::HrScheduleEdit, &requester).await?;
+    access::require_for(pool, &claims, Cap::HrScheduleEdit, &peer).await?;
+    if requester.is(&claims) || peer.is(&claims) {
         return Err(AppError::Forbidden(
             "You can't approve a swap you're part of.".into(),
         ));
@@ -1122,7 +1126,7 @@ pub async fn decide_swap(
     sqlx::query("UPDATE staff_swaps SET status = $2, decided_by = $3 WHERE id = $1")
         .bind(*id)
         .bind(if body.approve { "approved" } else { "rejected" })
-        .bind(caller)
+        .bind(by)
         .execute(pool)
         .await?;
     if body.approve {
@@ -1135,7 +1139,7 @@ pub async fn decide_swap(
                 s.peer_date,
                 Some(s.peer_shift_id),
                 "Swap",
-                caller,
+                by,
             )
             .await?;
             set_day(
@@ -1145,7 +1149,7 @@ pub async fn decide_swap(
                 s.requester_date,
                 Some(s.requester_shift_id),
                 "Swap",
-                caller,
+                by,
             )
             .await?;
         } else {
@@ -1156,7 +1160,7 @@ pub async fn decide_swap(
                 s.requester_date,
                 None,
                 "Swap",
-                caller,
+                by,
             )
             .await?;
             set_day(
@@ -1166,10 +1170,10 @@ pub async fn decide_swap(
                 s.peer_date,
                 Some(s.peer_shift_id),
                 "Swap",
-                caller,
+                by,
             )
             .await?;
-            set_day(pool, org_id, s.peer_id, s.peer_date, None, "Swap", caller).await?;
+            set_day(pool, org_id, s.peer_id, s.peer_date, None, "Swap", by).await?;
             set_day(
                 pool,
                 org_id,
@@ -1177,7 +1181,7 @@ pub async fn decide_swap(
                 s.requester_date,
                 Some(s.requester_shift_id),
                 "Swap",
-                caller,
+                by,
             )
             .await?;
         }
@@ -1218,13 +1222,10 @@ pub struct Preferences {
     security(("bearer_jwt" = []))
 )]
 pub async fn put_preferences(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<Preferences>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    require_active_profile(pool.get_ref(), user_id).await?;
     if body
         .pref_time
         .as_deref()
@@ -1233,8 +1234,8 @@ pub async fn put_preferences(
     {
         return Err(AppError::BadRequest("Invalid preferences".into()));
     }
-    sqlx::query("UPDATE staff_profiles SET pref_time = $2, cant_work_days = $3 WHERE user_id = $1")
-        .bind(user_id)
+    sqlx::query("UPDATE employees SET pref_time = $2, cant_work_days = $3 WHERE id = $1")
+        .bind(me.employee_id)
         .bind(body.pref_time.as_deref())
         .bind(&body.cant_work_days)
         .execute(pool.get_ref())
@@ -1331,9 +1332,10 @@ pub async fn decide_holiday(
     date: web::Path<NaiveDate>,
     body: web::Json<HolidayDecision>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrSchedulePublish, None).await?;
+    // A public holiday is the business's, every branch at once (audit B-3).
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrSchedulePublish).await?;
     if body.decision != "holiday" && body.decision != "dismissed" {
         return Err(AppError::BadRequest(
             "decision is holiday or dismissed".into(),
@@ -1348,7 +1350,7 @@ pub async fn decide_holiday(
     .bind(org_id)
     .bind(*date)
     .bind(&body.decision)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("No public holiday on that date.".into()))?;
@@ -1365,11 +1367,11 @@ pub struct Suggestion {
     pub work_shift_id: Uuid,
     pub shift_name: String,
     /// Who the suggestion puts on the shift.
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     /// Who it takes off it, for a reassignment.
-    pub from_user_id: Option<Uuid>,
-    pub from_user_name: Option<String>,
+    pub from_employee_id: Option<Uuid>,
+    pub from_employee_name: Option<String>,
     /// A core i18n key for the one-line reason, and its arguments.
     pub reason_key: String,
     pub reason_args: serde_json::Value,
@@ -1438,10 +1440,10 @@ async fn learned(
 ) -> Result<(HashMap<Uuid, engine::Fit>, bool), AppError> {
     // (user, shift, +1/−1, age in days, manager side)
     let rows: Vec<(Uuid, Uuid, f64, f64, bool)> = sqlx::query_as(
-        "SELECT user_id, work_shift_id, CASE WHEN accepted THEN 1.0 ELSE -1.0 END::float8, \
+        "SELECT employee_id, work_shift_id, CASE WHEN accepted THEN 1.0 ELSE -1.0 END::float8, \
                 EXTRACT(EPOCH FROM now() - created_at)::float8 / 86400, true \
            FROM staff_suggestion_events \
-          WHERE branch_id = $1 AND user_id IS NOT NULL AND work_shift_id IS NOT NULL \
+          WHERE branch_id = $1 AND employee_id IS NOT NULL AND work_shift_id IS NOT NULL \
             AND created_at > now() - INTERVAL '24 months' \
          UNION ALL \
          SELECT claimed_by, work_shift_id, 1.0, \
@@ -1452,14 +1454,14 @@ async fn learned(
          UNION ALL \
          SELECT x.uid, x.sid, x.v, EXTRACT(EPOCH FROM now() - s.created_at)::float8 / 86400, false \
            FROM staff_swaps s \
-           JOIN user_branch_assignments a ON a.user_id = s.requester_id AND a.branch_id = $1 \
+           JOIN employee_branches a ON a.employee_id = s.requester_id AND a.branch_id = $1 \
           CROSS JOIN LATERAL (VALUES (s.requester_id, s.peer_shift_id, 1.0::float8), \
                                      (s.requester_id, s.requester_shift_id, -1.0), \
                                      (s.peer_id, s.requester_shift_id, 1.0), \
                                      (s.peer_id, s.peer_shift_id, -1.0)) x(uid, sid, v) \
           WHERE s.status = 'approved' AND s.created_at > now() - INTERVAL '24 months' \
          UNION ALL \
-         SELECT user_id, work_shift_id, CASE WHEN status = 'absent' THEN -1.0 ELSE 1.0 END::float8, \
+         SELECT employee_id, work_shift_id, CASE WHEN status = 'absent' THEN -1.0 ELSE 1.0 END::float8, \
                 EXTRACT(EPOCH FROM now() - business_date::timestamp)::float8 / 86400, false \
            FROM attendance_records \
           WHERE branch_id = $1 AND work_shift_id IS NOT NULL AND status <> 'on_leave' \
@@ -1470,9 +1472,9 @@ async fn learned(
     .await?;
     let signals: Vec<engine::Signal> = rows
         .into_iter()
-        .filter_map(|(user_id, shift, value, age_days, manager)| {
+        .filter_map(|(employee_id, shift, value, age_days, manager)| {
             Some(engine::Signal {
-                user_id,
+                employee_id,
                 late: *late_of.get(&shift)?,
                 value,
                 age_days,
@@ -1610,7 +1612,7 @@ async fn suggest(
     for p in &staff {
         for s in shifts_of(
             pool,
-            (p.user_id, &p.name),
+            (p.employee_id, &p.name),
             branch_id,
             &shift_branch,
             ws - Duration::days(1),
@@ -1621,14 +1623,14 @@ async fn suggest(
         {
             let in_week = s.date >= ws && s.date <= to;
             if in_week {
-                board.busy.insert((s.date, p.user_id));
+                board.busy.insert((s.date, p.employee_id));
             }
             if s.on_leave {
                 continue;
             }
             board
                 .spans
-                .entry(p.user_id)
+                .entry(p.employee_id)
                 .or_default()
                 .push(engine::Span {
                     date: s.date,
@@ -1640,13 +1642,13 @@ async fn suggest(
                     .by_day
                     .entry((s.date, s.work_shift_id))
                     .or_default()
-                    .push(p.user_id);
+                    .push(p.employee_id);
                 *board
                     .on_shift
-                    .entry((p.user_id, s.work_shift_id))
+                    .entry((p.employee_id, s.work_shift_id))
                     .or_default() += 1;
                 if late_of.get(&s.work_shift_id).copied().unwrap_or(false) {
-                    *board.late_count.entry(p.user_id).or_default() += 1;
+                    *board.late_count.entry(p.employee_id).or_default() += 1;
                 }
             }
         }
@@ -1678,13 +1680,17 @@ async fn suggest(
         let mut c: Vec<(&RosterPerson, f64, bool)> = staff
             .iter()
             .filter(|p| {
-                !board.busy.contains(&(d, p.user_id))
+                !board.busy.contains(&(d, p.employee_id))
                     && !p.cant_work_days.contains(&dow)
                     && dept.is_none_or(|x| p.department_id == Some(x))
-                    && !decided.contains(&id_of(p.user_id))
+                    && !decided.contains(&id_of(p.employee_id))
             })
             .filter_map(|p| {
-                let learned = if frozen { None } else { fits.get(&p.user_id) };
+                let learned = if frozen {
+                    None
+                } else {
+                    fits.get(&p.employee_id)
+                };
                 let stated = matches!(p.pref_time.as_deref(), Some("morning" | "evening"));
                 let pref = match p.pref_time.as_deref() {
                     Some("morning") if late => -1.0,
@@ -1714,16 +1720,16 @@ async fn suggest(
                     0.0
                 };
                 let empty = Vec::new();
-                let spans = board.spans.get(&p.user_id).unwrap_or(&empty);
-                if !engine::fits(p.user_id, spans, span, &limits) {
+                let spans = board.spans.get(&p.employee_id).unwrap_or(&empty);
+                if !engine::fits(p.employee_id, spans, span, &limits) {
                     return None;
                 }
                 let spread = if late {
-                    -0.1 * f64::from(*board.late_count.get(&p.user_id).unwrap_or(&0))
+                    -0.1 * f64::from(*board.late_count.get(&p.employee_id).unwrap_or(&0))
                 } else {
                     0.0
                 };
-                let continuity = if board.on_shift.contains_key(&(p.user_id, w.id)) {
+                let continuity = if board.on_shift.contains_key(&(p.employee_id, w.id)) {
                     0.1
                 } else {
                     0.0
@@ -1742,14 +1748,14 @@ async fn suggest(
                by_default: bool,
                key: &str,
                args: serde_json::Value| Suggestion {
-        id: format!("add|{d}|{}|{}", w.id, p.user_id),
+        id: format!("add|{d}|{}|{}", w.id, p.employee_id),
         date: d,
         work_shift_id: w.id,
         shift_name: w.name.clone(),
-        user_id: p.user_id,
-        user_name: p.name.clone(),
-        from_user_id: None,
-        from_user_name: None,
+        employee_id: p.employee_id,
+        employee_name: p.name.clone(),
+        from_employee_id: None,
+        from_employee_name: None,
         reason_key: key.into(),
         reason_args: args,
         confidence: (60.0 + 25.0 * score).clamp(30.0, 95.0) as i32,
@@ -1766,13 +1772,15 @@ async fn suggest(
         settings.orders_per_staff,
     )
     .await?;
-    let dept_of: HashMap<Uuid, Option<Uuid>> =
-        staff.iter().map(|p| (p.user_id, p.department_id)).collect();
+    let dept_of: HashMap<Uuid, Option<Uuid>> = staff
+        .iter()
+        .map(|p| (p.employee_id, p.department_id))
+        .collect();
     if need.is_empty() {
         // Coverage need = how many the standing pattern puts on each shift and weekday.
         let pattern: Vec<(Uuid, Option<i16>, i64)> = sqlx::query_as(
             "SELECT s.work_shift_id, s.day_of_week, COUNT(*) FROM staff_schedules s \
-               JOIN user_branch_assignments a ON a.user_id = s.user_id AND a.branch_id = $1 \
+               JOIN employee_branches a ON a.employee_id = s.employee_id AND a.branch_id = $1 \
               WHERE s.effective_from <= $3 AND (s.effective_to IS NULL OR s.effective_to >= $2) \
               GROUP BY 1, 2",
         )
@@ -1810,7 +1818,7 @@ async fn suggest(
                     ));
                     let late = late_of.get(&w.id).copied().unwrap_or(false);
                     if let Some(span) = span_of(w, d, &tz) {
-                        board.assign(p.user_id, w, late, span);
+                        board.assign(p.employee_id, w, late, span);
                     }
                 }
             }
@@ -1879,7 +1887,7 @@ async fn suggest(
                             json!({ "shift": w.name, "hour": format!("{h:02}:00"), "short": short })));
                         let late = late_of.get(&w.id).copied().unwrap_or(false);
                         if let Some(span) = span_of(w, sd, &tz) {
-                            board.assign(p.user_id, w, late, span);
+                            board.assign(p.employee_id, w, late, span);
                         }
                         placed = true;
                         break;
@@ -1899,7 +1907,7 @@ async fn suggest(
         for w in &work_shifts {
             let assigned = board.by_day.get(&(d, w.id)).cloned().unwrap_or_default();
             for uid in &assigned {
-                let Some(person) = staff.iter().find(|p| p.user_id == *uid) else {
+                let Some(person) = staff.iter().find(|p| p.employee_id == *uid) else {
                     continue;
                 };
                 if !person.cant_work_days.contains(&dow) {
@@ -1908,14 +1916,14 @@ async fn suggest(
                 let id_of = |u: Uuid| format!("move|{d}|{}|{uid}|{u}", w.id);
                 if let Some((p, score, by_default)) = best(&board, w, d, None, &id_of) {
                     out.push(Suggestion {
-                        id: id_of(p.user_id),
+                        id: id_of(p.employee_id),
                         date: d,
                         work_shift_id: w.id,
                         shift_name: w.name.clone(),
-                        user_id: p.user_id,
-                        user_name: p.name.clone(),
-                        from_user_id: Some(*uid),
-                        from_user_name: Some(person.name.clone()),
+                        employee_id: p.employee_id,
+                        employee_name: p.name.clone(),
+                        from_employee_id: Some(*uid),
+                        from_employee_name: Some(person.name.clone()),
                         reason_key: "staff.sg_cant_work".into(),
                         reason_args: json!({ "name": person.name }),
                         confidence: (70.0 + 20.0 * score).clamp(40.0, 95.0) as i32,
@@ -1923,7 +1931,7 @@ async fn suggest(
                     });
                     let late = late_of.get(&w.id).copied().unwrap_or(false);
                     if let Some(span) = span_of(w, d, &tz) {
-                        board.assign(p.user_id, w, late, span);
+                        board.assign(p.employee_id, w, late, span);
                     }
                 }
             }
@@ -1942,12 +1950,12 @@ async fn pattern_updates(
     work_shifts: &[WorkShiftBrief],
     decided: &HashSet<String>,
 ) -> Result<Vec<Suggestion>, AppError> {
-    let ids: Vec<Uuid> = staff.iter().map(|p| p.user_id).collect();
-    // (user, weekday, shift or null = off) edited identically on each of the 4 weeks before.
+    let ids: Vec<Uuid> = staff.iter().map(|p| p.employee_id).collect();
+    // (employee, weekday, shift or null = off) edited identically on each of the 4 weeks before.
     let rows: Vec<(Uuid, i32, Option<Uuid>)> = sqlx::query_as(
-        "SELECT user_id, EXTRACT(DOW FROM on_date)::int, work_shift_id \
+        "SELECT employee_id, EXTRACT(DOW FROM on_date)::int, work_shift_id \
            FROM staff_schedule_overrides \
-          WHERE user_id = ANY($1) AND on_date >= $2 - 28 AND on_date < $2 \
+          WHERE employee_id = ANY($1) AND on_date >= $2 - 28 AND on_date < $2 \
           GROUP BY 1, 2, 3 HAVING COUNT(DISTINCT on_date) = 4",
     )
     .bind(&ids)
@@ -1959,7 +1967,7 @@ async fn pattern_updates(
         let d = ws + Duration::days(i64::from((dow + 1) % 7)); // Sat = 0
         // Already the pattern? Then there is nothing to suggest.
         let std: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT work_shift_id FROM staff_schedules WHERE user_id = $1 \
+            "SELECT work_shift_id FROM staff_schedules WHERE employee_id = $1 \
                 AND effective_from <= $2 AND (effective_to IS NULL OR effective_to >= $2) \
                 AND (day_of_week IS NULL OR day_of_week = $3::smallint) \
               ORDER BY day_of_week NULLS LAST LIMIT 1",
@@ -1977,7 +1985,7 @@ async fn pattern_updates(
         if decided.contains(&id) {
             continue;
         }
-        let Some(p) = staff.iter().find(|p| p.user_id == uid) else {
+        let Some(p) = staff.iter().find(|p| p.employee_id == uid) else {
             continue;
         };
         let name = work_shifts
@@ -1989,10 +1997,10 @@ async fn pattern_updates(
             date: d,
             work_shift_id: shift_id,
             shift_name: name.clone().unwrap_or_default(),
-            user_id: uid,
-            user_name: p.name.clone(),
-            from_user_id: None,
-            from_user_name: None,
+            employee_id: uid,
+            employee_name: p.name.clone(),
+            from_employee_id: None,
+            from_employee_name: None,
             reason_key: if shift.is_some() {
                 "staff.sg_pattern"
             } else {
@@ -2017,15 +2025,14 @@ pub async fn suggestions(
     pool: crate::db::Db,
     query: web::Query<SuggestQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::scope::org_read_branches(pool.get_ref(), &claims, org_id, Some(query.branch_id))
-        .await?;
-    crate::authz::require::require(
+    access::require_at(
         pool.get_ref(),
         &claims,
+        org_id,
         Cap::HrScheduleEdit,
-        Some(query.branch_id),
+        query.branch_id,
     )
     .await?;
     let out = cached_suggestions(
@@ -2102,7 +2109,7 @@ pub(crate) async fn precompute(
 async fn set_pattern_day(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     d: NaiveDate,
     shift: Option<Uuid>,
 ) -> Result<(), AppError> {
@@ -2111,11 +2118,11 @@ async fn set_pattern_day(
     type Row = (Uuid, Uuid, Option<i16>, NaiveDate, Option<NaiveDate>);
     let rows: Vec<Row> = sqlx::query_as(
         "SELECT id, work_shift_id, day_of_week, effective_from, effective_to \
-           FROM staff_schedules WHERE user_id = $1 AND org_id = $2 \
+           FROM staff_schedules WHERE employee_id = $1 AND org_id = $2 \
             AND (effective_to IS NULL OR effective_to >= $3) \
             AND (day_of_week IS NULL OR day_of_week = $4) FOR UPDATE",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(org_id)
     .bind(d)
     .bind(dow)
@@ -2127,14 +2134,14 @@ async fn set_pattern_day(
             for other in (0..7i16).filter(|x| *x != dow) {
                 sqlx::query(
                     "INSERT INTO staff_schedules \
-                         (org_id, user_id, work_shift_id, day_of_week, effective_from, effective_to) \
+                         (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to) \
                      SELECT $1, $2, $3, $4, $5, $6 WHERE NOT EXISTS ( \
-                         SELECT 1 FROM staff_schedules WHERE user_id = $2 AND day_of_week = $4 \
+                         SELECT 1 FROM staff_schedules WHERE employee_id = $2 AND day_of_week = $4 \
                             AND (effective_to IS NULL OR effective_to >= $5) \
                             AND ($6::date IS NULL OR effective_from <= $6))",
                 )
                 .bind(org_id)
-                .bind(user_id)
+                .bind(employee_id)
                 .bind(ws_id)
                 .bind(other)
                 .bind(start)
@@ -2158,11 +2165,11 @@ async fn set_pattern_day(
     }
     if let Some(shift) = shift {
         sqlx::query(
-            "INSERT INTO staff_schedules (org_id, user_id, work_shift_id, day_of_week, effective_from) \
+            "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, effective_from) \
              SELECT $1, $2, id, $4, $5 FROM work_shifts WHERE id = $3 AND org_id = $1",
         )
         .bind(org_id)
-        .bind(user_id)
+        .bind(employee_id)
         .bind(shift)
         .bind(dow)
         .bind(d)
@@ -2191,13 +2198,12 @@ pub async fn decide_suggestion(
     pool: crate::db::Db,
     body: web::Json<DecideSuggestion>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
-    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(body.branch_id)).await?;
-    crate::authz::require::require(pool, &claims, Cap::HrScheduleEdit, Some(body.branch_id))
-        .await?;
+    access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
+    access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, body.branch_id).await?;
     let parts: Vec<&str> = body.id.split('|').collect();
     let bad = || AppError::BadRequest("Unknown suggestion".into());
     let date: NaiveDate = parts.get(1).and_then(|d| d.parse().ok()).ok_or_else(bad)?;
@@ -2213,25 +2219,16 @@ pub async fn decide_suggestion(
         ),
         _ => return Err(bad()),
     };
-    crate::staff::require_user_in_org(pool, org_id, to).await?;
+    crate::staff::require_employee_in_org(pool, org_id, to).await?;
     if body.accept && pattern {
         // The standing pattern itself: the one suggestion that changes it,
-        // and only once a manager with pattern rights says so.
-        crate::permissions::checker::check_permission(pool, &claims, "work_shifts", "update")
-            .await?;
+        // and only once a manager with pattern rights for that person says so.
+        let subject = access::subject(pool, org_id, to).await?;
+        access::require_for(pool, &claims, Cap::HrScheduleEdit, &subject).await?;
         set_pattern_day(pool, org_id, to, date, (!shift.is_nil()).then_some(shift)).await?;
     } else if body.accept {
         if let Some(from) = from {
-            set_day(
-                pool,
-                org_id,
-                from,
-                date,
-                None,
-                "Suggestion accepted",
-                caller,
-            )
-            .await?;
+            set_day(pool, org_id, from, date, None, "Suggestion accepted", by).await?;
         }
         set_day(
             pool,
@@ -2240,12 +2237,12 @@ pub async fn decide_suggestion(
             date,
             Some(shift),
             "Suggestion accepted",
-            caller,
+            by,
         )
         .await?;
     }
     sqlx::query(
-        "INSERT INTO staff_suggestion_events (org_id, branch_id, suggestion, user_id, on_date, \
+        "INSERT INTO staff_suggestion_events (org_id, branch_id, suggestion, employee_id, on_date, \
             accepted, decided_by, work_shift_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT id FROM work_shifts WHERE id = $8))",
     )
@@ -2255,7 +2252,7 @@ pub async fn decide_suggestion(
     .bind(to)
     .bind(date)
     .bind(body.accept)
-    .bind(caller)
+    .bind(by)
     .bind((!pattern).then_some(shift))
     .execute(pool)
     .await?;
@@ -2322,12 +2319,10 @@ pub async fn get_coverage(
     pool: crate::db::Db,
     query: web::Query<CoverageQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(query.branch_id)).await?;
-    crate::authz::require::require(pool, &claims, Cap::HrScheduleRead, Some(query.branch_id))
-        .await?;
+    access::require_at(pool, &claims, org_id, Cap::HrScheduleRead, query.branch_id).await?;
     let settings =
         crate::staff::attendance::load_settings(pool, org_id, Some(query.branch_id)).await?;
     let needs = coverage_rows(pool, query.branch_id).await?;
@@ -2381,12 +2376,11 @@ pub async fn put_coverage(
     pool: crate::db::Db,
     body: web::Json<PutCoverage>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(body.branch_id)).await?;
-    crate::authz::require::require(pool, &claims, Cap::HrScheduleEdit, Some(body.branch_id))
-        .await?;
+    access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
+    access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, body.branch_id).await?;
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM staff_coverage_needs WHERE branch_id = $1 AND org_id = $2")
         .bind(body.branch_id)
@@ -2458,21 +2452,20 @@ pub async fn fairness(
     pool: crate::db::Db,
     query: web::Query<FairnessQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::authz::require::require(pool, &claims, Cap::HrRosterSettings, None).await?;
+    access::require_everywhere(pool, &claims, org_id, Cap::HrRosterSettings).await?;
     let settings = crate::staff::attendance::load_settings(pool, org_id, None).await?;
     let month = query.month.with_day(1).unwrap_or(query.month);
     let rows: Vec<FairnessRow> = sqlx::query_as(
-        "SELECT p.gender, COUNT(DISTINCT p.user_id) AS people, \
-                COUNT(DISTINCT p.user_id) FILTER (WHERE p.pref_time = 'evening') AS willing, \
+        "SELECT p.gender, COUNT(DISTINCT p.id) AS people, \
+                COUNT(DISTINCT p.id) FILTER (WHERE p.pref_time = 'evening') AS willing, \
                 COUNT(a.id) AS shifts, \
                 COUNT(a.id) FILTER (WHERE dawam_night_minutes(a.scheduled_start_at, \
                     a.scheduled_end_at, br.timezone::text, $3, $4) > 0) AS night_shifts \
-           FROM staff_profiles p \
-           JOIN users u ON u.id = p.user_id AND u.deleted_at IS NULL \
-           LEFT JOIN attendance_records a ON a.user_id = p.user_id \
+           FROM employees p \
+           LEFT JOIN attendance_records a ON a.employee_id = p.id \
                 AND a.business_date >= $2 AND a.business_date < ($2 + INTERVAL '1 month')::date \
                 AND a.scheduled_start_at IS NOT NULL AND a.status <> 'on_leave' \
            LEFT JOIN branches br ON br.id = a.branch_id \

@@ -1,7 +1,7 @@
 //! One call the Dawam app boots from: who I am, where I work, the people I
 //! can see, the org's pay settings, my limits and the shift templates.
 
-use actix_web::{HttpRequest, HttpResponse};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -9,11 +9,13 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use super::branches_of;
-use crate::authz::{CAPS, Cap, LimitKey};
+use crate::auth::jwt::Claims;
+use crate::authz::{CAPS, Cap, EffectiveSet, LimitKey};
 use crate::errors::{AppError, AppErrorResponse};
-use crate::orgs::handlers::extract_claims;
-use crate::staff::attendance::{load_settings, require_active_profile};
+use crate::staff::access;
+use crate::staff::attendance::load_settings;
 use crate::staff::dawam::roster::WorkShiftBrief;
+use crate::staff::principal::Me;
 
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct ContextBranch {
@@ -28,10 +30,13 @@ pub struct ContextBranch {
 
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct ContextPerson {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
+    /// Their Madar account, when they have one.
+    pub user_id: Option<Uuid>,
     pub name: String,
     pub phone: Option<String>,
-    /// `owner` · `manager` · `employee`
+    /// `owner` · `manager` · `employee` (from the linked account; an employee
+    /// with no account is `employee`).
     pub role: String,
     pub branch_ids: Vec<Uuid>,
     pub gender: Option<String>,
@@ -62,14 +67,19 @@ pub struct ContextSettings {
 
 #[derive(Serialize, ToSchema)]
 pub struct StaffContext {
-    pub user_id: Uuid,
+    /// Who is signed in: the employee.
+    pub employee_id: Uuid,
+    /// Their Madar account, when they have one; manager acts go through it.
+    pub user_id: Option<Uuid>,
+    pub name: String,
     pub org_id: Uuid,
     pub org_name: String,
     /// The org's modules (`pos`, `dawam`); POS on means till punches (CL-13).
     pub modules: Vec<String>,
     /// `owner` · `manager` · `employee`
     pub role: String,
-    /// The HR capabilities I hold (`hr.*` keys).
+    /// The HR capabilities I hold (`hr.*` keys) — through my Madar account;
+    /// empty for an employee with none. The app gates tabs on these (PM-4).
     pub caps: Vec<String>,
     /// My ceiling on a bonus/deduction before it waits for the owner; null = none.
     pub adjustment_limit_piastres: Option<i64>,
@@ -85,71 +95,111 @@ pub struct StaffContext {
     responses((status = 200, body = StaffContext), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_context(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
+pub async fn my_context(
+    req: HttpRequest,
+    me: Me,
+    pool: crate::db::Db,
+) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
-    let org_id = require_active_profile(pool, user_id).await?;
-    let eff = crate::authz::require::effective(pool, user_id, None).await?;
-    let (is_owner, db_role, org_name, modules): (bool, String, String, Vec<String>) =
-        sqlx::query_as(
-            "SELECT u.is_owner OR u.role = 'org_admin', u.role::text, o.name, o.modules \
-           FROM users u JOIN organizations o ON o.id = u.org_id WHERE u.id = $1",
-        )
-        .bind(user_id)
-        .fetch_one(pool)
-        .await?;
-    if !modules.iter().any(|m| m == "dawam") {
-        // Switched off (PS-7): hidden, every record kept.
-        return Err(AppError::Coded {
-            status: 403,
-            code: "DAWAM_OFF",
-            reason: format!("Dawam is switched off for {org_name}."),
-        });
-    }
-    let role = if is_owner {
+    let org_id = me.org_id;
+    // The linked account's powers, when the employee has one (StaffAuth put
+    // its claims here only if it is active in this org).
+    let claims: Option<Claims> = req.extensions().get::<Claims>().cloned();
+    let eff = match me.user_id {
+        Some(u) => crate::authz::require::effective(pool, u, None).await?,
+        None => EffectiveSet::default(),
+    };
+    let (name, org_name, modules): (String, String, Vec<String>) = sqlx::query_as(
+        "SELECT e.name, o.name, o.modules FROM employees e \
+           JOIN organizations o ON o.id = e.org_id WHERE e.id = $1",
+    )
+    .bind(me.employee_id)
+    .fetch_one(pool)
+    .await?;
+    let manages = [
+        Cap::HrScheduleEdit,
+        Cap::HrAttendanceEdit,
+        Cap::HrLeaveEdit,
+        Cap::HrAttendancePunchOthers,
+    ]
+    .iter()
+    .any(|c| eff.can(*c));
+    let role = if eff.owner {
         "owner"
-    } else if db_role == "branch_manager" || eff.can(Cap::HrScheduleEdit) {
+    } else if manages {
         "manager"
     } else {
         "employee"
     };
-    let mine = branches_of(pool, user_id).await?;
+    // Where I work, plus — for a manager — the branches I run.
+    let mine = branches_of(pool, me.employee_id).await?;
+    let run: Option<Vec<Uuid>> = match (&claims, role) {
+        (Some(c), "owner" | "manager") => {
+            match access::scope(pool, c, org_id, Cap::HrAttendanceRead).await {
+                Ok(s) => s,
+                Err(AppError::Forbidden(_)) => Some(vec![]),
+                Err(e) => return Err(e),
+            }
+        }
+        _ => Some(vec![]),
+    };
+    let all_branches = run.is_none();
+    let mut shown: Vec<Uuid> = mine.clone();
+    for b in run.clone().unwrap_or_default() {
+        if !shown.contains(&b) {
+            shown.push(b);
+        }
+    }
     let branches: Vec<ContextBranch> = sqlx::query_as(
         "SELECT id, name, geo_radius_meters, latitude, longitude, timezone::text AS timezone FROM branches \
           WHERE org_id = $1 AND deleted_at IS NULL AND ($2 OR id = ANY($3)) ORDER BY name",
     )
     .bind(org_id)
-    .bind(role == "owner")
-    .bind(&mine)
+    .bind(all_branches)
+    .bind(&shown)
     .fetch_all(pool)
     .await?;
     let branch_ids: Vec<Uuid> = branches.iter().map(|b| b.id).collect();
-    let see_pay = role != "employee" && eff.can(Cap::HrPayrollRead);
+    // Pay: only where my account may read payroll.
+    let pay: Option<Option<Vec<Uuid>>> = match &claims {
+        Some(c) if role != "employee" => {
+            match access::scope(pool, c, org_id, Cap::HrPayrollRead).await {
+                Ok(s) => Some(s),
+                Err(AppError::Forbidden(_)) => None,
+                Err(e) => return Err(e),
+            }
+        }
+        _ => None,
+    };
     let people: Vec<ContextPerson> = sqlx::query_as(
-        "SELECT u.id AS user_id, u.name, u.phone, \
+        "SELECT e.id AS employee_id, e.user_id, e.name, e.phone, \
                 CASE WHEN u.is_owner OR u.role = 'org_admin' THEN 'owner' \
                      WHEN u.role = 'branch_manager' THEN 'manager' ELSE 'employee' END AS role, \
-                COALESCE(ARRAY(SELECT a.branch_id FROM user_branch_assignments a \
-                                WHERE a.user_id = u.id), '{}') AS branch_ids, \
-                p.gender, p.hire_date, \
-                CASE WHEN $3 OR u.id = $4 THEN p.base_salary_piastres END AS base_salary_piastres, \
-                p.pay_method, CASE WHEN $3 OR u.id = $4 THEN p.pay_account END AS pay_account, \
-                p.pref_time, p.cant_work_days, d.model AS device_model, d.first_seen_at AS device_since \
-           FROM users u \
-           JOIN staff_profiles p ON p.user_id = u.id AND p.employment_status = 'active' \
-           LEFT JOIN staff_devices d ON d.user_id = u.id AND d.revoked_at IS NULL \
-          WHERE u.org_id = $1 AND u.deleted_at IS NULL AND u.is_active \
-            AND ($5 OR u.id = $4 OR u.is_owner OR u.role = 'org_admin' \
-                 OR EXISTS (SELECT 1 FROM user_branch_assignments a \
-                             WHERE a.user_id = u.id AND a.branch_id = ANY($2))) \
-          ORDER BY lower(u.name)",
+                COALESCE(ARRAY(SELECT eb.branch_id FROM employee_branches eb \
+                                WHERE eb.employee_id = e.id ORDER BY eb.assigned_at), '{}') AS branch_ids, \
+                e.gender, e.hire_date, \
+                CASE WHEN e.id = $4 OR ($3 AND ($6::uuid[] IS NULL OR EXISTS ( \
+                         SELECT 1 FROM employee_branches pb WHERE pb.employee_id = e.id \
+                            AND pb.branch_id = ANY($6)))) \
+                     THEN e.base_salary_piastres END AS base_salary_piastres, \
+                e.pay_method, \
+                CASE WHEN e.id = $4 OR $3 THEN e.pay_account END AS pay_account, \
+                e.pref_time, e.cant_work_days, d.model AS device_model, d.first_seen_at AS device_since \
+           FROM employees e \
+           LEFT JOIN users u ON u.id = e.user_id \
+           LEFT JOIN staff_devices d ON d.employee_id = e.id AND d.revoked_at IS NULL \
+          WHERE e.org_id = $1 AND e.employment_status = 'active' \
+            AND ($5 OR e.id = $4 \
+                 OR EXISTS (SELECT 1 FROM employee_branches a \
+                             WHERE a.employee_id = e.id AND a.branch_id = ANY($2))) \
+          ORDER BY lower(e.name)",
     )
     .bind(org_id)
     .bind(&branch_ids)
-    .bind(see_pay)
-    .bind(user_id)
-    .bind(role == "owner")
+    .bind(pay.is_some())
+    .bind(me.employee_id)
+    .bind(all_branches)
+    .bind(pay.clone().flatten())
     .fetch_all(pool)
     .await?;
     let work_shifts: Vec<WorkShiftBrief> = sqlx::query_as(
@@ -166,7 +216,9 @@ pub async fn my_context(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRes
         .map(|m| m.key.to_string())
         .collect();
     Ok(HttpResponse::Ok().json(StaffContext {
-        user_id,
+        employee_id: me.employee_id,
+        user_id: me.user_id,
+        name,
         org_id,
         modules,
         org_name,

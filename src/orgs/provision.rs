@@ -136,7 +136,8 @@ pub struct ProvisionOrgRequest {
     pub tax_rate: Option<f64>,
     pub branch: ProvisionBranch,
     pub owner: ProvisionOwner,
-    /// `pos`, `dawam`; default both. A Dawam-only customer is `["dawam"]` (SA-1).
+    /// `pos`, `dawam`; default POS only — Dawam is switched on per org. A
+    /// Dawam-only customer is `["dawam"]` (SA-1).
     #[serde(default)]
     pub modules: Option<Vec<String>>,
 }
@@ -274,7 +275,7 @@ pub async fn provision_org(
     let org = sqlx::query_as::<_, Org>(
         r#"
         INSERT INTO organizations (name, slug, currency_code, tax_rate, timezone, modules)
-        VALUES ($1, $2, $3, $4, $5::timezone_name, COALESCE($6, '{pos,dawam}'))
+        VALUES ($1, $2, $3, $4, $5::timezone_name, COALESCE($6, '{pos}'))
         RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone
         "#,
     )

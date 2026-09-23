@@ -198,7 +198,10 @@ async fn wipe(pool: &PgPool) -> Result<(), sqlx::Error> {
         "staff_schedules",
         "work_shifts",
         "staff_documents",
-        "staff_profiles",
+        "staff_notifications",
+        "staff_devices",
+        "employee_branches",
+        "employees",
         "departments",
     ] {
         sqlx::query(&format!("DELETE FROM {table} WHERE org_id = $1"))
@@ -233,8 +236,8 @@ async fn create_org(pool: &PgPool) -> Result<Uuid, sqlx::Error> {
     // Onboarding is marked complete so the dashboard lands on the real app
     // instead of the first-run wizard.
     sqlx::query_scalar(
-        "INSERT INTO organizations (name, slug, timezone, onboarding_completed_at) \
-         VALUES ($1, $2, 'Africa/Cairo'::timezone_name, now()) RETURNING id",
+        "INSERT INTO organizations (name, slug, timezone, onboarding_completed_at, modules) \
+         VALUES ($1, $2, 'Africa/Cairo'::timezone_name, now(), '{pos,dawam}') RETURNING id",
     )
     .bind(ORG_NAME)
     .bind(ORG_SLUG)
@@ -315,10 +318,12 @@ async fn create_employees(
             .execute(pool)
             .await?;
 
+        // A demo cashier who is also on payroll: a linked employee sharing the
+        // user's id (as every employee migrated from a staff profile does).
         sqlx::query(
-            "INSERT INTO staff_profiles (user_id, org_id, department_id, job_title, hire_date, \
+            "INSERT INTO employees (id, user_id, org_id, name, department_id, job_title, hire_date, \
                  employment_status, base_salary_piastres, employee_code) \
-             VALUES ($1, $2, $3, $4, CURRENT_DATE - 400, $5, $6, $7)",
+             VALUES ($1, $1, $2, $8, $3, $4, CURRENT_DATE - 400, $5, $6, $7)",
         )
         .bind(id)
         .bind(org)
@@ -327,6 +332,15 @@ async fn create_employees(
         .bind(e.status)
         .bind(e.salary_piastres)
         .bind(format!("EMP-{:03}", ids.len() + 1))
+        .bind(e.name)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO employee_branches (employee_id, branch_id, org_id) VALUES ($1, $2, $3)",
+        )
+        .bind(id)
+        .bind(branches[e.branch])
+        .bind(org)
         .execute(pool)
         .await?;
 
@@ -424,7 +438,7 @@ async fn roster(
         // definition of who is expected, so it has to exclude the weekend.
         for day_of_week in [6i16, 0, 1, 2, 3, 4] {
             sqlx::query(
-                "INSERT INTO staff_schedules (org_id, user_id, work_shift_id, day_of_week, \
+                "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, \
                      effective_from) \
                  VALUES ($1, $2, $3, $4, CURRENT_DATE - 60)",
             )
@@ -439,7 +453,7 @@ async fn roster(
 
     // One per-date override, so the resolution ladder has something to show.
     sqlx::query(
-        "INSERT INTO staff_schedule_overrides (org_id, user_id, on_date, work_shift_id, reason) \
+        "INSERT INTO staff_schedule_overrides (org_id, employee_id, on_date, work_shift_id, reason) \
          VALUES ($1, $2, CURRENT_DATE + 1, $3, 'Covering the evening shift')",
     )
     .bind(org)
@@ -489,7 +503,7 @@ async fn create_requests(
         ),
     ] {
         sqlx::query(
-            "INSERT INTO staff_requests (org_id, user_id, kind, on_date, from_time, to_time, reason) \
+            "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, from_time, to_time, reason) \
              VALUES ($1, $2, $3, $4, $5::time, $6::time, $7)",
         )
         .bind(org)
@@ -510,7 +524,7 @@ async fn create_requests(
         [(staff[3], 0usize, -12i64, 3i64), (staff[4], 2, -8, 2)]
     {
         sqlx::query(
-            "INSERT INTO staff_requests (org_id, user_id, kind, leave_type_id, on_date, end_date, \
+            "INSERT INTO staff_requests (org_id, employee_id, kind, leave_type_id, on_date, end_date, \
                  status, decided_at, reason) \
              VALUES ($1, $2, 'leave', $3, $4, $5, 'approved', now(), 'Planned')",
         )
@@ -526,7 +540,7 @@ async fn create_requests(
 
     // An approved mission, and one rejected request so the history is not all yes.
     sqlx::query(
-        "INSERT INTO staff_requests (org_id, user_id, kind, on_date, end_date, title, location, \
+        "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, end_date, title, location, \
              status, decided_at) \
          VALUES ($1, $2, 'mission', $3, $3, 'Supplier visit', 'Obour City', 'approved', now())",
     )
@@ -536,7 +550,7 @@ async fn create_requests(
     .execute(pool)
     .await?;
     sqlx::query(
-        "INSERT INTO staff_requests (org_id, user_id, kind, on_date, to_time, status, \
+        "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, to_time, status, \
              decided_at, reason, decision_note) \
          VALUES ($1, $2, 'late_arrival', $3, '11:00'::time, 'rejected', now(), \
                  'Overslept', 'Third time this month')",
@@ -553,7 +567,7 @@ async fn create_requests(
         for (i, lt) in leave_types.iter().enumerate() {
             let entitled = [21.0, 7.0, 0.0][i];
             sqlx::query(
-                "INSERT INTO leave_balances (org_id, user_id, leave_type_id, year, entitled_days) \
+                "INSERT INTO leave_balances (org_id, employee_id, leave_type_id, year, entitled_days) \
                  VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
             )
             .bind(org)
@@ -627,7 +641,7 @@ async fn create_attendance(
             };
 
             sqlx::query(
-                "INSERT INTO attendance_records (org_id, user_id, branch_id, work_shift_id, \
+                "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                      business_date, status, scheduled_start_at, scheduled_end_at, \
                      check_in_at, check_out_at, check_in_method, check_out_method, \
                      check_in_distance_meters, late_minutes, worked_minutes) \

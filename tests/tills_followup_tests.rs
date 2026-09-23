@@ -50,14 +50,18 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(JwtSecret(SECRET.into())))
-                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
                 .configure(madar_rust::tills::legacy_routes::configure)
                 .configure(madar_rust::tills::routes::configure)
                 .configure(madar_rust::orders::routes::configure)
                 .configure(madar_rust::branches::routes::configure)
                 .configure(madar_rust::payment_methods::routes::configure)
                 .configure(madar_rust::sync::routes::configure)
-                .configure(|c| madar_rust::reports::routes::configure(c, web::Data::new($pool.clone()))),
+                .configure(|c| {
+                    madar_rust::reports::routes::configure(c, web::Data::new($pool.clone()))
+                }),
         )
         .await
     };
@@ -370,12 +374,21 @@ async fn madar_app_can_use_every_table(pool: PgPool) {
         "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
           WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v') \
             AND NOT (has_table_privilege('madar_app', c.oid, 'SELECT') AND has_table_privilege('madar_app', c.oid, 'INSERT')) \
+            -- Dawam sign-in codes: read before the org is known, by the owner
+            -- pool only; the tenant role must never see them (Phase A).
+            AND c.relname <> 'staff_otp' \
           ORDER BY 1",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
     assert!(missing.is_empty(), "madar_app lacks grants on {missing:?}");
+    let otp: bool =
+        sqlx::query_scalar("SELECT has_table_privilege('madar_app', 'staff_otp', 'SELECT')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!otp, "the tenant role never reads sign-in codes");
     let archive: bool = sqlx::query_scalar(
         "SELECT has_schema_privilege('madar_app', 'archive', 'USAGE') AND has_table_privilege('madar_app', 'archive.till_entities', 'SELECT')",
     )

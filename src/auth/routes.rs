@@ -61,6 +61,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .wrap(Condition::new(limited, Governor::new(&login_gov)))
                     .route(web::post().to(crate::staff::dawam::signin::otp_verify)),
             )
+            // The staff app's session refresh: the device token is the
+            // credential, so it shares the login governor.
+            .service(
+                web::resource("/staff/refresh")
+                    .wrap(Condition::new(limited, Governor::new(&login_gov)))
+                    .route(web::post().to(crate::staff::dawam::signin::refresh)),
+            )
             .service(
                 web::resource("/resolve-branch")
                     .wrap(Condition::new(limited, Governor::new(&gov)))

@@ -51,6 +51,13 @@ pub async fn set_push_token(
     if app.is_empty() || token.is_empty() {
         return Err(AppError::BadRequest("app and token are required".into()));
     }
+    // The staff app signs in as an employee and registers through
+    // PUT /staff/me/push-token; a user session can't claim Dawam pushes.
+    if app == crate::staff::dawam::PUSH_APP {
+        return Err(AppError::BadRequest(
+            "The Dawam app registers its pushes through /staff/me/push-token".into(),
+        ));
+    }
     let locale = match body.locale.as_deref() {
         Some("en") => "en",
         _ => "ar",
@@ -59,7 +66,7 @@ pub async fn set_push_token(
     register(
         pool.get_ref(),
         org_id,
-        user_id,
+        super::Recipient::User(user_id),
         app,
         token,
         locale,
@@ -80,6 +87,12 @@ pub async fn delete_push_token(
     body: web::Json<UnregisterPushDevice>,
 ) -> Result<HttpResponse, AppError> {
     let user_id = extract_claims(&req)?.user_id_safe()?;
-    unregister(pool.get_ref(), user_id, body.app.trim(), body.token.trim()).await?;
+    unregister(
+        pool.get_ref(),
+        super::Recipient::User(user_id),
+        body.app.trim(),
+        body.token.trim(),
+    )
+    .await?;
     Ok(HttpResponse::NoContent().finish())
 }

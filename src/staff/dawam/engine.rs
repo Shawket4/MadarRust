@@ -100,7 +100,7 @@ pub struct Span {
 /// A roster past a labour limit. Warns, never blocks (RU-13).
 #[derive(Serialize, ToSchema, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LabourWarning {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     /// The day (or, for a week's limit, the Saturday it starts).
     pub date: NaiveDate,
     /// `day_hours` · `week_hours` · `presence` · `rest` · `weekly_rest` · `overtime_day`
@@ -110,10 +110,10 @@ pub struct LabourWarning {
 }
 
 /// Every limit one person's spans break.
-pub fn breaks(user_id: Uuid, spans: &[Span], l: &Limits) -> Vec<LabourWarning> {
+pub fn breaks(employee_id: Uuid, spans: &[Span], l: &Limits) -> Vec<LabourWarning> {
     let mut out = Vec::new();
     let w = |date, kind: &str, minutes, limit_minutes| LabourWarning {
-        user_id,
+        employee_id,
         date,
         kind: kind.into(),
         minutes,
@@ -162,14 +162,14 @@ pub fn breaks(user_id: Uuid, spans: &[Span], l: &Limits) -> Vec<LabourWarning> {
 }
 
 /// Would adding `extra` break a limit the person doesn't already break?
-pub fn fits(user_id: Uuid, spans: &[Span], extra: Span, l: &Limits) -> bool {
-    let before: HashSet<(NaiveDate, String)> = breaks(user_id, spans, l)
+pub fn fits(employee_id: Uuid, spans: &[Span], extra: Span, l: &Limits) -> bool {
+    let before: HashSet<(NaiveDate, String)> = breaks(employee_id, spans, l)
         .into_iter()
         .map(|b| (b.date, b.kind))
         .collect();
     let mut with = spans.to_vec();
     with.push(extra);
-    breaks(user_id, &with, l)
+    breaks(employee_id, &with, l)
         .into_iter()
         .all(|b| before.contains(&(b.date, b.kind)))
 }
@@ -177,7 +177,7 @@ pub fn fits(user_id: Uuid, spans: &[Span], extra: Span, l: &Limits) -> bool {
 /// One learning event: +1 took or kept a shift of that class, −1 refused or
 /// missed it.
 pub struct Signal {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub late: bool,
     pub value: f64,
     pub age_days: f64,
@@ -219,7 +219,7 @@ impl Fit {
 pub fn learn(signals: &[Signal]) -> HashMap<Uuid, Fit> {
     let mut out: HashMap<Uuid, Fit> = HashMap::new();
     for s in signals {
-        let f = out.entry(s.user_id).or_default();
+        let f = out.entry(s.employee_id).or_default();
         let wgt = decay(s.age_days);
         let slot = &mut f.acc[usize::from(!s.manager)][usize::from(s.late)];
         slot.0 += wgt * s.value;
@@ -332,7 +332,7 @@ mod tests {
         assert!((decay(56.0) - 0.5).abs() < 1e-9);
         let u = Uuid::from_u128(1);
         let s = |value, age_days, manager| Signal {
-            user_id: u,
+            employee_id: u,
             late: true,
             value,
             age_days,

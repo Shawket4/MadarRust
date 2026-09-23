@@ -24,6 +24,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(super::provision::list_templates),
             )
             .route("/{id}", web::get().to(handlers::get_org))
+            .route("/{id}/modules", web::get().to(handlers::get_org_modules))
             .route("/{id}", web::patch().to(handlers::update_org))
             .route("/{id}", web::delete().to(handlers::delete_org))
             .route("/{id}/logo", web::put().to(handlers::upload_org_logo))

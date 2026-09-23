@@ -1,28 +1,40 @@
-//! The employee directory: departments, staff profiles, documents.
+//! The employee directory: departments, employees, documents.
 //!
-//! Creating a `staff_profiles` row is what makes an existing user an employee —
-//! there is no separate "create employee" flow, because an employee has to be
-//! able to log in, and logging in is what `users` is for. Deleting the profile
-//! demotes them back to a plain login without touching their account, their
-//! orders, or their history.
+//! AN EMPLOYEE IS ITS OWN ENTITY (Dawam Phase A, PHASE_A_DESIGN.md §1),
+//! optionally linked to a Madar user:
 //!
-//! SALARY VISIBILITY: `base_salary_piastres` is nulled out for any caller who
-//! lacks `payroll:read`. Branch managers get `staff:read` (they need the roster)
-//! but not `payroll:read`, so they see who works for them without seeing what
-//! anyone earns. The field is redacted in the *response*, not the query, so there
-//! is exactly one place to get this wrong.
+//! - **linked** — an existing user (a cashier, a manager, the owner) who is also
+//!   on payroll. Their POS role is untouched; "make this user an employee" is
+//!   `POST /staff/employees` with `user_id`.
+//! - **app** — no user: signs in to the staff app with a WhatsApp code.
+//! - **manual** — no user, no app: payroll and attendance records only.
+//!
+//! Adding an employee never creates a login, a till PIN or a POS teller, and
+//! creating a login never makes anyone an employee. Removing an employee
+//! terminates them: their attendance and payslips are records of what
+//! happened and outlive the employment (AT-6).
+//!
+//! SALARY VISIBILITY: `base_salary_piastres` is nulled out unless the caller
+//! may read payroll for that employee's branches (`hr.payroll.read`). It is
+//! redacted in the *response*, not the query, so there is exactly one place to
+//! get this wrong.
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
+    auth::jwt::Claims,
+    authz::Cap,
     errors::{AppError, AppErrorResponse},
-    orgs::handlers::extract_claims,
-    permissions::checker::check_permission,
-    staff::{require_user_in_org, scope_org},
+    staff::{
+        access::{self, Subject},
+        principal::caller,
+        require_user_in_org, scope_org,
+    },
 };
 
 // ── Models ────────────────────────────────────────────────────
@@ -45,17 +57,21 @@ pub struct Department {
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct Employee {
-    pub user_id: Uuid,
+    pub id: Uuid,
     pub org_id: Uuid,
-    /// From `users` — the employee's name IS their user name; there is no
-    /// second copy to drift.
+    /// The linked Madar user, when this employee is one (a cashier, a manager,
+    /// the owner). Null for someone who is only on payroll.
+    pub user_id: Option<Uuid>,
+    /// `linked` · `app` (signs in to the staff app, no Madar account) ·
+    /// `manual` (records only, no app).
+    pub kind: String,
     pub name: String,
-    pub email: Option<String>,
     pub phone: Option<String>,
-    /// The POS role. Orthogonal to employment: a cleaner is a `teller`-role user
-    /// with the POS permissions revoked.
-    pub role: String,
-    pub is_active: bool,
+    /// May sign in to the staff app with a WhatsApp code.
+    pub app_access: bool,
+    /// The linked user's POS role; null for an unlinked employee.
+    pub role: Option<String>,
+    pub email: Option<String>,
     pub department_id: Option<Uuid>,
     #[sqlx(default)]
     pub department_name: Option<String>,
@@ -63,8 +79,9 @@ pub struct Employee {
     pub job_title: Option<String>,
     pub hire_date: Option<NaiveDate>,
     pub termination_date: Option<NaiveDate>,
+    /// `active` · `suspended` · `terminated`
     pub employment_status: String,
-    /// `None` when the caller lacks `payroll:read` — see the module docs.
+    /// `None` when the caller may not read this person's pay — see the module docs.
     pub base_salary_piastres: Option<i64>,
     pub national_id: Option<String>,
     pub photo_url: Option<String>,
@@ -72,22 +89,34 @@ pub struct Employee {
     pub emergency_contact_phone: Option<String>,
     pub notes: Option<String>,
     /// `m` · `f` · null — only ever a soft default for late shifts (SC-13).
-    #[sqlx(default)]
     pub gender: Option<String>,
     /// `cash` · `bank` · `wallet`
-    #[sqlx(default)]
     pub pay_method: String,
-    #[sqlx(default)]
     pub pay_account: Option<String>,
+    /// `morning` · `evening` · null
+    pub pref_time: Option<String>,
+    /// Days they can't work: 0 = Sunday … 6 = Saturday.
+    pub cant_work_days: Vec<i16>,
+    /// Where they work; managers see the people of their branches (RO-6).
+    pub branch_ids: Vec<Uuid>,
+    /// The live phone signed in to the staff app, if any.
+    pub device_model: Option<String>,
+    pub device_since: Option<DateTime<Utc>>,
+    pub device_last_seen: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl Employee {
-    /// Strip the salary unless the caller may see payroll. Called on every path
+    /// Strip the salary unless the caller may see it. Called on every path
     /// that returns an `Employee`.
-    fn redact_salary(mut self, may_see_salary: bool) -> Self {
-        if !may_see_salary {
+    fn redact_salary(mut self, pay_scope: &Option<Vec<Uuid>>, may_read_pay: bool) -> Self {
+        let visible = may_read_pay
+            && match pay_scope {
+                None => true,
+                Some(at) => self.branch_ids.iter().any(|b| at.contains(b)),
+            };
+        if !visible {
             self.base_salary_piastres = None;
         }
         self
@@ -98,7 +127,7 @@ impl Employee {
 pub struct StaffDocument {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub kind: String,
     pub title: String,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
@@ -109,7 +138,7 @@ pub struct StaffDocument {
 }
 
 const DOCUMENT_COLS: &str =
-    "id, org_id, user_id, kind, title, file_url, expires_on, uploaded_by, created_at";
+    "id, org_id, employee_id, kind, title, file_url, expires_on, uploaded_by, created_at";
 
 // ── Requests ──────────────────────────────────────────────────
 
@@ -120,11 +149,60 @@ pub struct UpsertDepartmentRequest {
     pub manager_user_id: Option<Uuid>,
 }
 
-/// Full replace of an employee's HR profile. A PUT rather than a POST because
-/// the key is the user id: writing a profile for a user who has none promotes
-/// them to staff, and writing it again edits them.
+/// Add an employee of any kind (see the module docs).
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+pub struct CreateEmployeeRequest {
+    /// Make this existing Madar user an employee (kind `linked`). Their name
+    /// and number are the defaults for the employee's.
+    #[serde(default)]
+    pub user_id: Option<Uuid>,
+    /// Required unless `user_id` is given.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Their WhatsApp number: how they sign in to the staff app.
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// May sign in to the staff app. Defaults to "has a phone".
+    #[serde(default)]
+    pub app_access: Option<bool>,
+    /// Where they work (at least one). `branch_id` is the older one-branch form.
+    #[serde(default)]
+    pub branch_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
+    /// Piastres. Ignored without `hr.payroll.edit` for every branch.
+    #[serde(default)]
+    pub base_salary_piastres: Option<i64>,
+    #[serde(default)]
+    pub job_title: Option<String>,
+    /// `m` · `f`
+    #[serde(default)]
+    pub gender: Option<String>,
+    /// Defaults to today.
+    #[serde(default)]
+    pub hire_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub department_id: Option<Uuid>,
+    #[serde(default)]
+    pub employee_code: Option<String>,
+}
+
+/// Replace an employee's HR profile. Profile fields are a full replace (null
+/// clears them); `name`, `phone`, `app_access` and `branch_ids` are kept when
+/// omitted.
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct PutEmployeeRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// A new number signs the old phone out (RO-10). Empty clears it.
+    #[serde(default)]
+    pub phone: Option<String>,
+    /// Turning it off signs the phone out.
+    #[serde(default)]
+    pub app_access: Option<bool>,
+    /// The whole set of branches.
+    #[serde(default)]
+    pub branch_ids: Option<Vec<Uuid>>,
     #[serde(default)]
     pub department_id: Option<Uuid>,
     #[serde(default)]
@@ -135,11 +213,12 @@ pub struct PutEmployeeRequest {
     pub hire_date: Option<NaiveDate>,
     #[serde(default)]
     pub termination_date: Option<NaiveDate>,
-    /// `active` | `suspended` | `terminated`. Defaults to `active`.
+    /// `active` | `suspended` | `terminated`. Defaults to `active`. Anything
+    /// but `active` signs the phone out (RO-10).
     #[serde(default)]
     pub employment_status: Option<String>,
-    /// Piastres. Ignored unless the caller has `payroll:update` — a branch
-    /// manager editing a job title must not be able to award a raise.
+    /// Piastres. Ignored unless the caller has `hr.payroll.edit` for every
+    /// branch — a branch manager editing a job title must not award a raise.
     #[serde(default)]
     pub base_salary_piastres: Option<i64>,
     #[serde(default)]
@@ -184,6 +263,12 @@ pub struct EmployeeListQuery {
     /// Case-insensitive substring over name, employee code, and job title.
     #[serde(default)]
     pub search: Option<String>,
+    /// Only the people of this branch.
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
+    /// `linked` · `app` · `manual`.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 fn validate_employment_status(status: &str) -> Result<&str, AppError> {
@@ -211,6 +296,14 @@ fn blank_to_none(value: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// A phone as stored: `+` and the canonical digits. Blank is none.
+fn clean_phone(raw: Option<&str>) -> Result<Option<String>, AppError> {
+    match raw.map(str::trim).filter(|p| !p.is_empty()) {
+        None => Ok(None),
+        Some(p) => Ok(Some(format!("+{}", crate::phone::normalize_phone(p)?))),
+    }
+}
+
 // ── Departments ───────────────────────────────────────────────
 
 #[utoipa::path(
@@ -222,20 +315,20 @@ pub async fn list_departments(
     req: HttpRequest,
     pool: crate::db::Db,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::scope(pool.get_ref(), &claims, org_id, Cap::HrStaffRead).await?;
 
     let rows = sqlx::query_as::<_, Department>(
         r#"
         SELECT d.id, d.org_id, d.name, d.manager_user_id,
                m.name AS manager_name,
-               COUNT(p.user_id) AS employee_count,
+               COUNT(e.id) AS employee_count,
                d.created_at, d.updated_at
           FROM departments d
           LEFT JOIN users m ON m.id = d.manager_user_id AND m.deleted_at IS NULL
-          LEFT JOIN staff_profiles p ON p.department_id = d.id
-                                    AND p.employment_status <> 'terminated'
+          LEFT JOIN employees e ON e.department_id = d.id
+                               AND e.employment_status <> 'terminated'
          WHERE d.org_id = $1
          GROUP BY d.id, m.name
          ORDER BY lower(d.name)
@@ -258,9 +351,10 @@ pub async fn create_department(
     pool: crate::db::Db,
     body: web::Json<UpsertDepartmentRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // A department spans the business: an org-wide act.
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrStaffCreate).await?;
 
     let name = trimmed_required(&body.name, "Department name")?;
     if let Some(manager) = body.manager_user_id {
@@ -294,9 +388,9 @@ pub async fn update_department(
     id: web::Path<Uuid>,
     body: web::Json<UpsertDepartmentRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrStaffEdit).await?;
 
     let name = trimmed_required(&body.name, "Department name")?;
     if let Some(manager) = body.manager_user_id {
@@ -331,15 +425,16 @@ pub async fn delete_department(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "delete").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrStaffDelete).await?;
 
-    // Profiles point at departments with ON DELETE SET NULL, so deleting one
+    // Employees point at departments with ON DELETE SET NULL, so deleting one
     // orphans rather than cascades. Refuse anyway while anyone is still in it:
     // silently unfiling twenty people is not what "delete department" means.
     let occupied: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM staff_profiles WHERE department_id = $1 AND org_id = $2",
+        "SELECT COUNT(*) FROM employees WHERE department_id = $1 AND org_id = $2 \
+            AND employment_status <> 'terminated'",
     )
     .bind(*id)
     .bind(org_id)
@@ -367,18 +462,44 @@ pub async fn delete_department(
 
 /// Every column of the employee projection, in `Employee` field order. Shared by
 /// the list and single-row queries so the two can never drift.
-const EMPLOYEE_COLS: &str = r#"
-    p.user_id, p.org_id, u.name, u.email, u.phone, u.role::text AS role, u.is_active,
-    p.department_id, d.name AS department_name, p.employee_code, p.job_title,
-    p.hire_date, p.termination_date, p.employment_status, p.base_salary_piastres,
-    p.national_id, p.photo_url, p.emergency_contact_name, p.emergency_contact_phone,
-    p.notes, p.gender, p.pay_method, p.pay_account, p.created_at, p.updated_at
+const EMPLOYEE_SELECT: &str = r#"
+    SELECT e.id, e.org_id, e.user_id,
+           CASE WHEN e.user_id IS NOT NULL THEN 'linked'
+                WHEN e.app_access THEN 'app' ELSE 'manual' END AS kind,
+           e.name, e.phone, e.app_access, u.role::text AS role, u.email,
+           e.department_id, d.name AS department_name, e.employee_code, e.job_title,
+           e.hire_date, e.termination_date, e.employment_status, e.base_salary_piastres,
+           e.national_id, e.photo_url, e.emergency_contact_name, e.emergency_contact_phone,
+           e.notes, e.gender, e.pay_method, e.pay_account, e.pref_time, e.cant_work_days,
+           COALESCE(ARRAY(SELECT eb.branch_id FROM employee_branches eb
+                           WHERE eb.employee_id = e.id ORDER BY eb.assigned_at, eb.branch_id),
+                    '{}') AS branch_ids,
+           dv.model AS device_model, dv.first_seen_at AS device_since,
+           dv.last_seen_at AS device_last_seen,
+           e.created_at, e.updated_at
+      FROM employees e
+      LEFT JOIN users u ON u.id = e.user_id
+      LEFT JOIN departments d ON d.id = e.department_id
+      LEFT JOIN staff_devices dv ON dv.employee_id = e.id AND dv.revoked_at IS NULL
 "#;
+
+/// Where the caller may read pay: `(scope, may at all)`.
+async fn pay_scope(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+) -> Result<(Option<Vec<Uuid>>, bool), AppError> {
+    match access::scope(pool, claims, org_id, Cap::HrPayrollRead).await {
+        Ok(s) => Ok((s, true)),
+        Err(AppError::Forbidden(_)) => Ok((Some(vec![]), false)),
+        Err(e) => Err(e),
+    }
+}
 
 #[utoipa::path(
     get, path = "/staff/employees", tag = "staff",
     params(EmployeeListQuery),
-    responses((status = 200, description = "Employees in the org", body = Vec<Employee>), AppErrorResponse),
+    responses((status = 200, description = "Employees at the caller's branches", body = Vec<Employee>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_employees(
@@ -386,15 +507,19 @@ pub async fn list_employees(
     pool: crate::db::Db,
     query: web::Query<EmployeeListQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    let may_see_salary = check_permission(pool.get_ref(), &claims, "payroll", "read")
-        .await
-        .is_ok();
+    let pool = pool.get_ref();
+    let scope = access::scope_at(pool, &claims, org_id, Cap::HrStaffRead, query.branch_id).await?;
+    let (pay, may_pay) = pay_scope(pool, &claims, org_id).await?;
 
     if let Some(status) = query.employment_status.as_deref() {
         validate_employment_status(status)?;
+    }
+    if let Some(kind) = query.kind.as_deref()
+        && !matches!(kind, "linked" | "app" | "manual")
+    {
+        return Err(AppError::BadRequest("kind is linked, app or manual".into()));
     }
     let search = query
         .search
@@ -402,72 +527,67 @@ pub async fn list_employees(
         .map(|s| format!("%{}%", s.trim().to_lowercase()));
 
     let rows = sqlx::query_as::<_, Employee>(&format!(
-        r#"
-        SELECT {EMPLOYEE_COLS}
-          FROM staff_profiles p
-          JOIN users u ON u.id = p.user_id AND u.deleted_at IS NULL
-          LEFT JOIN departments d ON d.id = p.department_id
-         WHERE p.org_id = $1
-           AND ($2::uuid IS NULL OR p.department_id = $2)
-           AND ($3::text IS NULL OR p.employment_status = $3)
-           AND ($4::text IS NULL
-                OR lower(u.name) LIKE $4
-                OR lower(COALESCE(p.employee_code, '')) LIKE $4
-                OR lower(COALESCE(p.job_title, '')) LIKE $4)
-         ORDER BY lower(u.name)
-        "#
+        "{EMPLOYEE_SELECT} \
+          WHERE e.org_id = $1 \
+            AND ($2::uuid IS NULL OR e.department_id = $2) \
+            AND ($3::text IS NULL OR e.employment_status = $3) \
+            AND ($4::text IS NULL \
+                 OR lower(e.name) LIKE $4 \
+                 OR lower(COALESCE(e.employee_code, '')) LIKE $4 \
+                 OR lower(COALESCE(e.job_title, '')) LIKE $4) \
+            AND {} \
+            AND ($6::text IS NULL OR $6 = CASE WHEN e.user_id IS NOT NULL THEN 'linked' \
+                 WHEN e.app_access THEN 'app' ELSE 'manual' END) \
+          ORDER BY lower(e.name)",
+        access::in_scope("e.id", 5)
     ))
     .bind(org_id)
     .bind(query.department_id)
     .bind(query.employment_status.as_deref())
     .bind(search)
-    .fetch_all(pool.get_ref())
+    .bind(scope.as_deref())
+    .bind(query.kind.as_deref())
+    .fetch_all(pool)
     .await?;
 
     let rows: Vec<Employee> = rows
         .into_iter()
-        .map(|e| e.redact_salary(may_see_salary))
+        .map(|e| e.redact_salary(&pay, may_pay))
         .collect();
     Ok(HttpResponse::Ok().json(rows))
 }
 
 #[utoipa::path(
-    get, path = "/staff/employees/{user_id}", tag = "staff",
-    params(("user_id" = Uuid, Path, description = "The employee's user ID")),
+    get, path = "/staff/employees/{employee_id}", tag = "staff",
+    params(("employee_id" = Uuid, Path, description = "The employee's id")),
     responses((status = 200, description = "The employee", body = Employee), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn get_employee(
     req: HttpRequest,
     pool: crate::db::Db,
-    user_id: web::Path<Uuid>,
+    employee_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    let may_see_salary = check_permission(pool.get_ref(), &claims, "payroll", "read")
-        .await
-        .is_ok();
-
-    let row = load_employee(pool.get_ref(), org_id, *user_id).await?;
-    Ok(HttpResponse::Ok().json(row.redact_salary(may_see_salary)))
+    let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrStaffRead).await?;
+    let subject = access::subject(pool, org_id, *employee_id).await?;
+    access::require_for(pool, &claims, Cap::HrStaffRead, &subject).await?;
+    let (pay, may_pay) = pay_scope(pool, &claims, org_id).await?;
+    let row = load_employee(pool, org_id, *employee_id).await?;
+    Ok(HttpResponse::Ok().json(row.redact_salary(&pay, may_pay)))
 }
 
 pub(crate) async fn load_employee(
-    pool: &sqlx::PgPool,
+    pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
 ) -> Result<Employee, AppError> {
     sqlx::query_as::<_, Employee>(&format!(
-        r#"
-        SELECT {EMPLOYEE_COLS}
-          FROM staff_profiles p
-          JOIN users u ON u.id = p.user_id AND u.deleted_at IS NULL
-          LEFT JOIN departments d ON d.id = p.department_id
-         WHERE p.user_id = $1 AND p.org_id = $2
-        "#
+        "{EMPLOYEE_SELECT} WHERE e.id = $1 AND e.org_id = $2"
     ))
-    .bind(user_id)
+    .bind(employee_id)
     .bind(org_id)
     .fetch_optional(pool)
     .await?
@@ -476,13 +596,13 @@ pub(crate) async fn load_employee(
 
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct BranchPerson {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub name: String,
 }
 
-/// Active staff at a branch, names only: what a till shows to tag a pay-out
-/// as someone's expense advance (AV-8). Anyone who works the branch may read
-/// it; nothing about pay is in it.
+/// Active employees at a branch, names only: what a till shows to tag a
+/// pay-out as someone's expense advance (AV-8). Anyone who works the branch
+/// may read it; nothing about pay is in it.
 #[utoipa::path(
     get, path = "/staff/branches/{branch_id}/people", tag = "staff",
     params(("branch_id" = Uuid, Path)),
@@ -494,15 +614,15 @@ pub async fn branch_people(
     pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
     let pool = pool.get_ref();
     crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(*branch_id)).await?;
     let rows: Vec<BranchPerson> = sqlx::query_as(
-        "SELECT u.id AS user_id, u.name FROM user_branch_assignments a \
-           JOIN users u ON u.id = a.user_id AND u.org_id = $2 AND u.deleted_at IS NULL AND u.is_active \
-           JOIN staff_profiles p ON p.user_id = u.id AND p.employment_status = 'active' \
-          WHERE a.branch_id = $1 ORDER BY lower(u.name)",
+        "SELECT e.id AS employee_id, e.name FROM employee_branches eb \
+           JOIN employees e ON e.id = eb.employee_id AND e.org_id = $2 \
+                           AND e.employment_status = 'active' \
+          WHERE eb.branch_id = $1 ORDER BY lower(e.name)",
     )
     .bind(*branch_id)
     .bind(org_id)
@@ -511,25 +631,107 @@ pub async fn branch_people(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct CreateEmployeeRequest {
+/// A Madar user who can be made an employee.
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+pub struct LinkableUser {
+    pub user_id: Uuid,
     pub name: String,
-    /// Their WhatsApp number: how they sign in to Dawam.
-    pub phone: String,
-    pub branch_id: Uuid,
-    /// Piastres. Ignored without `payroll:update`, as on the profile.
-    #[serde(default)]
-    pub base_salary_piastres: Option<i64>,
-    #[serde(default)]
-    pub job_title: Option<String>,
-    /// `m` · `f`
-    #[serde(default)]
-    pub gender: Option<String>,
+    /// Their POS role (`org_admin`, `branch_manager`, `teller`, …).
+    pub role: String,
+    pub phone: Option<String>,
+    pub email: Option<String>,
 }
 
-/// Add a Dawam employee: a user who signs in with a WhatsApp code, so no
-/// password or till PIN (a manager can give them a PIN later to work a till).
-/// Used by the Add Employee form and the spreadsheet import (DSH-7).
+/// The org's users who are not employees yet: the "make this user an
+/// employee" picker.
+#[utoipa::path(
+    get, path = "/staff/employees/linkable", tag = "staff",
+    responses((status = 200, body = Vec<LinkableUser>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn linkable_users(
+    req: HttpRequest,
+    pool: crate::db::Db,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    let scope = access::scope(pool, &claims, org_id, Cap::HrStaffCreate).await?;
+    // A branch manager sees the users of their branches; an owner, everyone.
+    let rows: Vec<LinkableUser> = sqlx::query_as(
+        "SELECT u.id AS user_id, u.name, u.role::text AS role, u.phone, u.email \
+           FROM users u \
+          WHERE u.org_id = $1 AND u.deleted_at IS NULL AND u.is_active \
+            AND u.role <> 'super_admin' \
+            AND NOT EXISTS (SELECT 1 FROM employees e WHERE e.user_id = u.id) \
+            AND ($2::uuid[] IS NULL OR EXISTS (SELECT 1 FROM user_branch_assignments a \
+                                                WHERE a.user_id = u.id AND a.branch_id = ANY($2))) \
+          ORDER BY lower(u.name)",
+    )
+    .bind(org_id)
+    .bind(scope.as_deref())
+    .fetch_all(pool)
+    .await?;
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+/// Linking (or changing the number of) a user who is not the caller gives
+/// them a phone sign-in with their own powers: the caller must dominate them
+/// (the same anti-escalation rule as editing their account), so a manager can
+/// never route the owner's staff-app code to their own phone.
+async fn guard_linked_user(
+    pool: &PgPool,
+    claims: &Claims,
+    user_id: Uuid,
+    authority: Cap,
+) -> Result<(), AppError> {
+    if claims.sub == user_id.to_string() {
+        return Ok(());
+    }
+    crate::permissions::guard::require_dominance(pool, claims, user_id, authority).await
+}
+
+async fn check_branches(pool: &PgPool, org_id: Uuid, branches: &[Uuid]) -> Result<(), AppError> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM branches WHERE id = ANY($1) AND org_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(branches)
+    .bind(org_id)
+    .fetch_one(pool)
+    .await?;
+    if n as usize != branches.len() {
+        return Err(AppError::NotFound("Branch not found".into()));
+    }
+    Ok(())
+}
+
+async fn phone_taken(
+    pool: &PgPool,
+    org_id: Uuid,
+    phone: &str,
+    except: Option<Uuid>,
+) -> Result<bool, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM employees WHERE org_id = $1 AND app_access \
+            AND employment_status <> 'terminated' AND phone_key = phone_canonical($2) \
+            AND ($3::uuid IS NULL OR id <> $3))",
+    )
+    .bind(org_id)
+    .bind(phone)
+    .bind(except)
+    .fetch_one(pool)
+    .await?)
+}
+
+fn dedup(mut v: Vec<Uuid>) -> Vec<Uuid> {
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|b| seen.insert(*b));
+    v
+}
+
+/// Add an employee: linked to an existing user, or without one (with or
+/// without the staff app). Used by the Employees page, the set-up wizard and
+/// the spreadsheet import (DSH-7). Never creates a login.
 #[utoipa::path(
     post, path = "/staff/employees", tag = "staff",
     request_body = CreateEmployeeRequest,
@@ -541,116 +743,156 @@ pub async fn create_employee(
     pool: crate::db::Db,
     body: web::Json<CreateEmployeeRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(body.branch_id)).await?;
-    crate::authz::require::require(
-        pool,
-        &claims,
-        crate::authz::Cap::HrStaffCreate,
-        Some(body.branch_id),
-    )
-    .await?;
-    // Holding the capability is never enough: the caller must hold what the
-    // new account's role gives.
-    crate::permissions::guard::require_can_create(pool, &claims, &crate::models::UserRole::Teller)
-        .await?;
-    let name = trimmed_required(&body.name, "name")?;
-    let phone = format!("+{}", crate::phone::normalize_phone(&body.phone)?);
-    let branch_ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM branches WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL)",
-    )
-    .bind(body.branch_id)
-    .bind(org_id)
-    .fetch_one(pool)
-    .await?;
-    if !branch_ok {
-        return Err(AppError::NotFound("Branch not found".into()));
+    access::gate(pool, &claims, org_id, Cap::HrStaffCreate).await?;
+    let mut branches = body.branch_ids.clone();
+    if let Some(b) = body.branch_id {
+        branches.insert(0, b);
     }
-    let taken: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE org_id = $1 AND deleted_at IS NULL \
-            AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $2)",
-    )
-    .bind(org_id)
-    .bind(phone.trim_start_matches('+'))
-    .fetch_one(pool)
-    .await?;
-    if taken {
+    let branches = dedup(branches);
+    if branches.is_empty() {
+        return Err(AppError::BadRequest("Pick the branch they work at".into()));
+    }
+    check_branches(pool, org_id, &branches).await?;
+    // Adding someone to a branch is that branch's manager's call (RO-1, RO-6).
+    for b in &branches {
+        access::require_at(pool, &claims, org_id, Cap::HrStaffCreate, *b).await?;
+    }
+
+    // The linked user, when this makes an existing user an employee.
+    let linked: Option<(String, Option<String>)> = match body.user_id {
+        Some(user) => {
+            let row: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT name, phone FROM users WHERE id = $1 AND org_id = $2 \
+                    AND deleted_at IS NULL AND role <> 'super_admin'",
+            )
+            .bind(user)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await?;
+            let row = row.ok_or_else(|| AppError::NotFound("User not found".into()))?;
+            let already: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM employees WHERE user_id = $1)")
+                    .bind(user)
+                    .fetch_one(pool)
+                    .await?;
+            if already {
+                return Err(AppError::Conflict(
+                    "That user is already an employee.".into(),
+                ));
+            }
+            guard_linked_user(pool, &claims, user, Cap::HrStaffCreate).await?;
+            Some(row)
+        }
+        None => None,
+    };
+
+    let name = match (body.name.as_deref(), &linked) {
+        (Some(n), _) if !n.trim().is_empty() => n.trim().to_string(),
+        (_, Some((user_name, _))) => user_name.clone(),
+        _ => return Err(AppError::BadRequest("name is required".into())),
+    };
+    // A linked user's number is the default; a number that is not a phone is
+    // dropped rather than refused, since it came from their account.
+    let phone = match (body.phone.as_deref(), &linked) {
+        (Some(p), _) if !p.trim().is_empty() => clean_phone(Some(p))?,
+        (_, Some((_, user_phone))) => clean_phone(user_phone.as_deref()).unwrap_or(None),
+        _ => None,
+    };
+    let app_access = body.app_access.unwrap_or(phone.is_some());
+    if app_access && phone.is_none() {
+        return Err(AppError::BadRequest(
+            "The staff app needs their WhatsApp number.".into(),
+        ));
+    }
+    if app_access
+        && let Some(p) = &phone
+        && phone_taken(pool, org_id, p, None).await?
+    {
         return Err(AppError::Conflict(format!(
-            "Someone here already has the number {phone}."
+            "Someone here already signs in with {p}."
         )));
     }
     if body.base_salary_piastres.is_some_and(|s| s < 0) {
         return Err(AppError::BadRequest("Salary cannot be negative".into()));
     }
-    let salary = if check_permission(pool, &claims, "payroll", "update")
-        .await
-        .is_ok()
-    {
+    let salary = if access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await? {
         body.base_salary_piastres
     } else {
         None
     };
-    // A login row needs a credential; this one is random and thrown away, so
-    // the only way in is the WhatsApp code. Low cost: nothing can guess it.
-    let unusable = bcrypt::hash(format!("{}{}", Uuid::new_v4(), Uuid::new_v4()), 4)
-        .map_err(|_| AppError::Internal)?;
+    if let Some(dept) = body.department_id {
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM departments WHERE id = $1 AND org_id = $2)",
+        )
+        .bind(dept)
+        .bind(org_id)
+        .fetch_one(pool)
+        .await?;
+        if !ok {
+            return Err(AppError::NotFound("Department not found".into()));
+        }
+    }
+
     let mut tx = pool.begin().await?;
-    let user_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (org_id, name, phone, role, password_hash) \
-         VALUES ($1, $2, $3, 'teller', $4) RETURNING id",
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO employees (org_id, user_id, name, phone, app_access, job_title, hire_date, \
+             base_salary_piastres, gender, department_id, employee_code) \
+         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_DATE), COALESCE($8, 0), $9, $10, $11) \
+         RETURNING id",
     )
     .bind(org_id)
+    .bind(body.user_id)
     .bind(&name)
     .bind(&phone)
-    .bind(&unusable)
-    .fetch_one(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO user_branch_assignments (user_id, branch_id, assigned_by) VALUES ($1, $2, $3)",
-    )
-    .bind(user_id)
-    .bind(body.branch_id)
-    .bind(claims.user_id())
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        "INSERT INTO staff_profiles (user_id, org_id, job_title, hire_date, base_salary_piastres, gender) \
-         VALUES ($1, $2, $3, CURRENT_DATE, COALESCE($4, 0), $5)",
-    )
-    .bind(user_id)
-    .bind(org_id)
+    .bind(app_access)
     .bind(blank_to_none(body.job_title.clone()))
+    .bind(body.hire_date)
     .bind(salary)
     .bind(blank_to_none(body.gender.clone()))
-    .execute(&mut *tx)
+    .bind(body.department_id)
+    .bind(blank_to_none(body.employee_code.clone()))
+    .fetch_one(&mut *tx)
     .await?;
+    for b in &branches {
+        sqlx::query(
+            "INSERT INTO employee_branches (employee_id, branch_id, org_id, assigned_by) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(b)
+        .bind(org_id)
+        .bind(claims.user_id_safe().ok())
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
-    let row = load_employee(pool, org_id, user_id).await?;
-    let may_see_salary = check_permission(pool, &claims, "payroll", "read")
-        .await
-        .is_ok();
-    Ok(HttpResponse::Created().json(row.redact_salary(may_see_salary)))
+    let (pay, may_pay) = pay_scope(pool, &claims, org_id).await?;
+    let row = load_employee(pool, org_id, id).await?;
+    Ok(HttpResponse::Created().json(row.redact_salary(&pay, may_pay)))
 }
 
 #[utoipa::path(
-    put, path = "/staff/employees/{user_id}", tag = "staff",
-    params(("user_id" = Uuid, Path, description = "The employee's user ID")),
+    put, path = "/staff/employees/{employee_id}", tag = "staff",
+    params(("employee_id" = Uuid, Path, description = "The employee's id")),
     request_body = PutEmployeeRequest,
-    responses((status = 200, description = "Employee profile saved", body = Employee), AppErrorResponse),
+    responses((status = 200, description = "Employee saved", body = Employee), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn put_employee(
     req: HttpRequest,
     pool: crate::db::Db,
-    user_id: web::Path<Uuid>,
+    employee_id: web::Path<Uuid>,
     body: web::Json<PutEmployeeRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, *user_id).await?;
+    let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrStaffEdit).await?;
+    let subject: Subject = access::subject(pool, org_id, *employee_id).await?;
+    access::require_for(pool, &claims, Cap::HrStaffEdit, &subject).await?;
 
     let status = match body.employment_status.as_deref() {
         Some(s) => validate_employment_status(s)?.to_string(),
@@ -672,60 +914,117 @@ pub async fn put_employee(
         )
         .bind(dept)
         .bind(org_id)
-        .fetch_one(pool.get_ref())
+        .fetch_one(pool)
         .await?;
         if !ok {
             return Err(AppError::NotFound("Department not found".into()));
         }
     }
 
-    // Salary is a payroll write, not a directory write. Without `payroll:update`
-    // the submitted figure is ignored and the stored one is kept, so a branch
-    // manager saving a job title cannot hand out a raise as a side effect.
-    let may_set_salary = check_permission(pool.get_ref(), &claims, "payroll", "update")
-        .await
-        .is_ok();
+    // The current sign-in facts, to see what changes.
+    let (old_phone_key, old_app): (Option<String>, bool) =
+        sqlx::query_as("SELECT phone_key, app_access FROM employees WHERE id = $1")
+            .bind(*employee_id)
+            .fetch_one(pool)
+            .await?;
+    let phone = match body.phone.as_deref() {
+        None => None,
+        Some(p) => Some(clean_phone(Some(p))?),
+    };
+    let new_key = match &phone {
+        Some(p) => p.as_deref().map(|p| p.trim_start_matches('+').to_string()),
+        None => old_phone_key.clone(),
+    };
+    let app_access = body.app_access.unwrap_or(old_app) && status != "terminated";
+    if app_access && new_key.is_none() {
+        return Err(AppError::BadRequest(
+            "The staff app needs their WhatsApp number.".into(),
+        ));
+    }
+    let phone_changed = new_key != old_phone_key;
+    let sign_in_changed = phone_changed || app_access != old_app;
+    // Handing a linked user's phone sign-in to a new number is an access
+    // change on that user.
+    if let Some(user) = subject.user_id
+        && (sign_in_changed && app_access)
+    {
+        guard_linked_user(pool, &claims, user, Cap::HrStaffEdit).await?;
+    }
+    if app_access
+        && let Some(Some(p)) = &phone
+        && phone_taken(pool, org_id, p, Some(*employee_id)).await?
+    {
+        return Err(AppError::Conflict(format!(
+            "Someone here already signs in with {p}."
+        )));
+    }
+
+    // Branches: the caller must run every branch they add or take away.
+    if let Some(wanted) = &body.branch_ids {
+        let wanted = dedup(wanted.clone());
+        if wanted.is_empty() {
+            return Err(AppError::BadRequest(
+                "An employee works at one branch at least".into(),
+            ));
+        }
+        check_branches(pool, org_id, &wanted).await?;
+        for b in wanted.iter().filter(|b| !subject.branches.contains(b)) {
+            access::require_at(pool, &claims, org_id, Cap::HrStaffEdit, *b).await?;
+        }
+        for b in subject.branches.iter().filter(|b| !wanted.contains(b)) {
+            access::require_at(pool, &claims, org_id, Cap::HrStaffEdit, *b).await?;
+        }
+    }
+
+    // Salary is a payroll write, not a directory write: without
+    // `hr.payroll.edit` for every branch the figure is ignored and the stored
+    // one kept, so a branch manager saving a job title cannot award a raise.
     if body.base_salary_piastres.is_some_and(|s| s < 0) {
         return Err(AppError::BadRequest("Salary cannot be negative".into()));
     }
-    let salary = if may_set_salary {
+    let salary = if access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await? {
         body.base_salary_piastres
     } else {
         None
     };
+    let name = match body.name.as_deref() {
+        Some(n) => Some(trimmed_required(n, "name")?),
+        None => None,
+    };
 
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
-        INSERT INTO staff_profiles (
-            user_id, org_id, department_id, employee_code, job_title, hire_date,
-            termination_date, employment_status, base_salary_piastres, national_id,
-            photo_url, emergency_contact_name, emergency_contact_phone, notes,
-            gender, pay_method, pay_account
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 0), $10, $11, $12, $13, $14,
-                $15, COALESCE($16, 'cash'), $17)
-        ON CONFLICT (user_id) DO UPDATE SET
-            department_id           = EXCLUDED.department_id,
-            employee_code           = EXCLUDED.employee_code,
-            job_title               = EXCLUDED.job_title,
-            hire_date               = EXCLUDED.hire_date,
-            termination_date        = EXCLUDED.termination_date,
-            employment_status       = EXCLUDED.employment_status,
+        UPDATE employees SET
+            name                    = COALESCE($3, name),
+            phone                   = CASE WHEN $4 THEN $5 ELSE phone END,
+            app_access              = $6,
+            department_id           = $7,
+            employee_code           = $8,
+            job_title               = $9,
+            hire_date               = $10,
+            termination_date        = $11,
+            employment_status       = $12,
             -- NULL here means "not permitted to change it", not "set to zero".
-            base_salary_piastres    = COALESCE($9, staff_profiles.base_salary_piastres),
-            national_id             = EXCLUDED.national_id,
-            photo_url               = EXCLUDED.photo_url,
-            emergency_contact_name  = EXCLUDED.emergency_contact_name,
-            emergency_contact_phone = EXCLUDED.emergency_contact_phone,
-            notes                   = EXCLUDED.notes,
-            gender                  = COALESCE($15, staff_profiles.gender),
-            pay_method              = COALESCE($16, staff_profiles.pay_method),
-            pay_account             = COALESCE($17, staff_profiles.pay_account),
+            base_salary_piastres    = COALESCE($13, base_salary_piastres),
+            national_id             = $14,
+            photo_url               = $15,
+            emergency_contact_name  = $16,
+            emergency_contact_phone = $17,
+            notes                   = $18,
+            gender                  = COALESCE($19, gender),
+            pay_method              = COALESCE($20, pay_method),
+            pay_account             = COALESCE($21, pay_account),
             updated_at              = now()
+        WHERE id = $1 AND org_id = $2
         "#,
     )
-    .bind(*user_id)
+    .bind(*employee_id)
     .bind(org_id)
+    .bind(&name)
+    .bind(phone.is_some())
+    .bind(phone.clone().flatten())
+    .bind(app_access)
     .bind(body.department_id)
     .bind(blank_to_none(body.employee_code.clone()))
     .bind(blank_to_none(body.job_title.clone()))
@@ -741,72 +1040,101 @@ pub async fn put_employee(
     .bind(blank_to_none(body.gender.clone()))
     .bind(blank_to_none(body.pay_method.clone()))
     .bind(blank_to_none(body.pay_account.clone()))
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await?;
-    // RO-10: someone who leaves loses the app on every phone at once.
-    if status != "active" {
-        crate::staff::dawam::revoke_devices(pool.get_ref(), *user_id).await?;
+    if let Some(wanted) = &body.branch_ids {
+        let wanted = dedup(wanted.clone());
+        sqlx::query(
+            "DELETE FROM employee_branches WHERE employee_id = $1 AND NOT (branch_id = ANY($2))",
+        )
+        .bind(*employee_id)
+        .bind(&wanted)
+        .execute(&mut *tx)
+        .await?;
+        for b in &wanted {
+            sqlx::query(
+                "INSERT INTO employee_branches (employee_id, branch_id, org_id, assigned_by) \
+                 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            )
+            .bind(*employee_id)
+            .bind(b)
+            .bind(org_id)
+            .bind(claims.user_id_safe().ok())
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    // RO-10: a new number, the app switched off, or someone who is no longer
+    // active loses the app on every phone at once.
+    if sign_in_changed || status != "active" {
+        crate::staff::dawam::revoke_devices(pool, *employee_id).await?;
     }
 
-    let row = load_employee(pool.get_ref(), org_id, *user_id).await?;
-    let may_see_salary = check_permission(pool.get_ref(), &claims, "payroll", "read")
-        .await
-        .is_ok();
-    Ok(HttpResponse::Ok().json(row.redact_salary(may_see_salary)))
+    let (pay, may_pay) = pay_scope(pool, &claims, org_id).await?;
+    let row = load_employee(pool, org_id, *employee_id).await?;
+    Ok(HttpResponse::Ok().json(row.redact_salary(&pay, may_pay)))
 }
 
 #[utoipa::path(
-    delete, path = "/staff/employees/{user_id}", tag = "staff",
-    params(("user_id" = Uuid, Path, description = "The employee's user ID")),
-    responses((status = 204, description = "Profile removed; the user account is untouched"), AppErrorResponse),
+    delete, path = "/staff/employees/{employee_id}", tag = "staff",
+    params(("employee_id" = Uuid, Path, description = "The employee's id")),
+    responses((status = 204, description = "Employee terminated; their records stay"), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_employee(
     req: HttpRequest,
     pool: crate::db::Db,
-    user_id: web::Path<Uuid>,
+    employee_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "delete").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrStaffDelete).await?;
+    let subject = access::subject(pool, org_id, *employee_id).await?;
+    access::require_for(pool, &claims, Cap::HrStaffDelete, &subject).await?;
 
-    // Deliberately NOT a cascade to attendance/payroll: the ledger and any
-    // generated payslips are records of what happened and outlive the profile.
-    let deleted = sqlx::query("DELETE FROM staff_profiles WHERE user_id = $1 AND org_id = $2")
-        .bind(*user_id)
-        .bind(org_id)
-        .execute(pool.get_ref())
-        .await?
-        .rows_affected();
-    if deleted == 0 {
-        return Err(AppError::NotFound("Employee not found".into()));
-    }
-    crate::staff::dawam::revoke_devices(pool.get_ref(), *user_id).await?;
+    // Deliberately NOT a delete: attendance and payslips are records of what
+    // happened and outlive the employment (AT-6). The person is terminated
+    // today, loses the app, and drops out of rosters and payroll from here.
+    sqlx::query(
+        "UPDATE employees SET employment_status = 'terminated', app_access = false, \
+             termination_date = GREATEST(CURRENT_DATE, COALESCE(hire_date, CURRENT_DATE)), \
+             updated_at = now() \
+          WHERE id = $1 AND org_id = $2 AND employment_status <> 'terminated'",
+    )
+    .bind(*employee_id)
+    .bind(org_id)
+    .execute(pool)
+    .await?;
+    crate::staff::dawam::revoke_devices(pool, *employee_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
 // ── Documents ─────────────────────────────────────────────────
 
 #[utoipa::path(
-    get, path = "/staff/employees/{user_id}/documents", tag = "staff",
-    params(("user_id" = Uuid, Path, description = "The employee's user ID")),
+    get, path = "/staff/employees/{employee_id}/documents", tag = "staff",
+    params(("employee_id" = Uuid, Path, description = "The employee's id")),
     responses((status = 200, description = "The employee's documents", body = Vec<StaffDocument>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_documents(
     req: HttpRequest,
     pool: crate::db::Db,
-    user_id: web::Path<Uuid>,
+    employee_id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrStaffRead).await?;
+    let subject = access::subject(pool.get_ref(), org_id, *employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrStaffRead, &subject).await?;
 
     let rows = sqlx::query_as::<_, StaffDocument>(&format!(
         "SELECT {DOCUMENT_COLS} FROM staff_documents \
-         WHERE user_id = $1 AND org_id = $2 ORDER BY created_at DESC"
+         WHERE employee_id = $1 AND org_id = $2 ORDER BY created_at DESC"
     ))
-    .bind(*user_id)
+    .bind(*employee_id)
     .bind(org_id)
     .fetch_all(pool.get_ref())
     .await?;
@@ -814,8 +1142,8 @@ pub async fn list_documents(
 }
 
 #[utoipa::path(
-    post, path = "/staff/employees/{user_id}/documents", tag = "staff",
-    params(("user_id" = Uuid, Path, description = "The employee's user ID")),
+    post, path = "/staff/employees/{employee_id}/documents", tag = "staff",
+    params(("employee_id" = Uuid, Path, description = "The employee's id")),
     request_body = CreateDocumentRequest,
     responses((status = 201, description = "Document attached", body = StaffDocument), AppErrorResponse),
     security(("bearer_jwt" = []))
@@ -823,29 +1151,30 @@ pub async fn list_documents(
 pub async fn create_document(
     req: HttpRequest,
     pool: crate::db::Db,
-    user_id: web::Path<Uuid>,
+    employee_id: web::Path<Uuid>,
     body: web::Json<CreateDocumentRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, *user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrStaffEdit).await?;
+    let subject = access::subject(pool.get_ref(), org_id, *employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrStaffEdit, &subject).await?;
 
     let title = trimmed_required(&body.title, "Document title")?;
     let file_url = trimmed_required(&body.file_url, "File URL")?;
     let kind = blank_to_none(body.kind.clone()).unwrap_or_else(|| "other".to_string());
 
     let row = sqlx::query_as::<_, StaffDocument>(&format!(
-        "INSERT INTO staff_documents (org_id, user_id, kind, title, file_url, expires_on, uploaded_by) \
+        "INSERT INTO staff_documents (org_id, employee_id, kind, title, file_url, expires_on, uploaded_by) \
          VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {DOCUMENT_COLS}"
     ))
     .bind(org_id)
-    .bind(*user_id)
+    .bind(*employee_id)
     .bind(&kind)
     .bind(&title)
     .bind(&file_url)
     .bind(body.expires_on)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .fetch_one(pool.get_ref())
     .await?;
     Ok(HttpResponse::Created().json(row))
@@ -862,18 +1191,23 @@ pub async fn delete_document(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "staff", "delete").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrStaffDelete).await?;
+    let owner: Uuid =
+        sqlx::query_scalar("SELECT employee_id FROM staff_documents WHERE id = $1 AND org_id = $2")
+            .bind(*id)
+            .bind(org_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Document not found".into()))?;
+    let subject = access::subject(pool.get_ref(), org_id, owner).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrStaffDelete, &subject).await?;
 
-    let deleted = sqlx::query("DELETE FROM staff_documents WHERE id = $1 AND org_id = $2")
+    sqlx::query("DELETE FROM staff_documents WHERE id = $1 AND org_id = $2")
         .bind(*id)
         .bind(org_id)
         .execute(pool.get_ref())
-        .await?
-        .rows_affected();
-    if deleted == 0 {
-        return Err(AppError::NotFound("Document not found".into()));
-    }
+        .await?;
     Ok(HttpResponse::NoContent().finish())
 }

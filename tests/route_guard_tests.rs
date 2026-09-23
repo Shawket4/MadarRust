@@ -84,6 +84,21 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "/demo/session",
         "public demo playground; 404 unless DEMO_MODE, which runs on a separate backend",
     ),
+    (
+        "POST",
+        "/auth/staff/otp/request",
+        "Dawam sign-in: a WhatsApp code to a number a manager registered; login governor",
+    ),
+    (
+        "POST",
+        "/auth/staff/otp/verify",
+        "Dawam sign-in: the code for a staff token and a device token; five tries; login governor",
+    ),
+    (
+        "POST",
+        "/auth/staff/refresh",
+        "Dawam session refresh: the phone's device token is the credential (401 without a live one)",
+    ),
     // ── Own credential instead of a staff JWT ──
     (
         "GET",
@@ -322,6 +337,16 @@ pub const AUTHENTICATED: &[(&str, &str, &str)] = &[
         "which capabilities ask a manager in this org; every till needs it to know when to ask",
     ),
     ("GET", "/timezones", "the static list of IANA zone names"),
+    (
+        "PUT",
+        "/push/token",
+        "the caller's own push device for their own notifications",
+    ),
+    (
+        "DELETE",
+        "/push/token",
+        "signs out the caller's own push device; a no-op on anyone else's",
+    ),
     (
         "POST",
         "/tills",
@@ -678,7 +703,11 @@ struct Fixture {
 /// A real, active person of a fresh org with no capability anywhere.
 async fn zero_cap_user(pool: &PgPool) -> Fixture {
     let org = Uuid::new_v4();
-    sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Guard', $2)")
+    // Both modules on, so /staff/* routes reach their handlers' own checks
+    // instead of stopping at "Dawam is off".
+    sqlx::query(
+        "INSERT INTO organizations (id, name, slug, modules) VALUES ($1, 'Guard', $2, '{pos,dawam}')",
+    )
         .bind(org)
         .bind(format!("guard-{org}"))
         .execute(pool)
@@ -770,14 +799,20 @@ async fn every_route_is_guarded_or_allowlisted(pool: PgPool) {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(madar_rust::menu::cache::MenuCache::from_env()))
+            .app_data(web::Data::new(
+                madar_rust::menu::cache::MenuCache::from_env(),
+            ))
             .app_data(web::Data::new(secret()))
             .app_data(web::Data::new(
                 madar_rust::auth::org_status::OrgStatusCache::new(),
             ))
-            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .app_data(web::Data::new(
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            ))
             .app_data(madar_rust::qr_card::routes::make_provider())
-            .app_data(web::Data::new(madar_rust::demo::config::DemoConfig::from_env()))
+            .app_data(web::Data::new(
+                madar_rust::demo::config::DemoConfig::from_env(),
+            ))
             .app_data(web::Data::new(madar_rust::ai::AiState::from_env()))
             .app_data(web::PathConfig::default().error_handler(|err, _req| {
                 madar_rust::errors::AppError::BadRequest(err.to_string()).into()
@@ -973,7 +1008,9 @@ async fn caught_routes_decide_permission_before_validation(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(secret()))
-            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .app_data(web::Data::new(
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            ))
             .app_data(web::JsonConfig::default().error_handler(|err, _req| {
                 madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))

@@ -16,11 +16,12 @@ use uuid::Uuid;
 use super::{notify, owners, user_name};
 use crate::authz::{Cap, Decision, Request as AuthzRequest};
 use crate::errors::{AppError, AppErrorResponse};
-use crate::orgs::handlers::extract_claims;
-use crate::staff::attendance::{load_settings, require_active_profile, today_in};
+use crate::staff::access;
+use crate::staff::attendance::{load_settings, today_in};
 use crate::staff::payroll::{
     ComputedPayslip, PayrollPeriod, Payslip, SalaryAdvance, compute_payslips,
 };
+use crate::staff::principal::{Me, caller};
 
 /// The pay window holding `day`: from `start_day` of one month to the day
 /// before it in the next. `start_day` 1 is the calendar month.
@@ -101,14 +102,14 @@ pub struct CurrentPayroll {
 }
 
 const PAYSLIP_SELECT: &str = r#"
-    SELECT s.id, s.org_id, s.payroll_period_id, s.user_id, u.name AS user_name,
+    SELECT s.id, s.org_id, s.payroll_period_id, s.employee_id, e.name AS employee_name,
            s.base_salary_piastres, s.worked_days, s.absent_days, s.leave_days,
            s.late_minutes, s.overtime_minutes, s.overtime_piastres, s.bonuses_piastres,
            s.deductions_piastres, s.advance_installment_piastres, s.net_piastres,
            s.breakdown, s.generated_at, s.paid_method, s.paid_at, s.carry_out_piastres,
            pp.name AS period_name, pp.start_date AS period_start, pp.end_date AS period_end
       FROM payslips s
-      JOIN users u ON u.id = s.user_id
+      JOIN employees e ON e.id = s.employee_id
       JOIN payroll_periods pp ON pp.id = s.payroll_period_id
 "#;
 
@@ -119,9 +120,10 @@ const PAYSLIP_SELECT: &str = r#"
     security(("bearer_jwt" = []))
 )]
 pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrPayrollRead, None).await?;
+    // Everyone's pay for the whole business: payroll read for every branch.
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRead).await?;
     let period = ensure_current_period(pool.get_ref(), org_id).await?;
     let (preview, payslips) = if period.status == "draft" {
         let settings = load_settings(pool.get_ref(), org_id, None).await?;
@@ -137,7 +139,7 @@ pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
         (p, Vec::new())
     } else {
         let s = sqlx::query_as::<_, Payslip>(&format!(
-            "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(u.name)"
+            "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(e.name)"
         ))
         .bind(period.id)
         .fetch_all(pool.get_ref())
@@ -170,15 +172,19 @@ pub struct PayEstimate {
     pub advance_room_piastres: i64,
 }
 
-async fn advance_room(pool: &PgPool, org_id: Uuid, user_id: Uuid) -> Result<(i64, i64), AppError> {
+async fn advance_room(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+) -> Result<(i64, i64), AppError> {
     let settings = load_settings(pool, org_id, None).await?;
     let (salary, outstanding): (i64, i64) = sqlx::query_as(
         "SELECT p.base_salary_piastres, \
                 COALESCE((SELECT SUM(remaining_piastres) FROM salary_advances a \
-                           WHERE a.user_id = p.user_id AND a.status IN ('pending', 'approved')), 0)::bigint \
-           FROM staff_profiles p WHERE p.user_id = $1",
+                           WHERE a.employee_id = p.id AND a.status IN ('pending', 'approved')), 0)::bigint \
+           FROM employees p WHERE p.id = $1",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .fetch_one(pool)
     .await?;
     let cap = (Decimal::from(salary) * settings.advance_cap_percent / Decimal::from(100))
@@ -194,10 +200,9 @@ async fn advance_room(pool: &PgPool, org_id: Uuid, user_id: Uuid) -> Result<(i64
     responses((status = 200, body = PayEstimate), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_estimate(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+pub async fn my_estimate(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
     let settings = load_settings(pool.get_ref(), org_id, None).await?;
     let today = today_for_org(pool.get_ref(), org_id).await?;
     let (start, end) = period_window(today, settings.period_start_day.max(1) as u32);
@@ -205,9 +210,9 @@ pub async fn my_estimate(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
     let slip = compute_payslips(&mut conn, org_id, start, end, &settings)
         .await?
         .into_iter()
-        .find(|s| s.user_id == user_id);
+        .find(|s| s.employee_id == employee_id);
     drop(conn);
-    let (room, _) = advance_room(pool.get_ref(), org_id, user_id).await?;
+    let (room, _) = advance_room(pool.get_ref(), org_id, employee_id).await?;
     Ok(HttpResponse::Ok().json(PayEstimate {
         period_start: start,
         period_end: end,
@@ -224,9 +229,9 @@ pub struct MarkPaid {
 
 /// Mark one payslip paid; the period is paid once everyone is (PAY-7).
 #[utoipa::path(
-    patch, path = "/staff/payroll/periods/{id}/payslips/{user_id}/paid", tag = "staff",
+    patch, path = "/staff/payroll/periods/{id}/payslips/{employee_id}/paid", tag = "staff",
     request_body = MarkPaid,
-    params(("id" = Uuid, Path), ("user_id" = Uuid, Path)),
+    params(("id" = Uuid, Path), ("employee_id" = Uuid, Path)),
     responses((status = 200, body = Payslip), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
@@ -236,10 +241,11 @@ pub async fn mark_paid(
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<MarkPaid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let (period_id, user_id) = path.into_inner();
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrPayrollRun, None).await?;
+    let (period_id, employee_id) = path.into_inner();
+    // Paying is part of the payroll run, held for every branch (RO-9).
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
     if !matches!(body.method.as_str(), "cash" | "bank" | "wallet") {
         return Err(AppError::BadRequest(
             "method is cash, bank or wallet".into(),
@@ -261,10 +267,10 @@ pub async fn mark_paid(
     }
     let n = sqlx::query(
         "UPDATE payslips SET paid_method = $3, paid_at = now() \
-          WHERE payroll_period_id = $1 AND user_id = $2 AND paid_at IS NULL",
+          WHERE payroll_period_id = $1 AND employee_id = $2 AND paid_at IS NULL",
     )
     .bind(period_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(&body.method)
     .execute(&mut *tx)
     .await?
@@ -286,16 +292,16 @@ pub async fn mark_paid(
     notify(
         pool.get_ref(),
         org_id,
-        user_id,
+        employee_id,
         "staff.n_paid",
         json!({ "method": body.method }),
     )
     .await;
     let row = sqlx::query_as::<_, Payslip>(&format!(
-        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 AND s.user_id = $2"
+        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 AND s.employee_id = $2"
     ))
     .bind(period_id)
-    .bind(user_id)
+    .bind(employee_id)
     .fetch_one(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(row))
@@ -308,8 +314,8 @@ pub struct Adjustment {
     pub id: Uuid,
     /// `bonus` · `deduction`
     pub kind: String,
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub amount_piastres: Option<i64>,
     pub percent_of_base: Option<Decimal>,
     pub reason: String,
@@ -324,15 +330,15 @@ pub struct Adjustment {
 }
 
 const ADJ_SELECT: &str = "SELECT * FROM ( \
-    SELECT a.id, 'bonus' AS kind, a.org_id, a.user_id, u.name AS user_name, a.amount_piastres, \
+    SELECT a.id, 'bonus' AS kind, a.org_id, a.employee_id, e.name AS employee_name, a.amount_piastres, \
            a.percent_of_base, a.reason, a.effective_date, a.source, a.status, a.recurring, \
            a.ends_on, a.created_by, a.created_at \
-      FROM payroll_bonuses a JOIN users u ON u.id = a.user_id \
+      FROM payroll_bonuses a JOIN employees e ON e.id = a.employee_id \
     UNION ALL \
-    SELECT a.id, 'deduction', a.org_id, a.user_id, u.name, a.amount_piastres, a.percent_of_base, \
+    SELECT a.id, 'deduction', a.org_id, a.employee_id, e.name, a.amount_piastres, a.percent_of_base, \
            a.reason, a.effective_date, a.source, a.status, a.recurring, a.ends_on, a.created_by, \
            a.created_at \
-      FROM payroll_deductions a JOIN users u ON u.id = a.user_id \
+      FROM payroll_deductions a JOIN employees e ON e.id = a.employee_id \
     ) x";
 
 async fn load_adjustment(pool: &PgPool, id: Uuid) -> Result<Adjustment, AppError> {
@@ -353,7 +359,7 @@ fn table_of(kind: &str) -> Result<&'static str, AppError> {
 
 #[derive(Deserialize, ToSchema)]
 pub struct NewAdjustment {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     /// `bonus` · `deduction`
     pub kind: String,
     #[serde(default)]
@@ -381,24 +387,27 @@ pub async fn create_adjustment(
     pool: crate::db::Db,
     body: web::Json<NewAdjustment>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrAdjustmentsCreate).await?;
     let table = table_of(&body.kind)?;
-    crate::staff::require_user_in_org(pool, org_id, body.user_id).await?;
-    if body.user_id == caller {
+    let subject = access::subject(pool, org_id, body.employee_id).await?;
+    if subject.is(&claims) {
         return Err(AppError::Forbidden(
             "You can't add pay lines for yourself.".into(),
         ));
     }
+    // A manager adds pay lines for the people of their branches (RO-6).
+    access::require_for(pool, &claims, Cap::HrAdjustmentsCreate, &subject).await?;
     let reason = body.reason.trim();
     if reason.is_empty() {
         return Err(AppError::BadRequest("A reason is required".into()));
     }
     let salary: i64 =
-        sqlx::query_scalar("SELECT base_salary_piastres FROM staff_profiles WHERE user_id = $1")
-            .bind(body.user_id)
+        sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
+            .bind(body.employee_id)
             .fetch_optional(pool)
             .await?
             .unwrap_or(0);
@@ -416,37 +425,34 @@ pub async fn create_adjustment(
             ));
         }
     };
-    let branch = super::branches_of(pool, body.user_id)
-        .await?
-        .first()
-        .copied();
+    let branch = access::decision_branch(pool, &claims, Cap::HrAdjustmentsCreate, &subject).await?;
     let mut ask = AuthzRequest::of(Cap::HrAdjustmentsCreate);
     ask.amount = Some(amount);
-    let status = match crate::authz::require::decide_for(pool, caller, &ask, branch).await? {
+    let status = match crate::authz::require::decide_for(pool, by, &ask, branch).await? {
         Decision::Allow => "approved",
         Decision::NeedsApproval(_) => "pending",
         Decision::Deny(_) => return Err(crate::authz::require::denied(Cap::HrAdjustmentsCreate)),
     };
     let today = today_for_org(pool, org_id).await?;
     let id: Uuid = sqlx::query_scalar(&format!(
-        "INSERT INTO {table} (org_id, user_id, amount_piastres, percent_of_base, reason, \
+        "INSERT INTO {table} (org_id, employee_id, amount_piastres, percent_of_base, reason, \
             effective_date, source, status, created_by, recurring) \
          VALUES ($1, $2, $3, $4, $5, $6, 'manual', $7, $8, $9) RETURNING id"
     ))
     .bind(org_id)
-    .bind(body.user_id)
+    .bind(body.employee_id)
     .bind(body.percent_of_base.is_none().then_some(amount))
     .bind(body.percent_of_base)
     .bind(reason)
     .bind(body.effective_date.unwrap_or(today))
     .bind(status)
-    .bind(caller)
+    .bind(by)
     .bind(body.recurring)
     .fetch_one(pool)
     .await?;
-    let who = user_name(pool, body.user_id).await;
+    let who = subject.name.clone();
     if status == "pending" {
-        let by = user_name(pool, caller).await;
+        let by = user_name(pool, by).await;
         for o in owners(pool, org_id).await? {
             notify(
                 pool,
@@ -461,7 +467,7 @@ pub async fn create_adjustment(
         notify(
             pool,
             org_id,
-            body.user_id,
+            body.employee_id,
             if body.kind == "bonus" {
                 "staff.n_bonus_added"
             } else {
@@ -478,7 +484,7 @@ pub async fn create_adjustment(
 #[into_params(parameter_in = Query)]
 pub struct AdjustmentList {
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
     #[serde(default)]
     pub status: Option<String>,
 }
@@ -493,17 +499,26 @@ pub async fn list_adjustments(
     pool: crate::db::Db,
     query: web::Query<AdjustmentList>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrPayrollRead, None).await?;
+    // Payroll readers, and managers for the lines of their branches (B15).
+    let scope = crate::staff::payroll::money_scope(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrAdjustmentsCreate,
+    )
+    .await?;
     let rows = sqlx::query_as::<_, Adjustment>(&format!(
-        "{ADJ_SELECT} WHERE x.org_id = $1 AND ($2::uuid IS NULL OR x.user_id = $2) \
-            AND ($3::text IS NULL OR x.status = $3) \
-          ORDER BY x.created_at DESC LIMIT 300"
+        "{ADJ_SELECT} WHERE x.org_id = $1 AND ($2::uuid IS NULL OR x.employee_id = $2) \
+            AND ($3::text IS NULL OR x.status = $3) AND {} \
+          ORDER BY x.created_at DESC LIMIT 300",
+        access::in_scope("x.employee_id", 4)
     ))
     .bind(org_id)
-    .bind(query.user_id)
+    .bind(query.employee_id)
     .bind(query.status.as_deref())
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -514,18 +529,12 @@ pub async fn list_adjustments(
     responses((status = 200, body = Vec<Adjustment>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_adjustments(
-    req: HttpRequest,
-    pool: crate::db::Db,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    require_active_profile(pool.get_ref(), user_id).await?;
+pub async fn my_adjustments(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let rows = sqlx::query_as::<_, Adjustment>(&format!(
-        "{ADJ_SELECT} WHERE x.user_id = $1 AND x.status = 'approved' \
+        "{ADJ_SELECT} WHERE x.employee_id = $1 AND x.status = 'approved' \
           ORDER BY x.created_at DESC LIMIT 200"
     ))
-    .bind(user_id)
+    .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -549,10 +558,11 @@ pub async fn decide_adjustment(
     path: web::Path<(String, Uuid)>,
     body: web::Json<DecidePay>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrAdjustmentsCreate).await?;
     let (kind, id) = path.into_inner();
     let table = table_of(&kind)?;
     let a = load_adjustment(pool, id).await?;
@@ -561,16 +571,20 @@ pub async fn decide_adjustment(
             "This line has already been decided".into(),
         ));
     }
-    let branch = super::branches_of(pool, a.user_id).await?.first().copied();
+    let subject = access::subject(pool, org_id, a.employee_id).await?;
+    access::require_for(pool, &claims, Cap::HrAdjustmentsCreate, &subject).await?;
+    let branch = access::decision_branch(pool, &claims, Cap::HrAdjustmentsCreate, &subject).await?;
     let mut ask = AuthzRequest::of(Cap::HrAdjustmentsCreate);
     ask.amount = a.amount_piastres;
     let pending = crate::authz::Pending {
         request: ask,
-        subject_id: a.user_id.to_string(),
-        requested_by: a.created_by.unwrap_or(a.user_id).to_string(),
+        subject_id: subject.authz_key(),
+        requested_by: a
+            .created_by
+            .map_or_else(|| subject.authz_key(), |u| u.to_string()),
         why: crate::authz::Why::NotHeld,
     };
-    crate::authz::require::settle(pool, caller, &pending, branch).await?;
+    crate::authz::require::settle(pool, by, &pending, branch).await?;
     sqlx::query(&format!(
         "UPDATE {table} SET status = $3, decided_by = $4, decided_at = now(), updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND status = 'pending'"
@@ -578,14 +592,14 @@ pub async fn decide_adjustment(
     .bind(id)
     .bind(org_id)
     .bind(if body.approve { "approved" } else { "rejected" })
-    .bind(caller)
+    .bind(by)
     .execute(pool)
     .await?;
     if body.approve {
         notify(
             pool,
             org_id,
-            a.user_id,
+            a.employee_id,
             if kind == "bonus" {
                 "staff.n_bonus_added"
             } else {
@@ -595,19 +609,27 @@ pub async fn decide_adjustment(
         )
         .await;
     }
-    if let Some(by) = a.created_by {
-        notify(
-            pool,
-            org_id,
-            by,
-            if body.approve {
-                "staff.n_adjustment_approved"
-            } else {
-                "staff.n_adjustment_rejected"
-            },
-            json!({ "name": a.user_name }),
-        )
-        .await;
+    // The manager who added it hears back, in the app, through their employee.
+    if let Some(creator) = a.created_by {
+        let theirs: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1")
+                .bind(creator)
+                .fetch_optional(pool)
+                .await?;
+        if let Some(e) = theirs {
+            notify(
+                pool,
+                org_id,
+                e,
+                if body.approve {
+                    "staff.n_adjustment_approved"
+                } else {
+                    "staff.n_adjustment_rejected"
+                },
+                json!({ "name": a.employee_name }),
+            )
+            .await;
+        }
     }
     Ok(HttpResponse::Ok().json(load_adjustment(pool, id).await?))
 }
@@ -624,12 +646,19 @@ pub async fn stop_adjustment(
     pool: crate::db::Db,
     path: web::Path<(String, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::authz::require::require(pool, &claims, Cap::HrAdjustmentsCreate, None).await?;
+    access::gate(pool, &claims, org_id, Cap::HrAdjustmentsCreate).await?;
     let (kind, id) = path.into_inner();
     let table = table_of(&kind)?;
+    // For a line of someone the caller manages — never "anywhere" (audit B-3).
+    let line = load_adjustment(pool, id).await?;
+    if line.kind != kind {
+        return Err(AppError::NotFound("Adjustment not found".into()));
+    }
+    let subject = access::subject(pool, org_id, line.employee_id).await?;
+    access::require_for(pool, &claims, Cap::HrAdjustmentsCreate, &subject).await?;
     let period = ensure_current_period(pool, org_id).await?;
     let n = sqlx::query(&format!(
         "UPDATE {table} SET ends_on = $3, updated_at = now() \
@@ -677,12 +706,13 @@ pub async fn review_advance(
     id: web::Path<Uuid>,
     body: web::Json<ReviewAdvance>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    let caller = claims.user_id_safe()?;
+    let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
-    let (user_id, asked, inst): (Uuid, i64, i32) = sqlx::query_as(
-        "SELECT user_id, amount_piastres, installments FROM salary_advances \
+    access::gate(pool, &claims, org_id, Cap::HrAdvancesDecide).await?;
+    let (employee_id, asked, inst): (Uuid, i64, i32) = sqlx::query_as(
+        "SELECT employee_id, amount_piastres, installments FROM salary_advances \
           WHERE id = $1 AND org_id = $2 AND status = 'pending'",
     )
     .bind(*id)
@@ -690,11 +720,14 @@ pub async fn review_advance(
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::Conflict("This advance has already been decided".into()))?;
-    if user_id == caller {
+    let subject = access::subject(pool, org_id, employee_id).await?;
+    if subject.is(&claims) {
         return Err(AppError::Forbidden(
             "Someone else has to decide your advance.".into(),
         ));
     }
+    // Approve or reject: at one of the person's branches (audit B-3).
+    access::require_for(pool, &claims, Cap::HrAdvancesDecide, &subject).await?;
     let amount = body.amount_piastres.unwrap_or(asked);
     let installments = body.installments.unwrap_or(inst);
     if amount <= 0 || !(1..=12).contains(&installments) {
@@ -703,7 +736,7 @@ pub async fn review_advance(
         ));
     }
     if body.approve {
-        let (room, salary) = advance_room(pool, org_id, user_id).await?;
+        let (room, salary) = advance_room(pool, org_id, employee_id).await?;
         // The one being decided is itself counted as outstanding.
         if amount > room + asked {
             return Err(AppError::Conflict(format!(
@@ -711,7 +744,8 @@ pub async fn review_advance(
                 (room + asked) / 100
             )));
         }
-        let branch = super::branches_of(pool, user_id).await?.first().copied();
+        let branch =
+            access::decision_branch(pool, &claims, Cap::HrAdvancesDecide, &subject).await?;
         let mut ask = AuthzRequest::of(Cap::HrAdvancesDecide);
         ask.percent = Some(if salary > 0 {
             (amount * 100).div_euclid(salary)
@@ -720,13 +754,11 @@ pub async fn review_advance(
         });
         let pending = crate::authz::Pending {
             request: ask,
-            subject_id: user_id.to_string(),
-            requested_by: user_id.to_string(),
+            subject_id: subject.authz_key(),
+            requested_by: subject.authz_key(),
             why: crate::authz::Why::NotHeld,
         };
-        crate::authz::require::settle(pool, caller, &pending, branch).await?;
-    } else {
-        crate::authz::require::require(pool, &claims, Cap::HrAdvancesDecide, None).await?;
+        crate::authz::require::settle(pool, by, &pending, branch).await?;
     }
     let monthly = (amount as u64).div_ceil(installments as u64) as i64;
     sqlx::query(
@@ -741,7 +773,7 @@ pub async fn review_advance(
     .bind(amount)
     .bind(installments)
     .bind(monthly)
-    .bind(caller)
+    .bind(by)
     .bind(
         body.note
             .as_deref()
@@ -753,7 +785,7 @@ pub async fn review_advance(
     notify(
         pool,
         org_id,
-        user_id,
+        employee_id,
         if body.approve {
             "staff.n_advance_approved"
         } else {
@@ -763,11 +795,11 @@ pub async fn review_advance(
     )
     .await;
     let row = sqlx::query_as::<_, SalaryAdvance>(
-        "SELECT a.id, a.org_id, a.user_id, u.name AS user_name, a.amount_piastres, \
+        "SELECT a.id, a.org_id, a.employee_id, e.name AS employee_name, a.amount_piastres, \
                 a.installments, a.monthly_installment_piastres, a.remaining_piastres, \
                 a.reason, a.status, a.decided_by, a.decided_at, a.decision_note, \
                 a.created_at, a.updated_at \
-           FROM salary_advances a JOIN users u ON u.id = a.user_id WHERE a.id = $1",
+           FROM salary_advances a JOIN employees e ON e.id = a.employee_id WHERE a.id = $1",
     )
     .bind(*id)
     .fetch_one(pool)
@@ -780,8 +812,8 @@ pub async fn review_advance(
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct ExpenseAdvance {
     pub id: Uuid,
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub branch_id: Option<Uuid>,
     pub amount_piastres: i64,
     pub purpose: String,
@@ -793,14 +825,14 @@ pub struct ExpenseAdvance {
     pub created_at: DateTime<Utc>,
 }
 
-const EXP_SELECT: &str = "SELECT e.id, e.user_id, u.name AS user_name, e.branch_id, \
+const EXP_SELECT: &str = "SELECT e.id, e.employee_id, p.name AS employee_name, e.branch_id, \
     e.amount_piastres, e.purpose, e.via, e.handed_by, h.name AS handed_by_name, e.given_on, \
-    e.created_at FROM expense_advances e JOIN users u ON u.id = e.user_id \
+    e.created_at FROM expense_advances e JOIN employees p ON p.id = e.employee_id \
     LEFT JOIN users h ON h.id = e.handed_by";
 
 #[derive(Deserialize, ToSchema)]
 pub struct NewExpenseAdvance {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub amount_piastres: i64,
     pub purpose: String,
     /// `safe` · `bank` · `till`
@@ -817,30 +849,29 @@ pub async fn log_expense_advance(
     pool: crate::db::Db,
     body: web::Json<NewExpenseAdvance>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
-    crate::staff::require_user_in_org(pool, org_id, body.user_id).await?;
-    let branch = super::branches_of(pool, body.user_id)
-        .await?
-        .first()
-        .copied();
-    crate::authz::require::require(pool, &claims, Cap::HrExpenseAdvancesLog, branch).await?;
+    access::gate(pool, &claims, org_id, Cap::HrExpenseAdvancesLog).await?;
+    let subject = access::subject(pool, org_id, body.employee_id).await?;
+    access::require_for(pool, &claims, Cap::HrExpenseAdvancesLog, &subject).await?;
+    let branch =
+        access::decision_branch(pool, &claims, Cap::HrExpenseAdvancesLog, &subject).await?;
     if !matches!(body.via.as_str(), "safe" | "bank" | "till") {
         return Err(AppError::BadRequest("via is safe, bank or till".into()));
     }
     let today = today_for_org(pool, org_id).await?;
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO expense_advances (org_id, user_id, branch_id, amount_piastres, purpose, via, \
+        "INSERT INTO expense_advances (org_id, employee_id, branch_id, amount_piastres, purpose, via, \
             handed_by, given_on) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(org_id)
-    .bind(body.user_id)
+    .bind(body.employee_id)
     .bind(branch)
     .bind(body.amount_piastres)
     .bind(body.purpose.trim())
     .bind(&body.via)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .bind(today)
     .fetch_one(pool)
     .await?;
@@ -855,7 +886,7 @@ pub async fn log_expense_advance(
 #[into_params(parameter_in = Query)]
 pub struct ExpenseQuery {
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
 }
 
 #[utoipa::path(
@@ -868,15 +899,24 @@ pub async fn list_expense_advances(
     pool: crate::db::Db,
     query: web::Query<ExpenseQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
-    crate::authz::require::require(pool.get_ref(), &claims, Cap::HrPayrollRead, None).await?;
+    // Payroll readers, and whoever logs them, for their branches (B15).
+    let scope = crate::staff::payroll::money_scope(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrExpenseAdvancesLog,
+    )
+    .await?;
     let rows = sqlx::query_as::<_, ExpenseAdvance>(&format!(
-        "{EXP_SELECT} WHERE e.org_id = $1 AND ($2::uuid IS NULL OR e.user_id = $2) \
-          ORDER BY e.given_on DESC, e.created_at DESC LIMIT 300"
+        "{EXP_SELECT} WHERE e.org_id = $1 AND ($2::uuid IS NULL OR e.employee_id = $2) AND {} \
+          ORDER BY e.given_on DESC, e.created_at DESC LIMIT 300",
+        access::in_scope("e.employee_id", 3)
     ))
     .bind(org_id)
-    .bind(query.user_id)
+    .bind(query.employee_id)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -887,17 +927,11 @@ pub async fn list_expense_advances(
     responses((status = 200, body = Vec<ExpenseAdvance>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_expense_advances(
-    req: HttpRequest,
-    pool: crate::db::Db,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    require_active_profile(pool.get_ref(), user_id).await?;
+pub async fn my_expense_advances(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let rows = sqlx::query_as::<_, ExpenseAdvance>(&format!(
-        "{EXP_SELECT} WHERE e.user_id = $1 ORDER BY e.given_on DESC LIMIT 200"
+        "{EXP_SELECT} WHERE e.employee_id = $1 ORDER BY e.given_on DESC LIMIT 200"
     ))
-    .bind(user_id)
+    .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -920,17 +954,12 @@ pub struct StaffNotification {
     responses((status = 200, body = Vec<StaffNotification>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_notifications(
-    req: HttpRequest,
-    pool: crate::db::Db,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
+pub async fn my_notifications(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let rows = sqlx::query_as::<_, StaffNotification>(
         "SELECT id, key, args, created_at, read_at FROM staff_notifications \
-          WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100",
+          WHERE employee_id = $1 ORDER BY created_at DESC LIMIT 100",
     )
-    .bind(user_id)
+    .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -949,17 +978,15 @@ pub struct ReadNotifications {
     security(("bearer_jwt" = []))
 )]
 pub async fn read_notifications(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<ReadNotifications>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
     sqlx::query(
         "UPDATE staff_notifications SET read_at = now() \
-          WHERE user_id = $1 AND read_at IS NULL AND (cardinality($2::uuid[]) = 0 OR id = ANY($2))",
+          WHERE employee_id = $1 AND read_at IS NULL AND (cardinality($2::uuid[]) = 0 OR id = ANY($2))",
     )
-    .bind(user_id)
+    .bind(me.employee_id)
     .bind(&body.ids)
     .execute(pool.get_ref())
     .await?;

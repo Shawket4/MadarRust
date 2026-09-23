@@ -701,6 +701,13 @@ pub async fn update_user(
     .await?
     .ok_or_else(|| AppError::NotFound("User not found".into()))?;
 
+    // RO-10: a deactivated account's Dawam phone is signed out at once (the
+    // employee it is linked to keeps their records; their manager decides
+    // whether they keep the app).
+    if body.is_active == Some(false) {
+        crate::staff::dawam::revoke_for_user(pool.get_ref(), *user_id).await?;
+    }
+
     Ok(HttpResponse::Ok().json(UserPublic::from(user)))
 }
 
@@ -769,6 +776,8 @@ pub async fn delete_user(
         .bind(*user_id)
         .execute(pool.get_ref())
         .await?;
+    // RO-10: and their Dawam phone with it.
+    crate::staff::dawam::revoke_for_user(pool.get_ref(), *user_id).await?;
 
     Ok(HttpResponse::NoContent().finish())
 }

@@ -1,5 +1,7 @@
 //! `/push/token`: register, rebind to a new user, sign-out, and cleanup on
-//! Dawam's phone revocation.
+//! Dawam's phone revocation. The Dawam app registers for its EMPLOYEE through
+//! `/staff/me/push-token`; `/push/token` is a Madar user's, and refuses both a
+//! staff token and the `dawam` app.
 
 use actix_web::{App, test, web};
 use sqlx::PgPool;
@@ -7,6 +9,8 @@ use uuid::Uuid;
 
 use madar_rust::auth::jwt::JwtSecret;
 use madar_rust::models::UserRole;
+
+mod common;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".to_string())
@@ -64,7 +68,8 @@ async fn org_and_user(pool: &PgPool) -> (Uuid, Uuid) {
 
 async fn live_row(pool: &PgPool, token: &str) -> Option<(Uuid, String, String)> {
     sqlx::query_as(
-        "SELECT user_id, app, locale FROM push_devices WHERE token = $1 AND revoked_at IS NULL",
+        "SELECT COALESCE(user_id, employee_id), app, locale FROM push_devices \
+          WHERE token = $1 AND revoked_at IS NULL",
     )
     .bind(token)
     .fetch_optional(pool)
@@ -81,11 +86,11 @@ async fn registering_a_token_creates_a_live_device(pool: PgPool) {
         put,
         "/push/token",
         token_for(u, org),
-        serde_json::json!({"app": "dawam", "token": "tok-1", "locale": "en", "platform": "ios"})
+        serde_json::json!({"app": "manager", "token": "tok-1", "locale": "en", "platform": "ios"})
     );
     assert_eq!(resp.status(), 204);
     let row = live_row(&pool, "tok-1").await.unwrap();
-    assert_eq!(row, (u, "dawam".to_string(), "en".to_string()));
+    assert_eq!(row, (u, "manager".to_string(), "en".to_string()));
 }
 
 #[sqlx::test]
@@ -98,14 +103,14 @@ async fn the_same_token_rebinds_to_whoever_registers_it_next(pool: PgPool) {
         put,
         "/push/token",
         token_for(u1, org),
-        serde_json::json!({"app": "dawam", "token": "shared", "locale": "ar"})
+        serde_json::json!({"app": "manager", "token": "shared", "locale": "ar"})
     );
     call!(
         &app,
         put,
         "/push/token",
         token_for(u2, org),
-        serde_json::json!({"app": "dawam", "token": "shared", "locale": "ar"})
+        serde_json::json!({"app": "manager", "token": "shared", "locale": "ar"})
     );
     let row = live_row(&pool, "shared").await.unwrap();
     assert_eq!(
@@ -128,7 +133,7 @@ async fn signing_out_revokes_only_that_device(pool: PgPool) {
         put,
         "/push/token",
         token_for(u, org),
-        serde_json::json!({"app": "dawam", "token": "tok-a"})
+        serde_json::json!({"app": "manager", "token": "tok-a"})
     );
     call!(
         &app,
@@ -142,7 +147,7 @@ async fn signing_out_revokes_only_that_device(pool: PgPool) {
         delete,
         "/push/token",
         token_for(u, org),
-        serde_json::json!({"app": "dawam", "token": "tok-a"})
+        serde_json::json!({"app": "manager", "token": "tok-a"})
     );
     assert_eq!(resp.status(), 204);
     assert!(live_row(&pool, "tok-a").await.is_none());
@@ -151,17 +156,49 @@ async fn signing_out_revokes_only_that_device(pool: PgPool) {
 
 #[sqlx::test]
 async fn revoking_a_dawam_phone_also_revokes_its_push_device(pool: PgPool) {
-    let (_org, u) = org_and_user(&pool).await;
+    let (org, _u) = org_and_user(&pool).await;
+    let e = common::employees::employee(&pool, org, "B", None, None, false, &[], 0).await;
     sqlx::query(
-        "INSERT INTO push_devices (org_id, user_id, app, token, locale) \
-         SELECT org_id, $1, 'dawam', 'phone-tok', 'ar' FROM users WHERE id = $1",
+        "INSERT INTO push_devices (org_id, employee_id, app, token, locale) \
+         VALUES ($1, $2, 'dawam', 'phone-tok', 'ar')",
     )
-    .bind(u)
+    .bind(org)
+    .bind(e)
     .execute(&pool)
     .await
     .unwrap();
-    madar_rust::staff::dawam::revoke_devices(&pool, u)
+    madar_rust::staff::dawam::revoke_devices(&pool, e)
         .await
         .unwrap();
     assert!(live_row(&pool, "phone-tok").await.is_none());
+}
+
+#[sqlx::test]
+async fn the_dawam_app_and_a_staff_token_cannot_use_push_token(pool: PgPool) {
+    let (org, u) = org_and_user(&pool).await;
+    let app = app!(pool);
+    // A user session can't claim the staff app's pushes: those belong to the
+    // employee, registered through /staff/me/push-token.
+    let resp = call!(
+        &app,
+        put,
+        "/push/token",
+        token_for(u, org),
+        serde_json::json!({"app": "dawam", "token": "tok-d"})
+    );
+    assert_eq!(resp.status(), 400);
+    // And a staff token is not a Madar session anywhere outside /staff.
+    common::employees::set_modules(&pool, org, &["pos", "dawam"]).await;
+    let e = common::employees::employee(&pool, org, "B", None, Some("+201012345670"), true, &[], 0)
+        .await;
+    let s = common::employees::session(&pool, e).await;
+    let resp = call!(
+        &app,
+        put,
+        "/push/token",
+        s.token,
+        serde_json::json!({"app": "manager", "token": "tok-e"})
+    );
+    assert_eq!(resp.status(), 401);
+    assert!(live_row(&pool, "tok-e").await.is_none());
 }

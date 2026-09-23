@@ -1,26 +1,29 @@
 //! Staff routes.
 //!
-//! Two scopes, both behind `JwtMiddleware`:
+//! One scope behind `StaffAuth` (see `staff::principal`), which accepts a
+//! Madar user's session (dashboard, POS) or the staff app's staff token — and
+//! is the ONLY place a staff token is accepted:
 //!
-//! - `/staff/*` — the ADMIN surface. Every handler checks a permission
-//!   (`staff` / `work_shifts` / `attendance` / `leave` / `payroll`).
-//! - `/staff/me/*` — SELF-SERVICE. No permission is checked because the scope is
-//!   the caller's own rows; the gate is having a `staff_profiles` row at all.
+//! - `/staff/*` — the ADMIN surface. Every handler checks an `hr.*` capability
+//!   at the right branch (`staff::access`).
+//! - `/staff/me/*` — SELF-SERVICE for the staff app's employee. No capability
+//!   is checked because the scope is the caller's own rows; the gate is a live
+//!   staff session (device, active employee, active org, Dawam on).
 //!
 //! `/staff/me/...` is registered on the same scope as `/staff/...`; actix matches
-//! the more specific literal segment first, so `me` never shadows a `{user_id}`
-//! path — and `me` is not a UUID, so it could not collide anyway.
+//! the more specific literal segment first, so `me` never shadows an
+//! `{employee_id}` path — and `me` is not a UUID, so it could not collide anyway.
 
 use actix_web::web;
 
-use crate::auth::middleware::JwtMiddleware;
 use crate::staff::dawam::{context, pay, presence, roster};
+use crate::staff::principal::StaffAuth;
 use crate::staff::{attendance, directory, discipline, payroll, requests, schedules};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/staff")
-            .wrap(JwtMiddleware)
+            .wrap(StaffAuth)
             // ── Self-service ─────────────────────────────────────
             .route("/me/today", web::get().to(attendance::my_today))
             .route("/me/check-in", web::post().to(attendance::check_in))
@@ -77,7 +80,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::patch().to(presence::decide_overtime),
             )
             .route(
-                "/employees/{user_id}/device",
+                "/employees/{employee_id}/device",
                 web::delete().to(presence::revoke_device),
             )
             .route("/roster", web::get().to(roster::roster))
@@ -117,7 +120,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/holidays/{date}", web::put().to(roster::decide_holiday))
             .route("/payroll/current", web::get().to(pay::current))
             .route(
-                "/payroll/periods/{id}/payslips/{user_id}/paid",
+                "/payroll/periods/{id}/payslips/{employee_id}/paid",
                 web::patch().to(pay::mark_paid),
             )
             .route("/adjustments", web::get().to(pay::list_adjustments))
@@ -156,27 +159,31 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/employees", web::get().to(directory::list_employees))
             .route("/employees", web::post().to(directory::create_employee))
             .route(
+                "/employees/linkable",
+                web::get().to(directory::linkable_users),
+            )
+            .route(
                 "/branches/{branch_id}/people",
                 web::get().to(directory::branch_people),
             )
             .route(
-                "/employees/{user_id}",
+                "/employees/{employee_id}",
                 web::get().to(directory::get_employee),
             )
             .route(
-                "/employees/{user_id}",
+                "/employees/{employee_id}",
                 web::put().to(directory::put_employee),
             )
             .route(
-                "/employees/{user_id}",
+                "/employees/{employee_id}",
                 web::delete().to(directory::delete_employee),
             )
             .route(
-                "/employees/{user_id}/documents",
+                "/employees/{employee_id}/documents",
                 web::get().to(directory::list_documents),
             )
             .route(
-                "/employees/{user_id}/documents",
+                "/employees/{employee_id}/documents",
                 web::post().to(directory::create_document),
             )
             .route(

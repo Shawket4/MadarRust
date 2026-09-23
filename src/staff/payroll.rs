@@ -30,13 +30,13 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
+    auth::jwt::Claims,
+    authz::Cap,
     errors::{AppError, AppErrorResponse},
-    orgs::handlers::extract_claims,
-    permissions::checker::check_permission,
     staff::{
+        access,
         attendance::load_settings,
-        requests::my_org,
-        require_user_in_org,
+        principal::{Me, caller},
         rules::{PayrollInputs, compute_net_salary, resolve_adjustment_piastres},
         scope_org, validate_decision,
     },
@@ -52,9 +52,9 @@ const DEFAULT_SHIFT_MINUTES: i64 = 480;
 pub struct PayrollAdjustment {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     #[sqlx(default)]
-    pub user_name: Option<String>,
+    pub employee_name: Option<String>,
     pub amount_piastres: Option<i64>,
     pub percent_of_base: Option<Decimal>,
     pub reason: String,
@@ -83,9 +83,9 @@ pub struct PayrollAdjustment {
 pub struct SalaryAdvance {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     #[sqlx(default)]
-    pub user_name: Option<String>,
+    pub employee_name: Option<String>,
     pub amount_piastres: i64,
     pub installments: i32,
     pub monthly_installment_piastres: i64,
@@ -100,12 +100,12 @@ pub struct SalaryAdvance {
 }
 
 const ADVANCE_SELECT: &str = r#"
-    SELECT a.id, a.org_id, a.user_id, u.name AS user_name, a.amount_piastres,
+    SELECT a.id, a.org_id, a.employee_id, e.name AS employee_name, a.amount_piastres,
            a.installments, a.monthly_installment_piastres, a.remaining_piastres,
            a.reason, a.status, a.decided_by, a.decided_at, a.decision_note,
            a.created_at, a.updated_at
       FROM salary_advances a
-      JOIN users u ON u.id = a.user_id
+      JOIN employees e ON e.id = a.employee_id
 "#;
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -134,9 +134,9 @@ pub struct Payslip {
     pub id: Uuid,
     pub org_id: Uuid,
     pub payroll_period_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     #[sqlx(default)]
-    pub user_name: Option<String>,
+    pub employee_name: Option<String>,
     pub base_salary_piastres: i64,
     pub worked_days: Decimal,
     pub absent_days: Decimal,
@@ -170,7 +170,7 @@ pub struct Payslip {
 }
 
 const PAYSLIP_SELECT: &str = r#"
-    SELECT s.id, s.org_id, s.payroll_period_id, s.user_id, u.name AS user_name,
+    SELECT s.id, s.org_id, s.payroll_period_id, s.employee_id, e.name AS employee_name,
            s.base_salary_piastres, s.worked_days, s.absent_days, s.leave_days,
            s.late_minutes, s.overtime_minutes, s.overtime_piastres, s.bonuses_piastres,
            s.deductions_piastres, s.advance_installment_piastres, s.net_piastres,
@@ -178,7 +178,7 @@ const PAYSLIP_SELECT: &str = r#"
            pp.name AS period_name, pp.start_date AS period_start,
            pp.end_date AS period_end
       FROM payslips s
-      JOIN users u ON u.id = s.user_id
+      JOIN employees e ON e.id = s.employee_id
       JOIN payroll_periods pp ON pp.id = s.payroll_period_id
 "#;
 
@@ -186,7 +186,7 @@ const PAYSLIP_SELECT: &str = r#"
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateAdjustmentRequest {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     /// Exactly one of `amount_piastres` or `percent_of_base`.
     #[serde(default)]
     pub amount_piastres: Option<i64>,
@@ -200,7 +200,7 @@ pub struct CreateAdjustmentRequest {
 pub struct CreateAdvanceRequest {
     /// Admin-only; omitted on `/staff/me/*`.
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
     pub amount_piastres: i64,
     /// Defaults to 1 — repaid in full from the next payslip.
     #[serde(default)]
@@ -238,7 +238,7 @@ pub struct PeriodStatusRequest {
 #[into_params(parameter_in = Query)]
 pub struct AdjustmentQuery {
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
     #[serde(default)]
     pub from: Option<NaiveDate>,
     #[serde(default)]
@@ -263,11 +263,11 @@ fn adjustment_select(table: &str) -> String {
          NULL::timestamptz AS waived_at, NULL::text AS waive_reason"
     };
     format!(
-        "SELECT a.id, a.org_id, a.user_id, u.name AS user_name, a.amount_piastres, \
+        "SELECT a.id, a.org_id, a.employee_id, e.name AS employee_name, a.amount_piastres, \
                 a.percent_of_base, a.reason, a.effective_date, a.source, a.status, \
                 {overrides}, \
                 a.created_by, a.created_at, a.updated_at \
-           FROM {table} a JOIN users u ON u.id = a.user_id"
+           FROM {table} a JOIN employees e ON e.id = a.employee_id"
     )
 }
 
@@ -277,22 +277,25 @@ async fn list_adjustments(
     query: &AdjustmentQuery,
     table: &str,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "read").await?;
+    let claims = caller(req)?;
     let org_id = scope_org(req, &claims)?;
+    let scope = money_scope(pool.get_ref(), &claims, org_id, Cap::HrAdjustmentsCreate).await?;
 
     let rows = sqlx::query_as::<_, PayrollAdjustment>(&format!(
         "{} WHERE a.org_id = $1 \
-             AND ($2::uuid IS NULL OR a.user_id = $2) \
+             AND ($2::uuid IS NULL OR a.employee_id = $2) \
              AND ($3::date IS NULL OR a.effective_date >= $3) \
              AND ($4::date IS NULL OR a.effective_date <= $4) \
-           ORDER BY a.effective_date DESC, lower(u.name)",
-        adjustment_select(table)
+             AND {} \
+           ORDER BY a.effective_date DESC, lower(e.name)",
+        adjustment_select(table),
+        access::in_scope("a.employee_id", 5)
     ))
     .bind(org_id)
-    .bind(query.user_id)
+    .bind(query.employee_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -304,10 +307,12 @@ async fn create_adjustment(
     body: &CreateAdjustmentRequest,
     table: &str,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "create").await?;
+    let claims = caller(req)?;
     let org_id = scope_org(req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, body.user_id).await?;
+    // The unlimited, instantly approved path is the owner's (audit B4): a
+    // manager adds a pay line under their limit through `POST /staff/adjustments`.
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollCreate).await?;
+    crate::staff::require_employee_in_org(pool.get_ref(), org_id, body.employee_id).await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
@@ -334,17 +339,17 @@ async fn create_adjustment(
     }
 
     let id = sqlx::query_scalar::<_, Uuid>(&format!(
-        "INSERT INTO {table} (org_id, user_id, amount_piastres, percent_of_base, reason, \
+        "INSERT INTO {table} (org_id, employee_id, amount_piastres, percent_of_base, reason, \
                               effective_date, source, status, created_by) \
          VALUES ($1, $2, $3, $4, $5, $6, 'manual', 'approved', $7) RETURNING id"
     ))
     .bind(org_id)
-    .bind(body.user_id)
+    .bind(body.employee_id)
     .bind(body.amount_piastres)
     .bind(body.percent_of_base)
     .bind(reason)
     .bind(body.effective_date)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -364,9 +369,9 @@ async fn delete_adjustment(
     id: Uuid,
     table: &str,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "delete").await?;
+    let claims = caller(req)?;
     let org_id = scope_org(req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollDelete).await?;
 
     let deleted = sqlx::query(&format!(
         "DELETE FROM {table} WHERE id = $1 AND org_id = $2"
@@ -492,9 +497,10 @@ pub async fn override_deduction(
     id: web::Path<Uuid>,
     body: web::Json<OverrideDeductionRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
+    require_deduction_edit(pool.get_ref(), &claims, org_id, *id).await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
@@ -516,7 +522,7 @@ pub async fn override_deduction(
     .bind(*id)
     .bind(org_id)
     .bind(body.amount_piastres)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .bind(reason)
     .execute(pool.get_ref())
     .await?
@@ -548,9 +554,10 @@ pub async fn waive_deduction(
     id: web::Path<Uuid>,
     body: web::Json<WaiveDeductionRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
+    require_deduction_edit(pool.get_ref(), &claims, org_id, *id).await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
@@ -568,7 +575,7 @@ pub async fn waive_deduction(
     )
     .bind(*id)
     .bind(org_id)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .bind(reason)
     .execute(pool.get_ref())
     .await?
@@ -601,16 +608,19 @@ pub async fn list_advances(
     pool: crate::db::Db,
     query: web::Query<AdjustmentQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // Payroll readers, and whoever decides advances, for their branches (B15).
+    let scope = money_scope(pool.get_ref(), &claims, org_id, Cap::HrAdvancesDecide).await?;
 
     let rows = sqlx::query_as::<_, SalaryAdvance>(&format!(
-        "{ADVANCE_SELECT} WHERE a.org_id = $1 AND ($2::uuid IS NULL OR a.user_id = $2) \
-          ORDER BY a.created_at DESC"
+        "{ADVANCE_SELECT} WHERE a.org_id = $1 AND ($2::uuid IS NULL OR a.employee_id = $2) \
+            AND {} ORDER BY a.created_at DESC",
+        access::in_scope("a.employee_id", 3)
     ))
     .bind(org_id)
-    .bind(query.user_id)
+    .bind(query.employee_id)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -619,7 +629,7 @@ pub async fn list_advances(
 async fn insert_advance(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     body: &CreateAdvanceRequest,
 ) -> Result<SalaryAdvance, AppError> {
     if body.amount_piastres <= 0 {
@@ -638,12 +648,12 @@ async fn insert_advance(
     let monthly = (body.amount_piastres as u64).div_ceil(installments as u64) as i64;
 
     let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO salary_advances (org_id, user_id, amount_piastres, installments, \
+        "INSERT INTO salary_advances (org_id, employee_id, amount_piastres, installments, \
                                       monthly_installment_piastres, remaining_piastres, reason) \
          VALUES ($1, $2, $3, $4, $5, $3, $6) RETURNING id",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(body.amount_piastres)
     .bind(installments)
     .bind(monthly)
@@ -674,15 +684,17 @@ pub async fn create_advance_admin(
     pool: crate::db::Db,
     body: web::Json<CreateAdvanceRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    let user_id = body
-        .user_id
-        .ok_or_else(|| AppError::BadRequest("user_id is required".into()))?;
-    require_user_in_org(pool.get_ref(), org_id, user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrAdvancesDecide).await?;
+    let employee_id = body
+        .employee_id
+        .ok_or_else(|| AppError::BadRequest("employee_id is required".into()))?;
+    let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
+    // Recording an ask on someone's behalf: it still waits for a decision.
+    access::require_for(pool.get_ref(), &claims, Cap::HrAdvancesDecide, &subject).await?;
 
-    let row = insert_advance(pool.get_ref(), org_id, user_id, &body).await?;
+    let row = insert_advance(pool.get_ref(), org_id, employee_id, &body).await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -692,15 +704,11 @@ pub async fn create_advance_admin(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_my_advance(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<CreateAdvanceRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = my_org(pool.get_ref(), user_id).await?;
-
-    let row = insert_advance(pool.get_ref(), org_id, user_id, &body).await?;
+    let row = insert_advance(pool.get_ref(), me.org_id, me.employee_id, &body).await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -709,15 +717,11 @@ pub async fn create_my_advance(
     responses((status = 200, description = "The employee's own advances", body = Vec<SalaryAdvance>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_advances(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    my_org(pool.get_ref(), user_id).await?;
-
+pub async fn my_advances(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let rows = sqlx::query_as::<_, SalaryAdvance>(&format!(
-        "{ADVANCE_SELECT} WHERE a.user_id = $1 ORDER BY a.created_at DESC"
+        "{ADVANCE_SELECT} WHERE a.employee_id = $1 ORDER BY a.created_at DESC"
     ))
-    .bind(user_id)
+    .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -736,9 +740,11 @@ pub async fn decide_advance(
     id: web::Path<Uuid>,
     body: web::Json<AdvanceDecision>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // No cap and no limit on this path, so it is the owner's (audit B4); a
+    // manager decides through `PATCH /staff/advances/{id}/review`.
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
     let decision = validate_decision(&body.status)?;
 
     let updated = sqlx::query(
@@ -749,7 +755,7 @@ pub async fn decide_advance(
     .bind(*id)
     .bind(org_id)
     .bind(decision)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .bind(
         body.note
             .as_deref()
@@ -780,9 +786,9 @@ pub async fn decide_advance(
     security(("bearer_jwt" = []))
 )]
 pub async fn list_periods(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::scope(pool.get_ref(), &claims, org_id, Cap::HrPayrollRead).await?;
 
     let rows = sqlx::query_as::<_, PayrollPeriod>(&format!(
         "SELECT {PERIOD_COLS} FROM payroll_periods WHERE org_id = $1 ORDER BY start_date DESC"
@@ -803,9 +809,10 @@ pub async fn create_period(
     pool: crate::db::Db,
     body: web::Json<CreatePeriodRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // Payroll runs for the whole business (RO-9).
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
 
     let name = body.name.trim();
     if name.is_empty() {
@@ -841,9 +848,10 @@ pub async fn set_period_status(
     id: web::Path<Uuid>,
     body: web::Json<PeriodStatusRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // Approving, reopening, paying and closing are the payroll run (RO-9).
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
 
     let target = match body.status.as_str() {
         s @ ("draft" | "generated" | "paid" | "closed") => s,
@@ -917,9 +925,9 @@ pub async fn delete_period(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "delete").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
 
     let mut tx = pool.begin().await?;
     let status: String = sqlx::query_scalar(
@@ -971,7 +979,7 @@ struct AttendanceTotals {
 /// computes exactly the same values and persists nothing.
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct ComputedPayslip {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub name: String,
     pub base_salary_piastres: i64,
     pub worked_days: Decimal,
@@ -1012,21 +1020,21 @@ pub(crate) async fn compute_payslips(
     // ── Everyone who was employed during the window ──────────────
     #[derive(sqlx::FromRow)]
     struct Staff {
-        user_id: Uuid,
+        employee_id: Uuid,
         name: String,
         base_salary_piastres: i64,
         hire_date: Option<NaiveDate>,
         termination_date: Option<NaiveDate>,
     }
     let staff: Vec<Staff> = sqlx::query_as(
-        "SELECT p.user_id, u.name, p.base_salary_piastres, p.hire_date, p.termination_date \
-           FROM staff_profiles p \
-           JOIN users u ON u.id = p.user_id AND u.deleted_at IS NULL \
+        "SELECT p.id AS employee_id, p.name, p.base_salary_piastres, p.hire_date, \
+                p.termination_date \
+           FROM employees p \
           WHERE p.org_id = $1 \
             AND p.employment_status <> 'suspended' \
             AND (p.hire_date        IS NULL OR p.hire_date        <= $3) \
             AND (p.termination_date IS NULL OR p.termination_date >= $2) \
-          ORDER BY lower(u.name)",
+          ORDER BY lower(p.name)",
     )
     .bind(org_id)
     .bind(start_date)
@@ -1037,7 +1045,7 @@ pub(crate) async fn compute_payslips(
     // ── Attendance totals, one query for the whole org ───────────
     #[derive(sqlx::FromRow)]
     struct TotalsRow {
-        user_id: Uuid,
+        employee_id: Uuid,
         worked_days: Decimal,
         absent_days: Decimal,
         leave_days: Decimal,
@@ -1050,7 +1058,7 @@ pub(crate) async fn compute_payslips(
     }
     let totals_rows: Vec<TotalsRow> = sqlx::query_as(
         r#"
-        SELECT a.user_id,
+        SELECT a.employee_id,
                COALESCE(SUM(CASE WHEN a.status IN ('present','late') THEN 1
                                  WHEN a.status = 'half_day'          THEN 0.5
                                  ELSE 0 END), 0)::numeric                     AS worked_days,
@@ -1060,26 +1068,26 @@ pub(crate) async fn compute_payslips(
                -- i.e. in production, not on an empty test org.
                COALESCE(SUM(CASE WHEN a.status = 'absent'   THEN 1 ELSE 0 END), 0)::numeric AS absent_days,
                COALESCE(SUM(CASE WHEN a.status = 'on_leave' THEN 1 ELSE 0 END), 0)::numeric AS leave_days,
-               COALESCE(SUM(a.late_minutes) FILTER (WHERE a.covered_user_id IS NULL), 0)::bigint
+               COALESCE(SUM(a.late_minutes) FILTER (WHERE a.covered_employee_id IS NULL), 0)::bigint
                                                                               AS late_minutes,
                -- Overtime is off unless the owner turned it on; in approval mode
                -- only what a manager approved counts (RU-7). A night shift's
                -- overtime is priced at the night rate (RU-8).
-               COALESCE(SUM(a.overtime_minutes) FILTER (WHERE a.covered_user_id IS NULL
+               COALESCE(SUM(a.overtime_minutes) FILTER (WHERE a.covered_employee_id IS NULL
                    AND ($4 = 'automatic' OR ($4 = 'approval' AND a.overtime_status = 'approved'))), 0)::bigint
                                                                               AS overtime_minutes,
                -- Night overtime is the overtime that falls in the night window,
                -- in the branch's time zone (RU-8, RU-9).
                COALESCE(SUM(LEAST(a.overtime_minutes,
                    dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $5, $6)))
-                   FILTER (WHERE a.covered_user_id IS NULL
+                   FILTER (WHERE a.covered_employee_id IS NULL
                    AND ($4 = 'automatic' OR ($4 = 'approval' AND a.overtime_status = 'approved'))), 0)::bigint
                                                                               AS night_overtime_minutes,
                -- A confirmed cover pays the coverer at their own plain rate (CV-4, CV-5).
-               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_user_id IS NOT NULL
+               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_employee_id IS NOT NULL
                    AND a.cover_status = 'confirmed'), 0)::bigint             AS cover_minutes,
                -- Working a day set up as a holiday (RU-10).
-               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_user_id IS NULL
+               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_employee_id IS NULL
                    AND h.on_date IS NOT NULL), 0)::bigint                    AS holiday_minutes,
                AVG(EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60.0)
                    FILTER (WHERE a.scheduled_start_at IS NOT NULL
@@ -1090,7 +1098,7 @@ pub(crate) async fn compute_payslips(
           LEFT JOIN staff_holidays h ON h.org_id = a.org_id AND h.on_date = a.business_date
                                     AND h.decision = 'holiday'
          WHERE a.org_id = $1 AND a.business_date BETWEEN $2 AND $3
-         GROUP BY a.user_id
+         GROUP BY a.employee_id
         "#,
     )
     .bind(org_id)
@@ -1105,7 +1113,7 @@ pub(crate) async fn compute_payslips(
     let mut extra: HashMap<Uuid, (i64, i64, i64)> = HashMap::new();
     for row in &totals_rows {
         extra.insert(
-            row.user_id,
+            row.employee_id,
             (
                 row.night_overtime_minutes,
                 row.cover_minutes,
@@ -1116,7 +1124,7 @@ pub(crate) async fn compute_payslips(
     let mut totals: HashMap<Uuid, AttendanceTotals> = HashMap::new();
     for row in totals_rows {
         totals.insert(
-            row.user_id,
+            row.employee_id,
             AttendanceTotals {
                 worked_days: row.worked_days,
                 absent_days: row.absent_days,
@@ -1136,7 +1144,7 @@ pub(crate) async fn compute_payslips(
     #[derive(sqlx::FromRow)]
     struct AdjRow {
         id: Uuid,
-        user_id: Uuid,
+        employee_id: Uuid,
         amount_piastres: Option<i64>,
         percent_of_base: Option<Decimal>,
         reason: String,
@@ -1161,7 +1169,7 @@ pub(crate) async fn compute_payslips(
         let rows: Vec<AdjRow> = sqlx::query_as(&format!(
             // A recurring allowance or deduction counts in every period from
             // its start until stopped (AD-3).
-            "SELECT id, user_id, amount_piastres, percent_of_base, reason, source, \
+            "SELECT id, employee_id, amount_piastres, percent_of_base, reason, source, \
                     {waived} AS waived FROM {table} \
               WHERE org_id = $1 AND status = 'approved' \
                 AND (effective_date BETWEEN $2 AND $3 \
@@ -1175,7 +1183,7 @@ pub(crate) async fn compute_payslips(
         .await?;
         let mut map: HashMap<Uuid, Vec<AdjRow>> = HashMap::new();
         for row in rows {
-            map.entry(row.user_id).or_default().push(row);
+            map.entry(row.employee_id).or_default().push(row);
         }
         Ok(map)
     }
@@ -1195,7 +1203,7 @@ pub(crate) async fn compute_payslips(
         // No attendance rows at all (a new hire, or a month nobody clocked):
         // every total is zero, but the pay divisor still needs a sane day length.
         let attendance = totals
-            .get(&person.user_id)
+            .get(&person.employee_id)
             .copied()
             .unwrap_or(AttendanceTotals {
                 scheduled_minutes: DEFAULT_SHIFT_MINUTES,
@@ -1225,9 +1233,9 @@ pub(crate) async fn compute_payslips(
             }
             (total, lines)
         };
-        let (mut bonus_total, mut bonus_lines) = resolve(bonus_rows.get(&person.user_id));
+        let (mut bonus_total, mut bonus_lines) = resolve(bonus_rows.get(&person.employee_id));
         let (mut deduction_total, mut deduction_lines) =
-            resolve(deduction_rows.get(&person.user_id));
+            resolve(deduction_rows.get(&person.employee_id));
 
         // Joined, left or changed mid-period: paid by calendar days (PAY-13).
         let window_days = (end_date - start_date).num_days() + 1;
@@ -1250,7 +1258,7 @@ pub(crate) async fn compute_payslips(
             attendance.scheduled_minutes,
         );
         let (night_ot, cover_minutes, holiday_minutes) =
-            extra.get(&person.user_id).copied().unwrap_or_default();
+            extra.get(&person.employee_id).copied().unwrap_or_default();
         if cover_minutes > 0 {
             let pay = round_piastres(rates.minutes_piastres(Decimal::from(cover_minutes)));
             bonus_total = bonus_total.saturating_add(pay);
@@ -1271,10 +1279,10 @@ pub(crate) async fn compute_payslips(
         let carry_in: i64 = sqlx::query_scalar(
             "SELECT s.carry_out_piastres FROM payslips s \
                JOIN payroll_periods pp ON pp.id = s.payroll_period_id \
-              WHERE s.user_id = $1 AND pp.org_id = $2 AND pp.end_date < $3 \
+              WHERE s.employee_id = $1 AND pp.org_id = $2 AND pp.end_date < $3 \
               ORDER BY pp.end_date DESC LIMIT 1",
         )
-        .bind(person.user_id)
+        .bind(person.employee_id)
         .bind(org_id)
         .bind(start_date)
         .fetch_optional(&mut *conn)
@@ -1306,11 +1314,11 @@ pub(crate) async fn compute_payslips(
         let advances: Vec<Advance> = sqlx::query_as(
             "SELECT id, monthly_installment_piastres, remaining_piastres \
                FROM salary_advances \
-              WHERE user_id = $1 AND org_id = $2 AND status = 'approved' \
+              WHERE employee_id = $1 AND org_id = $2 AND status = 'approved' \
                 AND remaining_piastres > 0 \
               ORDER BY created_at",
         )
-        .bind(person.user_id)
+        .bind(person.employee_id)
         .bind(org_id)
         .fetch_all(&mut *conn)
         .await?;
@@ -1353,7 +1361,7 @@ pub(crate) async fn compute_payslips(
         }
 
         out.push(ComputedPayslip {
-            user_id: person.user_id,
+            employee_id: person.employee_id,
             name: person.name.clone(),
             base_salary_piastres: person.base_salary_piastres,
             worked_days: attendance.worked_days,
@@ -1448,9 +1456,10 @@ pub async fn generate_period(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // Approving payroll is the payroll run, held for every branch (RO-9).
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
 
     #[derive(sqlx::FromRow)]
     struct Period {
@@ -1516,7 +1525,7 @@ pub async fn generate_period(
 
         sqlx::query(
             "INSERT INTO payslips (
-                 org_id, payroll_period_id, user_id, base_salary_piastres, worked_days,
+                 org_id, payroll_period_id, employee_id, base_salary_piastres, worked_days,
                  absent_days, leave_days, late_minutes, overtime_minutes, overtime_piastres,
                  bonuses_piastres, deductions_piastres, advance_installment_piastres,
                  net_piastres, breakdown, carry_out_piastres
@@ -1524,7 +1533,7 @@ pub async fn generate_period(
         )
         .bind(org_id)
         .bind(*id)
-        .bind(slip.user_id)
+        .bind(slip.employee_id)
         .bind(slip.base_piastres)
         .bind(slip.worked_days)
         .bind(slip.absent_days)
@@ -1553,13 +1562,13 @@ pub async fn generate_period(
     .bind(*id)
     .bind(employee_count)
     .bind(grand_total)
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
 
     let slips = sqlx::query_as::<_, Payslip>(&format!(
-        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(u.name)"
+        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(e.name)"
     ))
     .bind(*id)
     .fetch_all(pool.get_ref())
@@ -1581,10 +1590,11 @@ pub async fn preview_period(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    // READ, not create: seeing what payroll would do is not running it.
-    check_permission(pool.get_ref(), &claims, "payroll", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // READ, not run: seeing what payroll would do is not running it. It shows
+    // everyone's pay, so it needs payroll read for every branch.
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRead).await?;
 
     let period: (NaiveDate, NaiveDate) = sqlx::query_as(
         "SELECT start_date, end_date FROM payroll_periods WHERE id = $1 AND org_id = $2",
@@ -1621,9 +1631,9 @@ pub async fn export_period_csv(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRead).await?;
 
     let period: (String, String) =
         sqlx::query_as("SELECT name, status FROM payroll_periods WHERE id = $1 AND org_id = $2")
@@ -1639,7 +1649,7 @@ pub async fn export_period_csv(
     }
 
     let slips = sqlx::query_as::<_, Payslip>(&format!(
-        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(u.name)"
+        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(e.name)"
     ))
     .bind(*id)
     .fetch_all(pool.get_ref())
@@ -1658,8 +1668,8 @@ pub async fn export_period_csv(
     for slip in &slips {
         csv.push_str(&format!(
             "{},{},{},{},{},{},{},{},{},{}\n",
-            esc(slip.user_name.as_deref().unwrap_or("")),
-            esc(&slip.user_id.to_string()),
+            esc(slip.employee_name.as_deref().unwrap_or("")),
+            esc(&slip.employee_id.to_string()),
             money(slip.base_salary_piastres),
             money(slip.overtime_piastres),
             money(slip.bonuses_piastres),
@@ -1695,15 +1705,18 @@ pub async fn list_payslips(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "payroll", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrPayrollRead).await?;
 
     let rows = sqlx::query_as::<_, Payslip>(&format!(
-        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 AND s.org_id = $2 ORDER BY lower(u.name)"
+        "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 AND s.org_id = $2 AND {} \
+          ORDER BY lower(e.name)",
+        access::in_scope("s.employee_id", 3)
     ))
     .bind(*id)
     .bind(org_id)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -1714,20 +1727,59 @@ pub async fn list_payslips(
     responses((status = 200, description = "The employee's own payslips", body = Vec<Payslip>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_payslips(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    my_org(pool.get_ref(), user_id).await?;
-
+pub async fn my_payslips(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     // Only periods that have actually been finalised: a draft regeneration would
     // otherwise flash half-computed numbers at the employee.
     let rows = sqlx::query_as::<_, Payslip>(&format!(
         "{PAYSLIP_SELECT} \
-          WHERE s.user_id = $1 AND pp.status IN ('generated', 'paid', 'closed') \
+          WHERE s.employee_id = $1 AND pp.status IN ('generated', 'paid', 'closed') \
           ORDER BY pp.start_date DESC"
     ))
-    .bind(user_id)
+    .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
+}
+
+/// The people whose money lines a caller may list: payroll readers for their
+/// branches, and whoever holds `also` (the act the list backs) for theirs
+/// (audit B15: a manager must see the lines and advances they decide).
+pub(crate) async fn money_scope(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+    also: Cap,
+) -> Result<Option<Vec<Uuid>>, AppError> {
+    let read = access::scope(pool, claims, org_id, Cap::HrPayrollRead).await;
+    let act = access::scope(pool, claims, org_id, also).await;
+    match (read, act) {
+        (Ok(None), _) | (_, Ok(None)) => Ok(None),
+        (Ok(Some(mut a)), Ok(Some(b))) => {
+            a.extend(b);
+            a.sort();
+            a.dedup();
+            Ok(Some(a))
+        }
+        (Ok(Some(a)), Err(_)) | (Err(_), Ok(Some(a))) => Ok(Some(a)),
+        (Err(e), Err(_)) => Err(e),
+    }
+}
+
+/// Waiving or overriding a deduction is a payroll edit for that person.
+async fn require_deduction_edit(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+    id: Uuid,
+) -> Result<(), AppError> {
+    let owner: Uuid = sqlx::query_scalar(
+        "SELECT employee_id FROM payroll_deductions WHERE id = $1 AND org_id = $2",
+    )
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Deduction not found".into()))?;
+    let subject = access::subject(pool, org_id, owner).await?;
+    access::require_for(pool, claims, Cap::HrPayrollEdit, &subject).await
 }

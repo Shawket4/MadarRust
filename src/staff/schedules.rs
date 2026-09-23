@@ -26,10 +26,15 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
+    auth::jwt::Claims,
+    authz::Cap,
     errors::{AppError, AppErrorResponse},
-    orgs::handlers::extract_claims,
-    permissions::checker::check_permission,
-    staff::{DEFAULT_TZ, require_user_in_org, rules::ShiftRules, scope_org},
+    staff::{
+        DEFAULT_TZ, access,
+        principal::{Me, caller},
+        rules::ShiftRules,
+        scope_org,
+    },
 };
 
 // ── Models ────────────────────────────────────────────────────
@@ -66,7 +71,7 @@ const WORK_SHIFT_COLS: &str = "id, org_id, branch_id, name, start_time, end_time
 pub struct ScheduleAssignment {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub work_shift_id: Uuid,
     #[sqlx(default)]
     pub work_shift_name: Option<String>,
@@ -82,7 +87,7 @@ pub struct ScheduleAssignment {
 pub struct ScheduleOverride {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub on_date: NaiveDate,
     /// `None` = an explicit day off.
     pub work_shift_id: Option<Uuid>,
@@ -161,7 +166,7 @@ pub struct UpsertWorkShiftRequest {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct CreateAssignmentRequest {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub work_shift_id: Uuid,
     /// 0 = Sunday … 6 = Saturday. Omit for "every day".
     #[serde(default)]
@@ -174,7 +179,7 @@ pub struct CreateAssignmentRequest {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct PutOverrideRequest {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub on_date: NaiveDate,
     /// Omit (or send null) to mark the date an explicit day off.
     #[serde(default)]
@@ -189,13 +194,13 @@ pub struct UserQuery {
     /// Omit for the WHOLE org's roster — what a schedule grid needs, and the
     /// only way to draw one without a request per employee.
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
 #[into_params(parameter_in = Query)]
 pub struct DayQuery {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub date: NaiveDate,
     /// Which branch's timezone the day is measured in. Defaults to the
     /// employee's only branch assignment when they have exactly one.
@@ -211,7 +216,7 @@ pub struct DayQuery {
 /// nothing rostered.
 pub(crate) async fn resolve_shifts_for(
     pool: &PgPool,
-    user_id: Uuid,
+    employee_id: Uuid,
     date: NaiveDate,
     timezone: &str,
 ) -> Result<Vec<ResolvedShift>, AppError> {
@@ -220,7 +225,7 @@ pub(crate) async fn resolve_shifts_for(
         WITH ov AS (
             SELECT work_shift_id
               FROM staff_schedule_overrides
-             WHERE user_id = $1 AND on_date = $2
+             WHERE employee_id = $1 AND on_date = $2
         ),
         -- A weekday-specific row beats the every-day catch-all; only the winning
         -- tier survives, so a Tuesday special does not stack with the default.
@@ -229,7 +234,7 @@ pub(crate) async fn resolve_shifts_for(
                    CASE WHEN s.day_of_week IS NOT NULL THEN 0 ELSE 1 END AS pri
               FROM staff_schedules s
              WHERE NOT EXISTS (SELECT 1 FROM ov)
-               AND s.user_id = $1
+               AND s.employee_id = $1
                AND s.effective_from <= $2
                AND (s.effective_to IS NULL OR s.effective_to >= $2)
                AND (s.day_of_week IS NULL
@@ -256,7 +261,7 @@ pub(crate) async fn resolve_shifts_for(
          ORDER BY ws.start_time
         "#,
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(date)
     .bind(timezone)
     .fetch_all(pool)
@@ -292,13 +297,12 @@ pub struct MyScheduleQuery {
     security(("bearer_jwt" = []))
 )]
 pub async fn my_schedule(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     query: web::Query<MyScheduleQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = crate::staff::attendance::require_active_profile(pool.get_ref(), user_id).await?;
+    let employee_id = me.employee_id;
+    let org_id = me.org_id;
 
     if query.to < query.from {
         return Err(AppError::BadRequest("`to` is before `from`".into()));
@@ -311,22 +315,22 @@ pub async fn my_schedule(
         ));
     }
 
-    let tz = employee_timezone(pool.get_ref(), org_id, user_id).await?;
+    let tz = employee_timezone(pool.get_ref(), org_id, employee_id).await?;
     // Named only when the employee has exactly ONE live branch — the same rule
     // check-in uses. Someone assigned to two branches has no single "their
     // branch" to print under a shift, so the row stays unlabelled.
     let branch_name: Option<String> = sqlx::query_scalar(
         "SELECT name FROM (
              SELECT b.name, COUNT(*) OVER () AS n
-               FROM user_branch_assignments uba
-               JOIN branches b ON b.id = uba.branch_id
+               FROM employee_branches eb
+               JOIN branches b ON b.id = eb.branch_id
                               AND b.deleted_at IS NULL
                               AND b.org_id = $2
-              WHERE uba.user_id = $1
+              WHERE eb.employee_id = $1
          ) assignments
           WHERE n = 1",
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?;
@@ -336,7 +340,7 @@ pub async fn my_schedule(
     while date <= query.to {
         days.push(ScheduledDay {
             date,
-            shifts: resolve_shifts_for(pool.get_ref(), user_id, date, &tz).await?,
+            shifts: resolve_shifts_for(pool.get_ref(), employee_id, date, &tz).await?,
             branch_name: branch_name.clone(),
         });
         date = date.succ_opt().unwrap_or(date);
@@ -413,14 +417,18 @@ pub async fn list_work_shifts(
     req: HttpRequest,
     pool: crate::db::Db,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrScheduleRead).await?;
 
+    // Org-wide templates, and the ones of the caller's branches.
     let rows = sqlx::query_as::<_, WorkShift>(&format!(
-        "SELECT {WORK_SHIFT_COLS} FROM work_shifts WHERE org_id = $1 ORDER BY start_time, lower(name)"
+        "SELECT {WORK_SHIFT_COLS} FROM work_shifts WHERE org_id = $1 \
+           AND ($2::uuid[] IS NULL OR branch_id IS NULL OR branch_id = ANY($2)) \
+         ORDER BY start_time, lower(name)"
     ))
     .bind(org_id)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -437,9 +445,17 @@ pub async fn create_work_shift(
     pool: crate::db::Db,
     body: web::Json<UpsertWorkShiftRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleCreate).await?;
+    require_shift_scope(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrScheduleCreate,
+        body.branch_id,
+    )
+    .await?;
     let name = validate_work_shift(&body)?;
 
     let row = sqlx::query_as::<_, WorkShift>(&format!(
@@ -486,9 +502,28 @@ pub async fn update_work_shift(
     id: web::Path<Uuid>,
     body: web::Json<UpsertWorkShiftRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
+    let current = shift_branch(pool.get_ref(), org_id, *id).await?;
+    require_shift_scope(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrScheduleEdit,
+        current,
+    )
+    .await?;
+    if body.branch_id != current {
+        require_shift_scope(
+            pool.get_ref(),
+            &claims,
+            org_id,
+            Cap::HrScheduleEdit,
+            body.branch_id,
+        )
+        .await?;
+    }
     let name = validate_work_shift(&body)?;
 
     // Editing a shift never rewrites history: attendance rows carry their own
@@ -544,9 +579,18 @@ pub async fn delete_work_shift(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "delete").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleDelete).await?;
+    let current = shift_branch(pool.get_ref(), org_id, *id).await?;
+    require_shift_scope(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrScheduleDelete,
+        current,
+    )
+    .await?;
 
     // Attendance keeps its rows (the FK is ON DELETE SET NULL) but the roster
     // cascades, which would silently unschedule people. Make that explicit.
@@ -589,20 +633,22 @@ pub async fn list_assignments(
     pool: crate::db::Db,
     query: web::Query<UserQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrScheduleRead).await?;
 
-    let rows = sqlx::query_as::<_, ScheduleAssignment>(
-        "SELECT s.id, s.org_id, s.user_id, s.work_shift_id, ws.name AS work_shift_name, \
+    let rows = sqlx::query_as::<_, ScheduleAssignment>(&format!(
+        "SELECT s.id, s.org_id, s.employee_id, s.work_shift_id, ws.name AS work_shift_name, \
                 s.day_of_week, s.effective_from, s.effective_to, s.created_at \
            FROM staff_schedules s \
            JOIN work_shifts ws ON ws.id = s.work_shift_id \
-          WHERE ($1::uuid IS NULL OR s.user_id = $1) AND s.org_id = $2 \
-          ORDER BY s.user_id, s.effective_from DESC, s.day_of_week NULLS LAST, ws.start_time",
-    )
-    .bind(query.user_id)
+          WHERE ($1::uuid IS NULL OR s.employee_id = $1) AND s.org_id = $2 AND {} \
+          ORDER BY s.employee_id, s.effective_from DESC, s.day_of_week NULLS LAST, ws.start_time",
+        access::in_scope("s.employee_id", 3)
+    ))
+    .bind(query.employee_id)
     .bind(org_id)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -619,10 +665,11 @@ pub async fn create_assignment(
     pool: crate::db::Db,
     body: web::Json<CreateAssignmentRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, body.user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
+    let subject = access::subject(pool.get_ref(), org_id, body.employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
     if body.day_of_week.is_some_and(|d| !(0..=6).contains(&d)) {
         return Err(AppError::BadRequest(
@@ -650,16 +697,16 @@ pub async fn create_assignment(
     let row = sqlx::query_as::<_, ScheduleAssignment>(
         "WITH ins AS (
              INSERT INTO staff_schedules
-                 (org_id, user_id, work_shift_id, day_of_week, effective_from, effective_to)
+                 (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to)
              VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6)
              RETURNING *
          )
-         SELECT ins.id, ins.org_id, ins.user_id, ins.work_shift_id, ws.name AS work_shift_name,
+         SELECT ins.id, ins.org_id, ins.employee_id, ins.work_shift_id, ws.name AS work_shift_name,
                 ins.day_of_week, ins.effective_from, ins.effective_to, ins.created_at
            FROM ins JOIN work_shifts ws ON ws.id = ins.work_shift_id",
     )
     .bind(org_id)
-    .bind(body.user_id)
+    .bind(body.employee_id)
     .bind(body.work_shift_id)
     .bind(body.day_of_week)
     .bind(body.effective_from)
@@ -680,9 +727,18 @@ pub async fn delete_assignment(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
+    let owner: Uuid =
+        sqlx::query_scalar("SELECT employee_id FROM staff_schedules WHERE id = $1 AND org_id = $2")
+            .bind(*id)
+            .bind(org_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("Assignment not found".into()))?;
+    let subject = access::subject(pool.get_ref(), org_id, owner).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
     let deleted = sqlx::query("DELETE FROM staff_schedules WHERE id = $1 AND org_id = $2")
         .bind(*id)
@@ -709,10 +765,11 @@ pub async fn put_override(
     pool: crate::db::Db,
     body: web::Json<PutOverrideRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, body.user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
+    let subject = access::subject(pool.get_ref(), org_id, body.employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
     if let Some(shift_id) = body.work_shift_id {
         let ok: bool = sqlx::query_scalar(
@@ -730,20 +787,20 @@ pub async fn put_override(
     let row = sqlx::query_as::<_, ScheduleOverride>(
         "WITH up AS (
              INSERT INTO staff_schedule_overrides
-                 (org_id, user_id, on_date, work_shift_id, reason, created_by)
+                 (org_id, employee_id, on_date, work_shift_id, reason, created_by)
              VALUES ($1, $2, $3, $4, $5, $6)
-             ON CONFLICT (user_id, on_date) DO UPDATE SET
+             ON CONFLICT (employee_id, on_date) DO UPDATE SET
                  work_shift_id = EXCLUDED.work_shift_id,
                  reason        = EXCLUDED.reason,
                  created_by    = EXCLUDED.created_by
              RETURNING *
          )
-         SELECT up.id, up.org_id, up.user_id, up.on_date, up.work_shift_id,
+         SELECT up.id, up.org_id, up.employee_id, up.on_date, up.work_shift_id,
                 ws.name AS work_shift_name, up.reason, up.created_by, up.created_at
            FROM up LEFT JOIN work_shifts ws ON ws.id = up.work_shift_id",
     )
     .bind(org_id)
-    .bind(body.user_id)
+    .bind(body.employee_id)
     .bind(body.on_date)
     .bind(body.work_shift_id)
     .bind(
@@ -752,13 +809,13 @@ pub async fn put_override(
             .map(str::trim)
             .filter(|r| !r.is_empty()),
     )
-    .bind(claims.user_id())
+    .bind(claims.user_id_safe().ok())
     .fetch_one(pool.get_ref())
     .await?;
     crate::staff::dawam::roster::after_day_change(
         pool.get_ref(),
         org_id,
-        body.user_id,
+        body.employee_id,
         body.on_date,
     )
     .await?;
@@ -776,9 +833,19 @@ pub async fn delete_override(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
+    let owner: Uuid = sqlx::query_scalar(
+        "SELECT employee_id FROM staff_schedule_overrides WHERE id = $1 AND org_id = $2",
+    )
+    .bind(*id)
+    .bind(org_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("Override not found".into()))?;
+    let subject = access::subject(pool.get_ref(), org_id, owner).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
     let deleted = sqlx::query("DELETE FROM staff_schedule_overrides WHERE id = $1 AND org_id = $2")
         .bind(*id)
@@ -808,16 +875,17 @@ pub async fn get_scheduled_day(
     pool: crate::db::Db,
     query: web::Query<DayQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "work_shifts", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, query.user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleRead).await?;
+    let subject = access::subject(pool.get_ref(), org_id, query.employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrScheduleRead, &subject).await?;
 
     let tz = match query.branch_id {
         Some(branch_id) => crate::staff::branch_timezone(pool.get_ref(), branch_id).await?,
-        None => employee_timezone(pool.get_ref(), org_id, query.user_id).await?,
+        None => employee_timezone(pool.get_ref(), org_id, query.employee_id).await?,
     };
-    let rows = resolve_shifts_for(pool.get_ref(), query.user_id, query.date, &tz).await?;
+    let rows = resolve_shifts_for(pool.get_ref(), query.employee_id, query.date, &tz).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -841,7 +909,7 @@ pub(crate) async fn org_timezone(pool: &PgPool, org_id: Uuid) -> Result<String, 
 pub(crate) async fn employee_timezone(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
 ) -> Result<String, AppError> {
     let tz: Option<String> = sqlx::query_scalar(
         r#"
@@ -850,20 +918,46 @@ pub(crate) async fn employee_timezone(
             -- return NULL (no row) unless the employee has exactly one branch,
             -- which is what "their branch's clock" means.
             (SELECT MIN(b.timezone::text)
-               FROM user_branch_assignments uba
-               JOIN branches b ON b.id = uba.branch_id AND b.deleted_at IS NULL
-              WHERE uba.user_id = $1
+               FROM employee_branches eb
+               JOIN branches b ON b.id = eb.branch_id AND b.deleted_at IS NULL
+              WHERE eb.employee_id = $1
              HAVING COUNT(*) = 1),
             (SELECT o.timezone::text FROM organizations o WHERE o.id = $2),
             $3
         )
         "#,
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(org_id)
     .bind(DEFAULT_TZ)
     .fetch_optional(pool)
     .await?
     .flatten();
     Ok(tz.unwrap_or_else(|| DEFAULT_TZ.to_string()))
+}
+
+/// The branch a work shift belongs to (`None` = an org-wide template).
+async fn shift_branch(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<Option<Uuid>, AppError> {
+    let row: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT branch_id FROM work_shifts WHERE id = $1 AND org_id = $2")
+            .bind(id)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await?;
+    row.ok_or_else(|| AppError::NotFound("Work shift not found".into()))
+}
+
+/// A branch's shift is its manager's; an org-wide template needs the
+/// capability at every branch (RO-6).
+async fn require_shift_scope(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+    cap: Cap,
+    branch: Option<Uuid>,
+) -> Result<(), AppError> {
+    match branch {
+        Some(b) => access::require_at(pool, claims, org_id, cap, b).await,
+        None => access::require_everywhere(pool, claims, org_id, cap).await,
+    }
 }

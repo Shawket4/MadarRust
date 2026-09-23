@@ -1449,7 +1449,20 @@ pub(crate) async fn add_cash_movement_inner(
                 "Only a pay-out can be an expense advance".into(),
             ));
         }
-        crate::staff::require_user_in_org(pool, actor.org_id, to).await?;
+        // The till's pay-out names an active employee of this business, and
+        // only with Dawam on (audit B19).
+        let ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM employees e JOIN organizations o ON o.id = e.org_id \
+              WHERE e.id = $1 AND e.org_id = $2 AND e.employment_status = 'active' \
+                AND 'dawam' = ANY(o.modules))",
+        )
+        .bind(to)
+        .bind(actor.org_id)
+        .fetch_one(pool)
+        .await?;
+        if !ok {
+            return Err(AppError::NotFound("Employee not found".into()));
+        }
     }
     if let Some(cref) = body.client_ref
         && let Some(existing) = fetch_cash_movement_by_client_ref(pool, cref, actor.org_id).await?
@@ -1549,7 +1562,7 @@ pub(crate) async fn add_cash_movement_inner(
     };
     if let Some(to) = body.expense_advance_to {
         sqlx::query(
-            "INSERT INTO expense_advances (org_id, user_id, branch_id, amount_piastres, purpose, \
+            "INSERT INTO expense_advances (org_id, employee_id, branch_id, amount_piastres, purpose, \
                 via, handed_by, given_on, till_movement_id) \
              SELECT $1, $2, $3, $4, $5, 'till', $6, \
                     (COALESCE($7, now()) AT TIME ZONE COALESCE(b.timezone::text, 'Africa/Cairo'))::date, $8 \

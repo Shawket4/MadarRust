@@ -119,6 +119,7 @@ paths(
         // ── orgs ────────────────────────────────────────────────────
         crate::orgs::handlers::list_orgs,
         crate::orgs::handlers::get_org,
+        crate::orgs::handlers::get_org_modules,
         crate::orgs::handlers::offline_auth_bundle,
         crate::orgs::provision::provision_org,
         crate::orgs::provision::list_templates,
@@ -465,6 +466,7 @@ paths(
         crate::staff::directory::put_employee,
         crate::staff::directory::create_employee,
         crate::staff::directory::branch_people,
+        crate::staff::directory::linkable_users,
         crate::staff::directory::delete_employee,
         crate::staff::directory::list_documents,
         crate::staff::directory::create_document,
@@ -534,6 +536,7 @@ paths(
         // ── dawam ─────────────────────────────────────────────────────
         crate::staff::dawam::signin::otp_request,
         crate::staff::dawam::signin::otp_verify,
+        crate::staff::dawam::signin::refresh,
         crate::staff::dawam::context::my_context,
         crate::staff::dawam::set_push_token,
         crate::staff::dawam::presence::ping,
@@ -821,6 +824,9 @@ paths(
         crate::staff::rules::LateTier,
         crate::staff::directory::Department,
         crate::staff::directory::Employee,
+        crate::staff::directory::LinkableUser,
+        crate::staff::dawam::signin::StaffTokenRefresh,
+        crate::orgs::handlers::OrgModules,
         crate::staff::directory::StaffDocument,
         crate::staff::schedules::WorkShift,
         crate::staff::schedules::ScheduleAssignment,

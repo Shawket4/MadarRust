@@ -381,7 +381,7 @@ pub async fn create_org(
                                    require_table_for_orders, receipt_footer, timezone, modules)
         VALUES ($1, $2, $3, $4, $5,
                 COALESCE($6, false), COALESCE($7, 0), COALESCE($8, true),
-                COALESCE($9, false), $10, $11::timezone_name, COALESCE($12, '{pos,dawam}'))
+                COALESCE($9, false), $10, $11::timezone_name, COALESCE($12, '{pos}'))
         RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone
         "#,
     )
@@ -485,6 +485,51 @@ pub async fn get_org(
 
     let org = fetch_org(pool.get_ref(), *org_id).await?;
     Ok(HttpResponse::Ok().json(org))
+}
+
+// ── GET /orgs/:id/modules  (any member) ──────────────────────
+
+/// Which modules an org has switched on.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OrgModules {
+    pub org_id: Uuid,
+    /// `pos`, `dawam` (PS-2).
+    pub modules: Vec<String>,
+}
+
+/// The org's modules, for anyone who works there: the dashboard routes by
+/// the server's answer (PS-3), and a branch manager cannot read the org
+/// itself (`orgs:read` is the owner's). Switching them is `PATCH /orgs/{id}`,
+/// a super admin's alone (SA-1).
+#[utoipa::path(
+    get,
+    path = "/orgs/{id}/modules",
+    tag = "orgs",
+    params(("id" = Uuid, Path, description = "Organization ID")),
+    responses(
+        (status = 200, description = "The org's switched-on modules", body = OrgModules),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn get_org_modules(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    require_same_org(&claims, Some(*org_id))?;
+    let modules: Vec<String> = sqlx::query_scalar(
+        "SELECT modules FROM organizations WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(*org_id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
+    Ok(HttpResponse::Ok().json(OrgModules {
+        org_id: *org_id,
+        modules,
+    }))
 }
 
 // ── GET /orgs/:id/offline-auth-bundle  (org-scoped) ──────────
@@ -804,7 +849,7 @@ pub async fn update_org(
     // If this update toggled the active flag, drop the cached org status so the
     // suspension (or reactivation) is enforced on the next request rather than
     // after the cache TTL elapses.
-    if body.is_active.is_some()
+    if (body.is_active.is_some() || body.modules.is_some())
         && let Some(cache) = req.app_data::<web::Data<crate::auth::org_status::OrgStatusCache>>()
     {
         cache.invalidate(*org_id);

@@ -16,7 +16,7 @@
 //!     `delivery_notes`, and `customer_lat` / `customer_lng` (a home address as
 //!     a coordinate pair).
 //!   * **Staff** — `users.name`, `users.email`, `users.phone`,
-//!     `staff_profiles.national_id`, `base_salary_piastres`,
+//!     `employees.national_id`, `base_salary_piastres`,
 //!     `emergency_contact_name` / `_phone`, and the attendance geofence fixes
 //!     `check_in_latitude` / `check_in_longitude`.
 //!   * **Credentials** — `password_hash`, `pin_hash`, `offline_pin_hash`,

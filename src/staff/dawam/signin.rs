@@ -6,22 +6,22 @@
 //! ONE phone: a new phone revokes the old one, the manager is told, and no
 //! approval is needed.
 
-use actix_web::{HttpResponse, web};
+use actix_web::{HttpRequest, HttpResponse, web};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use super::{hash_token, notify_managers, revoke_devices};
-use crate::auth::jwt::{JwtSecret, create_token};
+use super::{hash_token, notify_managers};
+use crate::auth::jwt::JwtSecret;
+use crate::authz::Cap;
 use crate::errors::{AppError, AppErrorResponse};
 use crate::models::UserRole;
+use crate::staff::principal::{self, DEVICE_HEADER};
 
 const OTP_TTL_SECONDS: i64 = 300;
 const OTP_MAX_ATTEMPTS: i32 = 5;
-/// A staff session lasts a month; the phone binding, not the token, is what
-/// ends it early (RO-4).
-const SESSION_HOURS: i64 = 24 * 30;
 
 #[derive(Deserialize, ToSchema)]
 pub struct StaffOtpRequest {
@@ -65,13 +65,20 @@ pub struct StaffSession {
     /// picked: ask, then verify again with `org_id`. The code stays valid.
     pub needs_org: bool,
     pub orgs: Vec<StaffOrgChoice>,
-    /// `Authorization: Bearer` for every other call.
+    /// The staff token: `Authorization: Bearer` on `/staff/*` only. It lives
+    /// an hour; refresh it with `POST /auth/staff/refresh`.
     pub token: Option<String>,
-    /// Kept in the phone's secure storage and sent as `X-Staff-Device` on every
-    /// punch and ping (RO-3).
+    pub token_expires_at: Option<DateTime<Utc>>,
+    /// Kept in the phone's secure storage and sent as `X-Staff-Device` on
+    /// every call (RO-3). It is what refreshes the session.
     pub device_token: Option<String>,
+    /// Who signed in: the employee.
+    pub employee_id: Option<Uuid>,
+    /// Their Madar account when they have one (a manager, a cashier). Manager
+    /// acts in the app go through it.
     pub user_id: Option<Uuid>,
     pub name: Option<String>,
+    /// The linked account's role; null for an employee with no account.
     pub role: Option<UserRole>,
     pub org_id: Option<Uuid>,
     /// True when this sign-in moved the account from another phone.
@@ -80,47 +87,31 @@ pub struct StaffSession {
 
 #[derive(sqlx::FromRow)]
 struct Account {
-    user_id: Uuid,
+    employee_id: Uuid,
+    user_id: Option<Uuid>,
     name: String,
-    role: UserRole,
-    phone: Option<String>,
+    role: Option<UserRole>,
     org_id: Uuid,
     org_name: String,
     org_active: bool,
 }
 
-/// Every staff account whose number is this phone, in any business.
+/// Every employee, in any business, who signs in to the app with this phone
+/// (`phone` is canonical, see `crate::phone`).
 async fn accounts_for(pool: &PgPool, phone: &str) -> Result<Vec<Account>, AppError> {
-    // Stored numbers are as a manager typed them: canonicalise both sides.
-    let tail: String = phone
-        .chars()
-        .rev()
-        .take(9)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    let rows: Vec<Account> = sqlx::query_as(
-        "SELECT u.id AS user_id, u.name, u.role, u.phone, u.org_id, o.name AS org_name, \
-                (o.is_active AND o.deleted_at IS NULL) AS org_active \
-           FROM users u \
-           JOIN staff_profiles p ON p.user_id = u.id AND p.employment_status = 'active' \
-           JOIN organizations o ON o.id = u.org_id \
-          WHERE u.deleted_at IS NULL AND u.is_active AND 'dawam' = ANY(o.modules) \
-            AND regexp_replace(COALESCE(u.phone, ''), '\\D', '', 'g') LIKE '%' || $1",
+    Ok(sqlx::query_as(
+        "SELECT e.id AS employee_id, u.id AS user_id, e.name, u.role, e.org_id, \
+                o.name AS org_name, (o.is_active AND o.deleted_at IS NULL) AS org_active \
+           FROM employees e \
+           JOIN organizations o ON o.id = e.org_id \
+           LEFT JOIN users u ON u.id = e.user_id AND u.is_active AND u.deleted_at IS NULL \
+          WHERE e.phone_key = $1 AND e.app_access AND e.employment_status = 'active' \
+            AND 'dawam' = ANY(o.modules) \
+          ORDER BY o.name, e.id",
     )
-    .bind(&tail)
+    .bind(phone)
     .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .filter(|a| {
-            a.phone
-                .as_deref()
-                .and_then(|p| crate::phone::normalize_phone(p).ok())
-                .is_some_and(|p| p == phone)
-        })
-        .collect())
+    .await?)
 }
 
 fn six_digits() -> String {
@@ -245,7 +236,9 @@ pub async fn otp_verify(
                 needs_org: true,
                 orgs,
                 token: None,
+                token_expires_at: None,
                 device_token: None,
+                employee_id: None,
                 user_id: None,
                 name: None,
                 role: None,
@@ -268,39 +261,57 @@ pub async fn otp_verify(
         .execute(pool)
         .await?;
 
-    // One live phone (RO-4): this sign-in moves the account.
-    let had_phone: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM staff_devices WHERE user_id = $1 AND org_id = $2 \
-                        AND revoked_at IS NULL)",
-    )
-    .bind(account.user_id)
-    .bind(account.org_id)
-    .fetch_one(pool)
-    .await?;
-    revoke_devices(pool, account.user_id).await?;
+    // One live phone (RO-4): this sign-in moves the employee. Serialised per
+    // employee, so two verifies at once can't both bind a phone (B-11).
     let device_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('staff_device:' || $1::text))")
+        .bind(account.employee_id)
+        .execute(&mut *tx)
+        .await?;
+    let had_phone: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM staff_devices WHERE employee_id = $1 AND revoked_at IS NULL)",
+    )
+    .bind(account.employee_id)
+    .fetch_one(&mut *tx)
+    .await?;
     sqlx::query(
-        "INSERT INTO staff_devices (org_id, user_id, token_hash, platform, model) \
-         VALUES ($1, $2, $3, $4, $5)",
+        "UPDATE staff_devices SET revoked_at = now() \
+          WHERE employee_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(account.employee_id)
+    .execute(&mut *tx)
+    .await?;
+    let device_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO staff_devices (org_id, employee_id, token_hash, platform, model) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(account.org_id)
-    .bind(account.user_id)
+    .bind(account.employee_id)
     .bind(hash_token(&device_token))
     .bind(body.platform.as_deref().unwrap_or(""))
     .bind(body.model.as_deref().unwrap_or(""))
-    .execute(pool)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    // The old phone's pushes go with it.
+    crate::push::revoke_all(
+        pool,
+        crate::push::Recipient::Employee(account.employee_id),
+        super::PUSH_APP,
+    )
     .await?;
     if had_phone {
-        let branch = super::branches_of(pool, account.user_id)
+        let branch = super::branches_of(pool, account.employee_id)
             .await?
             .first()
             .copied();
         sqlx::query(
-            "INSERT INTO attendance_flags (org_id, user_id, branch_id, kind) \
+            "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind) \
              VALUES ($1, $2, $3, 'new_phone')",
         )
         .bind(account.org_id)
-        .bind(account.user_id)
+        .bind(account.employee_id)
         .bind(branch)
         .execute(pool)
         .await?;
@@ -308,35 +319,93 @@ pub async fn otp_verify(
             pool,
             account.org_id,
             branch,
-            Some(account.user_id),
+            Cap::HrStaffEdit,
+            Some(account.employee_id),
             "staff.n_new_phone",
             serde_json::json!({ "name": account.name, "device": body.model.clone().unwrap_or_default() }),
         )
         .await;
     }
 
-    let token = create_token(
+    let (token, expires) = principal::mint(
         &secret,
+        account.employee_id,
+        account.org_id,
         account.user_id,
-        Some(account.org_id),
-        account.role.clone(),
-        None,
-        SESSION_HOURS,
-    )
-    .map_err(|_| AppError::Internal)?;
-    sqlx::query("UPDATE users SET last_login_at = now() WHERE id = $1")
-        .bind(account.user_id)
-        .execute(pool)
-        .await?;
+        device_id,
+    )?;
+    if let Some(user) = account.user_id {
+        sqlx::query("UPDATE users SET last_login_at = now() WHERE id = $1")
+            .bind(user)
+            .execute(pool)
+            .await?;
+    }
     Ok(HttpResponse::Ok().json(StaffSession {
         needs_org: false,
         orgs,
         token: Some(token),
+        token_expires_at: Some(expires),
         device_token: Some(device_token),
-        user_id: Some(account.user_id),
+        employee_id: Some(account.employee_id),
+        user_id: account.user_id,
         name: Some(account.name.clone()),
-        role: Some(account.role.clone()),
+        role: account.role.clone(),
         org_id: Some(account.org_id),
         new_phone: had_phone,
+    }))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct StaffTokenRefresh {
+    /// A fresh staff token for `/staff/*`.
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+    pub employee_id: Uuid,
+    pub org_id: Uuid,
+}
+
+/// A fresh staff token for the phone that sends its device token in
+/// `X-Staff-Device` (RO-3). The device is the refresh credential: once it is
+/// revoked (a new phone, a new number, the employee deactivated) this answers
+/// 401 `DEVICE_REVOKED` and the app signs out. The same checks as every
+/// `/staff/*` call: the employee is active with app access, the business is
+/// active and has Dawam on.
+#[utoipa::path(
+    operation_id = "staff_token_refresh",
+    post, path = "/auth/staff/refresh", tag = "staff-auth",
+    params(("X-Staff-Device" = String, Header, description = "The device token from sign-in")),
+    responses((status = 200, body = StaffTokenRefresh), AppErrorResponse)
+)]
+pub async fn refresh(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    secret: web::Data<JwtSecret>,
+) -> Result<HttpResponse, AppError> {
+    let pool = pool.get_ref();
+    let sent = req
+        .headers()
+        .get(DEVICE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .ok_or_else(principal::device_revoked)?;
+    let row: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT id, employee_id, org_id FROM staff_devices \
+          WHERE token_hash = $1 AND revoked_at IS NULL",
+    )
+    .bind(hash_token(&sent))
+    .fetch_optional(pool)
+    .await?;
+    let Some((device_id, employee_id, org_id)) = row else {
+        return Err(principal::device_revoked());
+    };
+    let (who, _) =
+        principal::check_session(pool, employee_id, org_id, device_id, Some(&sent)).await?;
+    let (token, expires_at) =
+        principal::mint(&secret, employee_id, org_id, who.user_id, device_id)?;
+    Ok(HttpResponse::Ok().json(StaffTokenRefresh {
+        token,
+        expires_at,
+        employee_id,
+        org_id,
     }))
 }

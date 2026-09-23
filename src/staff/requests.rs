@@ -22,7 +22,7 @@
 //! Approving spends; cancelling an approved request refunds. Both happen inside
 //! the same transaction as the status change.
 
-use actix_web::{HttpRequest, HttpResponse, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -32,10 +32,15 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::{
+    auth::jwt::Claims,
+    authz::Cap,
     errors::{AppError, AppErrorResponse},
-    orgs::handlers::extract_claims,
-    permissions::checker::check_permission,
-    staff::{attendance::DayAdjustments, require_user_in_org, scope_org, validate_decision},
+    staff::{
+        access,
+        attendance::DayAdjustments,
+        principal::{Me, StaffPrincipal, caller},
+        scope_org, validate_decision,
+    },
 };
 
 /// The six things an employee can ask for.
@@ -59,9 +64,9 @@ pub const KINDS: [&str; 6] = [
 pub struct StaffRequest {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     #[sqlx(default)]
-    pub user_name: Option<String>,
+    pub employee_name: Option<String>,
     /// `leave` | `late_arrival` | `early_departure` | `excuse` | `mission`.
     pub kind: String,
     pub on_date: NaiveDate,
@@ -91,13 +96,13 @@ pub struct StaffRequest {
 }
 
 const REQUEST_SELECT: &str = r#"
-    SELECT r.id, r.org_id, r.user_id, u.name AS user_name, r.kind, r.on_date,
+    SELECT r.id, r.org_id, r.employee_id, e.name AS employee_name, r.kind, r.on_date,
            r.end_date, r.from_time, r.to_time, r.leave_type_id,
            t.name AS leave_type_name, r.is_half_day, r.title, r.location,
            r.attendance_record_id, r.reason, r.status, r.is_paid, r.decided_by, r.decided_at,
            r.decision_note, r.created_at, r.updated_at
       FROM staff_requests r
-      JOIN users u ON u.id = r.user_id
+      JOIN employees e ON e.id = r.employee_id
       LEFT JOIN leave_types t ON t.id = r.leave_type_id
 "#;
 
@@ -121,7 +126,7 @@ const LEAVE_TYPE_COLS: &str = "id, org_id, name, is_paid, annual_quota_days, \
 pub struct LeaveBalance {
     pub id: Uuid,
     pub org_id: Uuid,
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub leave_type_id: Uuid,
     #[sqlx(default)]
     pub leave_type_name: Option<String>,
@@ -135,7 +140,7 @@ pub struct LeaveBalance {
 }
 
 const BALANCE_SELECT: &str = r#"
-    SELECT b.id, b.org_id, b.user_id, b.leave_type_id, t.name AS leave_type_name,
+    SELECT b.id, b.org_id, b.employee_id, b.leave_type_id, t.name AS leave_type_name,
            b.year, b.entitled_days, b.used_days, b.carried_over_days,
            (b.entitled_days + b.carried_over_days - b.used_days) AS remaining_days
       FROM leave_balances b
@@ -148,7 +153,7 @@ const BALANCE_SELECT: &str = r#"
 pub struct CreateStaffRequest {
     /// Admin-only. Omitted on `/staff/me/*`, where it is always the caller.
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
     /// One of `leave`, `late_arrival`, `early_departure`, `excuse`, `mission`,
     /// `correction`.
     pub kind: String,
@@ -202,7 +207,7 @@ pub struct UpsertLeaveTypeRequest {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct PutBalanceRequest {
-    pub user_id: Uuid,
+    pub employee_id: Uuid,
     pub leave_type_id: Uuid,
     pub year: i32,
     pub entitled_days: Decimal,
@@ -214,7 +219,7 @@ pub struct PutBalanceRequest {
 #[into_params(parameter_in = Query)]
 pub struct RequestListQuery {
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -229,7 +234,7 @@ pub struct RequestListQuery {
 #[into_params(parameter_in = Query)]
 pub struct BalanceQuery {
     #[serde(default)]
-    pub user_id: Option<Uuid>,
+    pub employee_id: Option<Uuid>,
     /// Defaults to the current calendar year.
     #[serde(default)]
     pub year: Option<i32>,
@@ -358,7 +363,7 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<(), AppError> {
 /// uses — the tz database owns DST, not us.
 pub(crate) async fn day_adjustments(
     pool: &PgPool,
-    user_id: Uuid,
+    employee_id: Uuid,
     business_date: NaiveDate,
     timezone: &str,
     excused_time_paid_default: bool,
@@ -378,7 +383,7 @@ pub(crate) async fn day_adjustments(
                ($2::date + r.to_time)   AT TIME ZONE $3 AS to_at,
                r.is_paid
           FROM staff_requests r
-         WHERE r.user_id = $1
+         WHERE r.employee_id = $1
            AND r.status = 'approved'
            AND r.on_date <= $2
            AND COALESCE(r.end_date, r.on_date) >= $2
@@ -388,7 +393,7 @@ pub(crate) async fn day_adjustments(
            AND r.kind <> 'correction'
         "#,
     )
-    .bind(user_id)
+    .bind(employee_id)
     .bind(business_date)
     .bind(timezone)
     .fetch_all(pool)
@@ -439,7 +444,7 @@ pub(crate) async fn day_adjustments(
 async fn insert_request(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     body: &CreateStaffRequest,
 ) -> Result<StaffRequest, AppError> {
     validate_kind(&body.kind)?;
@@ -473,10 +478,10 @@ async fn insert_request(
         // Two live leave requests over the same day would double-count the balance.
         let overlapping: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM staff_requests \
-              WHERE user_id = $1 AND kind = 'leave' AND status IN ('pending', 'approved') \
+              WHERE employee_id = $1 AND kind = 'leave' AND status IN ('pending', 'approved') \
                 AND on_date <= $3 AND COALESCE(end_date, on_date) >= $2",
         )
-        .bind(user_id)
+        .bind(employee_id)
         .bind(body.on_date)
         .bind(end_date)
         .fetch_one(pool)
@@ -496,10 +501,10 @@ async fn insert_request(
         // punch and — once a manager waved it through — rewrite their pay.
         let owned: Option<NaiveDate> = sqlx::query_scalar(
             "SELECT business_date FROM attendance_records \
-              WHERE id = $1 AND user_id = $2 AND org_id = $3",
+              WHERE id = $1 AND employee_id = $2 AND org_id = $3",
         )
         .bind(record_id)
-        .bind(user_id)
+        .bind(employee_id)
         .bind(org_id)
         .fetch_optional(pool)
         .await?;
@@ -519,13 +524,13 @@ async fn insert_request(
     // message in `AppError::from`.
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO staff_requests \
-             (org_id, user_id, kind, on_date, end_date, from_time, to_time, \
+             (org_id, employee_id, kind, on_date, end_date, from_time, to_time, \
               leave_type_id, is_half_day, title, location, attendance_record_id, reason) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, FALSE), $10, $11, $12, $13) \
          RETURNING id",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(&body.kind)
     .bind(body.on_date)
     .bind(end_date)
@@ -584,9 +589,10 @@ pub async fn list_requests(
     pool: crate::db::Db,
     query: web::Query<RequestListQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // A manager sees the requests of their branches' people (RO-6).
+    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrLeaveRead).await?;
     validate_status_filter(query.status.as_deref())?;
     if let Some(kind) = query.kind.as_deref() {
         validate_kind(kind)?;
@@ -595,19 +601,22 @@ pub async fn list_requests(
     let rows = sqlx::query_as::<_, StaffRequest>(&format!(
         "{REQUEST_SELECT} \
           WHERE r.org_id = $1 \
-            AND ($2::uuid IS NULL OR r.user_id = $2) \
+            AND ($2::uuid IS NULL OR r.employee_id = $2) \
             AND ($3::text IS NULL OR r.kind = $3) \
             AND ($4::text IS NULL OR r.status = $4) \
             AND ($5::date IS NULL OR COALESCE(r.end_date, r.on_date) >= $5) \
             AND ($6::date IS NULL OR r.on_date <= $6) \
-          ORDER BY r.status = 'pending' DESC, r.on_date DESC, r.created_at DESC"
+            AND {} \
+          ORDER BY r.status = 'pending' DESC, r.on_date DESC, r.created_at DESC",
+        access::in_scope("r.employee_id", 7)
     ))
     .bind(org_id)
-    .bind(query.user_id)
+    .bind(query.employee_id)
     .bind(query.kind.as_deref())
     .bind(query.status.as_deref())
     .bind(query.from)
     .bind(query.to)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -624,15 +633,16 @@ pub async fn create_request_admin(
     pool: crate::db::Db,
     body: web::Json<CreateStaffRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    let user_id = body
-        .user_id
-        .ok_or_else(|| AppError::BadRequest("user_id is required".into()))?;
-    require_user_in_org(pool.get_ref(), org_id, user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrLeaveCreate).await?;
+    let employee_id = body
+        .employee_id
+        .ok_or_else(|| AppError::BadRequest("employee_id is required".into()))?;
+    let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrLeaveCreate, &subject).await?;
 
-    let row = insert_request(pool.get_ref(), org_id, user_id, &body).await?;
+    let row = insert_request(pool.get_ref(), org_id, employee_id, &body).await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -643,18 +653,17 @@ pub async fn create_request_admin(
     security(("bearer_jwt" = []))
 )]
 pub async fn create_my_request(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     body: web::Json<CreateStaffRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    let org_id = my_org(pool.get_ref(), user_id).await?;
+    let org_id = me.org_id;
+    let employee_id = me.employee_id;
 
-    let row = insert_request(pool.get_ref(), org_id, user_id, &body).await?;
+    let row = insert_request(pool.get_ref(), org_id, employee_id, &body).await?;
     let pool = pool.get_ref();
-    let name = crate::staff::dawam::user_name(pool, user_id).await;
-    let branch = crate::staff::dawam::branches_of(pool, user_id)
+    let name = crate::staff::dawam::employee_name(pool, employee_id).await;
+    let branch = crate::staff::dawam::branches_of(pool, employee_id)
         .await?
         .first()
         .copied();
@@ -662,7 +671,8 @@ pub async fn create_my_request(
         pool,
         org_id,
         branch,
-        Some(user_id),
+        Cap::HrLeaveEdit,
+        Some(employee_id),
         "staff.n_request",
         serde_json::json!({ "name": name, "kind": row.kind, "date": row.on_date }),
     )
@@ -675,15 +685,11 @@ pub async fn create_my_request(
     responses((status = 200, description = "The employee's own requests", body = Vec<StaffRequest>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
-pub async fn my_requests(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    my_org(pool.get_ref(), user_id).await?;
-
+pub async fn my_requests(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let rows = sqlx::query_as::<_, StaffRequest>(&format!(
-        "{REQUEST_SELECT} WHERE r.user_id = $1 ORDER BY r.on_date DESC, r.created_at DESC"
+        "{REQUEST_SELECT} WHERE r.employee_id = $1 ORDER BY r.on_date DESC, r.created_at DESC"
     ))
-    .bind(user_id)
+    .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -706,20 +712,31 @@ pub async fn decide_request(
     id: web::Path<Uuid>,
     body: web::Json<RequestDecision>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let caller = claims.user_id_safe()?;
+    // The acting person: a Madar user (dashboard, or the app through a linked
+    // account), and/or the staff app's own employee.
+    let claims: Option<Claims> = req.extensions().get::<Claims>().cloned();
+    let me: Option<StaffPrincipal> = req.extensions().get::<StaffPrincipal>().cloned();
     // Only cancelling one's OWN request needs no permission (checked below, once
-    // the request is loaded). Anything else is refused before the body is
-    // validated or the request looked up (route guard).
+    // the request is loaded). Anything else needs a manager's account and is
+    // refused before the request is looked up.
+    let org_id = match (&claims, &me) {
+        (Some(c), _) => scope_org(&req, c)?,
+        (None, Some(m)) => m.org_id,
+        (None, None) => return Err(AppError::Unauthorized("Missing claims".into())),
+    };
     if body.status != "cancelled" {
-        check_permission(pool.get_ref(), &claims, "leave", "update").await?;
+        let c = caller(&req)?;
+        access::gate(pool.get_ref(), &c, org_id, Cap::HrLeaveEdit).await?;
     }
     let decision = validate_decision(&body.status)?;
-    let org_id = scope_org(&req, &claims)?;
+    let actor: Option<Uuid> = claims
+        .as_ref()
+        .and_then(|c| c.user_id_safe().ok())
+        .or(me.as_ref().and_then(|m| m.user_id));
 
     #[derive(sqlx::FromRow)]
     struct Row {
-        user_id: Uuid,
+        employee_id: Uuid,
         kind: String,
         leave_type_id: Option<Uuid>,
         on_date: NaiveDate,
@@ -734,7 +751,7 @@ pub async fn decide_request(
     // A first, unlocked read decides who may act and applies an approved
     // correction's punch; the locked read below re-validates before the flip.
     let existing: Row = sqlx::query_as(
-        "SELECT user_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
+        "SELECT employee_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
                 from_time, to_time, attendance_record_id \
            FROM staff_requests WHERE id = $1 AND org_id = $2",
     )
@@ -744,18 +761,24 @@ pub async fn decide_request(
     .await?
     .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
 
-    // Cancelling one's own pending request needs no permission; deciding someone
-    // else's does.
-    let self_cancel = decision == "cancelled" && existing.user_id == caller;
+    let subject = access::subject(pool.get_ref(), org_id, existing.employee_id).await?;
+    let is_own = me
+        .as_ref()
+        .is_some_and(|m| m.employee_id == existing.employee_id)
+        || claims.as_ref().is_some_and(|c| subject.is(c));
+    // Cancelling one's own request needs no permission; deciding someone
+    // else's does, at one of their branches (RO-6).
+    let self_cancel = decision == "cancelled" && is_own;
     if !self_cancel {
-        check_permission(pool.get_ref(), &claims, "leave", "update").await?;
+        let claims = caller(&req)?;
+        access::require_for(pool.get_ref(), &claims, Cap::HrLeaveEdit, &subject).await?;
         // RQ-5: deciding your own request is the owner's alone.
-        if existing.user_id == caller {
-            crate::authz::require::require(
+        if is_own {
+            access::require_for(
                 pool.get_ref(),
                 &claims,
-                crate::authz::Cap::HrRequestsSelfApprove,
-                None,
+                Cap::HrRequestsSelfApprove,
+                &subject,
             )
             .await?;
         }
@@ -822,7 +845,7 @@ pub async fn decide_request(
             None,
             None,
             "Approved punch correction request",
-            Some(caller),
+            actor,
         )
         .await?;
     }
@@ -831,7 +854,7 @@ pub async fn decide_request(
     // FOR UPDATE: two managers hitting Approve at once must not both spend the
     // same days of leave.
     let existing: Row = sqlx::query_as(
-        "SELECT user_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
+        "SELECT employee_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
                 from_time, to_time, attendance_record_id \
            FROM staff_requests WHERE id = $1 AND org_id = $2 FOR UPDATE",
     )
@@ -869,13 +892,13 @@ pub async fn decide_request(
         match (existing.status.as_str(), decision) {
             (_, "approved") => {
                 sqlx::query(
-                    "INSERT INTO leave_balances (org_id, user_id, leave_type_id, year, entitled_days, used_days) \
+                    "INSERT INTO leave_balances (org_id, employee_id, leave_type_id, year, entitled_days, used_days) \
                      VALUES ($1, $2, $3, $4, 0, $5) \
-                     ON CONFLICT (user_id, leave_type_id, year) DO UPDATE SET \
+                     ON CONFLICT (employee_id, leave_type_id, year) DO UPDATE SET \
                          used_days = leave_balances.used_days + $5, updated_at = now()",
                 )
                 .bind(org_id)
-                .bind(existing.user_id)
+                .bind(existing.employee_id)
                 .bind(leave_type_id)
                 .bind(year)
                 .bind(days)
@@ -885,9 +908,9 @@ pub async fn decide_request(
             ("approved", "cancelled") => {
                 sqlx::query(
                     "UPDATE leave_balances SET used_days = GREATEST(used_days - $4, 0), updated_at = now() \
-                      WHERE user_id = $1 AND leave_type_id = $2 AND year = $3",
+                      WHERE employee_id = $1 AND leave_type_id = $2 AND year = $3",
                 )
-                .bind(existing.user_id)
+                .bind(existing.employee_id)
                 .bind(leave_type_id)
                 .bind(year)
                 .bind(days)
@@ -934,7 +957,7 @@ pub async fn decide_request(
     )
     .bind(*id)
     .bind(decision)
-    .bind(caller)
+    .bind(actor)
     .bind(clean(body.note.as_ref()))
     .bind(is_paid)
     .execute(&mut *tx)
@@ -948,19 +971,19 @@ pub async fn decide_request(
         reprice_days(
             pool.get_ref(),
             org_id,
-            existing.user_id,
+            existing.employee_id,
             existing.on_date,
             existing.end_date.unwrap_or(existing.on_date),
-            Some(caller),
+            actor,
         )
         .await?;
     }
 
-    if existing.user_id != caller && decision != "cancelled" {
+    if !is_own && decision != "cancelled" {
         crate::staff::dawam::notify(
             pool.get_ref(),
             org_id,
-            existing.user_id,
+            existing.employee_id,
             if decision == "approved" {
                 "staff.n_request_approved"
             } else {
@@ -979,17 +1002,17 @@ pub async fn decide_request(
 pub(crate) async fn reprice_days(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    employee_id: Uuid,
     from: NaiveDate,
     to: NaiveDate,
     editor: Option<Uuid>,
 ) -> Result<(), AppError> {
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM attendance_records \
-          WHERE org_id = $1 AND user_id = $2 AND business_date BETWEEN $3 AND $4",
+          WHERE org_id = $1 AND employee_id = $2 AND business_date BETWEEN $3 AND $4",
     )
     .bind(org_id)
-    .bind(user_id)
+    .bind(employee_id)
     .bind(from)
     .bind(to)
     .fetch_all(pool)
@@ -1022,9 +1045,9 @@ pub async fn list_leave_types(
     req: HttpRequest,
     pool: crate::db::Db,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::scope(pool.get_ref(), &claims, org_id, Cap::HrLeaveRead).await?;
 
     let rows = sqlx::query_as::<_, LeaveType>(&format!(
         "SELECT {LEAVE_TYPE_COLS} FROM leave_types WHERE org_id = $1 ORDER BY lower(name)"
@@ -1046,9 +1069,10 @@ pub async fn create_leave_type(
     pool: crate::db::Db,
     body: web::Json<UpsertLeaveTypeRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "create").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    // Leave types are the business's: an org-wide act.
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrLeaveCreate).await?;
 
     let name = body.name.trim();
     if name.is_empty() {
@@ -1087,9 +1111,9 @@ pub async fn update_leave_type(
     id: web::Path<Uuid>,
     body: web::Json<UpsertLeaveTypeRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrLeaveEdit).await?;
 
     let name = body.name.trim();
     if name.is_empty() {
@@ -1129,9 +1153,9 @@ pub async fn delete_leave_type(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "delete").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrLeaveDelete).await?;
 
     // The FK is ON DELETE RESTRICT: a type someone has taken leave under is part
     // of the record. Say so instead of surfacing a foreign-key violation.
@@ -1171,18 +1195,20 @@ pub async fn list_balances(
     pool: crate::db::Db,
     query: web::Query<BalanceQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "read").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
+    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrLeaveRead).await?;
     let year = query.year.unwrap_or_else(|| Utc::now().year());
 
     let rows = sqlx::query_as::<_, LeaveBalance>(&format!(
         "{BALANCE_SELECT} WHERE b.org_id = $1 AND b.year = $2 \
-          AND ($3::uuid IS NULL OR b.user_id = $3) ORDER BY lower(t.name)"
+          AND ($3::uuid IS NULL OR b.employee_id = $3) AND {} ORDER BY lower(t.name)",
+        access::in_scope("b.employee_id", 4)
     ))
     .bind(org_id)
     .bind(year)
-    .bind(query.user_id)
+    .bind(query.employee_id)
+    .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -1199,10 +1225,11 @@ pub async fn put_balance(
     pool: crate::db::Db,
     body: web::Json<PutBalanceRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "leave", "update").await?;
+    let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    require_user_in_org(pool.get_ref(), org_id, body.user_id).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrLeaveEdit).await?;
+    let subject = access::subject(pool.get_ref(), org_id, body.employee_id).await?;
+    access::require_for(pool.get_ref(), &claims, Cap::HrLeaveEdit, &subject).await?;
 
     if body.entitled_days < Decimal::ZERO
         || body.carried_over_days.is_some_and(|c| c < Decimal::ZERO)
@@ -1214,16 +1241,16 @@ pub async fn put_balance(
     // approval path, and letting HR set it by hand would desynchronise it from
     // the approved requests it is supposed to mirror.
     let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO leave_balances (org_id, user_id, leave_type_id, year, entitled_days, carried_over_days) \
+        "INSERT INTO leave_balances (org_id, employee_id, leave_type_id, year, entitled_days, carried_over_days) \
          VALUES ($1, $2, $3, $4, $5, COALESCE($6, 0)) \
-         ON CONFLICT (user_id, leave_type_id, year) DO UPDATE SET \
+         ON CONFLICT (employee_id, leave_type_id, year) DO UPDATE SET \
              entitled_days     = EXCLUDED.entitled_days, \
              carried_over_days = EXCLUDED.carried_over_days, \
              updated_at        = now() \
          RETURNING id",
     )
     .bind(org_id)
-    .bind(body.user_id)
+    .bind(body.employee_id)
     .bind(body.leave_type_id)
     .bind(body.year)
     .bind(body.entitled_days)
@@ -1245,38 +1272,18 @@ pub async fn put_balance(
     security(("bearer_jwt" = []))
 )]
 pub async fn my_leave_balances(
-    req: HttpRequest,
+    me: Me,
     pool: crate::db::Db,
     query: web::Query<BalanceQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let user_id = claims.user_id_safe()?;
-    my_org(pool.get_ref(), user_id).await?;
     let year = query.year.unwrap_or_else(|| Utc::now().year());
 
     let rows = sqlx::query_as::<_, LeaveBalance>(&format!(
-        "{BALANCE_SELECT} WHERE b.user_id = $1 AND b.year = $2 ORDER BY lower(t.name)"
+        "{BALANCE_SELECT} WHERE b.employee_id = $1 AND b.year = $2 ORDER BY lower(t.name)"
     ))
-    .bind(user_id)
+    .bind(me.employee_id)
     .bind(year)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
-}
-
-// ── Shared ────────────────────────────────────────────────────
-
-/// The org of the caller's own staff profile. Self-service endpoints scope by
-/// this rather than by the token's org claim, so a login without a profile gets
-/// a clear 403 instead of an empty list.
-pub(crate) async fn my_org(pool: &PgPool, user_id: Uuid) -> Result<Uuid, AppError> {
-    sqlx::query_scalar("SELECT org_id FROM staff_profiles WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| {
-            AppError::Forbidden(
-                "You do not have an employee profile yet — ask your manager to set one up".into(),
-            )
-        })
 }

@@ -14,8 +14,9 @@ use uuid::Uuid;
 
 use crate::authz::Cap;
 use crate::errors::{AppError, AppErrorResponse};
-use crate::orgs::handlers::extract_claims;
+use crate::staff::access;
 use crate::staff::attendance::load_settings;
+use crate::staff::principal::caller;
 use crate::staff::rules::PayRates;
 
 const MAX_DAYS: i64 = 400;
@@ -62,11 +63,12 @@ pub async fn labour_vs_sales(
     pool: crate::db::Db,
     q: web::Query<ReportQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
     check(&q)?;
-    crate::authz::require::require(pool, &claims, Cap::HrPayrollRead, q.branch_id).await?;
+    // The branches whose pay the caller reads (RO-6).
+    let scope = access::scope_at(pool, &claims, org_id, Cap::HrPayrollRead, q.branch_id).await?;
     if !super::roster::has_module(pool, org_id, "pos").await? {
         return Err(AppError::Forbidden(
             "Labour cost vs sales needs POS switched on.".into(),
@@ -77,14 +79,14 @@ pub async fn labour_vs_sales(
         "SELECT a.business_date, a.branch_id, p.base_salary_piastres, \
                 (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int, \
                 a.worked_minutes, a.overtime_minutes \
-           FROM attendance_records a JOIN staff_profiles p ON p.user_id = a.user_id \
+           FROM attendance_records a JOIN employees p ON p.id = a.employee_id \
           WHERE a.org_id = $1 AND a.business_date BETWEEN $2 AND $3 \
-            AND ($4::uuid IS NULL OR a.branch_id = $4) AND a.check_in_at IS NOT NULL",
+            AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4)) AND a.check_in_at IS NOT NULL",
     )
     .bind(org_id)
     .bind(q.from)
     .bind(q.to)
-    .bind(q.branch_id)
+    .bind(scope.as_deref())
     .fetch_all(pool)
     .await?;
     let mut days: BTreeMap<(NaiveDate, Uuid), (Decimal, i64)> = BTreeMap::new();
@@ -105,7 +107,7 @@ pub async fn labour_vs_sales(
                 SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))::bigint \
            FROM orders o JOIN branches b ON b.id = o.branch_id \
            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id \
-          WHERE b.org_id = $1 AND ($4::uuid IS NULL OR o.branch_id = $4) \
+          WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR o.branch_id = ANY($4)) \
             AND o.status NOT IN ('voided', 'refunded') \
             AND o.created_at >= $2::date - 1 AND o.created_at < $3::date + 2 \
           GROUP BY 1, 2",
@@ -113,7 +115,7 @@ pub async fn labour_vs_sales(
     .bind(org_id)
     .bind(q.from)
     .bind(q.to)
-    .bind(q.branch_id)
+    .bind(scope.as_deref())
     .fetch_all(pool)
     .await?;
     for (date, branch, amount) in sales {
@@ -165,11 +167,12 @@ pub async fn payroll_history(
     pool: crate::db::Db,
     q: web::Query<ReportQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
     check(&q)?;
-    crate::authz::require::require(pool, &claims, Cap::HrPayrollRead, None).await?;
+    // Whole-business totals: payroll read for every branch.
+    access::require_everywhere(pool, &claims, org_id, Cap::HrPayrollRead).await?;
     let rows: Vec<PayrollHistoryRow> = sqlx::query_as(
         "SELECT pp.id AS period_id, pp.name, pp.start_date, pp.end_date, pp.status, \
                 COUNT(s.id) AS people, \
@@ -195,8 +198,8 @@ pub async fn payroll_history(
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct SalaryAdvanceRow {
     pub id: Uuid,
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub amount_piastres: i64,
     pub remaining_piastres: i64,
     pub installments: i32,
@@ -208,8 +211,8 @@ pub struct SalaryAdvanceRow {
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct ExpenseAdvanceRow {
     pub id: Uuid,
-    pub user_id: Uuid,
-    pub user_name: String,
+    pub employee_id: Uuid,
+    pub employee_name: String,
     pub amount_piastres: i64,
     pub purpose: String,
     /// `safe` · `bank` · `till`
@@ -239,34 +242,37 @@ pub async fn advances(
     pool: crate::db::Db,
     q: web::Query<ReportQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
+    let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
     check(&q)?;
-    crate::authz::require::require(pool, &claims, Cap::HrPayrollRead, None).await?;
-    let salary: Vec<SalaryAdvanceRow> = sqlx::query_as(
-        "SELECT a.id, a.user_id, u.name AS user_name, a.amount_piastres, a.remaining_piastres, \
+    let scope = access::scope_at(pool, &claims, org_id, Cap::HrPayrollRead, q.branch_id).await?;
+    let salary: Vec<SalaryAdvanceRow> = sqlx::query_as(&format!(
+        "SELECT a.id, a.employee_id, p.name AS employee_name, a.amount_piastres, a.remaining_piastres, \
                 a.installments, a.status, (a.created_at AT TIME ZONE 'Africa/Cairo')::date AS given_on \
-           FROM salary_advances a JOIN users u ON u.id = a.user_id \
+           FROM salary_advances a JOIN employees p ON p.id = a.employee_id \
           WHERE a.org_id = $1 AND (a.created_at AT TIME ZONE 'Africa/Cairo')::date BETWEEN $2 AND $3 \
+            AND {} \
           ORDER BY a.created_at DESC",
-    )
+        access::in_scope("a.employee_id", 4)
+    ))
     .bind(org_id)
     .bind(q.from)
     .bind(q.to)
+    .bind(scope.as_deref())
     .fetch_all(pool)
     .await?;
     let expense: Vec<ExpenseAdvanceRow> = sqlx::query_as(
-        "SELECT e.id, e.user_id, u.name AS user_name, e.amount_piastres, e.purpose, e.via, e.given_on \
-           FROM expense_advances e JOIN users u ON u.id = e.user_id \
+        "SELECT e.id, e.employee_id, p.name AS employee_name, e.amount_piastres, e.purpose, e.via, e.given_on \
+           FROM expense_advances e JOIN employees p ON p.id = e.employee_id \
           WHERE e.org_id = $1 AND e.given_on BETWEEN $2 AND $3 \
-            AND ($4::uuid IS NULL OR e.branch_id = $4) \
+            AND ($4::uuid[] IS NULL OR e.branch_id = ANY($4)) \
           ORDER BY e.given_on DESC, e.created_at DESC",
     )
     .bind(org_id)
     .bind(q.from)
     .bind(q.to)
-    .bind(q.branch_id)
+    .bind(scope.as_deref())
     .fetch_all(pool)
     .await?;
     let live = |s: &SalaryAdvanceRow| s.status == "approved" || s.status == "settled";
