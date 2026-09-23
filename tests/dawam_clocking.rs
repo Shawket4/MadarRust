@@ -427,6 +427,17 @@ async fn a_till_punch_needs_a_real_till_and_never_the_staff_app(pool: PgPool) {
         "{heard:?}"
     );
     assert!(heard.contains(&"staff.n_till_punch_out".to_string()));
+    // …in words a push can show with the app closed, in both languages.
+    for key in ["staff.n_till_punch_in", "staff.n_till_punch_out"] {
+        for ar in [false, true] {
+            let said =
+                madar_rust::push::render(key, &json!({ "name": "Amal" }), ar).unwrap_or_default();
+            assert!(
+                said.contains("Amal") && !said.contains("staff."),
+                "{key} {ar}: {said}"
+            );
+        }
+    }
 }
 
 #[sqlx::test]
@@ -973,6 +984,107 @@ async fn an_unpaid_excuse_deducts_the_exact_minutes_not_the_suggestion(pool: PgP
     assert!(amount > 0);
     assert_eq!(flag["minutes_away"], 17);
     assert_ne!(amount % 500, 0, "exact, not rounded to 5 EGP: {amount}");
+}
+
+/// A second time away on the same shift (the first flag already handled)
+/// can be deducted too, and neither line is undone when the day is re-priced
+/// (a correction runs the rules again). The two used to collide with the one
+/// automatic line per record and source: 409, or deleted by the recompute.
+#[sqlx::test]
+async fn a_second_flag_on_the_same_shift_deducts_and_survives_a_reprice(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(14)).await;
+    shift_around_now(&pool, &f, f.a, 240, 240).await;
+    let s = session(&pool, f.a).await;
+    let start = Utc::now() - Duration::minutes(200);
+    let open_flag = || {
+        let pool = pool.clone();
+        let who = f.a;
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM attendance_flags WHERE employee_id = $1 AND kind = 'left_mid_shift' \
+                    AND resolution IS NULL",
+            )
+            .bind(who)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    walk!(app, &s, &f, start, [(15, true), (30, false), (45, false)]);
+    let first = open_flag().await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/flags/{first}"),
+        owner_t(&f),
+        json!({ "action": "deduct", "amount_piastres": 5000 })
+    );
+    assert_eq!(resp.status(), 200, "{:?}", test::read_body(resp).await);
+    // Back at +60, away again from +75.
+    for (min, inside) in [(60, true), (75, false), (90, false)] {
+        let lat = if inside {
+            LAT
+        } else {
+            AWAY + min as f64 * 0.0001
+        };
+        let body = json!({ "latitude": lat, "longitude": LNG, "accuracy_meters": 9.0 + min as f64 / 10.0,
+                           "offline": signed(&s, start, Duration::minutes(min)) });
+        assert_eq!(
+            call!(app, post, "/staff/me/pings", phone(&s), body).status(),
+            200
+        );
+    }
+    let second = open_flag().await;
+    assert_ne!(first, second, "a new flag for the new time away");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/flags/{second}"),
+        owner_t(&f),
+        json!({ "action": "excuse_unpaid" })
+    );
+    assert_eq!(resp.status(), 200, "{:?}", test::read_body(resp).await);
+    let lines = || {
+        let pool = pool.clone();
+        let who = f.a;
+        async move {
+            sqlx::query_as::<_, (String, i64)>(
+                "SELECT source, amount_piastres FROM payroll_deductions \
+                  WHERE employee_id = $1 AND source IN ('left_mid_shift', 'excused_unpaid', 'unpaid_excuse') \
+                  ORDER BY source",
+            )
+            .bind(who)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = lines().await;
+    assert_eq!(
+        before.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(),
+        ["excused_unpaid", "left_mid_shift"],
+        "both, under the one name for unpaid excused time"
+    );
+    // The manager corrects the day: the rules price it again.
+    let rec: Uuid = sqlx::query_scalar("SELECT id FROM attendance_records WHERE employee_id = $1")
+        .bind(f.a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{rec}"),
+        owner_t(&f),
+        json!({ "check_in_at": start - Duration::minutes(5), "reason": "Came in earlier" })
+    );
+    assert_eq!(resp.status(), 200, "{:?}", test::read_body(resp).await);
+    assert_eq!(
+        lines().await,
+        before,
+        "a manager's decisions outlive a re-price"
+    );
 }
 
 // ── manager and till punches ───────────────────────────────────────────────
@@ -1607,4 +1719,179 @@ async fn approving_the_month_wipes_its_coordinates_and_keeps_the_facts(pool: PgP
     .await
     .unwrap();
     assert_eq!(left, 0);
+}
+
+// ── a closed month (AT-7, orchestrator decision 1: one check, PERIOD_CLOSED) ──
+
+/// Once a month's payroll is approved, no attendance edit reaches back into
+/// it: the manual record, the correction and the delete all answer 409
+/// `PERIOD_CLOSED` (the one `period_lock` check), and the record is left as
+/// it was. A day in an open month still changes.
+#[sqlx::test]
+async fn an_approved_month_refuses_every_attendance_edit(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    let closed_day = NaiveDate::from_ymd_opt(2026, 8, 10).unwrap();
+    let open_day = NaiveDate::from_ymd_opt(2026, 9, 10).unwrap();
+    let rec = |d: NaiveDate| {
+        let pool = pool.clone();
+        let (org, who, branch) = (f.org, f.a, f.branch);
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, status, \
+                     check_in_at, check_in_method, check_out_at, check_out_method) \
+                 VALUES ($1, $2, $3, $4, 'present', $4::date + TIME '09:00', 'mobile_gps', \
+                         $4::date + TIME '17:00', 'mobile_gps') RETURNING id",
+            )
+            .bind(org)
+            .bind(who)
+            .bind(branch)
+            .bind(d)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let closed_rec = rec(closed_day).await;
+    let open_rec = rec(open_day).await;
+    sqlx::query(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+         VALUES ($1, 'Aug', '2026-08-01', '2026-08-31', 'generated')",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let closed = |resp: actix_web::dev::ServiceResponse| async move {
+        let st = resp.status().as_u16();
+        let body = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+        assert_eq!(st, 409, "{body}");
+        assert!(body.contains("PERIOD_CLOSED"), "{body}");
+        assert!(
+            !body.contains("MONTH_CLOSED"),
+            "one check, one code: {body}"
+        );
+    };
+    let later = |d: NaiveDate| d.and_hms_opt(8, 0, 0).unwrap().and_utc();
+    closed(call!(
+        app,
+        patch,
+        format!("/staff/attendance/{closed_rec}"),
+        owner_t(&f),
+        json!({ "check_in_at": later(closed_day), "reason": "Came in earlier" })
+    ))
+    .await;
+    closed(call!(
+        app,
+        post,
+        "/staff/attendance",
+        owner_t(&f),
+        json!({ "employee_id": f.b, "branch_id": f.branch, "business_date": closed_day,
+                "check_in_at": later(closed_day), "reason": "Forgot the phone" })
+    ))
+    .await;
+    closed(call!(
+        app,
+        delete,
+        format!("/staff/attendance/{closed_rec}?reason=wrong"),
+        owner_t(&f)
+    ))
+    .await;
+    let method: Option<String> =
+        sqlx::query_scalar("SELECT check_in_method FROM attendance_records WHERE id = $1")
+            .bind(closed_rec)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(method.as_deref(), Some("mobile_gps"), "kept, and untouched");
+
+    // The open month still takes a correction.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{open_rec}"),
+        owner_t(&f),
+        json!({ "check_in_at": later(open_day), "reason": "Came in earlier" })
+    );
+    assert_eq!(resp.status(), 200, "{:?}", test::read_body(resp).await);
+}
+
+// ── money dates (AT-1, audit 08) ───────────────────────────────────────────
+
+/// A pay line and an expense advance with no date land on the day where
+/// the person works: their branch's day, not the database server's and not
+/// the org's first branch's. UTC−11 and UTC+14 are always on different
+/// dates, so the test holds whenever it runs. Before, the far branch's own
+/// today was refused as "in the future".
+#[sqlx::test]
+async fn money_acts_are_dated_on_the_branchs_day(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "Pacific/Pago_Pago").await;
+    let far = branch(&pool, f.org, "Kiritimati", "Pacific/Kiritimati").await;
+    let nour = employee(
+        &pool,
+        f.org,
+        "Nour",
+        None,
+        Some("+201012345677"),
+        true,
+        &[far],
+        600_000,
+    )
+    .await;
+    let there = local(&pool, Utc::now(), "Pacific/Kiritimati").await.date();
+    let first = local(&pool, Utc::now(), "Pacific/Pago_Pago").await.date();
+    assert_ne!(there, first);
+
+    let adj = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner_t(&f),
+        json!({ "employee_id": nour, "kind": "bonus", "amount_piastres": 10_000, "reason": "Great week" })
+    ))
+    .await;
+    assert_eq!(adj["effective_date"], json!(there), "{adj}");
+
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner_t(&f),
+        json!({ "employee_id": nour, "amount_piastres": 5_000, "purpose": "Milk", "via": "safe",
+                "branch_id": far, "given_on": there })
+    );
+    assert_eq!(resp.status(), 201, "{:?}", test::read_body(resp).await);
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner_t(&f),
+        json!({ "employee_id": nour, "amount_piastres": 5_000, "purpose": "Sugar", "via": "safe",
+                "branch_id": far })
+    );
+    assert_eq!(resp.status(), 201);
+    assert_eq!(json_of(resp).await["given_on"], json!(there));
+    // The day after the branch's today is still the future.
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner_t(&f),
+        json!({ "employee_id": nour, "amount_piastres": 5_000, "purpose": "Cups", "via": "safe",
+                "branch_id": far, "given_on": there + Duration::days(1) })
+    );
+    assert_eq!(resp.status(), 400);
+    // No writer can leave the day to the database any more.
+    let left: Result<u64, _> = sqlx::query(
+        "INSERT INTO expense_advances (org_id, employee_id, amount_piastres, purpose, via) \
+         VALUES ($1, $2, 100, 'x', 'safe')",
+    )
+    .bind(f.org)
+    .bind(nour)
+    .execute(&pool)
+    .await
+    .map(|r| r.rows_affected());
+    assert!(left.is_err(), "given_on has no server-date default");
 }

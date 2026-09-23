@@ -2360,12 +2360,13 @@ pub async fn create_manual_record(
     )
     .await?;
     require_employee_in_org(pool.get_ref(), org_id, body.employee_id).await?;
-    // AT-7: after the month's payroll is approved, the fix goes into the next month.
-    crate::staff::requests::require_open_month(
+    // AT-7: after the month's payroll is approved, the fix goes into the next
+    // month. The one closed-month check (`period_lock`, 409 `PERIOD_CLOSED`).
+    crate::staff::period_lock::assert_open(
         pool.get_ref(),
         org_id,
         body.business_date,
-        body.business_date,
+        "an attendance record",
     )
     .await?;
 
@@ -2513,12 +2514,13 @@ pub async fn correct_record(
     if reason.is_empty() {
         return Err(AppError::BadRequest("A correction needs a reason".into()));
     }
-    // AT-7: after the month's payroll is approved, the fix goes into the next month.
-    crate::staff::requests::require_open_month(
+    // AT-7: after the month's payroll is approved, the fix goes into the next
+    // month. The one closed-month check (`period_lock`, 409 `PERIOD_CLOSED`).
+    crate::staff::period_lock::assert_open(
         pool.get_ref(),
         org_id,
         existing.business_date,
-        existing.business_date,
+        "a correction",
     )
     .await?;
 
@@ -2753,11 +2755,12 @@ pub async fn delete_record(
         existing.branch_id,
     )
     .await?;
-    crate::staff::requests::require_open_month(
+    // The one closed-month check (`period_lock`, 409 `PERIOD_CLOSED`).
+    crate::staff::period_lock::assert_open(
         pool.get_ref(),
         org_id,
         existing.business_date,
-        existing.business_date,
+        "this attendance record",
     )
     .await?;
 

@@ -210,6 +210,16 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "تبديل الوردية اترفض",
     ),
     (
+        "staff.n_till_punch_in",
+        "{name} clocked in with their PIN at the till",
+        "{name} سجّل حضور بالرقم السري من الكاشير",
+    ),
+    (
+        "staff.n_till_punch_out",
+        "{name} clocked out with their PIN at the till",
+        "{name} سجّل انصراف بالرقم السري من الكاشير",
+    ),
+    (
         "staff.n_week_published",
         "The roster for the week of {date} is published",
         "جدول أسبوع {date} اتنشر",

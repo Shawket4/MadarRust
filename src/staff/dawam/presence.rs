@@ -787,28 +787,23 @@ pub async fn resolve_flag(
                 return Err(crate::authz::require::denied(Cap::HrDeductionsCreate));
             }
         };
-        // One name for unpaid excused time everywhere: `excused_unpaid`.
-        // The row carries `created_by`, which is what keeps the sweep's
-        // automatic `excused_unpaid` line from overwriting a manager's.
+        // One name for unpaid excused time (orchestrator decision 2):
+        // `excused_unpaid`, never the old `unpaid_excuse`.
         let source = if resolution == "deducted" {
             "left_mid_shift"
         } else {
             "excused_unpaid"
         };
-        // The sweep may already hold an `excused_unpaid` line for this record
-        // (an approved unpaid excuse): the flag's minutes add to it, and the
-        // manager's name on it keeps the sweep from re-pricing it.
+        // A manager's decision, not a rule's row: it is NOT keyed to the
+        // attendance record (the flag keeps the link, `deduction_id`). Keyed,
+        // it collided with the one automatic row per record and source — a
+        // second flag on the same shift could not be deducted (409), and the
+        // rules' recompute of that record deleted an unpaid excuse made here.
         deduction_id = Some(
             sqlx::query_scalar(
                 "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
                     effective_date, source, attendance_record_id, created_by, status) \
-                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, $7, $8, $9) \
-                 ON CONFLICT (attendance_record_id, source) \
-                     WHERE attendance_record_id IS NOT NULL AND source <> 'manual' \
-                 DO UPDATE SET amount_piastres = payroll_deductions.amount_piastres + EXCLUDED.amount_piastres, \
-                               reason = payroll_deductions.reason || ' · ' || EXCLUDED.reason, \
-                               created_by = EXCLUDED.created_by, status = EXCLUDED.status, \
-                               updated_at = now() \
+                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, NULL, $7, $8) \
                  RETURNING id",
             )
             .bind(org_id)
@@ -817,7 +812,6 @@ pub async fn resolve_flag(
             .bind(reason)
             .bind(date)
             .bind(source)
-            .bind(record_id)
             .bind(by)
             .bind(status)
             .fetch_one(pool)
