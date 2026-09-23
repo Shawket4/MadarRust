@@ -711,8 +711,7 @@ async fn price_attendance(pool: &PgPool, org: Uuid) -> Result<usize, sqlx::Error
 
     let mut priced = 0;
     for id in ids {
-        let mut conn = pool.acquire().await?;
-        if madar_rust::staff::penalties::recompute_record(&mut conn, id, &settings)
+        if madar_rust::staff::penalties::recompute_record(pool, id, &settings)
             .await
             .expect("price")
             > 0

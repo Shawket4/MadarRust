@@ -315,7 +315,7 @@ async fn seed(pool: &PgPool) -> F {
     let period: Uuid = one(
         pool,
         "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
-         VALUES ($1, 'P', CURRENT_DATE - 30, CURRENT_DATE - 1, 'generated') RETURNING id",
+         VALUES ($1, 'P', CURRENT_DATE - 60, CURRENT_DATE - 3, 'generated') RETURNING id",
         &[org],
     )
     .await;
@@ -480,7 +480,7 @@ fn at_b(f: &F) -> Vec<(&'static str, String, Value)> {
         (
             "PATCH",
             format!("/staff/requests/{}/decision", f.req_x),
-            json!({ "status": "approved" }),
+            json!({ "status": "approved", "is_paid": true }),
         ),
         (
             "POST",
@@ -489,8 +489,8 @@ fn at_b(f: &F) -> Vec<(&'static str, String, Value)> {
         ),
         (
             "PUT",
-            "/staff/leave/balances".into(),
-            json!({ "employee_id": x, "leave_type_id": Uuid::new_v4(), "year": 2026, "entitled_days": 21 }),
+            "/staff/attendance/settings".into(),
+            json!({ "branch_id": b, "absence_deduction_days": 2 }),
         ),
         // the roster
         (
@@ -677,9 +677,9 @@ fn org_wide(f: &F) -> Vec<(&'static str, String, Value)> {
             Value::Null,
         ),
         (
-            "POST",
-            "/staff/leave/types".into(),
-            json!({ "name": "Hajj" }),
+            "DELETE",
+            format!("/staff/attendance/settings/branches/{}", f.a),
+            Value::Null,
         ),
         (
             "POST",
@@ -801,7 +801,7 @@ async fn the_same_acts_at_the_managers_own_branch_go_through(pool: PgPool) {
         (
             "PATCH",
             format!("/staff/requests/{}/decision", f.req_y),
-            json!({ "status": "approved" }),
+            json!({ "status": "approved", "is_paid": true }),
             200,
         ),
         (

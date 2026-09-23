@@ -259,6 +259,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::put().to(attendance::put_attendance_settings),
             )
             .route(
+                "/attendance/settings/branches",
+                web::get().to(attendance::list_branch_rules),
+            )
+            .route(
+                "/attendance/settings/branches/{branch_id}",
+                web::delete().to(attendance::delete_branch_rules),
+            )
+            .route(
                 "/attendance/summary",
                 web::get().to(attendance::attendance_summary),
             )
@@ -281,25 +289,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::delete().to(attendance::delete_record),
             )
             // ── Requests (leave, late arrival, early departure, excuse,
-            //    mission) + leave types and balances ─────────────────
+            //    mission, correction). Leave has no types or balances. ──
             .route("/requests", web::get().to(requests::list_requests))
             .route("/requests", web::post().to(requests::create_request_admin))
             .route(
                 "/requests/{id}/decision",
                 web::patch().to(requests::decide_request),
             )
-            .route("/leave/types", web::get().to(requests::list_leave_types))
-            .route("/leave/types", web::post().to(requests::create_leave_type))
-            .route(
-                "/leave/types/{id}",
-                web::patch().to(requests::update_leave_type),
-            )
-            .route(
-                "/leave/types/{id}",
-                web::delete().to(requests::delete_leave_type),
-            )
-            .route("/leave/balances", web::get().to(requests::list_balances))
-            .route("/leave/balances", web::put().to(requests::put_balance))
             // ── Payroll ──────────────────────────────────────────
             .route(
                 "/payroll/deductions",
@@ -320,6 +316,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/payroll/deductions/{id}/waive",
                 web::patch().to(payroll::waive_deduction),
+            )
+            .route(
+                "/payroll/deductions/{id}/unwaive",
+                web::patch().to(crate::staff::penalties::unwaive_deduction),
             )
             .route("/payroll/bonuses", web::get().to(payroll::list_bonuses))
             .route("/payroll/bonuses", web::post().to(payroll::create_bonus))

@@ -14,20 +14,26 @@
 //! arrive at 10:00 is never late in the first place — there is no penalty row to
 //! waive, no correction to make, and nothing to argue about later.
 //!
-//! ## Leave balances
+//! ## Leave has no types and no balances (RQ-2, RQ-3)
 //!
-//! `leave_balances.used_days` is maintained by the approval path, not derived on
-//! read: an entitlement can change mid-year, so recomputing "days used" from the
-//! request list would silently rewrite history every time HR edits a quota.
-//! Approving spends; cancelling an approved request refunds. Both happen inside
-//! the same transaction as the status change.
+//! The employee asks for full or half days with a note; the manager approves
+//! each as paid or unpaid. Unpaid leave is priced like an absence by
+//! `penalties`. The old leave types and balances are no longer read or written
+//! here; `/staff/me/leave-balances` still shows what older data holds.
+//!
+//! ## Who decides (RQ-5)
+//!
+//! A request goes to the managers of the requester's branch. A manager's own
+//! request is approved as it is filed when they hold `hr.requests.self_approve`;
+//! otherwise it waits for someone above them, and the owner is told. Nobody
+//! approves their own request any other way.
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -37,7 +43,7 @@ use crate::{
     errors::{AppError, AppErrorResponse},
     staff::{
         access,
-        attendance::DayAdjustments,
+        attendance::{AttendanceSettings, DayAdjustments, ExcusedWindow, TimedRequest, WindowRequest},
         principal::{Me, StaffPrincipal, caller},
         scope_org, validate_decision,
     },
@@ -48,7 +54,7 @@ use crate::{
 /// The first five are EXCUSED WINDOWS — "forgive this part of my day". The
 /// sixth, `correction`, is not: it proposes an edit to a punch that the clock
 /// got wrong, and on approval it is written to the attendance record and
-/// repriced. See [`apply_correction`].
+/// repriced.
 pub const KINDS: [&str; 6] = [
     "leave",
     "late_arrival",
@@ -67,19 +73,30 @@ pub struct StaffRequest {
     pub employee_id: Uuid,
     #[sqlx(default)]
     pub employee_name: Option<String>,
-    /// `leave` | `late_arrival` | `early_departure` | `excuse` | `mission`.
+    /// `leave` | `late_arrival` | `early_departure` | `excuse` | `mission` | `correction`.
     pub kind: String,
     pub on_date: NaiveDate,
-    /// Set for `leave` and `mission`; the span's last day.
+    /// Set for `leave` and `mission`: the span's last day. For an `excuse`
+    /// that runs past midnight, the next day (its end is then on that day).
     pub end_date: Option<NaiveDate>,
     /// Start of the excused window. `None` = open to the shift's start.
+    /// For a `correction`: the proposed check-in, branch-local.
     pub from_time: Option<NaiveTime>,
     /// End of the excused window. `None` = open to the shift's end.
+    /// For a `correction`: the proposed check-out, branch-local (earlier on the
+    /// clock than the check-in = the next morning, a night shift).
     pub to_time: Option<NaiveTime>,
+    /// Deprecated (RQ-2): older rows only; never set on new requests.
     pub leave_type_id: Option<Uuid>,
     #[sqlx(default)]
     pub leave_type_name: Option<String>,
     pub is_half_day: bool,
+    /// A half-day leave: `first` or `second` half of the day off (RQ-8).
+    #[sqlx(default)]
+    pub leave_half: Option<String>,
+    /// The shift a late arrival, early departure or excuse is for (split days).
+    #[sqlx(default)]
+    pub work_shift_id: Option<Uuid>,
     pub title: Option<String>,
     pub location: Option<String>,
     /// The record a `correction` proposes to fix. `None` for every other kind.
@@ -93,34 +110,39 @@ pub struct StaffRequest {
     pub decision_note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// A manager's own request waiting for someone above them (RQ-5): the
+    /// owner decides it. Worked out by the server from capabilities.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub to_owner: bool,
+    /// For a pending excuse or early departure: the business's (or branch's)
+    /// rule, which the approve dialog starts from (RQ-7).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub paid_default: Option<bool>,
+    /// For a correction: the record's current punches, so an approver sees
+    /// what the proposal changes.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub record_check_in_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub record_check_out_at: Option<DateTime<Utc>>,
 }
 
 const REQUEST_SELECT: &str = r#"
     SELECT r.id, r.org_id, r.employee_id, e.name AS employee_name, r.kind, r.on_date,
            r.end_date, r.from_time, r.to_time, r.leave_type_id,
-           t.name AS leave_type_name, r.is_half_day, r.title, r.location,
+           t.name AS leave_type_name, r.is_half_day, r.leave_half, r.work_shift_id,
+           r.title, r.location,
            r.attendance_record_id, r.reason, r.status, r.is_paid, r.decided_by, r.decided_at,
-           r.decision_note, r.created_at, r.updated_at
+           r.decision_note, r.created_at, r.updated_at,
+           ar.check_in_at AS record_check_in_at, ar.check_out_at AS record_check_out_at
       FROM staff_requests r
       JOIN employees e ON e.id = r.employee_id
       LEFT JOIN leave_types t ON t.id = r.leave_type_id
+      LEFT JOIN attendance_records ar ON ar.id = r.attendance_record_id
 "#;
-
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
-pub struct LeaveType {
-    pub id: Uuid,
-    pub org_id: Uuid,
-    pub name: String,
-    pub is_paid: bool,
-    pub annual_quota_days: Option<Decimal>,
-    pub requires_approval: bool,
-    pub is_active: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-const LEAVE_TYPE_COLS: &str = "id, org_id, name, is_paid, annual_quota_days, \
-     requires_approval, is_active, created_at, updated_at";
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct LeaveBalance {
@@ -160,14 +182,27 @@ pub struct CreateStaffRequest {
     pub on_date: NaiveDate,
     #[serde(default)]
     pub end_date: Option<NaiveDate>,
+    /// Branch-local wall clock.
     #[serde(default)]
     pub from_time: Option<NaiveTime>,
+    /// Branch-local wall clock. An excuse ending at or before it starts runs
+    /// past midnight.
     #[serde(default)]
     pub to_time: Option<NaiveTime>,
+    /// Deprecated (RQ-2): ignored. Leave has no types.
     #[serde(default)]
     pub leave_type_id: Option<Uuid>,
     #[serde(default)]
     pub is_half_day: Option<bool>,
+    /// `first` | `second`: which half of the day a half-day leave takes off.
+    /// Omitted on a half day = the first.
+    #[serde(default)]
+    pub leave_half: Option<String>,
+    /// The shift a late arrival, early departure or excuse is for. Omitted =
+    /// the shift of the day its time falls in.
+    #[serde(default)]
+    pub work_shift_id: Option<Uuid>,
+    /// A mission's title; when omitted the note is used.
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -177,42 +212,26 @@ pub struct CreateStaffRequest {
     pub attendance_record_id: Option<Uuid>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Only when the request is approved as it is filed (the filer holds
+    /// `hr.requests.self_approve`): leave paid or unpaid, an excuse's pay.
+    /// Omitted: leave is paid, an excuse follows the rule.
+    #[serde(default)]
+    pub is_paid: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct RequestDecision {
     /// `approved` | `rejected` | `cancelled`.
     pub status: String,
+    /// Required when cancelling someone else's request, or any approved one
+    /// (AT-7).
     #[serde(default)]
     pub note: Option<String>,
-    /// Whether the excused time is paid. Applies to `excuse` and
-    /// `early_departure`; omitted falls back to the org's
-    /// `excused_time_paid_default`.
+    /// Paid or unpaid. REQUIRED when approving leave (RQ-2). For `excuse` and
+    /// `early_departure`, omitted falls back to the rule
+    /// (`excused_time_paid_default`, branch then business, RQ-7).
     #[serde(default)]
     pub is_paid: Option<bool>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct UpsertLeaveTypeRequest {
-    pub name: String,
-    #[serde(default)]
-    pub is_paid: Option<bool>,
-    #[serde(default)]
-    pub annual_quota_days: Option<Decimal>,
-    #[serde(default)]
-    pub requires_approval: Option<bool>,
-    #[serde(default)]
-    pub is_active: Option<bool>,
-}
-
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct PutBalanceRequest {
-    pub employee_id: Uuid,
-    pub leave_type_id: Uuid,
-    pub year: i32,
-    pub entitled_days: Decimal,
-    #[serde(default)]
-    pub carried_over_days: Option<Decimal>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -281,36 +300,80 @@ async fn local_instant(
     )
 }
 
+/// `time` on the business date or on the day after, whichever lies nearer
+/// `near` — a night shift's after-midnight punch belongs to the next morning
+/// (B5). Without an anchor, the business date.
+async fn local_instant_near(
+    pool: &PgPool,
+    date: NaiveDate,
+    time: NaiveTime,
+    timezone: &str,
+    near: Option<DateTime<Utc>>,
+) -> Result<DateTime<Utc>, AppError> {
+    let same = local_instant(pool, date, time, timezone).await?;
+    let Some(anchor) = near else {
+        return Ok(same);
+    };
+    let next = local_instant(pool, date + Duration::days(1), time, timezone).await?;
+    Ok(if (next - anchor).num_seconds().abs() < (same - anchor).num_seconds().abs() {
+        next
+    } else {
+        same
+    })
+}
+
+/// Trim free text; a note of nothing but punctuation (the "." people type to
+/// get past a field) is no note at all.
 fn clean(value: Option<&String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+        .filter(|v| v.chars().any(char::is_alphanumeric))
 }
 
-/// Days a leave request consumes: inclusive day count, or half a day when the
-/// request is a single-day half.
-pub(crate) fn leave_days(start: NaiveDate, end: NaiveDate, is_half_day: bool) -> Decimal {
-    if is_half_day {
-        return dec!(0.5);
-    }
-    Decimal::from((end - start).num_days().max(0) + 1)
+/// What a valid request stores beyond the body.
+struct Shape {
+    end_date: Option<NaiveDate>,
+    leave_half: Option<&'static str>,
+    title: Option<String>,
 }
 
 /// Reject a request whose shape its kind does not allow, with a message that says
 /// what was missing. The database CHECK enforces the same rules as a backstop;
 /// this exists so the API answers "a late arrival needs a time" rather than
 /// surfacing a constraint name.
-fn validate_shape(body: &CreateStaffRequest) -> Result<(), AppError> {
+fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
     let bad = |m: &str| Err(AppError::BadRequest(m.to_string()));
+    let mut shape = Shape {
+        end_date: None,
+        leave_half: None,
+        title: None,
+    };
+    if body.work_shift_id.is_some()
+        && !matches!(
+            body.kind.as_str(),
+            "late_arrival" | "early_departure" | "excuse"
+        )
+    {
+        return bad("Only a late arrival, early departure or excuse names a shift");
+    }
     match body.kind.as_str() {
         "leave" => {
             let end = body.end_date.unwrap_or(body.on_date);
             if end < body.on_date {
                 return bad("End date is before start date");
             }
-            if body.is_half_day.unwrap_or(false) && end != body.on_date {
+            let half = body.is_half_day.unwrap_or(false);
+            if half && end != body.on_date {
                 return bad("A half day must start and end on the same date");
             }
+            shape.end_date = Some(end);
+            shape.leave_half = match (half, body.leave_half.as_deref()) {
+                (false, None) => None,
+                (false, Some(_)) => return bad("Only a half day says which half"),
+                (true, None | Some("first")) => Some("first"),
+                (true, Some("second")) => Some("second"),
+                (true, Some(_)) => return bad("A half day is the first or the second half"),
+            };
         }
         "late_arrival" => {
             if body.to_time.is_none() {
@@ -323,17 +386,28 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<(), AppError> {
             }
         }
         "excuse" => match (body.from_time, body.to_time) {
-            (Some(from), Some(to)) if to > from => {}
-            (Some(_), Some(_)) => return bad("The window must end after it starts"),
+            (Some(from), Some(to)) if to == from => {
+                return bad("The window must end after it starts");
+            }
+            // Ending at or before it starts on the clock = past midnight.
+            (Some(from), Some(to)) => {
+                if to < from {
+                    shape.end_date = Some(body.on_date + Duration::days(1));
+                }
+            }
             _ => return bad("A permission needs a start and an end time"),
         },
         "mission" => {
-            if clean(body.title.as_ref()).is_none() {
-                return bad("A mission needs a title");
+            // The app sends the note; a title-less mission takes it (§3).
+            shape.title = clean(body.title.as_ref()).or_else(|| clean(body.reason.as_ref()));
+            if shape.title.is_none() {
+                return bad("A mission needs a title or a note saying where you'll be");
             }
-            if body.end_date.unwrap_or(body.on_date) < body.on_date {
+            let end = body.end_date.unwrap_or(body.on_date);
+            if end < body.on_date {
                 return bad("End date is before start date");
             }
+            shape.end_date = Some(end);
         }
         "correction" => {
             if body.attendance_record_id.is_none() {
@@ -341,18 +415,49 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<(), AppError> {
             }
             match (body.from_time, body.to_time) {
                 (None, None) => return bad("A correction needs a proposed time"),
-                (Some(from), Some(to)) if to <= from => {
+                (Some(from), Some(to)) if to == from => {
                     return bad("The check-out must be after the check-in");
                 }
                 _ => {}
             }
         }
-        other => return validate_kind(other),
+        other => {
+            validate_kind(other)?;
+        }
     }
-    Ok(())
+    Ok(shape)
 }
 
 // ── The classifier's input ────────────────────────────────────
+
+/// The half of a day's rostered time a half-day leave takes off (RQ-8): the
+/// instant where half the day's rostered minutes have passed splits it, so on
+/// a split day of two equal shifts the first half is the morning shift.
+pub fn half_day_window(
+    shifts: &[(DateTime<Utc>, DateTime<Utc>)],
+    half: &str,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let mut sorted: Vec<_> = shifts.iter().copied().filter(|(s, e)| e > s).collect();
+    sorted.sort();
+    let first = sorted.first()?.0;
+    let last = sorted.iter().map(|(_, e)| *e).max()?;
+    let total: i64 = sorted.iter().map(|(s, e)| (*e - *s).num_seconds()).sum();
+    let mut left = total / 2;
+    let mut cut = last;
+    for (s, e) in &sorted {
+        let len = (*e - *s).num_seconds();
+        if left <= len {
+            cut = *s + Duration::seconds(left);
+            break;
+        }
+        left -= len;
+    }
+    Some(if half == "second" {
+        (cut, last)
+    } else {
+        (first, cut)
+    })
+}
 
 /// Resolve one employee's approved requests for one business date into the
 /// adjustments the attendance math consumes.
@@ -360,37 +465,50 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<(), AppError> {
 /// Times are stored as the branch's LOCAL wall clock (an employee agreeing to
 /// arrive "by 10:00" means 10:00 where they work), so they are converted here
 /// with the same `(date + time) AT TIME ZONE` treatment the rest of the module
-/// uses — the tz database owns DST, not us.
+/// uses — the tz database owns DST, not us. Each time is offered on the business
+/// date and the day after; `DayAdjustments::for_shift` keeps the one inside the
+/// shift, which is what makes a night shift's 01:00 mean the next morning.
 pub(crate) async fn day_adjustments(
     pool: &PgPool,
     employee_id: Uuid,
     business_date: NaiveDate,
     timezone: &str,
-    excused_time_paid_default: bool,
+    settings: &AttendanceSettings,
 ) -> Result<DayAdjustments, AppError> {
     #[derive(sqlx::FromRow)]
     struct Row {
         kind: String,
-        from_at: Option<DateTime<Utc>>,
-        to_at: Option<DateTime<Utc>>,
+        is_half_day: bool,
+        leave_half: Option<String>,
+        work_shift_id: Option<Uuid>,
         is_paid: Option<bool>,
+        crosses: bool,
+        from0: Option<DateTime<Utc>>,
+        from1: Option<DateTime<Utc>>,
+        to0: Option<DateTime<Utc>>,
+        to1: Option<DateTime<Utc>>,
     }
 
     let rows: Vec<Row> = sqlx::query_as(
         r#"
-        SELECT r.kind,
-               ($2::date + r.from_time) AT TIME ZONE $3 AS from_at,
-               ($2::date + r.to_time)   AT TIME ZONE $3 AS to_at,
-               r.is_paid
+        SELECT r.kind, r.is_half_day, r.leave_half, r.work_shift_id,
+               COALESCE(r.is_paid, lt.is_paid) AS is_paid,
+               (r.kind = 'excuse' AND r.end_date = r.on_date + 1) AS crosses,
+               ($2::date + r.from_time) AT TIME ZONE $3     AS from0,
+               ($2::date + 1 + r.from_time) AT TIME ZONE $3 AS from1,
+               ($2::date + r.to_time) AT TIME ZONE $3       AS to0,
+               ($2::date + 1 + r.to_time) AT TIME ZONE $3   AS to1
           FROM staff_requests r
+          LEFT JOIN leave_types lt ON lt.id = r.leave_type_id
          WHERE r.employee_id = $1
            AND r.status = 'approved'
-           AND r.on_date <= $2
-           AND COALESCE(r.end_date, r.on_date) >= $2
            -- Corrections are excluded on purpose: they REWRITE the punch on
            -- approval rather than forgive a window. Letting one through here
            -- would forgive the very lateness it just recorded.
            AND r.kind <> 'correction'
+           AND ((r.kind IN ('leave', 'mission')
+                 AND r.on_date <= $2 AND COALESCE(r.end_date, r.on_date) >= $2)
+                OR (r.kind NOT IN ('leave', 'mission') AND r.on_date = $2))
         "#,
     )
     .bind(employee_id)
@@ -399,44 +517,197 @@ pub(crate) async fn day_adjustments(
     .fetch_all(pool)
     .await?;
 
-    let mut adj = DayAdjustments {
-        excused_time_paid: excused_time_paid_default,
-        ..Default::default()
-    };
+    let default_paid = settings.excused_time_paid_default;
+    let mut adj = DayAdjustments::default();
     for row in rows {
+        let timed = |candidates: [Option<DateTime<Utc>>; 2], paid: bool| TimedRequest {
+            candidates: candidates.into_iter().flatten().collect(),
+            work_shift_id: row.work_shift_id,
+            paid,
+        };
         match row.kind.as_str() {
-            // Latest wins: two approvals for one morning cannot both hold, and the
-            // more generous one is the one the employee was last told about.
-            "late_arrival" => {
-                if let Some(to) = row.to_at
-                    && adj.excused_until.is_none_or(|current| to > current)
-                {
-                    adj.excused_until = Some(to);
-                }
-            }
-            "early_departure" => {
-                if let Some(from) = row.from_at
-                    && adj.excused_from.is_none_or(|current| from < current)
-                {
-                    adj.excused_from = Some(from);
-                }
-                if let Some(paid) = row.is_paid {
-                    adj.excused_time_paid = paid;
-                }
-            }
+            "late_arrival" => adj.late_arrivals.push(timed([row.to0, row.to1], true)),
+            "early_departure" => adj.early_departures.push(timed(
+                [row.from0, row.from1],
+                row.is_paid.unwrap_or(default_paid),
+            )),
             "excuse" => {
-                if let (Some(from), Some(to)) = (row.from_at, row.to_at) {
-                    adj.excused_windows.push((from, to));
-                }
-                if let Some(paid) = row.is_paid {
-                    adj.excused_time_paid = paid;
+                let candidates = match (row.from0, row.from1, row.to0, row.to1) {
+                    (Some(f0), _, _, Some(t1)) if row.crosses => vec![(f0, t1)],
+                    (Some(f0), Some(f1), Some(t0), Some(t1)) => vec![(f0, t0), (f1, t1)],
+                    _ => vec![],
+                };
+                adj.excuses.push(WindowRequest {
+                    candidates,
+                    work_shift_id: row.work_shift_id,
+                    paid: row.is_paid.unwrap_or(default_paid),
+                });
+            }
+            "mission" => {
+                adj.on_leave = true;
+                adj.leave_paid = true;
+            }
+            "leave" => {
+                // A decided leave says paid or unpaid; an old one without an
+                // answer stays as it always read — paid.
+                let paid = row.is_paid.unwrap_or(true);
+                if row.is_half_day && settings.half_day_leave_counts != "whole_day" {
+                    let shifts = crate::staff::schedules::resolve_shifts_for(
+                        pool,
+                        employee_id,
+                        business_date,
+                        timezone,
+                    )
+                    .await?;
+                    let windows: Vec<_> = shifts
+                        .iter()
+                        .map(|s| (s.scheduled_start_at, s.scheduled_end_at))
+                        .collect();
+                    let half = row.leave_half.as_deref().unwrap_or("first");
+                    if let Some((from, to)) = half_day_window(&windows, half) {
+                        adj.half_off = Some(ExcusedWindow { from, to, paid });
+                    }
+                } else {
+                    adj.on_leave = true;
+                    adj.leave_paid = adj.leave_paid || paid;
                 }
             }
-            "leave" | "mission" => adj.on_leave = true,
             _ => {}
         }
     }
     Ok(adj)
+}
+
+// ── Month guard (RQ-4) ────────────────────────────────────────
+
+/// A month whose payroll is approved (`generated`), paid or closed can't be
+/// changed by a request or a manual attendance edit (RQ-4, AT-7): after
+/// approval the fix goes into the next month. Every day of `[from, to]` is
+/// checked, so a leave can't reach back into a closed month through its end.
+pub(crate) async fn require_open_month(
+    pool: &PgPool,
+    org_id: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<(), AppError> {
+    let closed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM payroll_periods WHERE org_id = $1 \
+            AND start_date <= $3 AND end_date >= $2 \
+            AND status IN ('generated', 'paid', 'closed'))",
+    )
+    .bind(org_id)
+    .bind(from)
+    .bind(to.max(from))
+    .fetch_one(pool)
+    .await?;
+    if closed {
+        return Err(AppError::Coded {
+            status: 409,
+            code: "MONTH_CLOSED",
+            reason: "That month's payroll is already approved — it can't change now. \
+                     Fix it in next month's pay instead."
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+// ── Who decides (RQ-5) ────────────────────────────────────────
+
+/// Does this person decide requests themselves (a manager)? Their own
+/// requests then go above them.
+async fn is_decider(pool: &PgPool, user_id: Option<Uuid>) -> Result<bool, AppError> {
+    let Some(user) = user_id else {
+        return Ok(false);
+    };
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND is_active AND deleted_at IS NULL)",
+    )
+    .bind(user)
+    .fetch_one(pool)
+    .await?;
+    if !live {
+        return Ok(false);
+    }
+    Ok(crate::authz::require::effective(pool, user, None)
+        .await?
+        .can(Cap::HrLeaveEdit))
+}
+
+/// The branch a request's day is priced at: the record's on that date, else
+/// the person's first branch.
+async fn request_branch(
+    pool: &PgPool,
+    employee_id: Uuid,
+    date: NaiveDate,
+) -> Result<Option<Uuid>, AppError> {
+    let on_record: Option<Uuid> = sqlx::query_scalar(
+        "SELECT branch_id FROM attendance_records \
+          WHERE employee_id = $1 AND business_date = $2 \
+          ORDER BY covered_employee_id IS NOT NULL, check_in_at NULLS LAST LIMIT 1",
+    )
+    .bind(employee_id)
+    .bind(date)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match on_record {
+        Some(b) => Some(b),
+        None => access::branches_of(pool, employee_id)
+            .await?
+            .first()
+            .copied(),
+    })
+}
+
+/// The rule's paid default for an excuse or early departure (RQ-7): the
+/// branch's override, else the business's.
+async fn paid_default_for(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    date: NaiveDate,
+) -> Result<bool, AppError> {
+    let branch = request_branch(pool, employee_id, date).await?;
+    Ok(crate::staff::attendance::load_settings(pool, org_id, branch)
+        .await?
+        .excused_time_paid_default)
+}
+
+/// Fill the fields the server works out: who decides a pending request, and
+/// the pay rule an approver starts from.
+async fn enrich(pool: &PgPool, rows: &mut [StaffRequest]) -> Result<(), AppError> {
+    let mut deciders: HashMap<Uuid, bool> = HashMap::new();
+    let mut defaults: HashMap<(Uuid, NaiveDate), bool> = HashMap::new();
+    for r in rows.iter_mut().filter(|r| r.status == "pending") {
+        let to_owner = match deciders.get(&r.employee_id) {
+            Some(v) => *v,
+            None => {
+                let user: Option<Uuid> =
+                    sqlx::query_scalar("SELECT user_id FROM employees WHERE id = $1")
+                        .bind(r.employee_id)
+                        .fetch_optional(pool)
+                        .await?
+                        .flatten();
+                let v = is_decider(pool, user).await?;
+                deciders.insert(r.employee_id, v);
+                v
+            }
+        };
+        r.to_owner = to_owner;
+        if matches!(r.kind.as_str(), "excuse" | "early_departure") {
+            let key = (r.employee_id, r.on_date);
+            let v = match defaults.get(&key) {
+                Some(v) => *v,
+                None => {
+                    let v = paid_default_for(pool, r.org_id, r.employee_id, r.on_date).await?;
+                    defaults.insert(key, v);
+                    v
+                }
+            };
+            r.paid_default = Some(v);
+        }
+    }
+    Ok(())
 }
 
 // ── Requests CRUD ─────────────────────────────────────────────
@@ -448,48 +719,26 @@ async fn insert_request(
     body: &CreateStaffRequest,
 ) -> Result<StaffRequest, AppError> {
     validate_kind(&body.kind)?;
-    // RQ-2, RQ-3: leave has no types; one an older client sends is still checked.
-    let body = body.clone();
-    let body = &body;
-    validate_shape(body)?;
-    // RQ-4: a paid or closed month is frozen.
-    require_open_month(pool, org_id, body.on_date).await?;
+    let shape = validate_shape(body)?;
+    // RQ-4: an approved, paid or closed month is frozen — every day of it.
+    require_open_month(
+        pool,
+        org_id,
+        body.on_date,
+        shape.end_date.unwrap_or(body.on_date),
+    )
+    .await?;
 
-    let is_leave = body.kind == "leave";
-    let end_date = match body.kind.as_str() {
-        "leave" | "mission" => Some(body.end_date.unwrap_or(body.on_date)),
-        _ => None,
-    };
-
-    if is_leave && body.leave_type_id.is_some() {
-        let type_ok: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM leave_types WHERE id = $1 AND org_id = $2 AND is_active)",
+    if let Some(shift) = body.work_shift_id {
+        let known: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM work_shifts WHERE id = $1 AND org_id = $2)",
         )
-        .bind(body.leave_type_id)
+        .bind(shift)
         .bind(org_id)
         .fetch_one(pool)
         .await?;
-        if !type_ok {
-            return Err(AppError::NotFound(
-                "Leave type not found or inactive".into(),
-            ));
-        }
-
-        // Two live leave requests over the same day would double-count the balance.
-        let overlapping: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM staff_requests \
-              WHERE employee_id = $1 AND kind = 'leave' AND status IN ('pending', 'approved') \
-                AND on_date <= $3 AND COALESCE(end_date, on_date) >= $2",
-        )
-        .bind(employee_id)
-        .bind(body.on_date)
-        .bind(end_date)
-        .fetch_one(pool)
-        .await?;
-        if overlapping > 0 {
-            return Err(AppError::Conflict(
-                "There is already a pending or approved leave request over those dates".into(),
-            ));
+        if !known {
+            return Err(AppError::NotFound("Shift not found".into()));
         }
     }
 
@@ -525,20 +774,22 @@ async fn insert_request(
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO staff_requests \
              (org_id, employee_id, kind, on_date, end_date, from_time, to_time, \
-              leave_type_id, is_half_day, title, location, attendance_record_id, reason) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, FALSE), $10, $11, $12, $13) \
+              is_half_day, leave_half, work_shift_id, title, location, \
+              attendance_record_id, reason) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, FALSE), $9, $10, $11, $12, $13, $14) \
          RETURNING id",
     )
     .bind(org_id)
     .bind(employee_id)
     .bind(&body.kind)
     .bind(body.on_date)
-    .bind(end_date)
+    .bind(shape.end_date)
     .bind(body.from_time)
     .bind(body.to_time)
-    .bind(body.leave_type_id)
     .bind(body.is_half_day)
-    .bind(clean(body.title.as_ref()))
+    .bind(shape.leave_half)
+    .bind(body.work_shift_id)
+    .bind(shape.title)
     .bind(clean(body.location.as_ref()))
     .bind(body.attendance_record_id)
     .bind(clean(body.reason.as_ref()))
@@ -548,34 +799,73 @@ async fn insert_request(
     load_request(pool, id).await
 }
 
-/// A paid or closed payroll month can't be changed by a request (RQ-4).
-pub(crate) async fn require_open_month(
-    pool: &PgPool,
-    org_id: Uuid,
-    on_date: NaiveDate,
-) -> Result<(), AppError> {
-    let closed: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM payroll_periods WHERE org_id = $1 \
-            AND $2 BETWEEN start_date AND end_date AND status IN ('paid', 'closed'))",
-    )
-    .bind(org_id)
-    .bind(on_date)
-    .fetch_one(pool)
-    .await?;
-    if closed {
-        return Err(AppError::Conflict(
-            "That month's payroll is already paid — it can't change now.".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) async fn load_request(pool: &PgPool, id: Uuid) -> Result<StaffRequest, AppError> {
-    sqlx::query_as::<_, StaffRequest>(&format!("{REQUEST_SELECT} WHERE r.id = $1"))
+    let mut row = sqlx::query_as::<_, StaffRequest>(&format!("{REQUEST_SELECT} WHERE r.id = $1"))
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| AppError::NotFound("Request not found".into()))
+        .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    enrich(pool, std::slice::from_mut(&mut row)).await?;
+    Ok(row)
+}
+
+/// After filing: approve it at once when the filer approves their own
+/// requests (RQ-5), otherwise tell whoever decides it. Returns the row as it
+/// now stands, so the app says what the server did.
+async fn after_filing(
+    pool: &PgPool,
+    org_id: Uuid,
+    claims: Option<&Claims>,
+    subject: &access::Subject,
+    row: StaffRequest,
+    is_paid: Option<bool>,
+) -> Result<StaffRequest, AppError> {
+    let own = claims.is_some_and(|c| subject.is(c));
+    if let Some(c) = claims.filter(|_| own)
+        && access::can_for(pool, c, Cap::HrRequestsSelfApprove, subject).await?
+    {
+        let paid = match row.kind.as_str() {
+            "leave" => Some(is_paid.unwrap_or(true)),
+            "excuse" | "early_departure" => is_paid,
+            _ => None,
+        };
+        apply_decision(
+            pool,
+            org_id,
+            row.id,
+            "approved",
+            c.user_id_safe().ok(),
+            None,
+            paid,
+        )
+        .await?;
+        return load_request(pool, row.id).await;
+    }
+
+    let name = crate::staff::dawam::employee_name(pool, subject.id).await;
+    let args = serde_json::json!({ "name": name, "kind": row.kind, "date": row.on_date });
+    if row.to_owner {
+        // A manager's own request waits for someone above them: the owner is
+        // told (RQ-5), not the requester's peers.
+        for owner in crate::staff::dawam::owners(pool, org_id).await? {
+            if owner != subject.id {
+                crate::staff::dawam::notify(pool, org_id, owner, "staff.n_request", args.clone())
+                    .await;
+            }
+        }
+    } else {
+        crate::staff::dawam::notify_managers(
+            pool,
+            org_id,
+            subject.home(),
+            Cap::HrLeaveEdit,
+            Some(subject.id),
+            "staff.n_request",
+            args,
+        )
+        .await;
+    }
+    Ok(row)
 }
 
 #[utoipa::path(
@@ -598,7 +888,7 @@ pub async fn list_requests(
         validate_kind(kind)?;
     }
 
-    let rows = sqlx::query_as::<_, StaffRequest>(&format!(
+    let mut rows = sqlx::query_as::<_, StaffRequest>(&format!(
         "{REQUEST_SELECT} \
           WHERE r.org_id = $1 \
             AND ($2::uuid IS NULL OR r.employee_id = $2) \
@@ -619,13 +909,14 @@ pub async fn list_requests(
     .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
+    enrich(pool.get_ref(), &mut rows).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
 #[utoipa::path(
     post, path = "/staff/requests", tag = "staff",
     request_body = CreateStaffRequest,
-    responses((status = 201, description = "Request filed", body = StaffRequest), AppErrorResponse),
+    responses((status = 201, description = "Request filed (approved at once when it is the filer's own and they approve their own)", body = StaffRequest), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn create_request_admin(
@@ -643,40 +934,39 @@ pub async fn create_request_admin(
     access::require_for(pool.get_ref(), &claims, Cap::HrLeaveCreate, &subject).await?;
 
     let row = insert_request(pool.get_ref(), org_id, employee_id, &body).await?;
+    let row = after_filing(
+        pool.get_ref(),
+        org_id,
+        Some(&claims),
+        &subject,
+        row,
+        body.is_paid,
+    )
+    .await?;
     Ok(HttpResponse::Created().json(row))
 }
 
 #[utoipa::path(
     post, path = "/staff/me/requests", tag = "staff",
     request_body = CreateStaffRequest,
-    responses((status = 201, description = "Request filed", body = StaffRequest), AppErrorResponse),
+    responses((status = 201, description = "Request filed; `status` says whether it was approved as filed (RQ-5)", body = StaffRequest), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn create_my_request(
+    req: HttpRequest,
     me: Me,
     pool: crate::db::Db,
     body: web::Json<CreateStaffRequest>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = me.org_id;
     let employee_id = me.employee_id;
-
-    let row = insert_request(pool.get_ref(), org_id, employee_id, &body).await?;
     let pool = pool.get_ref();
-    let name = crate::staff::dawam::employee_name(pool, employee_id).await;
-    let branch = crate::staff::dawam::branches_of(pool, employee_id)
-        .await?
-        .first()
-        .copied();
-    crate::staff::dawam::notify_managers(
-        pool,
-        org_id,
-        branch,
-        Cap::HrLeaveEdit,
-        Some(employee_id),
-        "staff.n_request",
-        serde_json::json!({ "name": name, "kind": row.kind, "date": row.on_date }),
-    )
-    .await;
+    let subject = access::subject(pool, org_id, employee_id).await?;
+
+    let row = insert_request(pool, org_id, employee_id, &body).await?;
+    // A linked, active manager acts through their account (`caller`).
+    let claims: Option<Claims> = req.extensions().get::<Claims>().cloned();
+    let row = after_filing(pool, org_id, claims.as_ref(), &subject, row, body.is_paid).await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -686,13 +976,48 @@ pub async fn create_my_request(
     security(("bearer_jwt" = []))
 )]
 pub async fn my_requests(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let rows = sqlx::query_as::<_, StaffRequest>(&format!(
+    let mut rows = sqlx::query_as::<_, StaffRequest>(&format!(
         "{REQUEST_SELECT} WHERE r.employee_id = $1 ORDER BY r.on_date DESC, r.created_at DESC"
     ))
     .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
+    enrich(pool.get_ref(), &mut rows).await?;
     Ok(HttpResponse::Ok().json(rows))
+}
+
+#[derive(sqlx::FromRow)]
+struct Existing {
+    employee_id: Uuid,
+    kind: String,
+    on_date: NaiveDate,
+    end_date: Option<NaiveDate>,
+    status: String,
+    from_time: Option<NaiveTime>,
+    to_time: Option<NaiveTime>,
+    attendance_record_id: Option<Uuid>,
+}
+
+const EXISTING_COLS: &str = "employee_id, kind, on_date, end_date, status, from_time, to_time, \
+     attendance_record_id";
+
+fn check_transition(existing: &str, decision: &str) -> Result<(), AppError> {
+    if existing == decision {
+        return Err(AppError::Conflict(format!(
+            "This request is already {decision}"
+        )));
+    }
+    if existing == "rejected" || existing == "cancelled" {
+        return Err(AppError::Conflict(format!(
+            "This request was already {existing} and cannot be changed"
+        )));
+    }
+    if existing == "approved" && decision == "rejected" {
+        return Err(AppError::Conflict(
+            "An approved request cannot be rejected — cancel it instead".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -701,7 +1026,7 @@ pub async fn my_requests(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
     request_body = RequestDecision,
     responses(
         (status = 200, description = "Decision recorded", body = StaffRequest),
-        (status = 409, description = "Already decided"),
+        (status = 409, description = "Already decided, or the month is closed"),
         AppErrorResponse,
     ),
     security(("bearer_jwt" = []))
@@ -733,35 +1058,18 @@ pub async fn decide_request(
         .as_ref()
         .and_then(|c| c.user_id_safe().ok())
         .or(me.as_ref().and_then(|m| m.user_id));
+    let pool = pool.get_ref();
 
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        employee_id: Uuid,
-        kind: String,
-        leave_type_id: Option<Uuid>,
-        on_date: NaiveDate,
-        end_date: Option<NaiveDate>,
-        is_half_day: bool,
-        status: String,
-        from_time: Option<NaiveTime>,
-        to_time: Option<NaiveTime>,
-        attendance_record_id: Option<Uuid>,
-    }
-
-    // A first, unlocked read decides who may act and applies an approved
-    // correction's punch; the locked read below re-validates before the flip.
-    let existing: Row = sqlx::query_as(
-        "SELECT employee_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
-                from_time, to_time, attendance_record_id \
-           FROM staff_requests WHERE id = $1 AND org_id = $2",
-    )
+    let existing: Existing = sqlx::query_as(&format!(
+        "SELECT {EXISTING_COLS} FROM staff_requests WHERE id = $1 AND org_id = $2"
+    ))
     .bind(*id)
     .bind(org_id)
-    .fetch_optional(pool.get_ref())
+    .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
 
-    let subject = access::subject(pool.get_ref(), org_id, existing.employee_id).await?;
+    let subject = access::subject(pool, org_id, existing.employee_id).await?;
     let is_own = me
         .as_ref()
         .is_some_and(|m| m.employee_id == existing.employee_id)
@@ -771,219 +1079,71 @@ pub async fn decide_request(
     let self_cancel = decision == "cancelled" && is_own;
     if !self_cancel {
         let claims = caller(&req)?;
-        access::require_for(pool.get_ref(), &claims, Cap::HrLeaveEdit, &subject).await?;
-        // RQ-5: deciding your own request is the owner's alone.
+        access::require_for(pool, &claims, Cap::HrLeaveEdit, &subject).await?;
+        // RQ-5: nobody approves their own request by hand. With
+        // `hr.requests.self_approve` it was approved as it was filed; without
+        // it, someone above them decides.
         if is_own {
-            access::require_for(
-                pool.get_ref(),
-                &claims,
-                Cap::HrRequestsSelfApprove,
-                &subject,
-            )
-            .await?;
+            return Err(AppError::Forbidden(
+                "Your own requests are decided by someone above you.".into(),
+            ));
         }
+        // A manager's request goes ABOVE them: a peer manager of the same
+        // branch can't decide it (RQ-5).
+        if let Some(user) = subject.user_id
+            && is_decider(pool, Some(user)).await?
+        {
+            crate::permissions::guard::require_dominance(pool, &claims, user, Cap::HrLeaveEdit)
+                .await
+                .map_err(|_| {
+                    AppError::Forbidden(
+                        "A manager's own request is decided by someone above them, usually the owner."
+                            .into(),
+                    )
+                })?;
+        }
+    }
+    let note = clean(body.note.as_ref());
+    if decision == "cancelled" {
+        // AT-7: undoing a decision, or someone else's request, says why.
+        if (!is_own || existing.status == "approved") && note.is_none() {
+            return Err(AppError::BadRequest(if existing.status == "approved" {
+                "Say why this approved request is cancelled".into()
+            } else {
+                "Say why you are cancelling someone else's request".into()
+            }));
+        }
+        // An approved correction has rewritten the punch; cancelling the
+        // request would free the shift for another correction while the punch
+        // stays rewritten (RQ-9). The punch is corrected on the attendance
+        // record instead.
+        if existing.kind == "correction" && existing.status == "approved" {
+            return Err(AppError::Conflict(
+                "An approved correction has already rewritten the punch — correct the attendance record instead".into(),
+            ));
+        }
+    }
+    if decision == "approved" && existing.kind == "leave" && body.is_paid.is_none() {
+        return Err(AppError::BadRequest(
+            "Say whether this leave is paid or unpaid".into(),
+        ));
     }
     if decision != "rejected" {
-        require_open_month(pool.get_ref(), org_id, existing.on_date).await?;
-    }
-
-    if existing.status == decision {
-        return Err(AppError::Conflict(format!(
-            "This request is already {decision}"
-        )));
-    }
-    if existing.status == "rejected" || existing.status == "cancelled" {
-        return Err(AppError::Conflict(format!(
-            "This request was already {} and cannot be changed",
-            existing.status
-        )));
-    }
-    if existing.status == "approved" && decision == "rejected" {
-        return Err(AppError::Conflict(
-            "An approved request cannot be rejected — cancel it instead".into(),
-        ));
-    }
-
-    // ── An approved correction rewrites the punch ───────────────
-    // Applied BEFORE the status flip, and outside the transaction, on purpose
-    // (and before the transaction is even opened, so the request never holds
-    // two pooled connections — the locked re-read below re-checks everything):
-    // writing the punch is IDEMPOTENT (the same values produce the same row),
-    // whereas approving is not. If the status update then fails, the manager
-    // retries and lands in exactly the same place. The reverse order could
-    // leave a request marked approved whose punch was never written — a
-    // correction that silently did nothing.
-    if decision == "approved"
-        && existing.kind == "correction"
-        && let Some(record_id) = existing.attendance_record_id
-    {
-        // The BRANCH's clock, not the employee's. A proposed "17:00" means 17:00
-        // where the shift was worked, and that is also the timezone the record
-        // itself derives against — using the employee's would land the punch on
-        // a different instant for anyone assigned to more than one branch.
-        let record_branch: Uuid =
-            sqlx::query_scalar("SELECT branch_id FROM attendance_records WHERE id = $1")
-                .bind(record_id)
-                .fetch_optional(pool.get_ref())
-                .await?
-                .ok_or_else(|| AppError::NotFound("Attendance record not found".into()))?;
-        let tz = crate::staff::branch_timezone(pool.get_ref(), record_branch).await?;
-        let proposed_in = match existing.from_time {
-            Some(t) => Some(local_instant(pool.get_ref(), existing.on_date, t, &tz).await?),
-            None => None,
-        };
-        let proposed_out = match existing.to_time {
-            Some(t) => Some(local_instant(pool.get_ref(), existing.on_date, t, &tz).await?),
-            None => None,
-        };
-        // CL-16: an approved correction is written as `correction`.
-        crate::staff::attendance::apply_punch_correction_as(
-            pool.get_ref(),
+        require_open_month(
+            pool,
             org_id,
-            record_id,
-            proposed_in,
-            proposed_out,
-            None,
-            None,
-            "Approved punch correction request",
-            actor,
-            Some("correction"),
-        )
-        .await?;
-    }
-
-    let mut tx = pool.begin().await?;
-    // FOR UPDATE: two managers hitting Approve at once must not both spend the
-    // same days of leave.
-    let existing: Row = sqlx::query_as(
-        "SELECT employee_id, kind, leave_type_id, on_date, end_date, is_half_day, status, \
-                from_time, to_time, attendance_record_id \
-           FROM staff_requests WHERE id = $1 AND org_id = $2 FOR UPDATE",
-    )
-    .bind(*id)
-    .bind(org_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
-
-    if existing.status == decision {
-        return Err(AppError::Conflict(format!(
-            "This request is already {decision}"
-        )));
-    }
-    if existing.status == "rejected" || existing.status == "cancelled" {
-        return Err(AppError::Conflict(format!(
-            "This request was already {} and cannot be changed",
-            existing.status
-        )));
-    }
-    if existing.status == "approved" && decision == "rejected" {
-        return Err(AppError::Conflict(
-            "An approved request cannot be rejected — cancel it instead".into(),
-        ));
-    }
-
-    // ── Leave balance arithmetic ────────────────────────────────
-    if existing.kind == "leave"
-        && let Some(leave_type_id) = existing.leave_type_id
-    {
-        let end = existing.end_date.unwrap_or(existing.on_date);
-        let days = leave_days(existing.on_date, end, existing.is_half_day);
-        let year = existing.on_date.year();
-
-        match (existing.status.as_str(), decision) {
-            (_, "approved") => {
-                sqlx::query(
-                    "INSERT INTO leave_balances (org_id, employee_id, leave_type_id, year, entitled_days, used_days) \
-                     VALUES ($1, $2, $3, $4, 0, $5) \
-                     ON CONFLICT (employee_id, leave_type_id, year) DO UPDATE SET \
-                         used_days = leave_balances.used_days + $5, updated_at = now()",
-                )
-                .bind(org_id)
-                .bind(existing.employee_id)
-                .bind(leave_type_id)
-                .bind(year)
-                .bind(days)
-                .execute(&mut *tx)
-                .await?;
-            }
-            ("approved", "cancelled") => {
-                sqlx::query(
-                    "UPDATE leave_balances SET used_days = GREATEST(used_days - $4, 0), updated_at = now() \
-                      WHERE employee_id = $1 AND leave_type_id = $2 AND year = $3",
-                )
-                .bind(existing.employee_id)
-                .bind(leave_type_id)
-                .bind(year)
-                .bind(days)
-                .execute(&mut *tx)
-                .await?;
-            }
-            _ => {}
-        }
-    }
-
-    // ── is_paid resolution ──────────────────────────────────────
-    // Only the window kinds carry a pay decision. The approver's explicit choice
-    // wins; otherwise the org default applies at the moment of approval, so later
-    // edits to the default never retro-change a decided request.
-    // Leave is approved as paid or unpaid by the manager (RQ-2); left unsaid,
-    // its type decides.
-    let is_paid = if decision == "approved" && existing.kind == "leave" {
-        body.is_paid
-    } else if decision == "approved"
-        && matches!(existing.kind.as_str(), "excuse" | "early_departure")
-    {
-        match body.is_paid {
-            Some(paid) => Some(paid),
-            None => Some(
-                sqlx::query_scalar::<_, bool>(
-                    "SELECT excused_time_paid_default FROM attendance_settings \
-                      WHERE org_id = $1 AND branch_id IS NULL LIMIT 1",
-                )
-                .bind(org_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .unwrap_or(true),
-            ),
-        }
-    } else {
-        None
-    };
-
-    sqlx::query(
-        "UPDATE staff_requests SET status = $2, decided_by = $3, \
-             decided_at = CASE WHEN $2 = 'cancelled' THEN decided_at ELSE now() END, \
-             decision_note = $4, is_paid = COALESCE($5, is_paid), updated_at = now() \
-          WHERE id = $1",
-    )
-    .bind(*id)
-    .bind(decision)
-    .bind(actor)
-    .bind(clean(body.note.as_ref()))
-    .bind(is_paid)
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-
-    // Approving removes a penalty at its source and cancelling brings it back
-    // (RQ-6, RQ-12): re-derive every day the request covers. A correction was
-    // applied above; a human waive or override is never touched.
-    if existing.kind != "correction" && matches!(decision, "approved" | "cancelled") {
-        reprice_days(
-            pool.get_ref(),
-            org_id,
-            existing.employee_id,
             existing.on_date,
             existing.end_date.unwrap_or(existing.on_date),
-            actor,
         )
         .await?;
     }
+    check_transition(&existing.status, decision)?;
+
+    apply_decision(pool, org_id, *id, decision, actor, note, body.is_paid).await?;
 
     if !is_own && decision != "cancelled" {
         crate::staff::dawam::notify(
-            pool.get_ref(),
+            pool,
             org_id,
             existing.employee_id,
             if decision == "approved" {
@@ -995,19 +1155,196 @@ pub async fn decide_request(
         )
         .await;
     }
-    let row = load_request(pool.get_ref(), *id).await?;
+    let row = load_request(pool, *id).await?;
     Ok(HttpResponse::Ok().json(row))
 }
 
+/// Record a decision and carry it out: the status flip under a row lock, then
+/// an approved correction's punch, then the repricing of every covered day.
+///
+/// The flip comes FIRST (audit B6): a second manager rejecting or cancelling
+/// in between can no longer leave a punch rewritten under a rejected request.
+/// If writing the punch then fails, the approval is taken back, so a request
+/// never reads approved with its correction unapplied.
+async fn apply_decision(
+    pool: &PgPool,
+    org_id: Uuid,
+    id: Uuid,
+    decision: &str,
+    actor: Option<Uuid>,
+    note: Option<String>,
+    body_is_paid: Option<bool>,
+) -> Result<(), AppError> {
+    let existing: Existing = sqlx::query_as(&format!(
+        "SELECT {EXISTING_COLS} FROM staff_requests WHERE id = $1 AND org_id = $2"
+    ))
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+
+    // ── is_paid resolution ──────────────────────────────────────
+    // Only the window kinds and leave carry a pay decision. The approver's
+    // explicit choice wins; otherwise the rule (the branch's, else the
+    // business's) applies at the moment of approval, so later edits to the
+    // rule never retro-change a decided request (RQ-7).
+    let is_paid = match (decision, existing.kind.as_str()) {
+        ("approved", "leave") => body_is_paid,
+        ("approved", "excuse" | "early_departure") => Some(match body_is_paid {
+            Some(paid) => paid,
+            None => {
+                paid_default_for(pool, org_id, existing.employee_id, existing.on_date).await?
+            }
+        }),
+        _ => None,
+    };
+
+    let mut tx = pool.begin().await?;
+    // FOR UPDATE: two managers hitting Approve at once must not both decide.
+    let locked: Existing = sqlx::query_as(&format!(
+        "SELECT {EXISTING_COLS} FROM staff_requests WHERE id = $1 AND org_id = $2 FOR UPDATE"
+    ))
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    check_transition(&locked.status, decision)?;
+    let before = locked.status.clone();
+
+    sqlx::query(
+        "UPDATE staff_requests SET status = $2, decided_by = $3, \
+             decided_at = CASE WHEN $2 = 'cancelled' THEN COALESCE(decided_at, now()) ELSE now() END, \
+             decision_note = $4, is_paid = COALESCE($5, is_paid), updated_at = now() \
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(decision)
+    .bind(actor)
+    .bind(note)
+    .bind(is_paid)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    // ── An approved correction rewrites the punch ───────────────
+    if decision == "approved"
+        && locked.kind == "correction"
+        && let Some(record_id) = locked.attendance_record_id
+        && let Err(e) = apply_correction(pool, org_id, &locked, record_id, actor).await
+    {
+        sqlx::query(
+            "UPDATE staff_requests SET status = $2, decided_by = NULL, decided_at = NULL, \
+                 decision_note = NULL, updated_at = now() \
+              WHERE id = $1 AND status = 'approved'",
+        )
+        .bind(id)
+        .bind(before)
+        .execute(pool)
+        .await?;
+        return Err(e);
+    }
+
+    // Approving removes a penalty at its source and cancelling brings it back
+    // (RQ-6, RQ-12): re-derive every day the request covers. A correction was
+    // applied above; a human waive, override or status is never touched (AT-7).
+    if locked.kind != "correction" && matches!(decision, "approved" | "cancelled") {
+        reprice_days(
+            pool,
+            org_id,
+            locked.employee_id,
+            locked.on_date,
+            locked.end_date.unwrap_or(locked.on_date),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Write an approved correction's proposed times to the record, in the
+/// BRANCH's clock (AT-1), each on the calendar day nearest the shift so a
+/// night shift's check-out after midnight lands on the next morning (B5).
+async fn apply_correction(
+    pool: &PgPool,
+    org_id: Uuid,
+    request: &Existing,
+    record_id: Uuid,
+    actor: Option<Uuid>,
+) -> Result<(), AppError> {
+    #[derive(sqlx::FromRow)]
+    struct Rec {
+        branch_id: Uuid,
+        scheduled_start_at: Option<DateTime<Utc>>,
+        scheduled_end_at: Option<DateTime<Utc>>,
+        check_in_at: Option<DateTime<Utc>>,
+        check_out_at: Option<DateTime<Utc>>,
+    }
+    let rec: Rec = sqlx::query_as(
+        "SELECT branch_id, scheduled_start_at, scheduled_end_at, check_in_at, check_out_at \
+           FROM attendance_records WHERE id = $1",
+    )
+    .bind(record_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Attendance record not found".into()))?;
+    let tz = crate::staff::branch_timezone(pool, rec.branch_id).await?;
+    let proposed_in = match request.from_time {
+        Some(t) => Some(
+            local_instant_near(
+                pool,
+                request.on_date,
+                t,
+                &tz,
+                rec.scheduled_start_at.or(rec.check_in_at),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let proposed_out = match request.to_time {
+        Some(t) => {
+            let near = rec
+                .scheduled_end_at
+                .or(rec.check_out_at)
+                .or(proposed_in.or(rec.check_in_at));
+            let mut out = local_instant_near(pool, request.on_date, t, &tz, near).await?;
+            // A check-out always follows its check-in: earlier on the clock
+            // means the next morning.
+            if let Some(in_at) = proposed_in.or(rec.check_in_at)
+                && out <= in_at
+            {
+                out = local_instant(pool, request.on_date + Duration::days(1), t, &tz).await?;
+            }
+            Some(out)
+        }
+        None => None,
+    };
+    // CL-16: an approved correction is written as `correction`.
+    crate::staff::attendance::apply_punch_correction_as(
+        pool,
+        org_id,
+        record_id,
+        proposed_in,
+        proposed_out,
+        None,
+        None,
+        "Approved punch correction request",
+        actor,
+        Some("correction"),
+    )
+    .await
+}
+
 /// Re-derive and re-price a person's attendance days, e.g. after a request that
-/// covers them was approved or cancelled.
+/// covers them was approved or cancelled. Automation: a manager's status and
+/// the audit columns stay theirs (AT-7).
 pub(crate) async fn reprice_days(
     pool: &PgPool,
     org_id: Uuid,
     employee_id: Uuid,
     from: NaiveDate,
     to: NaiveDate,
-    editor: Option<Uuid>,
 ) -> Result<(), AppError> {
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM attendance_records \
@@ -1020,253 +1357,15 @@ pub(crate) async fn reprice_days(
     .fetch_all(pool)
     .await?;
     for id in ids {
-        crate::staff::attendance::apply_punch_correction(
-            pool,
-            org_id,
-            id,
-            None,
-            None,
-            None,
-            None,
-            "Re-priced after a request decision",
-            editor,
-        )
-        .await?;
+        crate::staff::attendance::reprice_record(pool, org_id, id).await?;
     }
     Ok(())
 }
 
-// ── Leave types ───────────────────────────────────────────────
+// ── Balances (read-only legacy) ───────────────────────────────
 
-#[utoipa::path(
-    get, path = "/staff/leave/types", tag = "staff",
-    responses((status = 200, description = "Leave types", body = Vec<LeaveType>), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn list_leave_types(
-    req: HttpRequest,
-    pool: crate::db::Db,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    access::scope(pool.get_ref(), &claims, org_id, Cap::HrLeaveRead).await?;
-
-    let rows = sqlx::query_as::<_, LeaveType>(&format!(
-        "SELECT {LEAVE_TYPE_COLS} FROM leave_types WHERE org_id = $1 ORDER BY lower(name)"
-    ))
-    .bind(org_id)
-    .fetch_all(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::Ok().json(rows))
-}
-
-#[utoipa::path(
-    post, path = "/staff/leave/types", tag = "staff",
-    request_body = UpsertLeaveTypeRequest,
-    responses((status = 201, description = "Leave type created", body = LeaveType), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn create_leave_type(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    body: web::Json<UpsertLeaveTypeRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    // Leave types are the business's: an org-wide act.
-    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrLeaveCreate).await?;
-
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("Leave type name is required".into()));
-    }
-    if body.annual_quota_days.is_some_and(|q| q < Decimal::ZERO) {
-        return Err(AppError::BadRequest("Quota cannot be negative".into()));
-    }
-
-    let row = sqlx::query_as::<_, LeaveType>(&format!(
-        "INSERT INTO leave_types (org_id, name, is_paid, annual_quota_days, requires_approval, is_active) \
-         VALUES ($1, $2, COALESCE($3, TRUE), $4, COALESCE($5, TRUE), COALESCE($6, TRUE)) \
-         RETURNING {LEAVE_TYPE_COLS}"
-    ))
-    .bind(org_id)
-    .bind(name)
-    .bind(body.is_paid)
-    .bind(body.annual_quota_days)
-    .bind(body.requires_approval)
-    .bind(body.is_active)
-    .fetch_one(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::Created().json(row))
-}
-
-#[utoipa::path(
-    patch, path = "/staff/leave/types/{id}", tag = "staff",
-    params(("id" = Uuid, Path, description = "Leave type ID")),
-    request_body = UpsertLeaveTypeRequest,
-    responses((status = 200, description = "Leave type updated", body = LeaveType), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn update_leave_type(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    id: web::Path<Uuid>,
-    body: web::Json<UpsertLeaveTypeRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrLeaveEdit).await?;
-
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(AppError::BadRequest("Leave type name is required".into()));
-    }
-
-    let row = sqlx::query_as::<_, LeaveType>(&format!(
-        "UPDATE leave_types SET name = $3, \
-             is_paid = COALESCE($4, is_paid), \
-             annual_quota_days = $5, \
-             requires_approval = COALESCE($6, requires_approval), \
-             is_active = COALESCE($7, is_active), \
-             updated_at = now() \
-          WHERE id = $1 AND org_id = $2 RETURNING {LEAVE_TYPE_COLS}"
-    ))
-    .bind(*id)
-    .bind(org_id)
-    .bind(name)
-    .bind(body.is_paid)
-    .bind(body.annual_quota_days)
-    .bind(body.requires_approval)
-    .bind(body.is_active)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Leave type not found".into()))?;
-    Ok(HttpResponse::Ok().json(row))
-}
-
-#[utoipa::path(
-    delete, path = "/staff/leave/types/{id}", tag = "staff",
-    params(("id" = Uuid, Path, description = "Leave type ID")),
-    responses((status = 204, description = "Leave type deleted"), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn delete_leave_type(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    id: web::Path<Uuid>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrLeaveDelete).await?;
-
-    // The FK is ON DELETE RESTRICT: a type someone has taken leave under is part
-    // of the record. Say so instead of surfacing a foreign-key violation.
-    let used: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM staff_requests WHERE leave_type_id = $1")
-            .bind(*id)
-            .fetch_one(pool.get_ref())
-            .await?;
-    if used > 0 {
-        return Err(AppError::BadRequest(
-            "This leave type has requests against it — deactivate it instead of deleting".into(),
-        ));
-    }
-
-    let deleted = sqlx::query("DELETE FROM leave_types WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
-        .execute(pool.get_ref())
-        .await?
-        .rows_affected();
-    if deleted == 0 {
-        return Err(AppError::NotFound("Leave type not found".into()));
-    }
-    Ok(HttpResponse::NoContent().finish())
-}
-
-// ── Balances ──────────────────────────────────────────────────
-
-#[utoipa::path(
-    get, path = "/staff/leave/balances", tag = "staff",
-    params(BalanceQuery),
-    responses((status = 200, description = "Leave balances", body = Vec<LeaveBalance>), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn list_balances(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    query: web::Query<BalanceQuery>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrLeaveRead).await?;
-    let year = query.year.unwrap_or_else(|| Utc::now().year());
-
-    let rows = sqlx::query_as::<_, LeaveBalance>(&format!(
-        "{BALANCE_SELECT} WHERE b.org_id = $1 AND b.year = $2 \
-          AND ($3::uuid IS NULL OR b.employee_id = $3) AND {} ORDER BY lower(t.name)",
-        access::in_scope("b.employee_id", 4)
-    ))
-    .bind(org_id)
-    .bind(year)
-    .bind(query.employee_id)
-    .bind(scope.as_deref())
-    .fetch_all(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::Ok().json(rows))
-}
-
-#[utoipa::path(
-    put, path = "/staff/leave/balances", tag = "staff",
-    request_body = PutBalanceRequest,
-    responses((status = 200, description = "Balance saved", body = LeaveBalance), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn put_balance(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    body: web::Json<PutBalanceRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    access::gate(pool.get_ref(), &claims, org_id, Cap::HrLeaveEdit).await?;
-    let subject = access::subject(pool.get_ref(), org_id, body.employee_id).await?;
-    access::require_for(pool.get_ref(), &claims, Cap::HrLeaveEdit, &subject).await?;
-
-    if body.entitled_days < Decimal::ZERO
-        || body.carried_over_days.is_some_and(|c| c < Decimal::ZERO)
-    {
-        return Err(AppError::BadRequest("Day counts cannot be negative".into()));
-    }
-
-    // `used_days` is deliberately absent from the update: it belongs to the
-    // approval path, and letting HR set it by hand would desynchronise it from
-    // the approved requests it is supposed to mirror.
-    let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO leave_balances (org_id, employee_id, leave_type_id, year, entitled_days, carried_over_days) \
-         VALUES ($1, $2, $3, $4, $5, COALESCE($6, 0)) \
-         ON CONFLICT (employee_id, leave_type_id, year) DO UPDATE SET \
-             entitled_days     = EXCLUDED.entitled_days, \
-             carried_over_days = EXCLUDED.carried_over_days, \
-             updated_at        = now() \
-         RETURNING id",
-    )
-    .bind(org_id)
-    .bind(body.employee_id)
-    .bind(body.leave_type_id)
-    .bind(body.year)
-    .bind(body.entitled_days)
-    .bind(body.carried_over_days)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    let row = sqlx::query_as::<_, LeaveBalance>(&format!("{BALANCE_SELECT} WHERE b.id = $1"))
-        .bind(id)
-        .fetch_one(pool.get_ref())
-        .await?;
-    Ok(HttpResponse::Ok().json(row))
-}
-
+/// Deprecated (RQ-3): Dawam has no leave balances. This shows what older data
+/// holds and is never written any more.
 #[utoipa::path(
     get, path = "/staff/me/leave-balances", tag = "staff",
     params(BalanceQuery),

@@ -2347,6 +2347,24 @@ ar = "تغيير قواعد الحضور والمرتبات"
 hint_en = "The business-wide rules: lateness and absence costs, working days, overtime, the pay period and the advance cap. Needs every branch."
 hint_ar = "قواعد النشاط كله: خصم التأخير والغياب، أيام الشغل، الوقت الإضافي، فترة المرتب وحد السلف. محتاج كل الفروع."
 
+# --- phase-b rules ---
+# Owner decision 2026-09-23: branch managers SEE the rules (read-only), for
+# their own branches: the business's rules plus their branches' overrides.
+# Editing stays on hr.rules.edit (owner). Id 241 leaves 237-240 to the other
+# Phase B areas so parallel branches don't collide.
+[[cap]]
+id = 241
+key = "hr.rules.view"
+group = "hr"
+tier = "configurable"
+risk = "normal"
+defaults = "om"
+en = "See attendance and pay rules"
+ar = "عرض قواعد الحضور والمرتبات"
+hint_en = "Read-only: the business's rules and the overrides of your branches. Changing them needs the owner."
+hint_ar = "للعرض بس: قواعد النشاط وتعديلات فروعك. تغييرها محتاج المالك."
+# --- end phase-b rules ---
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.

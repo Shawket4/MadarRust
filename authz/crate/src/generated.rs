@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "679bc717e26c4288";
+pub const SPEC_HASH: &str = "ac991e9eac60602f";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -203,6 +203,7 @@ pub enum Cap {
     HrExpenseAdvancesLog = 234,
     HrRosterSettings = 235,
     HrRulesEdit = 236,
+    HrRulesView = 241,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -399,6 +400,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::HrExpenseAdvancesLog, key: "hr.expense_advances.log", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Log expense advances", ar: "تسجيل ع\u{64f}هد المصاريف", hint_en: Some("Cash handed over for shop purchases. A log only: never deducted from pay."), hint_ar: Some("فلوس متسلمة لمشتريات المحل. سجل بس: عمره ما بيتخصم من المرتب.") },
     CapMeta { cap: Cap::HrRosterSettings, key: "hr.roster.settings", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Change roster settings", ar: "تغيير إعدادات الجدول", hint_en: Some("How shift suggestions weigh defaults, including the gender default."), hint_ar: Some("إزاي اقتراحات الورديات بتوزن الافتراضيات، ومنها افتراض النوع.") },
     CapMeta { cap: Cap::HrRulesEdit, key: "hr.rules.edit", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Change attendance and pay rules", ar: "تغيير قواعد الحضور والمرتبات", hint_en: Some("The business-wide rules: lateness and absence costs, working days, overtime, the pay period and the advance cap. Needs every branch."), hint_ar: Some("قواعد النشاط كله: خصم التأخير والغياب، أيام الشغل، الوقت الإضافي، فترة المرتب وحد السلف. محتاج كل الفروع.") },
+    CapMeta { cap: Cap::HrRulesView, key: "hr.rules.view", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See attendance and pay rules", ar: "عرض قواعد الحضور والمرتبات", hint_en: Some("Read-only: the business's rules and the overrides of your branches. Changing them needs the owner."), hint_ar: Some("للعرض بس: قواعد النشاط وتعديلات فروعك. تغييرها محتاج المالك.") },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[

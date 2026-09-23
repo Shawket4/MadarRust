@@ -1093,12 +1093,30 @@ async fn nobody_clocks_in_before_the_rules_are_saved(pool: PgPool) {
     assert!(String::from_utf8_lossy(&test::read_body(resp).await).contains("RULES_NOT_SET"));
 
     let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
-    let saved = json_of(call!(
+    // A one-field save (a limit, the gender mode) is not the rules step: the
+    // door stays shut until the ladder and the absence cost are saved (RU-1).
+    let partial = json_of(call!(
         app,
         put,
         "/staff/attendance/settings",
         owner,
         json!({ "absence_deduction_days": 1 })
+    ))
+    .await;
+    assert!(partial["rules_saved_at"].is_null(), "{partial}");
+    assert!(
+        partial["suggested_tiers"].as_array().is_some_and(|t| !t.is_empty()),
+        "the set-up step gets a suggested ladder to start from: {partial}"
+    );
+    assert_eq!(partial["late_deduction_tiers"], json!([]), "a suggestion is never saved by itself");
+    let resp = call!(app, post, "/staff/me/check-in", tok, here.clone());
+    assert_eq!(resp.status(), 409);
+    let saved = json_of(call!(
+        app,
+        put,
+        "/staff/attendance/settings",
+        owner,
+        json!({ "absence_deduction_days": 1, "late_deduction_tiers": partial["suggested_tiers"] })
     ))
     .await;
     assert!(saved["rules_saved_at"].is_string(), "{saved}");
