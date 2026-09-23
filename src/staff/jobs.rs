@@ -18,8 +18,13 @@
 //!      idempotently — the partial unique index on
 //!      `(attendance_record_id, source)` turns a re-run into an update.
 //!
-//!   4. **Purge stale attendance coordinates.** Latitude/longitude older than
-//!      `COORD_RETENTION_DAYS` are nulled. See `purge_stale_coordinates`.
+//!   4. **Wipe the coordinates of approved months (AT-4).** Once a payroll
+//!      month is approved its punches' and pings' latitude/longitude are
+//!      nulled; distances, inside/outside and flags stay. The approval does it
+//!      at once; this is the safety net. See `purge_stale_coordinates`.
+//!
+//! AT-1: every "which day is it" here is the BRANCH's day, never the database
+//! server's `CURRENT_DATE` or the org's zone.
 //!
 //! Runs on the OWNER pool, which bypasses RLS. That is the sanctioned path for
 //! cross-tenant background work (see `src/db.rs`); every query below is explicitly
@@ -76,11 +81,51 @@ pub fn spawn(pool: PgPool) {
 #[doc(hidden)]
 pub async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     close_forgotten_checkouts(pool).await?;
+    close_unrostered(pool).await?;
     mark_absences(pool).await?;
     apply_pending_penalties(pool).await?;
     purge_stale_coordinates(pool).await?;
     precompute_suggestions(pool).await?;
     phones_that_died(pool).await?;
+    tracking_went_quiet(pool).await?;
+    Ok(())
+}
+
+/// A shift whose phone went silent without a low battery (audit 03 bug 8):
+/// the client said tracking was on, then never pinged. After 45 minutes with
+/// no ping (from the check-in, or the last ping) at a battery above 15%, the
+/// shift is marked "tracking off" and the manager told, once — the server no
+/// longer relies on the phone's own word (CL-5).
+#[doc(hidden)]
+pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+    let quiet: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(&format!(
+        "SELECT a.org_id, a.employee_id, a.branch_id, a.id FROM attendance_records a \
+           JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
+           JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
+           LEFT JOIN LATERAL (SELECT at, battery_percent FROM attendance_pings p \
+                               WHERE p.attendance_record_id = a.id ORDER BY at DESC LIMIT 1) last ON true \
+          WHERE a.check_in_at IS NOT NULL AND a.check_out_at IS NULL \
+            AND NOT a.tracking_off AND a.covered_employee_id IS NULL \
+            AND COALESCE(last.at, a.check_in_at) < now() - INTERVAL '45 minutes' \
+            AND COALESCE(last.battery_percent, 100) > $1 \
+            AND NOT EXISTS (SELECT 1 FROM attendance_flags f \
+                             WHERE f.attendance_record_id = a.id \
+                               AND f.kind IN ('tracking_off', 'phone_died')) \
+          LIMIT 500"
+    ))
+    .bind(crate::staff::dawam::presence::LOW_BATTERY)
+    .fetch_all(pool)
+    .await?;
+    for (org_id, employee_id, branch_id, record_id) in quiet {
+        crate::staff::dawam::presence::mark_tracking_off(
+            pool,
+            org_id,
+            employee_id,
+            branch_id,
+            record_id,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -253,6 +298,60 @@ async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), crate::errors::A
     Ok(())
 }
 
+/// An open record with no rostered shift has no "supposed to finish" (CL-15,
+/// CL-17): left open it would collect location for ever. Once it has been open
+/// longer than the day's presence limit (RU-13) plus the auto-close buffer, it
+/// is closed at check-in + that limit, `auto`, with no overtime; the person
+/// can still ask for a fix for that day.
+#[doc(hidden)]
+pub async fn close_unrostered(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+    let rows: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&format!(
+        "WITH open AS ( \
+             SELECT a.id, a.check_in_at, \
+                    COALESCE(( \
+                        SELECT s.limit_presence_hours FROM attendance_settings s \
+                         WHERE s.org_id = a.org_id \
+                           AND (s.branch_id = a.branch_id OR s.branch_id IS NULL) \
+                         ORDER BY s.branch_id NULLS LAST LIMIT 1), 10) AS hours, \
+                    COALESCE(( \
+                        SELECT s.auto_checkout_buffer_minutes FROM attendance_settings s \
+                         WHERE s.org_id = a.org_id \
+                           AND (s.branch_id = a.branch_id OR s.branch_id IS NULL) \
+                         ORDER BY s.branch_id NULLS LAST LIMIT 1), 120) AS buffer \
+               FROM attendance_records a \
+               JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
+               JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
+              WHERE a.check_in_at IS NOT NULL AND a.check_out_at IS NULL \
+                AND a.scheduled_end_at IS NULL \
+         ) \
+         SELECT id, check_in_at, \
+                check_in_at + make_interval(secs => (hours * 3600)::double precision) \
+           FROM open \
+          WHERE now() > check_in_at + make_interval(secs => (hours * 3600)::double precision) \
+                        + make_interval(mins => buffer) \
+          LIMIT 500"
+    ))
+    .fetch_all(pool)
+    .await?;
+    for (id, check_in, close_at) in rows {
+        let worked = (close_at - check_in).num_minutes().max(0) as i32;
+        sqlx::query(
+            "UPDATE attendance_records SET \
+                 check_out_at = $2, check_out_method = 'auto', \
+                 worked_minutes = $3, overtime_minutes = 0, early_leave_minutes = 0, \
+                 edit_reason = COALESCE(edit_reason, 'Auto-closed: no checkout recorded'), \
+                 updated_at = now() \
+               WHERE id = $1 AND check_out_at IS NULL",
+        )
+        .bind(id)
+        .bind(close_at)
+        .bind(worked)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 // ── 2. Absences ───────────────────────────────────────────────
 
 async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
@@ -268,13 +367,15 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
         excused: bool,
     }
 
-    // Yesterday and today only: a sweep that reached back further would resurrect
-    // absences an operator had deliberately deleted.
+    // Yesterday and today only — the BRANCH's yesterday and today (AT-1): a
+    // sweep that reached back further would resurrect absences an operator had
+    // deliberately deleted. The candidate days span every zone; each row is
+    // then held to its own branch's two days below.
     let missing: Vec<Missing> = sqlx::query_as(&format!(
         r#"
         WITH days AS (
             SELECT d::date AS business_date
-              FROM generate_series(CURRENT_DATE - 1, CURRENT_DATE, INTERVAL '1 day') d
+              FROM generate_series(CURRENT_DATE - 2, CURRENT_DATE + 1, INTERVAL '1 day') d
         ),
         rostered AS (
             SELECT p.org_id,
@@ -329,6 +430,8 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                ) AS excused
           FROM rostered r
          WHERE r.branch_id IS NOT NULL
+           AND r.business_date BETWEEN (now() AT TIME ZONE r.tz)::date - 1
+                                   AND (now() AT TIME ZONE r.tz)::date
            -- The shift must be over before its absence is a fact.
            AND now() > (r.business_date + r.end_time
                     + CASE WHEN r.crosses_midnight
@@ -396,7 +499,9 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::App
            FROM attendance_records a \
            JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
            JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
-          WHERE a.business_date >= CURRENT_DATE - 7 \
+           JOIN branches b ON b.id = a.branch_id \
+          WHERE a.business_date >= (now() AT TIME ZONE \
+                    COALESCE(b.timezone::text, o.timezone::text, 'Africa/Cairo'))::date - 7 \
             AND (a.check_out_at IS NOT NULL OR a.status IN ('absent', 'on_leave')) \
             AND (a.late_minutes > 0 OR a.status IN ('absent', 'on_leave')) \
             AND NOT EXISTS ( \
@@ -416,58 +521,15 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::App
     Ok(())
 }
 
-// ── 4. Attendance coordinate retention ────────────────────────
+// ── 4. Coordinates of approved months (AT-4) ──────────────────
 
-/// How long a punch's GPS coordinates are kept. After this, the latitude and
-/// longitude are nulled and the record keeps only *when* the punch happened and
-/// whether it passed the geofence.
-const COORD_RETENTION_DAYS: i32 = 90;
-
-/// Null out attendance coordinates older than `COORD_RETENTION_DAYS`.
-///
-/// Attendance *times* must live as long as payroll does — they are the evidence
-/// for what someone was paid. The *coordinates* do not: once a punch is settled
-/// and no longer disputed, latitude and longitude have served their only purpose
-/// (proving the person was at the branch when they clocked in). Keeping precise
-/// employee locations for years to support a payslip is hard to defend as
-/// proportionate, so we stop keeping them.
-///
-/// Deliberately preserved:
-///   * `check_in_at` / `check_out_at` and every derived minute count — payroll.
-///   * `check_in_distance_meters` / `check_out_distance_meters` — the geofence
-///     RESULT. It records that the punch was N metres from the branch, which is
-///     the auditable fact, without recording WHERE the employee was.
-///   * `check_in_method` / `check_out_method`.
-///
-/// Idempotent: rows already purged fail the `IS NOT NULL` test, so a re-run is a
-/// no-op. Bounded per tick so a first run over a large backlog cannot hold long
-/// locks — the remainder is picked up on the next tick.
+/// Wipe the exact coordinates of every approved payroll month (AT-4): the
+/// punches' and the pings'. Times, distances, inside/outside, methods and
+/// flags stay — they are what payroll and a dispute need. The approval wipes
+/// its own month at once (`privacy::wipe_period_coordinates`); this catches
+/// anything it missed and anything added to an approved month since. It is a
+/// privacy duty, so it runs for every org, Dawam on or off.
 pub async fn purge_stale_coordinates(pool: &PgPool) -> Result<(), crate::errors::AppError> {
-    let purged = sqlx::query(
-        "UPDATE attendance_records SET \
-             check_in_latitude = NULL, check_in_longitude = NULL, \
-             check_out_latitude = NULL, check_out_longitude = NULL, \
-             updated_at = now() \
-           WHERE id IN ( \
-               SELECT id FROM attendance_records \
-                WHERE business_date < CURRENT_DATE - $1 \
-                  AND (check_in_latitude IS NOT NULL OR check_in_longitude IS NOT NULL \
-                       OR check_out_latitude IS NOT NULL OR check_out_longitude IS NOT NULL) \
-                ORDER BY business_date \
-                LIMIT 1000 \
-           )",
-    )
-    .bind(COORD_RETENTION_DAYS)
-    .execute(pool)
-    .await?
-    .rows_affected();
-
-    if purged > 0 {
-        tracing::info!(
-            records = purged,
-            retention_days = COORD_RETENTION_DAYS,
-            "purged stale attendance coordinates"
-        );
-    }
+    crate::staff::dawam::privacy::wipe_approved_months(pool).await?;
     Ok(())
 }

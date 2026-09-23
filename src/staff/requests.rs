@@ -836,7 +836,8 @@ pub async fn decide_request(
             Some(t) => Some(local_instant(pool.get_ref(), existing.on_date, t, &tz).await?),
             None => None,
         };
-        crate::staff::attendance::apply_punch_correction(
+        // CL-16: an approved correction is written as `correction`.
+        crate::staff::attendance::apply_punch_correction_as(
             pool.get_ref(),
             org_id,
             record_id,
@@ -846,6 +847,7 @@ pub async fn decide_request(
             None,
             "Approved punch correction request",
             actor,
+            Some("correction"),
         )
         .await?;
     }

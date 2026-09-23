@@ -1566,6 +1566,14 @@ pub async fn generate_period(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    // AT-4: an approved month's exact coordinates go now (clocking).
+    crate::staff::dawam::privacy::wipe_period_coordinates(
+        pool.get_ref(),
+        org_id,
+        period.start_date,
+        period.end_date,
+    )
+    .await?;
 
     let slips = sqlx::query_as::<_, Payslip>(&format!(
         "{PAYSLIP_SELECT} WHERE s.payroll_period_id = $1 ORDER BY lower(e.name)"

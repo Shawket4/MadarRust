@@ -314,7 +314,7 @@ async fn a_manual_employee_is_on_payroll_without_any_sign_in(pool: PgPool) {
     assert_eq!(resp.status(), 200);
     let rec = body(resp).await;
     assert_eq!(rec["employee_id"], json!(id));
-    assert_eq!(rec["check_in_method"], "manual");
+    assert_eq!(rec["check_in_method"], "manager", "CL-16");
 
     let period = run_payroll(&app, &o).await;
     let slips = body(call!(
@@ -371,6 +371,17 @@ async fn an_app_employee_signs_in_punches_and_reads_their_payslip(pool: PgPool) 
     assert_eq!(ctx["employee_id"], json!(id));
     assert_eq!(ctx["role"], "employee");
     assert_eq!(ctx["caps"], json!([]));
+    // A new phone takes no location before the notice is accepted (AT-5).
+    assert!(ctx["privacy_accepted_at"].is_null());
+    let resp = call!(
+        app,
+        "POST",
+        "/staff/me/check-in",
+        me,
+        json!({ "branch_id": o.a, "latitude": LAT, "longitude": LNG })
+    );
+    assert_eq!(resp.status(), 403);
+    assert_eq!(call!(app, "POST", "/staff/me/privacy", me).status(), 200);
 
     let resp = call!(
         app,
@@ -476,7 +487,8 @@ async fn a_cashier_made_an_employee_keeps_the_till_and_gains_the_app(pool: PgPoo
     assert_eq!(ctx["role"], "employee");
 
     // The till: his PIN punches the employee he is.
-    let till = user_token(o.owner, o.org, UserRole::OrgAdmin);
+    let device = common::employees::open_till(&pool, o.org, o.a, teller).await;
+    let till = common::employees::at_till(&user_token(o.owner, o.org, UserRole::OrgAdmin), device);
     let resp = call!(
         app,
         "POST",
@@ -507,11 +519,12 @@ async fn a_till_pin_of_someone_who_is_not_an_employee_is_refused(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    let till = common::employees::open_till(&pool, o.org, o.a, teller).await;
     let resp = call!(
         app,
         "POST",
         "/staff/attendance/till-punch",
-        owner_t(&o),
+        common::employees::at_till(&owner_t(&o), till),
         json!({ "branch_id": o.a, "pin": "1357" })
     );
     assert_eq!(resp.status(), 403);

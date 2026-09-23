@@ -540,6 +540,7 @@ paths(
         crate::staff::dawam::context::my_context,
         crate::staff::dawam::set_push_token,
         crate::staff::dawam::presence::ping,
+        crate::staff::dawam::privacy::accept,
         crate::staff::dawam::presence::list_flags,
         crate::staff::dawam::presence::resolve_flag,
         crate::staff::dawam::presence::my_coverable,

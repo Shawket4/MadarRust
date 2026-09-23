@@ -243,6 +243,12 @@ pub struct CheckInRequest {
     /// Set when the punch was queued offline; the server rebuilds its time (CL-11).
     #[serde(default)]
     pub offline: Option<crate::staff::dawam::clock::OfflineStamp>,
+    /// The fix's reported accuracy, metres (CL-9: a perfect one is suspicious).
+    #[serde(default)]
+    pub accuracy_meters: Option<f64>,
+    /// The OS's mock-location marker for this fix (CL-9).
+    #[serde(default)]
+    pub is_mock: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -254,6 +260,12 @@ pub struct CheckOutRequest {
     /// Set when the punch was queued offline; the server rebuilds its time (CL-11).
     #[serde(default)]
     pub offline: Option<crate::staff::dawam::clock::OfflineStamp>,
+    /// The fix's reported accuracy, metres (CL-9).
+    #[serde(default)]
+    pub accuracy_meters: Option<f64>,
+    /// The OS's mock-location marker for this fix (CL-9).
+    #[serde(default)]
+    pub is_mock: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -920,7 +932,8 @@ async fn adjustments_for(
 /// Resolve the shift a punch at `now` belongs to, looking at both today's and
 /// yesterday's roster so a night shift's after-midnight arrival stays on the day
 /// the shift started. Returns the shift and the business date it belongs to.
-async fn resolve_punch_shift(
+/// Every punch path uses it: the app, a manager's and the till's (SC-10).
+pub(crate) async fn resolve_punch_shift(
     pool: &PgPool,
     employee_id: Uuid,
     today: NaiveDate,
@@ -972,6 +985,7 @@ async fn resolve_punch_shift(
 pub async fn check_in(
     me: Me,
     pool: crate::db::Db,
+    secret: web::Data<crate::auth::jwt::JwtSecret>,
     body: web::Json<CheckInRequest>,
 ) -> Result<HttpResponse, AppError> {
     // Only from the employee's live phone (CL-1): `Me` is a staff-app session
@@ -979,6 +993,8 @@ pub async fn check_in(
     let employee_id = me.employee_id;
     let org_id = me.org_id;
     require_rules(pool.get_ref(), org_id).await?;
+    // Location only after the notice was accepted on this phone (AT-5).
+    crate::staff::dawam::privacy::require_accepted(pool.get_ref(), &me).await?;
 
     let branch_org = crate::staff::resolve_branch_org(pool.get_ref(), body.branch_id).await?;
     if branch_org != org_id {
@@ -994,40 +1010,29 @@ pub async fn check_in(
     }
 
     let settings = load_settings(pool.get_ref(), org_id, Some(body.branch_id)).await?;
+    // The app's punch is always fenced (CL-2): the org's `require_geofence`
+    // switch no longer reaches the phone.
     let distance = check_geofence(
         pool.get_ref(),
         body.branch_id,
         body.latitude,
         body.longitude,
-        settings.require_geofence,
+        true,
     )
     .await?;
 
     let tz = branch_timezone(pool.get_ref(), body.branch_id).await?;
-    let stamped = crate::staff::dawam::clock::rebuild(body.offline.as_ref(), Utc::now())?;
+    let stamped = crate::staff::dawam::clock::rebuild(
+        body.offline.as_ref(),
+        Utc::now(),
+        me.verifier(&secret),
+    )?;
     let now = stamped.at;
     let today = day_in(pool.get_ref(), now, &tz).await?;
     let (shift, business_date) =
         resolve_punch_shift(pool.get_ref(), employee_id, today, &tz, now).await?;
 
-    // Arriving before the shift's check-in window is a mistake, not a punch —
-    // otherwise an early bird opens the record that the real shift needs.
-    if let Some(s) = &shift {
-        let opens_at = s.scheduled_start_at
-            - chrono::Duration::minutes(s.checkin_window_minutes.max(0) as i64);
-        if now < opens_at {
-            return Err(AppError::BadRequest(format!(
-                "Too early — check-in for {} opens {} minutes before it starts",
-                s.name, s.checkin_window_minutes
-            )));
-        }
-        if now >= s.scheduled_end_at {
-            return Err(AppError::BadRequest(format!(
-                "{} has already ended",
-                s.name
-            )));
-        }
-    }
+    check_window(shift.as_ref(), now)?;
 
     let adjustments =
         adjustments_for(pool.get_ref(), &settings, employee_id, business_date, &tz).await?;
@@ -1100,8 +1105,50 @@ pub async fn check_in(
         )
         .await?;
     }
+    // The punch's own fix is checked too (CL-8/9): with tracking off there
+    // are no pings to catch a mocked location.
+    crate::staff::dawam::presence::check_punch_fix(
+        pool.get_ref(),
+        org_id,
+        employee_id,
+        body.branch_id,
+        id,
+        body.accuracy_meters,
+        body.is_mock,
+    )
+    .await?;
     let record = load_record(pool.get_ref(), org_id, id).await?;
     Ok(HttpResponse::Created().json(record))
+}
+
+/// A check-in before the shift's window opens, or after it ended, is refused
+/// (CL-3) — for every way of punching: the app, a manager's, the till's.
+/// An unrostered day has no window: the punch opens a record with nothing to
+/// be late for (a deliberate choice, see the clocking report).
+pub(crate) fn check_window(
+    shift: Option<&ResolvedShift>,
+    now: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let Some(s) = shift else {
+        return Ok(());
+    };
+    // Arriving before the shift's check-in window is a mistake, not a punch —
+    // otherwise an early bird opens the record that the real shift needs.
+    let opens_at =
+        s.scheduled_start_at - chrono::Duration::minutes(s.checkin_window_minutes.max(0) as i64);
+    if now < opens_at {
+        return Err(AppError::BadRequest(format!(
+            "Too early — check-in for {} opens {} minutes before it starts",
+            s.name, s.checkin_window_minutes
+        )));
+    }
+    if now >= s.scheduled_end_at {
+        return Err(AppError::BadRequest(format!(
+            "{} has already ended",
+            s.name
+        )));
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -1117,10 +1164,17 @@ pub async fn check_in(
 pub async fn check_out(
     me: Me,
     pool: crate::db::Db,
+    secret: web::Data<crate::auth::jwt::JwtSecret>,
     body: web::Json<CheckOutRequest>,
 ) -> Result<HttpResponse, AppError> {
     let employee_id = me.employee_id;
     let org_id = me.org_id;
+    crate::staff::dawam::privacy::require_accepted(pool.get_ref(), &me).await?;
+    let stamped = crate::staff::dawam::clock::rebuild(
+        body.offline.as_ref(),
+        Utc::now(),
+        me.verifier(&secret),
+    )?;
 
     #[derive(sqlx::FromRow)]
     struct Open {
@@ -1133,7 +1187,7 @@ pub async fn check_out(
         scheduled_end_at: Option<DateTime<Utc>>,
     }
 
-    let open: Open = sqlx::query_as(
+    let mut open: Option<Open> = sqlx::query_as(
         "SELECT id, branch_id, business_date, work_shift_id, check_in_at, \
                 scheduled_start_at, scheduled_end_at \
            FROM attendance_records \
@@ -1142,8 +1196,26 @@ pub async fn check_out(
     )
     .bind(employee_id)
     .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("You are not checked in".into()))?;
+    .await?;
+    if open.is_none() && stamped.offline {
+        // A check-out queued offline while the sweep auto-closed the shift
+        // (CL-15): the real time the phone recorded replaces the automatic
+        // one, so it is not lost as a refused op.
+        open = sqlx::query_as(
+            "SELECT id, branch_id, business_date, work_shift_id, check_in_at, \
+                    scheduled_start_at, scheduled_end_at \
+               FROM attendance_records \
+              WHERE employee_id = $1 AND check_out_method = 'auto' \
+                AND check_in_at IS NOT NULL AND check_in_at <= $2 \
+                AND $2 < check_in_at + INTERVAL '24 hours' \
+              ORDER BY check_in_at DESC LIMIT 1",
+        )
+        .bind(employee_id)
+        .bind(stamped.at)
+        .fetch_optional(pool.get_ref())
+        .await?;
+    }
+    let open = open.ok_or_else(|| AppError::NotFound("You are not checked in".into()))?;
 
     let settings = load_settings(pool.get_ref(), org_id, Some(open.branch_id)).await?;
     let distance = check_geofence(
@@ -1151,12 +1223,11 @@ pub async fn check_out(
         open.branch_id,
         body.latitude,
         body.longitude,
-        settings.require_geofence,
+        true,
     )
     .await?;
 
     let tz = branch_timezone(pool.get_ref(), open.branch_id).await?;
-    let stamped = crate::staff::dawam::clock::rebuild(body.offline.as_ref(), Utc::now())?;
     // A queued check-out can't close before the check-in it follows.
     let now = open.check_in_at.map_or(stamped.at, |i| stamped.at.max(i));
     let shift = load_shift_snapshot(pool.get_ref(), &open.work_shift_id, open.business_date, &tz)
@@ -1228,6 +1299,16 @@ pub async fn check_out(
         )
         .await?;
     }
+    crate::staff::dawam::presence::check_punch_fix(
+        pool.get_ref(),
+        org_id,
+        employee_id,
+        open.branch_id,
+        open.id,
+        body.accuracy_meters,
+        body.is_mock,
+    )
+    .await?;
 
     // The shift just closed, so price it now — a manager should see the penalty
     // immediately, not the next morning after the sweep.
@@ -1631,25 +1712,49 @@ pub async fn team_presence(
     )
     .await?;
 
-    let tz = crate::staff::schedules::org_timezone(pool.get_ref(), org_id).await?;
+    // AT-1: each person's "today" is their branch's day, not the org's or the
+    // database server's. The header's day and zone are the asked-for branch's,
+    // else the org's.
+    let tz = match query.branch_id {
+        Some(b) => branch_timezone(pool.get_ref(), b).await?,
+        None => crate::staff::schedules::org_timezone(pool.get_ref(), org_id).await?,
+    };
     let today = today_in(pool.get_ref(), &tz).await?;
 
     let rows = sqlx::query_as::<_, PresenceRow>(
         r#"
-        WITH roster AS (
-            -- Everyone active, with the minutes they are rostered for today and
-            -- when that shift was due to start.
-            SELECT p.id AS employee_id,
-                   p.name AS employee_name,
-                   p.job_title,
-                   (SELECT b.name
-                      FROM employee_branches eb
-                      JOIN branches b ON b.id = eb.branch_id
-                                     AND b.deleted_at IS NULL
-                                     AND b.org_id = p.org_id
-                     WHERE eb.employee_id = p.id
-                     ORDER BY eb.assigned_at
-                     LIMIT 1)                                     AS branch_name,
+        WITH people AS (
+            -- Everyone active, at the branch they are looked at for: the one
+            -- asked for, else their first (in scope) — and that branch's zone.
+            SELECT p.id, p.org_id, p.name, p.job_title,
+                   hb.name AS branch_name,
+                   COALESCE(hb.timezone::text, o.timezone::text, 'Africa/Cairo') AS tz
+              FROM employees p
+              JOIN organizations o ON o.id = p.org_id
+              LEFT JOIN LATERAL (
+                  SELECT b.name, b.timezone
+                    FROM employee_branches eb
+                    JOIN branches b ON b.id = eb.branch_id
+                                   AND b.deleted_at IS NULL
+                                   AND b.org_id = p.org_id
+                   WHERE eb.employee_id = p.id
+                     AND ($2::uuid[] IS NULL OR eb.branch_id = ANY($2))
+                   ORDER BY eb.assigned_at
+                   LIMIT 1
+              ) hb ON true
+             WHERE p.org_id = $1 AND p.employment_status = 'active'
+        ),
+        local AS (
+            SELECT pe.*, (now() AT TIME ZONE pe.tz)::date AS d FROM people pe
+        ),
+        roster AS (
+            -- The minutes each is rostered for their today and when that
+            -- shift was due to start.
+            SELECT l.id AS employee_id,
+                   l.name AS employee_name,
+                   l.job_title,
+                   l.branch_name,
+                   l.d,
                    COALESCE((
                        SELECT SUM(EXTRACT(EPOCH FROM (
                                   ws.end_time - ws.start_time
@@ -1658,30 +1763,34 @@ pub async fn team_presence(
                               )) / 60)::bigint
                          FROM staff_schedules s
                          JOIN work_shifts ws ON ws.id = s.work_shift_id AND ws.is_active
-                        WHERE s.employee_id = p.id
-                          AND s.effective_from <= $2
-                          AND (s.effective_to IS NULL OR s.effective_to >= $2)
+                        WHERE s.employee_id = l.id
+                          AND s.effective_from <= l.d
+                          AND (s.effective_to IS NULL OR s.effective_to >= l.d)
                           AND (s.day_of_week IS NULL
-                               OR s.day_of_week = EXTRACT(DOW FROM $2::date)::smallint)
+                               OR s.day_of_week = EXTRACT(DOW FROM l.d)::smallint)
                    ), 0)                                          AS scheduled_minutes,
-                   (SELECT MIN(($2::date + ws.start_time) AT TIME ZONE $3)
+                   (SELECT MIN((l.d + ws.start_time) AT TIME ZONE l.tz)
                       FROM staff_schedules s
                       JOIN work_shifts ws ON ws.id = s.work_shift_id AND ws.is_active
-                     WHERE s.employee_id = p.id
-                       AND s.effective_from <= $2
-                       AND (s.effective_to IS NULL OR s.effective_to >= $2)
+                     WHERE s.employee_id = l.id
+                       AND s.effective_from <= l.d
+                       AND (s.effective_to IS NULL OR s.effective_to >= l.d)
                        AND (s.day_of_week IS NULL
-                            OR s.day_of_week = EXTRACT(DOW FROM $2::date)::smallint)
+                            OR s.day_of_week = EXTRACT(DOW FROM l.d)::smallint)
                    )                                              AS due_at
-              FROM employees p
-             WHERE p.org_id = $1 AND p.employment_status = 'active'
+              FROM local l
         ),
         today AS (
+            -- Their day's record, or a night shift from yesterday still open.
             SELECT DISTINCT ON (a.employee_id)
                    a.employee_id, a.check_in_at, a.check_out_at, a.status,
                    a.late_minutes, a.worked_minutes, a.branch_id
               FROM attendance_records a
-             WHERE a.org_id = $1 AND a.business_date = $2
+              JOIN roster r ON r.employee_id = a.employee_id
+             WHERE a.org_id = $1
+               AND (a.business_date = r.d
+                    OR (a.business_date = r.d - 1 AND a.check_in_at IS NOT NULL
+                        AND a.check_out_at IS NULL))
              ORDER BY a.employee_id, a.check_in_at DESC NULLS LAST
         )
         SELECT r.employee_id, r.employee_name, r.job_title, r.branch_name,
@@ -1705,16 +1814,14 @@ pub async fn team_presence(
                END AS state
           FROM roster r
           LEFT JOIN today t ON t.employee_id = r.employee_id
-         WHERE ($4::uuid[] IS NULL
-                OR t.branch_id = ANY($4)
+         WHERE ($2::uuid[] IS NULL
+                OR t.branch_id = ANY($2)
                 OR EXISTS (SELECT 1 FROM employee_branches eb
-                            WHERE eb.employee_id = r.employee_id AND eb.branch_id = ANY($4)))
+                            WHERE eb.employee_id = r.employee_id AND eb.branch_id = ANY($2)))
          ORDER BY lower(r.employee_name)
         "#,
     )
     .bind(org_id)
-    .bind(today)
-    .bind(&tz)
     .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
@@ -1903,7 +2010,8 @@ pub async fn correct_record(
         return Err(AppError::BadRequest("A correction needs a reason".into()));
     }
 
-    apply_punch_correction(
+    // A punch the manager moves is recorded as a correction (CL-16).
+    apply_punch_correction_as(
         pool.get_ref(),
         org_id,
         *id,
@@ -1913,6 +2021,7 @@ pub async fn correct_record(
         body.notes.as_deref(),
         reason,
         claims.user_id_safe().ok(),
+        Some("correction"),
     )
     .await?;
 
@@ -1926,6 +2035,8 @@ pub async fn correct_record(
 /// manager approving "I forgot to clock out at 17:00" produces exactly the
 /// record a manual edit would — same derivation, same repricing, same audit
 /// columns. Idempotent: applying the same values twice writes the same row.
+/// It keeps each punch's method; [`apply_punch_correction_as`] marks the
+/// punches it moves (CL-16).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_punch_correction(
     pool: &PgPool,
@@ -1937,6 +2048,37 @@ pub(crate) async fn apply_punch_correction(
     notes: Option<&str>,
     reason: &str,
     editor: Option<Uuid>,
+) -> Result<(), AppError> {
+    apply_punch_correction_as(
+        pool,
+        org_id,
+        record_id,
+        check_in_at,
+        check_out_at,
+        status_override,
+        notes,
+        reason,
+        editor,
+        None,
+    )
+    .await
+}
+
+/// [`apply_punch_correction`], recording `method` (`correction`) on every
+/// punch whose time it changes (CL-16). A punch it leaves alone keeps how it
+/// was made.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_punch_correction_as(
+    pool: &PgPool,
+    org_id: Uuid,
+    record_id: Uuid,
+    check_in_at: Option<DateTime<Utc>>,
+    check_out_at: Option<DateTime<Utc>>,
+    status_override: Option<&str>,
+    notes: Option<&str>,
+    reason: &str,
+    editor: Option<Uuid>,
+    method: Option<&str>,
 ) -> Result<(), AppError> {
     let existing = load_record(pool, org_id, record_id).await?;
     let check_in_at = check_in_at.or(existing.check_in_at);
@@ -1975,10 +2117,16 @@ pub(crate) async fn apply_punch_correction(
 
     sqlx::query(
         "UPDATE attendance_records SET \
+            check_in_method = CASE \
+                WHEN $13::text IS NOT NULL AND $3::timestamptz IS NOT NULL \
+                     AND $3::timestamptz IS DISTINCT FROM check_in_at THEN $13 \
+                ELSE COALESCE(check_in_method, CASE WHEN $3::timestamptz IS NULL THEN NULL ELSE 'manual' END) END, \
+            check_out_method = CASE \
+                WHEN $13::text IS NOT NULL AND $4::timestamptz IS NOT NULL \
+                     AND $4::timestamptz IS DISTINCT FROM check_out_at THEN $13 \
+                ELSE COALESCE(check_out_method, CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE 'manual' END) END, \
             check_in_at  = $3, \
-            check_in_method  = COALESCE(check_in_method,  CASE WHEN $3::timestamptz IS NULL THEN NULL ELSE 'manual' END), \
             check_out_at = $4, \
-            check_out_method = COALESCE(check_out_method, CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE 'manual' END), \
             status = $5, late_minutes = $6, early_leave_minutes = $7, \
             overtime_minutes = $8, worked_minutes = $9, \
             notes = COALESCE($10, notes), edit_reason = $11, edited_by = $12, \
@@ -1997,6 +2145,7 @@ pub(crate) async fn apply_punch_correction(
     .bind(notes.map(str::trim).filter(|n| !n.is_empty()))
     .bind(reason)
     .bind(editor)
+    .bind(method)
     .execute(pool)
     .await?;
 

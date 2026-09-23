@@ -15,6 +15,7 @@ pub mod context;
 pub mod engine;
 pub mod pay;
 pub mod presence;
+pub mod privacy;
 pub mod reports;
 pub mod roster;
 pub mod signin;

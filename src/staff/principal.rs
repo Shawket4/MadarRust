@@ -76,6 +76,21 @@ pub struct StaffPrincipal {
     pub device_id: Uuid,
 }
 
+impl StaffPrincipal {
+    /// What vouches for this phone's offline stamps: its own device row (CL-11).
+    pub fn verifier<'a>(&self, secret: &'a JwtSecret) -> crate::staff::dawam::clock::Verifier<'a> {
+        crate::staff::dawam::clock::Verifier {
+            secret,
+            device: Some(self.device_id),
+        }
+    }
+}
+
+/// The staff principal on a request, if the staff app made it.
+pub fn staff_principal(req: &HttpRequest) -> Option<StaffPrincipal> {
+    req.extensions().get::<StaffPrincipal>().cloned()
+}
+
 /// Mint a staff token for `employee` on `device`. Returns the token and when
 /// it expires.
 pub fn mint(
@@ -284,7 +299,9 @@ pub struct StaffAuthService<S> {
     service: Rc<S>,
 }
 
-async fn authenticate(req: &ServiceRequest) -> Result<(), AppError> {
+/// Authenticate a `/staff/*` request. For the staff app's own session it also
+/// returns the signed server time to hand back to that phone (CL-11).
+async fn authenticate(req: &ServiceRequest) -> Result<Option<String>, AppError> {
     let token = req
         .headers()
         .get("Authorization")
@@ -305,7 +322,7 @@ async fn authenticate(req: &ServiceRequest) -> Result<(), AppError> {
     if let Ok(claims) = verify_token(&secret, &token) {
         check_user_org(pool.get_ref(), &claims).await?;
         req.extensions_mut().insert(claims);
-        return Ok(());
+        return Ok(None);
     }
 
     // The staff app's session.
@@ -344,8 +361,9 @@ async fn authenticate(req: &ServiceRequest) -> Result<(), AppError> {
             iat: staff.iat,
         });
     }
+    let anchor = crate::staff::dawam::clock::sign_anchor(&secret, principal.device_id, Utc::now());
     req.extensions_mut().insert(principal);
-    Ok(())
+    Ok(Some(anchor))
 }
 
 impl<S, B> Service<ServiceRequest> for StaffAuthService<S>
@@ -362,11 +380,27 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let svc = self.service.clone();
         Box::pin(async move {
-            if let Err(e) = authenticate(&req).await {
-                let resp = e.error_response().map_into_boxed_body();
-                return Ok(req.into_response(resp).map_into_right_body());
+            let anchor = match authenticate(&req).await {
+                Ok(a) => a,
+                Err(e) => {
+                    let resp = e.error_response().map_into_boxed_body();
+                    return Ok(req.into_response(resp).map_into_right_body());
+                }
+            };
+            let mut res = svc.call(req).await?;
+            // Every answer the phone gets carries the signed server time it
+            // dates offline punches from (CL-11).
+            if let Some(a) = anchor
+                && let Ok(v) = actix_web::http::header::HeaderValue::from_str(&a)
+            {
+                res.headers_mut().insert(
+                    actix_web::http::header::HeaderName::from_static(
+                        crate::staff::dawam::clock::ANCHOR_HEADER,
+                    ),
+                    v,
+                );
             }
-            svc.call(req).await.map(|r| r.map_into_left_body())
+            Ok(res.map_into_left_body())
         })
     }
 }

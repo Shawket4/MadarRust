@@ -89,8 +89,20 @@ impl Session {
 }
 
 /// Sign `employee` in on a new phone, as `POST /auth/staff/otp/verify` does,
-/// without the WhatsApp round trip: one live device and a staff token.
+/// without the WhatsApp round trip: one live device and a staff token. The
+/// phone has accepted the location notice (AT-5); see [`session_unaccepted`].
 pub async fn session(pool: &PgPool, employee: Uuid) -> Session {
+    let s = session_unaccepted(pool, employee).await;
+    sqlx::query("UPDATE staff_devices SET privacy_accepted_at = now() WHERE id = $1")
+        .bind(s.device_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    s
+}
+
+/// A freshly signed-in phone that has not accepted the location notice yet.
+pub async fn session_unaccepted(pool: &PgPool, employee: Uuid) -> Session {
     let (org, user): (Uuid, Option<Uuid>) =
         sqlx::query_as("SELECT org_id, user_id FROM employees WHERE id = $1")
             .bind(employee)
@@ -141,9 +153,44 @@ pub async fn phone_token(pool: &PgPool, employee: Uuid) -> String {
     format!("{}|{}", s.token, s.device)
 }
 
+/// A branch till: a registered POS device at `branch` with a till session
+/// open on it (the only place a till PIN punch is accepted, CL-13). Returns
+/// the device id.
+pub async fn open_till(pool: &PgPool, org: Uuid, branch: Uuid, teller: Uuid) -> Uuid {
+    let device = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO devices (id, org_id, branch_id, code, kind) VALUES ($1, $2, $3, 'T1', 'pos')",
+    )
+    .bind(device)
+    .bind(org)
+    .bind(branch)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO tills (branch_id, teller_id, device_id) VALUES ($1, $2, $3)")
+        .bind(branch)
+        .bind(teller)
+        .bind(device)
+        .execute(pool)
+        .await
+        .unwrap();
+    device
+}
+
+/// A user's JWT sent from a till device: `token#till=<device>` for
+/// [`authed`] (adds `X-Madar-Device`).
+pub fn at_till(user_token: &str, device: Uuid) -> String {
+    format!("{user_token}#till={device}")
+}
+
 /// Authenticate a request with a user's JWT, or with a phone's
-/// `token|device` (the staff token plus `X-Staff-Device`).
+/// `token|device` (the staff token plus `X-Staff-Device`), or a user's JWT
+/// from a till (`token#till=<device>`, see [`at_till`]).
 pub fn authed(req: TestRequest, token: &str) -> TestRequest {
+    let (token, req) = match token.split_once("#till=") {
+        Some((t, device)) => (t, req.insert_header(("X-Madar-Device", device.to_string()))),
+        None => (token, req),
+    };
     match token.split_once('|') {
         Some((t, device)) => req
             .insert_header(("Authorization", format!("Bearer {t}")))

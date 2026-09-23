@@ -431,8 +431,10 @@ async fn check_in_outside_the_geofence_is_refused(pool: PgPool) {
     assert_eq!(count, 0, "a refused punch must not leave a record behind");
 }
 
+/// CL-2: the app's punch is always fenced. The org's old `require_geofence`
+/// switch no longer reaches the phone (the spec has no off switch).
 #[sqlx::test]
-async fn geofencing_can_be_turned_off_per_org(pool: PgPool) {
+async fn the_fence_cannot_be_turned_off_for_the_app(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool, &stable_zone()).await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
@@ -461,9 +463,11 @@ async fn geofencing_can_be_turned_off_per_org(pool: PgPool) {
     let resp = check_in(&app, &token, f.branch, BRANCH_LAT + 0.01, BRANCH_LNG).await;
     assert_eq!(
         resp.status(),
-        201,
-        "with the fence off, distance should not block the punch"
+        403,
+        "the switch is gone: outside the radius is refused"
     );
+    let resp = check_in(&app, &token, f.branch, BRANCH_LAT, BRANCH_LNG).await;
+    assert_eq!(resp.status(), 201);
 }
 
 // ── Lateness ──────────────────────────────────────────────────
@@ -2206,12 +2210,13 @@ async fn self_service_needs_no_permission_grant(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn attendance_coordinates_are_purged_after_the_retention_window(pool: PgPool) {
-    // Attendance TIMES are payroll evidence and must survive; the COORDINATES are
-    // only there to prove the punch happened at the branch, and stop being
-    // defensible to keep once the punch is settled. The geofence RESULT
-    // (distance in metres) is kept — it is the auditable fact, and unlike a
-    // latitude/longitude it does not record where the employee actually was.
+async fn attendance_coordinates_are_wiped_once_their_month_is_approved(pool: PgPool) {
+    // AT-4: exact coordinates go when the payroll month they belong to is
+    // approved — not by age. Attendance TIMES are payroll evidence and must
+    // survive, and so must the geofence RESULT (distance in metres): it is
+    // the auditable fact, and unlike a latitude/longitude it does not record
+    // where the employee actually was. A month nobody approved yet keeps its
+    // coordinates however old it is.
     let f = seed(&pool, "UTC").await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
 
@@ -2224,28 +2229,37 @@ async fn attendance_coordinates_are_purged_after_the_retention_window(pool: PgPo
                      (org_id, employee_id, branch_id, business_date, status, check_in_at, \
                       check_in_latitude, check_in_longitude, check_in_distance_meters, \
                       check_in_method, check_out_at, check_out_latitude, check_out_longitude) \
-                 VALUES ($1, $2, $3, (CURRENT_DATE - $4::int), 'present', now(), \
+                 VALUES ($1, $2, $3, $4::date, 'present', now(), \
                          30.0444, 31.2357, 12.5, 'mobile_gps', now(), 30.0445, 31.2358) \
                  RETURNING id",
             )
             .bind(org)
             .bind(user)
             .bind(branch)
-            .bind(day.parse::<i32>().unwrap())
+            .bind(day)
             .fetch_one(&pool)
             .await
             .unwrap()
         }
     };
 
-    let old_record = insert("120").await; // well past the 90-day window
-    let recent_record = insert("10").await; // comfortably inside it
+    let approved_record = insert("2026-06-10").await;
+    let open_record = insert("2026-05-10").await; // older, but never approved
+    sqlx::query(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+         VALUES ($1, 'June', '2026-06-01', '2026-06-30', 'generated'), \
+                ($1, 'May', '2026-05-01', '2026-05-31', 'draft')",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     madar_rust::staff::jobs::purge_stale_coordinates(&pool)
         .await
-        .expect("the purge should succeed");
+        .expect("the wipe should succeed");
 
-    // The old punch keeps everything payroll needs, minus the coordinates.
+    // The approved month keeps everything payroll needs, minus the coordinates.
     let (lat, lng, out_lat, out_lng, checked_in, distance, method): (
         Option<f64>,
         Option<f64>,
@@ -2259,7 +2273,7 @@ async fn attendance_coordinates_are_purged_after_the_retention_window(pool: PgPo
                 check_out_longitude, check_in_at, check_in_distance_meters, check_in_method \
            FROM attendance_records WHERE id = $1",
     )
-    .bind(old_record)
+    .bind(approved_record)
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -2287,18 +2301,18 @@ async fn attendance_coordinates_are_purged_after_the_retention_window(pool: PgPo
         "how the punch was made must survive"
     );
 
-    // A recent punch is untouched: the window has not passed.
+    // The month nobody approved keeps its coordinates.
     let (lat, lng): (Option<f64>, Option<f64>) = sqlx::query_as(
         "SELECT check_in_latitude, check_in_longitude FROM attendance_records WHERE id = $1",
     )
-    .bind(recent_record)
+    .bind(open_record)
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(
         (lat, lng),
         (Some(30.0444), Some(31.2357)),
-        "a punch inside the retention window must keep its coordinates"
+        "a month not yet approved must keep its coordinates"
     );
 
     // Idempotent: re-running finds nothing left to do and must not error.

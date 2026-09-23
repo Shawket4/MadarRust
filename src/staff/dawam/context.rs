@@ -88,6 +88,10 @@ pub struct StaffContext {
     pub people: Vec<ContextPerson>,
     pub work_shifts: Vec<WorkShiftBrief>,
     pub settings: ContextSettings,
+    /// When THIS phone accepted the location notice; null = show it before
+    /// any location is taken (AT-5). A new phone, or a restored session on
+    /// one that never accepted, starts null.
+    pub privacy_accepted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[utoipa::path(
@@ -233,6 +237,7 @@ pub async fn my_context(
         branches,
         people,
         work_shifts,
+        privacy_accepted_at: super::privacy::accepted_at(pool, me.device_id).await?,
         settings: ContextSettings {
             period_start_day: s.period_start_day,
             overtime_mode: s.overtime_mode,
