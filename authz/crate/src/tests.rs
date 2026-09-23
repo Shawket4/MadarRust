@@ -802,3 +802,43 @@ fn a_non_owner_touches_only_people_strictly_below_them() {
     assert_eq!(may_touch(&owner, "o1", &owner.clone(), "o2"), Ok(()));
     assert_eq!(may_give_kind(&owner, RoleKind::OrgAdmin), Ok(()));
 }
+
+// ── remote approvals (PM-1) ─────────────────────────────────────────────────
+
+#[test]
+fn an_act_over_the_limit_waits_for_someone_without_that_limit() {
+    let capped = |max: Option<i64>| {
+        let mut r = role(RoleKind::BranchManager, &[Cap::HrAdjustmentsCreate]);
+        if let Some(m) = max {
+            r.limits.insert(
+                Cap::HrAdjustmentsCreate.id(),
+                Limits {
+                    max_amount: Some(m),
+                    ..Default::default()
+                },
+            );
+        }
+        resolve(
+            &person(vec![assigned(r, &[])], vec![]),
+            Scope::Anywhere,
+            NOW,
+            &OrgPolicy::default(),
+        )
+    };
+    let manager = capped(Some(1000_00));
+    let bigger = capped(Some(5000_00));
+    let owner = capped(None);
+    let req = Request::of(Cap::HrAdjustmentsCreate).amount(2000_00);
+
+    assert_eq!(park(decide(&manager, &Request::of(Cap::HrAdjustmentsCreate).amount(5_00)), req, "emp", "mgr"), None);
+    let p = park(decide(&manager, &req), req, "emp", "mgr").expect("waits");
+    assert!(matches!(p.why, Why::OverLimit { limit: 1000_00, asked: 2000_00, .. }));
+
+    assert_eq!(can_settle(&bigger, "other", &p), Ok(()));
+    assert_eq!(can_settle(&owner, "owner", &p), Ok(()));
+    assert!(matches!(can_settle(&manager, "peer", &p), Err(Why::OverLimit { .. })), "same limit can't");
+    assert_eq!(can_settle(&owner, "mgr", &p), Err(Why::SamePerson), "not who asked");
+    assert_eq!(can_settle(&owner, "emp", &p), Err(Why::SamePerson), "not who it's for");
+    let json = serde_json::to_string(&p).unwrap();
+    assert_eq!(serde_json::from_str::<Pending>(&json).unwrap(), p, "stored as it was parked");
+}

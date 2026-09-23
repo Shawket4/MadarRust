@@ -109,6 +109,26 @@ pub async fn decide_for(
     Ok(decide(&effective(pool, user_id, branch).await?, req))
 }
 
+/// PM-1: may `approver` settle a parked act (from their phone or the
+/// dashboard)? Anyone allowed it outright — the capability without the limit
+/// that made it wait — never the one who asked or the person it is for.
+pub async fn settle(
+    pool: &PgPool,
+    approver: Uuid,
+    pending: &super::Pending,
+    branch: Option<Uuid>,
+) -> Result<(), AppError> {
+    let eff = effective(pool, approver, branch).await?;
+    super::can_settle(&eff, &approver.to_string(), pending).map_err(|why| match why {
+        super::Why::SamePerson => {
+            AppError::Forbidden("Someone else has to decide this one.".into())
+        }
+        _ => AppError::Forbidden(
+            "This is above your limit too — it waits for someone with a higher one.".into(),
+        ),
+    })
+}
+
 pub fn denied(cap: Cap) -> AppError {
     AppError::Forbidden(format!(
         "You don't have permission to do this: {} ({})",

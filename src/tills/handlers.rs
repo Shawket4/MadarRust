@@ -453,6 +453,10 @@ pub struct CashMovementRequest {
     pub client_ref: Option<Uuid>,
     #[serde(default)]
     pub device_id: Option<Uuid>,
+    /// A pay-out handed to an employee for shop purchases: logged in Dawam as
+    /// their expense advance, never deducted (AV-8).
+    #[serde(default)]
+    pub expense_advance_to: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -578,10 +582,7 @@ async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
 /// voided) + movements − cash refunds issued from this till.
-pub async fn compute_system_cash<'e, E>(
-    executor: E,
-    till_id: Uuid,
-) -> Result<i64, sqlx::Error>
+pub async fn compute_system_cash<'e, E>(executor: E, till_id: Uuid) -> Result<i64, sqlx::Error>
 where
     E: sqlx::PgExecutor<'e>,
 {
@@ -1198,10 +1199,7 @@ pub async fn get_till_report(
     }))
 }
 
-pub async fn report_figures(
-    pool: &PgPool,
-    till: &Till,
-) -> Result<TillReportFigures, AppError> {
+pub async fn report_figures(pool: &PgPool, till: &Till) -> Result<TillReportFigures, AppError> {
     let till_id = till.id;
     let payment_summary = sqlx::query_as::<_, PaymentSummaryRow>(
         r#"SELECT op.method::text AS payment_method,
@@ -1445,6 +1443,14 @@ pub(crate) async fn add_cash_movement_inner(
             "Only a correction can name the movement it corrects".into(),
         ));
     }
+    if let Some(to) = body.expense_advance_to {
+        if kind != CashMovementKind::PayOut {
+            return Err(AppError::BadRequest(
+                "Only a pay-out can be an expense advance".into(),
+            ));
+        }
+        crate::staff::require_user_in_org(pool, actor.org_id, to).await?;
+    }
     if let Some(cref) = body.client_ref
         && let Some(existing) = fetch_cash_movement_by_client_ref(pool, cref, actor.org_id).await?
     {
@@ -1541,6 +1547,32 @@ pub(crate) async fn add_cash_movement_inner(
         }
         Err(e) => return Err(e.into()),
     };
+    if let Some(to) = body.expense_advance_to {
+        sqlx::query(
+            "INSERT INTO expense_advances (org_id, user_id, branch_id, amount_piastres, purpose, \
+                via, handed_by, given_on, till_movement_id) \
+             SELECT $1, $2, $3, $4, $5, 'till', $6, \
+                    (COALESCE($7, now()) AT TIME ZONE COALESCE(b.timezone::text, 'Africa/Cairo'))::date, $8 \
+               FROM branches b WHERE b.id = $3",
+        )
+        .bind(actor.org_id)
+        .bind(to)
+        .bind(till.branch_id)
+        .bind(-i64::from(body.amount))
+        .bind(body.note.trim())
+        .bind(actor.teller_id)
+        .bind(body.created_at)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if let Some(corrects_id) = body.corrects_id {
+        // Undoing the pay-out undoes the advance it logged.
+        sqlx::query("DELETE FROM expense_advances WHERE till_movement_id = $1")
+            .bind(corrects_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     let movement = sqlx::query_as::<_, CashMovement>(&format!(
         "SELECT {CASH_MOVEMENT_COLUMNS} FROM till_cash_movements m WHERE m.id = $1"
     ))

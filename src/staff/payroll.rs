@@ -17,6 +17,8 @@
 
 use std::collections::HashMap;
 
+use crate::costing::round_piastres;
+
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -148,6 +150,14 @@ pub struct Payslip {
     pub net_piastres: i64,
     pub breakdown: serde_json::Value,
     pub generated_at: DateTime<Utc>,
+    /// Paid by `cash` · `bank` · `wallet` (PAY-7); null until marked paid.
+    #[sqlx(default)]
+    pub paid_method: Option<String>,
+    #[sqlx(default)]
+    pub paid_at: Option<DateTime<Utc>>,
+    /// What deductions exceeded pay by; carried into the next payslip (PAY-12).
+    #[sqlx(default)]
+    pub carry_out_piastres: i64,
     /// The period this covers, denormalised. A payslip identified only by its
     /// generation timestamp is unreadable — two months run on the same day would
     /// be indistinguishable to the employee looking at them.
@@ -164,7 +174,7 @@ const PAYSLIP_SELECT: &str = r#"
            s.base_salary_piastres, s.worked_days, s.absent_days, s.leave_days,
            s.late_minutes, s.overtime_minutes, s.overtime_piastres, s.bonuses_piastres,
            s.deductions_piastres, s.advance_installment_piastres, s.net_piastres,
-           s.breakdown, s.generated_at,
+           s.breakdown, s.generated_at, s.paid_method, s.paid_at, s.carry_out_piastres,
            pp.name AS period_name, pp.start_date AS period_start,
            pp.end_date AS period_end
       FROM payslips s
@@ -866,6 +876,20 @@ pub async fn set_period_status(
             "A {current} period cannot move to {target}"
         )));
     }
+    // PAY-8: reopening is only possible while nobody has been paid.
+    if current == "generated" && target == "draft" {
+        let any_paid: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM payslips WHERE payroll_period_id = $1 AND paid_at IS NOT NULL)",
+        )
+        .bind(*id)
+        .fetch_one(pool.get_ref())
+        .await?;
+        if any_paid {
+            return Err(AppError::Conflict(
+                "Someone has already been paid — this payroll can't be reopened.".into(),
+            ));
+        }
+    }
 
     let row = sqlx::query_as::<_, PayrollPeriod>(&format!(
         "UPDATE payroll_periods SET status = $3, \
@@ -964,6 +988,9 @@ pub struct ComputedPayslip {
     /// pay would go negative; this is the affordable figure, the one collected.
     pub advance_installment_piastres: i64,
     pub net_piastres: i64,
+    /// Deductions beyond what was earned: the payslip stops at zero and this
+    /// carries into the next one as a debt (PAY-12).
+    pub carry_out_piastres: i64,
     /// Line-by-line, so a preview can name each deduction rather than showing a
     /// lump sum nobody can argue with.
     pub breakdown: serde_json::Value,
@@ -975,7 +1002,7 @@ pub struct ComputedPayslip {
 }
 
 /// Compute every payslip for a window without writing anything.
-async fn compute_payslips(
+pub(crate) async fn compute_payslips(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
     start_date: NaiveDate,
@@ -988,9 +1015,11 @@ async fn compute_payslips(
         user_id: Uuid,
         name: String,
         base_salary_piastres: i64,
+        hire_date: Option<NaiveDate>,
+        termination_date: Option<NaiveDate>,
     }
     let staff: Vec<Staff> = sqlx::query_as(
-        "SELECT p.user_id, u.name, p.base_salary_piastres \
+        "SELECT p.user_id, u.name, p.base_salary_piastres, p.hire_date, p.termination_date \
            FROM staff_profiles p \
            JOIN users u ON u.id = p.user_id AND u.deleted_at IS NULL \
           WHERE p.org_id = $1 \
@@ -1014,6 +1043,9 @@ async fn compute_payslips(
         leave_days: Decimal,
         late_minutes: i64,
         overtime_minutes: i64,
+        night_overtime_minutes: i64,
+        cover_minutes: i64,
+        holiday_minutes: i64,
         avg_scheduled_minutes: Option<Decimal>,
     }
     let totals_rows: Vec<TotalsRow> = sqlx::query_as(
@@ -1028,12 +1060,35 @@ async fn compute_payslips(
                -- i.e. in production, not on an empty test org.
                COALESCE(SUM(CASE WHEN a.status = 'absent'   THEN 1 ELSE 0 END), 0)::numeric AS absent_days,
                COALESCE(SUM(CASE WHEN a.status = 'on_leave' THEN 1 ELSE 0 END), 0)::numeric AS leave_days,
-               COALESCE(SUM(a.late_minutes), 0)::bigint     AS late_minutes,
-               COALESCE(SUM(a.overtime_minutes), 0)::bigint AS overtime_minutes,
+               COALESCE(SUM(a.late_minutes) FILTER (WHERE a.covered_user_id IS NULL), 0)::bigint
+                                                                              AS late_minutes,
+               -- Overtime is off unless the owner turned it on; in approval mode
+               -- only what a manager approved counts (RU-7). A night shift's
+               -- overtime is priced at the night rate (RU-8).
+               COALESCE(SUM(a.overtime_minutes) FILTER (WHERE a.covered_user_id IS NULL
+                   AND ($4 = 'automatic' OR ($4 = 'approval' AND a.overtime_status = 'approved'))), 0)::bigint
+                                                                              AS overtime_minutes,
+               -- Night overtime is the overtime that falls in the night window,
+               -- in the branch's time zone (RU-8, RU-9).
+               COALESCE(SUM(LEAST(a.overtime_minutes,
+                   dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $5, $6)))
+                   FILTER (WHERE a.covered_user_id IS NULL
+                   AND ($4 = 'automatic' OR ($4 = 'approval' AND a.overtime_status = 'approved'))), 0)::bigint
+                                                                              AS night_overtime_minutes,
+               -- A confirmed cover pays the coverer at their own plain rate (CV-4, CV-5).
+               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_user_id IS NOT NULL
+                   AND a.cover_status = 'confirmed'), 0)::bigint             AS cover_minutes,
+               -- Working a day set up as a holiday (RU-10).
+               COALESCE(SUM(a.worked_minutes) FILTER (WHERE a.covered_user_id IS NULL
+                   AND h.on_date IS NOT NULL), 0)::bigint                    AS holiday_minutes,
                AVG(EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60.0)
                    FILTER (WHERE a.scheduled_start_at IS NOT NULL
                              AND a.scheduled_end_at   IS NOT NULL)            AS avg_scheduled_minutes
           FROM attendance_records a
+          LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id
+          JOIN branches br ON br.id = a.branch_id
+          LEFT JOIN staff_holidays h ON h.org_id = a.org_id AND h.on_date = a.business_date
+                                    AND h.decision = 'holiday'
          WHERE a.org_id = $1 AND a.business_date BETWEEN $2 AND $3
          GROUP BY a.user_id
         "#,
@@ -1041,9 +1096,23 @@ async fn compute_payslips(
     .bind(org_id)
     .bind(start_date)
     .bind(end_date)
+    .bind(&settings.overtime_mode)
+    .bind(settings.night_start)
+    .bind(settings.night_end)
     .fetch_all(&mut *conn)
     .await?;
 
+    let mut extra: HashMap<Uuid, (i64, i64, i64)> = HashMap::new();
+    for row in &totals_rows {
+        extra.insert(
+            row.user_id,
+            (
+                row.night_overtime_minutes,
+                row.cover_minutes,
+                row.holiday_minutes,
+            ),
+        );
+    }
     let mut totals: HashMap<Uuid, AttendanceTotals> = HashMap::new();
     for row in totals_rows {
         totals.insert(
@@ -1071,6 +1140,8 @@ async fn compute_payslips(
         amount_piastres: Option<i64>,
         percent_of_base: Option<Decimal>,
         reason: String,
+        source: String,
+        waived: bool,
     }
     async fn load_adjustments(
         conn: &mut sqlx::PgConnection,
@@ -1079,18 +1150,23 @@ async fn compute_payslips(
         from: NaiveDate,
         to: NaiveDate,
     ) -> Result<HashMap<Uuid, Vec<AdjRow>>, AppError> {
-        // `waived_at IS NULL` is what makes an override stick: a waived deduction
-        // stays visible in the ledger but never reaches a payslip. The bonuses
-        // table has no waive columns, hence the per-table predicate.
-        let waive_filter = if table == "payroll_deductions" {
-            "AND waived_at IS NULL"
+        // A waived deduction stays on the payslip, struck through and counted
+        // for nothing (AD-8): the decision is final and visible. The bonuses
+        // table has no waive columns, hence the per-table column.
+        let waived = if table == "payroll_deductions" {
+            "waived_at IS NOT NULL"
         } else {
-            ""
+            "false"
         };
         let rows: Vec<AdjRow> = sqlx::query_as(&format!(
-            "SELECT id, user_id, amount_piastres, percent_of_base, reason FROM {table} \
+            // A recurring allowance or deduction counts in every period from
+            // its start until stopped (AD-3).
+            "SELECT id, user_id, amount_piastres, percent_of_base, reason, source, \
+                    {waived} AS waived FROM {table} \
               WHERE org_id = $1 AND status = 'approved' \
-                AND effective_date BETWEEN $2 AND $3 {waive_filter}"
+                AND (effective_date BETWEEN $2 AND $3 \
+                     OR (recurring AND effective_date <= $3 \
+                         AND (ends_on IS NULL OR ends_on >= $2)))"
         ))
         .bind(org_id)
         .bind(from)
@@ -1135,15 +1211,90 @@ async fn compute_payslips(
                     row.percent_of_base,
                     person.base_salary_piastres,
                 );
+                if row.waived {
+                    lines.push(json!({
+                        "id": row.id, "reason": row.reason, "piastres": amount,
+                        "source": row.source, "waived": true,
+                    }));
+                    continue;
+                }
                 total = total.saturating_add(amount);
                 lines.push(json!({
-                    "id": row.id, "reason": row.reason, "piastres": amount,
+                    "id": row.id, "reason": row.reason, "piastres": amount, "source": row.source,
                 }));
             }
             (total, lines)
         };
-        let (bonus_total, bonus_lines) = resolve(bonus_rows.get(&person.user_id));
-        let (deduction_total, deduction_lines) = resolve(deduction_rows.get(&person.user_id));
+        let (mut bonus_total, mut bonus_lines) = resolve(bonus_rows.get(&person.user_id));
+        let (mut deduction_total, mut deduction_lines) =
+            resolve(deduction_rows.get(&person.user_id));
+
+        // Joined, left or changed mid-period: paid by calendar days (PAY-13).
+        let window_days = (end_date - start_date).num_days() + 1;
+        let from = person.hire_date.map_or(start_date, |h| h.max(start_date));
+        let to = person
+            .termination_date
+            .map_or(end_date, |t| t.min(end_date));
+        let paid_days = ((to - from).num_days() + 1).clamp(0, window_days);
+        let base_salary = if paid_days < window_days {
+            round_piastres(
+                Decimal::from(person.base_salary_piastres) * Decimal::from(paid_days)
+                    / Decimal::from(window_days.max(1)),
+            )
+        } else {
+            person.base_salary_piastres
+        };
+        let rates = crate::staff::rules::PayRates::from_base(
+            person.base_salary_piastres,
+            settings.working_days_per_month,
+            attendance.scheduled_minutes,
+        );
+        let (night_ot, cover_minutes, holiday_minutes) =
+            extra.get(&person.user_id).copied().unwrap_or_default();
+        if cover_minutes > 0 {
+            let pay = round_piastres(rates.minutes_piastres(Decimal::from(cover_minutes)));
+            bonus_total = bonus_total.saturating_add(pay);
+            bonus_lines
+                .push(json!({ "id": null, "kind": "cover", "reason": "cover", "piastres": pay }));
+        }
+        if holiday_minutes > 0 {
+            let pay = round_piastres(
+                rates.minutes_piastres(Decimal::from(holiday_minutes))
+                    * (settings.holiday_multiplier - Decimal::ONE).max(Decimal::ZERO),
+            );
+            bonus_total = bonus_total.saturating_add(pay);
+            bonus_lines.push(
+                json!({ "id": null, "kind": "holiday", "reason": "holiday", "piastres": pay }),
+            );
+        }
+        // Last payslip's shortfall is this one's first deduction (PAY-12).
+        let carry_in: i64 = sqlx::query_scalar(
+            "SELECT s.carry_out_piastres FROM payslips s \
+               JOIN payroll_periods pp ON pp.id = s.payroll_period_id \
+              WHERE s.user_id = $1 AND pp.org_id = $2 AND pp.end_date < $3 \
+              ORDER BY pp.end_date DESC LIMIT 1",
+        )
+        .bind(person.user_id)
+        .bind(org_id)
+        .bind(start_date)
+        .fetch_optional(&mut *conn)
+        .await?
+        .unwrap_or(0);
+        if carry_in > 0 {
+            deduction_total = deduction_total.saturating_add(carry_in);
+            deduction_lines.push(
+                json!({ "id": null, "kind": "carry", "reason": "carry", "piastres": carry_in }),
+            );
+        }
+        // One multiplier that prices day and night overtime at their own rates.
+        let ot_multiplier = if attendance.overtime_minutes > 0 {
+            let day = attendance.overtime_minutes - night_ot.min(attendance.overtime_minutes);
+            (Decimal::from(day) * settings.overtime_day_multiplier
+                + Decimal::from(night_ot) * settings.overtime_night_multiplier)
+                / Decimal::from(attendance.overtime_minutes)
+        } else {
+            settings.overtime_day_multiplier
+        };
 
         // Live advances, oldest first — the earliest debt is repaid first.
         #[derive(sqlx::FromRow)]
@@ -1169,11 +1320,11 @@ async fn compute_payslips(
             .sum();
 
         let result = compute_net_salary(&PayrollInputs {
-            base_salary_piastres: person.base_salary_piastres,
+            base_salary_piastres: base_salary,
             working_days_per_month: settings.working_days_per_month,
             scheduled_minutes_per_day: attendance.scheduled_minutes,
             overtime_minutes: attendance.overtime_minutes,
-            overtime_multiplier: settings.default_overtime_multiplier,
+            overtime_multiplier: ot_multiplier,
             bonuses_piastres: bonus_total,
             deductions_piastres: deduction_total,
             advance_installment_piastres: wanted,
@@ -1216,11 +1367,21 @@ async fn compute_payslips(
             deductions_piastres: result.deductions_piastres,
             advance_installment_piastres: result.advance_installment_piastres,
             net_piastres: result.net_piastres,
+            carry_out_piastres: deduction_total
+                .saturating_sub(
+                    result
+                        .base_piastres
+                        .saturating_add(result.overtime_piastres)
+                        .saturating_add(result.bonuses_piastres),
+                )
+                .max(0),
             breakdown: json!({
                 "bonuses": bonus_lines,
                 "deductions": deduction_lines,
                 "advances": advance_lines,
-                "overtime_multiplier": settings.default_overtime_multiplier,
+                "overtime_multiplier": ot_multiplier,
+                "paid_days": paid_days,
+                "window_days": window_days,
                 "scheduled_minutes_per_day": attendance.scheduled_minutes,
                 "working_days_per_month": settings.working_days_per_month,
             }),
@@ -1358,8 +1519,8 @@ pub async fn generate_period(
                  org_id, payroll_period_id, user_id, base_salary_piastres, worked_days,
                  absent_days, leave_days, late_minutes, overtime_minutes, overtime_piastres,
                  bonuses_piastres, deductions_piastres, advance_installment_piastres,
-                 net_piastres, breakdown
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                 net_piastres, breakdown, carry_out_piastres
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
         )
         .bind(org_id)
         .bind(*id)
@@ -1376,6 +1537,7 @@ pub async fn generate_period(
         .bind(slip.advance_installment_piastres)
         .bind(slip.net_piastres)
         .bind(&slip.breakdown)
+        .bind(slip.carry_out_piastres)
         .execute(&mut *tx)
         .await?;
 

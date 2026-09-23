@@ -755,6 +755,13 @@ pub async fn put_override(
     .bind(claims.user_id())
     .fetch_one(pool.get_ref())
     .await?;
+    crate::staff::dawam::roster::after_day_change(
+        pool.get_ref(),
+        org_id,
+        body.user_id,
+        body.on_date,
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(row))
 }
 

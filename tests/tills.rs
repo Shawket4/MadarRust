@@ -322,6 +322,7 @@ async fn test_cash_movements(pool: PgPool) {
         note: "Paid vendor".into(),
         created_at: None,
         client_ref: None,
+        expense_advance_to: None,
     };
     let req_move = test::TestRequest::post()
         .uri(&format!("/shifts/{}/cash-movements", shift_id))
@@ -461,6 +462,7 @@ async fn test_cash_movement_client_ref_idempotent(pool: PgPool) {
         note: "Paid vendor".into(),
         created_at: None,
         client_ref: Some(cref),
+        expense_advance_to: None,
     };
 
     let first = test::call_service(
@@ -1442,6 +1444,7 @@ async fn test_cash_movement_timestamp_contract(pool: PgPool) {
                 note: "vendor".into(),
                 created_at,
                 client_ref: None,
+                expense_advance_to: None,
             })
             .to_request()
     };

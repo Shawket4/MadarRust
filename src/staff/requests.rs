@@ -299,9 +299,6 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<(), AppError> {
     let bad = |m: &str| Err(AppError::BadRequest(m.to_string()));
     match body.kind.as_str() {
         "leave" => {
-            if body.leave_type_id.is_none() {
-                return bad("A leave request needs a leave type");
-            }
             let end = body.end_date.unwrap_or(body.on_date);
             if end < body.on_date {
                 return bad("End date is before start date");
@@ -446,7 +443,12 @@ async fn insert_request(
     body: &CreateStaffRequest,
 ) -> Result<StaffRequest, AppError> {
     validate_kind(&body.kind)?;
+    // RQ-2, RQ-3: leave has no types; one an older client sends is still checked.
+    let body = body.clone();
+    let body = &body;
     validate_shape(body)?;
+    // RQ-4: a paid or closed month is frozen.
+    require_open_month(pool, org_id, body.on_date).await?;
 
     let is_leave = body.kind == "leave";
     let end_date = match body.kind.as_str() {
@@ -454,7 +456,7 @@ async fn insert_request(
         _ => None,
     };
 
-    if is_leave {
+    if is_leave && body.leave_type_id.is_some() {
         let type_ok: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM leave_types WHERE id = $1 AND org_id = $2 AND is_active)",
         )
@@ -512,15 +514,15 @@ async fn insert_request(
         }
     }
 
-    // The partial unique index covers the other kinds: one live request per kind
-    // per day, so `ON CONFLICT DO NOTHING` turns a duplicate into a clean 409
-    // instead of a constraint error.
+    // `staff_requests_no_overlap` and `staff_requests_one_correction` are the
+    // arbiters: a violation comes back as a DB error, mapped to the right 409
+    // message in `AppError::from`.
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO staff_requests \
              (org_id, user_id, kind, on_date, end_date, from_time, to_time, \
               leave_type_id, is_half_day, title, location, attendance_record_id, reason) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, FALSE), $10, $11, $12, $13) \
-         ON CONFLICT DO NOTHING RETURNING id",
+         RETURNING id",
     )
     .bind(org_id)
     .bind(user_id)
@@ -535,13 +537,32 @@ async fn insert_request(
     .bind(clean(body.location.as_ref()))
     .bind(body.attendance_record_id)
     .bind(clean(body.reason.as_ref()))
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| {
-        AppError::Conflict("There is already a live request of that kind for that date".into())
-    })?;
+    .fetch_one(pool)
+    .await?;
 
     load_request(pool, id).await
+}
+
+/// A paid or closed payroll month can't be changed by a request (RQ-4).
+pub(crate) async fn require_open_month(
+    pool: &PgPool,
+    org_id: Uuid,
+    on_date: NaiveDate,
+) -> Result<(), AppError> {
+    let closed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM payroll_periods WHERE org_id = $1 \
+            AND $2 BETWEEN start_date AND end_date AND status IN ('paid', 'closed'))",
+    )
+    .bind(org_id)
+    .bind(on_date)
+    .fetch_one(pool)
+    .await?;
+    if closed {
+        return Err(AppError::Conflict(
+            "That month's payroll is already paid — it can't change now.".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn load_request(pool: &PgPool, id: Uuid) -> Result<StaffRequest, AppError> {
@@ -631,6 +652,21 @@ pub async fn create_my_request(
     let org_id = my_org(pool.get_ref(), user_id).await?;
 
     let row = insert_request(pool.get_ref(), org_id, user_id, &body).await?;
+    let pool = pool.get_ref();
+    let name = crate::staff::dawam::user_name(pool, user_id).await;
+    let branch = crate::staff::dawam::branches_of(pool, user_id)
+        .await?
+        .first()
+        .copied();
+    crate::staff::dawam::notify_managers(
+        pool,
+        org_id,
+        branch,
+        Some(user_id),
+        "staff.n_request",
+        serde_json::json!({ "name": name, "kind": row.kind, "date": row.on_date }),
+    )
+    .await;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -713,6 +749,19 @@ pub async fn decide_request(
     let self_cancel = decision == "cancelled" && existing.user_id == caller;
     if !self_cancel {
         check_permission(pool.get_ref(), &claims, "leave", "update").await?;
+        // RQ-5: deciding your own request is the owner's alone.
+        if existing.user_id == caller {
+            crate::authz::require::require(
+                pool.get_ref(),
+                &claims,
+                crate::authz::Cap::HrRequestsSelfApprove,
+                None,
+            )
+            .await?;
+        }
+    }
+    if decision != "rejected" {
+        require_open_month(pool.get_ref(), org_id, existing.on_date).await?;
     }
 
     if existing.status == decision {
@@ -853,7 +902,11 @@ pub async fn decide_request(
     // Only the window kinds carry a pay decision. The approver's explicit choice
     // wins; otherwise the org default applies at the moment of approval, so later
     // edits to the default never retro-change a decided request.
-    let is_paid = if decision == "approved"
+    // Leave is approved as paid or unpaid by the manager (RQ-2); left unsaid,
+    // its type decides.
+    let is_paid = if decision == "approved" && existing.kind == "leave" {
+        body.is_paid
+    } else if decision == "approved"
         && matches!(existing.kind.as_str(), "excuse" | "early_departure")
     {
         match body.is_paid {
@@ -888,8 +941,74 @@ pub async fn decide_request(
     .await?;
     tx.commit().await?;
 
+    // Approving removes a penalty at its source and cancelling brings it back
+    // (RQ-6, RQ-12): re-derive every day the request covers. A correction was
+    // applied above; a human waive or override is never touched.
+    if existing.kind != "correction" && matches!(decision, "approved" | "cancelled") {
+        reprice_days(
+            pool.get_ref(),
+            org_id,
+            existing.user_id,
+            existing.on_date,
+            existing.end_date.unwrap_or(existing.on_date),
+            Some(caller),
+        )
+        .await?;
+    }
+
+    if existing.user_id != caller && decision != "cancelled" {
+        crate::staff::dawam::notify(
+            pool.get_ref(),
+            org_id,
+            existing.user_id,
+            if decision == "approved" {
+                "staff.n_request_approved"
+            } else {
+                "staff.n_request_rejected"
+            },
+            serde_json::json!({ "kind": existing.kind, "date": existing.on_date }),
+        )
+        .await;
+    }
     let row = load_request(pool.get_ref(), *id).await?;
     Ok(HttpResponse::Ok().json(row))
+}
+
+/// Re-derive and re-price a person's attendance days, e.g. after a request that
+/// covers them was approved or cancelled.
+pub(crate) async fn reprice_days(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+    editor: Option<Uuid>,
+) -> Result<(), AppError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM attendance_records \
+          WHERE org_id = $1 AND user_id = $2 AND business_date BETWEEN $3 AND $4",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    for id in ids {
+        crate::staff::attendance::apply_punch_correction(
+            pool,
+            org_id,
+            id,
+            None,
+            None,
+            None,
+            None,
+            "Re-priced after a request decision",
+            editor,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 // ── Leave types ───────────────────────────────────────────────

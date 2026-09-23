@@ -839,6 +839,46 @@ pub fn can_approve(
     }
 }
 
+// ── Remote approvals (PM-1) ─────────────────────────────────────────────────
+
+/// An act that needed approval, parked until someone decides it from their
+/// own phone or the dashboard. The POS's same-device PIN approval is
+/// [`can_approve`] on the spot; this is the same rule, later and elsewhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    pub request: Request,
+    /// Whose record the act touches (the employee paid, the sale refunded).
+    pub subject_id: String,
+    /// Who attempted it.
+    pub requested_by: String,
+    /// Why it had to wait.
+    pub why: Why,
+}
+
+/// Park the act when [`decide`] said it needs approval. `Allow` and `Deny`
+/// never wait.
+pub fn park(decision: Decision, request: Request, subject_id: &str, requested_by: &str) -> Option<Pending> {
+    match decision {
+        Decision::NeedsApproval(why) => Some(Pending {
+            request,
+            subject_id: subject_id.to_string(),
+            requested_by: requested_by.to_string(),
+            why,
+        }),
+        Decision::Allow | Decision::Deny(_) => None,
+    }
+}
+
+/// May `approver` settle `p`? Not the person it is for, not the one who asked,
+/// and only someone allowed the act outright — the capability without that
+/// limit.
+pub fn can_settle(approver: &EffectiveSet, approver_id: &str, p: &Pending) -> Result<(), Why> {
+    if approver_id == p.requested_by {
+        return Err(Why::SamePerson);
+    }
+    can_approve(approver, approver_id, &p.subject_id, &p.request)
+}
+
 // ── Legacy projection ───────────────────────────────────────────────────────
 
 pub mod legacy {

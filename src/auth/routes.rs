@@ -50,6 +50,17 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::resource("/authz-keys")
                     .route(web::get().to(crate::authz::snapshot::authz_keys)),
             )
+            // Dawam staff sign-in by phone OTP: unauthenticated, login governor.
+            .service(
+                web::resource("/staff/otp/request")
+                    .wrap(Condition::new(limited, Governor::new(&login_gov)))
+                    .route(web::post().to(crate::staff::dawam::signin::otp_request)),
+            )
+            .service(
+                web::resource("/staff/otp/verify")
+                    .wrap(Condition::new(limited, Governor::new(&login_gov)))
+                    .route(web::post().to(crate::staff::dawam::signin::otp_verify)),
+            )
             .service(
                 web::resource("/resolve-branch")
                     .wrap(Condition::new(limited, Governor::new(&gov)))

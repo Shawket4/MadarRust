@@ -20,7 +20,7 @@
 //! yesterday's business date alongside the rest of that shift.
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -81,6 +81,20 @@ pub struct AttendanceRecord {
     pub edited_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// A cover: whose shift this person worked (CV-*).
+    #[sqlx(default)]
+    pub covered_user_id: Option<Uuid>,
+    /// `pending` · `confirmed` · `rejected` for a cover.
+    #[sqlx(default)]
+    pub cover_status: Option<String>,
+    /// `pending` · `approved` · `rejected` when overtime needs a decision.
+    #[sqlx(default)]
+    pub overtime_status: Option<String>,
+    #[sqlx(default)]
+    pub tracking_off: bool,
+    /// Why someone else punched for this person.
+    #[sqlx(default)]
+    pub punch_reason: Option<String>,
 }
 
 /// Every attendance column plus the two denormalised names, in `AttendanceRecord`
@@ -95,7 +109,8 @@ const RECORD_COLS: &str = r#"
     a.check_out_distance_meters, a.check_out_method,
     a.late_minutes, a.early_leave_minutes, a.overtime_minutes, a.worked_minutes,
     a.is_manual, a.notes, a.edit_reason, a.created_by, a.edited_by,
-    a.created_at, a.updated_at
+    a.created_at, a.updated_at, a.covered_user_id, a.cover_status,
+    a.overtime_status, a.tracking_off, a.punch_reason
 "#;
 
 const RECORD_JOINS: &str = "FROM attendance_records a \
@@ -111,19 +126,50 @@ pub struct AttendanceSettings {
     pub absence_deduction_days: Decimal,
     pub default_overtime_multiplier: Decimal,
     pub auto_checkout_buffer_minutes: i32,
-    pub weekend_days: Vec<i16>,
     pub working_days_per_month: Decimal,
     pub require_geofence: bool,
     /// Whether an approved mid-shift permission or early departure is PAID by
     /// default. The approver may override it on any individual request.
     pub excused_time_paid_default: bool,
+    /// Day of the month a pay period opens (PAY-1): 26 = a 26th–25th cycle.
+    pub period_start_day: i16,
+    /// `off` · `automatic` · `approval` (RU-7).
+    pub overtime_mode: String,
+    pub overtime_day_multiplier: Decimal,
+    pub overtime_night_multiplier: Decimal,
+    /// What working a set-up holiday pays (RU-10).
+    pub holiday_multiplier: Decimal,
+    /// Salary advances owed may reach this share of monthly salary (AV-5).
+    pub advance_cap_percent: Decimal,
+    /// `half_shift` · `whole_day`: what a half-day leave counts as (RQ-8).
+    pub half_day_leave_counts: String,
+    /// Night for the night overtime rate and for suggestions (RU-8, RU-9).
+    pub night_start: NaiveTime,
+    pub night_end: NaiveTime,
+    /// `off` · `soft` · `hard`: how the gender default weighs in suggestions (SC-12).
+    pub gender_mode: String,
+    /// When the business saved its rules; nobody clocks in before (RU-1).
+    pub rules_saved_at: Option<DateTime<Utc>>,
+    /// Labour limits, hours (RU-13). They warn, never block, and stay
+    /// unconfirmed until a lawyer signs them off.
+    pub limit_day_hours: Decimal,
+    pub limit_week_hours: Decimal,
+    pub limit_presence_hours: Decimal,
+    pub limit_rest_hours: Decimal,
+    pub limit_overtime_day_hours: Decimal,
+    /// POS-derived coverage: one person per this many orders an hour.
+    pub orders_per_staff: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 const SETTINGS_COLS: &str = "id, org_id, branch_id, late_deduction_tiers, absence_deduction_days, \
-     default_overtime_multiplier, auto_checkout_buffer_minutes, weekend_days, \
+     default_overtime_multiplier, auto_checkout_buffer_minutes, \
      working_days_per_month, require_geofence, excused_time_paid_default, \
+     period_start_day, overtime_mode, overtime_day_multiplier, overtime_night_multiplier, \
+     holiday_multiplier, advance_cap_percent, half_day_leave_counts, \
+     night_start, night_end, gender_mode, rules_saved_at, limit_day_hours, limit_week_hours, \
+     limit_presence_hours, limit_rest_hours, limit_overtime_day_hours, orders_per_staff, \
      created_at, updated_at";
 
 impl AttendanceSettings {
@@ -189,6 +235,13 @@ pub struct CheckInRequest {
     pub latitude: Option<f64>,
     #[serde(default)]
     pub longitude: Option<f64>,
+    /// "Always" location was refused: the shift is marked and the manager told
+    /// (CL-5). Location at the punch is still required.
+    #[serde(default)]
+    pub tracking_off: Option<bool>,
+    /// Set when the punch was queued offline; the server rebuilds its time (CL-11).
+    #[serde(default)]
+    pub offline: Option<crate::staff::dawam::clock::OfflineStamp>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -197,6 +250,9 @@ pub struct CheckOutRequest {
     pub latitude: Option<f64>,
     #[serde(default)]
     pub longitude: Option<f64>,
+    /// Set when the punch was queued offline; the server rebuilds its time (CL-11).
+    #[serde(default)]
+    pub offline: Option<crate::staff::dawam::clock::OfflineStamp>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -248,13 +304,46 @@ pub struct PutAttendanceSettingsRequest {
     #[serde(default)]
     pub auto_checkout_buffer_minutes: Option<i32>,
     #[serde(default)]
-    pub weekend_days: Option<Vec<i16>>,
-    #[serde(default)]
     pub working_days_per_month: Option<Decimal>,
     #[serde(default)]
     pub require_geofence: Option<bool>,
     #[serde(default)]
     pub excused_time_paid_default: Option<bool>,
+    #[serde(default)]
+    pub period_start_day: Option<i16>,
+    /// `off` · `automatic` · `approval`.
+    #[serde(default)]
+    pub overtime_mode: Option<String>,
+    #[serde(default)]
+    pub overtime_day_multiplier: Option<Decimal>,
+    #[serde(default)]
+    pub overtime_night_multiplier: Option<Decimal>,
+    #[serde(default)]
+    pub holiday_multiplier: Option<Decimal>,
+    #[serde(default)]
+    pub advance_cap_percent: Option<Decimal>,
+    /// `half_shift` · `whole_day`.
+    #[serde(default)]
+    pub half_day_leave_counts: Option<String>,
+    #[serde(default)]
+    pub night_start: Option<NaiveTime>,
+    #[serde(default)]
+    pub night_end: Option<NaiveTime>,
+    /// `off` · `soft` · `hard`; owner only (`hr.roster.settings`).
+    #[serde(default)]
+    pub gender_mode: Option<String>,
+    #[serde(default)]
+    pub limit_day_hours: Option<Decimal>,
+    #[serde(default)]
+    pub limit_week_hours: Option<Decimal>,
+    #[serde(default)]
+    pub limit_presence_hours: Option<Decimal>,
+    #[serde(default)]
+    pub limit_rest_hours: Option<Decimal>,
+    #[serde(default)]
+    pub limit_overtime_day_hours: Option<Decimal>,
+    #[serde(default)]
+    pub orders_per_staff: Option<i32>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -469,10 +558,26 @@ where
         absence_deduction_days: Decimal::ONE,
         default_overtime_multiplier: Decimal::new(150, 2),
         auto_checkout_buffer_minutes: 120,
-        weekend_days: vec![5, 6],
         working_days_per_month: Decimal::from(30),
         require_geofence: true,
         excused_time_paid_default: true,
+        period_start_day: 26,
+        overtime_mode: "off".into(),
+        overtime_day_multiplier: Decimal::new(135, 2),
+        overtime_night_multiplier: Decimal::new(170, 2),
+        holiday_multiplier: Decimal::from(2),
+        advance_cap_percent: Decimal::from(50),
+        half_day_leave_counts: "half_shift".into(),
+        night_start: NaiveTime::from_hms_opt(22, 0, 0).expect("valid time"),
+        night_end: NaiveTime::from_hms_opt(6, 0, 0).expect("valid time"),
+        gender_mode: "soft".into(),
+        rules_saved_at: None,
+        limit_day_hours: Decimal::from(8),
+        limit_week_hours: Decimal::from(48),
+        limit_presence_hours: Decimal::from(10),
+        limit_rest_hours: Decimal::from(12),
+        limit_overtime_day_hours: Decimal::from(2),
+        orders_per_staff: 12,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }))
@@ -515,12 +620,20 @@ pub async fn put_attendance_settings(
     if let Some(tiers) = body.late_deduction_tiers.as_deref() {
         rules::validate_tiers(tiers)?;
     }
-    if let Some(days) = body.weekend_days.as_deref()
-        && days.iter().any(|d| !(0..=6).contains(d))
-    {
-        return Err(AppError::BadRequest(
-            "weekend_days must be 0 (Sunday) through 6 (Saturday)".into(),
-        ));
+    if let Some(mode) = body.gender_mode.as_deref() {
+        if !matches!(mode, "off" | "soft" | "hard") {
+            return Err(AppError::BadRequest(
+                "gender_mode is off, soft or hard".into(),
+            ));
+        }
+        // Roster settings are the owner's (hr.roster.settings).
+        crate::authz::require::require(
+            pool.get_ref(),
+            &claims,
+            crate::authz::Cap::HrRosterSettings,
+            None,
+        )
+        .await?;
     }
     if body
         .working_days_per_month
@@ -555,12 +668,23 @@ pub async fn put_attendance_settings(
         r#"
         INSERT INTO attendance_settings (
             org_id, branch_id, late_deduction_tiers, absence_deduction_days,
-            default_overtime_multiplier, auto_checkout_buffer_minutes, weekend_days,
-            working_days_per_month, require_geofence, excused_time_paid_default
+            default_overtime_multiplier, auto_checkout_buffer_minutes,
+            working_days_per_month, require_geofence, excused_time_paid_default,
+            period_start_day, overtime_mode, overtime_day_multiplier,
+            overtime_night_multiplier, holiday_multiplier, advance_cap_percent,
+            half_day_leave_counts, night_start, night_end, gender_mode, rules_saved_at,
+            limit_day_hours, limit_week_hours, limit_presence_hours, limit_rest_hours,
+            limit_overtime_day_hours, orders_per_staff
         ) VALUES (
             $1, $2, COALESCE($3, '[]'::jsonb), COALESCE($4, 1.00), COALESCE($5, 1.50),
-            COALESCE($6, 120), COALESCE($7, ARRAY[5,6]::smallint[]),
-            COALESCE($8, 30.00), COALESCE($9, TRUE), COALESCE($10, TRUE)
+            COALESCE($6, 120),
+            COALESCE($8, 30.00), COALESCE($9, TRUE), COALESCE($10, TRUE),
+            COALESCE($11, 26), COALESCE($12, 'off'), COALESCE($13, 1.35),
+            COALESCE($14, 1.70), COALESCE($15, 2.00), COALESCE($16, 50),
+            COALESCE($17, 'half_shift'), COALESCE($18, '22:00'), COALESCE($19, '06:00'),
+            COALESCE($7, 'soft'), CASE WHEN $2::uuid IS NULL THEN now() END,
+            COALESCE($20, 8), COALESCE($21, 48), COALESCE($22, 10), COALESCE($23, 12),
+            COALESCE($24, 2), COALESCE($25, 12)
         )
         ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid))
         DO UPDATE SET
@@ -568,10 +692,29 @@ pub async fn put_attendance_settings(
             absence_deduction_days       = COALESCE($4, attendance_settings.absence_deduction_days),
             default_overtime_multiplier  = COALESCE($5, attendance_settings.default_overtime_multiplier),
             auto_checkout_buffer_minutes = COALESCE($6, attendance_settings.auto_checkout_buffer_minutes),
-            weekend_days                 = COALESCE($7, attendance_settings.weekend_days),
             working_days_per_month       = COALESCE($8, attendance_settings.working_days_per_month),
             require_geofence             = COALESCE($9, attendance_settings.require_geofence),
             excused_time_paid_default    = COALESCE($10, attendance_settings.excused_time_paid_default),
+            period_start_day             = COALESCE($11, attendance_settings.period_start_day),
+            overtime_mode                = COALESCE($12, attendance_settings.overtime_mode),
+            overtime_day_multiplier      = COALESCE($13, attendance_settings.overtime_day_multiplier),
+            overtime_night_multiplier    = COALESCE($14, attendance_settings.overtime_night_multiplier),
+            holiday_multiplier           = COALESCE($15, attendance_settings.holiday_multiplier),
+            advance_cap_percent          = COALESCE($16, attendance_settings.advance_cap_percent),
+            half_day_leave_counts        = COALESCE($17, attendance_settings.half_day_leave_counts),
+            night_start                  = COALESCE($18, attendance_settings.night_start),
+            night_end                    = COALESCE($19, attendance_settings.night_end),
+            gender_mode                  = COALESCE($7, attendance_settings.gender_mode),
+            limit_day_hours              = COALESCE($20, attendance_settings.limit_day_hours),
+            limit_week_hours             = COALESCE($21, attendance_settings.limit_week_hours),
+            limit_presence_hours         = COALESCE($22, attendance_settings.limit_presence_hours),
+            limit_rest_hours             = COALESCE($23, attendance_settings.limit_rest_hours),
+            limit_overtime_day_hours     = COALESCE($24, attendance_settings.limit_overtime_day_hours),
+            orders_per_staff             = COALESCE($25, attendance_settings.orders_per_staff),
+            -- Saving the business-wide rules is what lets people clock in (RU-1).
+            rules_saved_at               = CASE WHEN attendance_settings.branch_id IS NULL
+                                                THEN COALESCE(attendance_settings.rules_saved_at, now())
+                                                ELSE attendance_settings.rules_saved_at END,
             updated_at                   = now()
         RETURNING {SETTINGS_COLS}
         "#
@@ -582,10 +725,25 @@ pub async fn put_attendance_settings(
     .bind(body.absence_deduction_days)
     .bind(body.default_overtime_multiplier)
     .bind(body.auto_checkout_buffer_minutes)
-    .bind(body.weekend_days.as_deref())
+    .bind(body.gender_mode.as_deref())
     .bind(body.working_days_per_month)
     .bind(body.require_geofence)
     .bind(body.excused_time_paid_default)
+    .bind(body.period_start_day)
+    .bind(body.overtime_mode.as_deref())
+    .bind(body.overtime_day_multiplier)
+    .bind(body.overtime_night_multiplier)
+    .bind(body.holiday_multiplier)
+    .bind(body.advance_cap_percent)
+    .bind(body.half_day_leave_counts.as_deref())
+    .bind(body.night_start)
+    .bind(body.night_end)
+    .bind(body.limit_day_hours)
+    .bind(body.limit_week_hours)
+    .bind(body.limit_presence_hours)
+    .bind(body.limit_rest_hours)
+    .bind(body.limit_overtime_day_hours)
+    .bind(body.orders_per_staff)
     .fetch_one(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(row))
@@ -603,7 +761,7 @@ struct BranchFence {
 /// Distance from the branch centre, or an error when the punch is outside the
 /// fence. Returns `None` when there is nothing to measure against and the org
 /// does not require one.
-async fn check_geofence(
+pub(crate) async fn check_geofence(
     pool: &PgPool,
     branch_id: Uuid,
     latitude: Option<f64>,
@@ -681,7 +839,44 @@ pub(crate) async fn require_active_profile(pool: &PgPool, user_id: Uuid) -> Resu
 
 /// Today's calendar date in a given timezone, decided by Postgres so the tz
 /// database owns DST rather than the server process.
-async fn today_in(pool: &PgPool, timezone: &str) -> Result<NaiveDate, AppError> {
+/// Nobody clocks in before the business has saved its rules (RU-1): the
+/// lateness ladder and the absence cost must exist before anything is priced.
+pub(crate) async fn require_rules(pool: &PgPool, org_id: Uuid) -> Result<(), AppError> {
+    let saved: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM attendance_settings \
+          WHERE org_id = $1 AND branch_id IS NULL AND rules_saved_at IS NOT NULL)",
+    )
+    .bind(org_id)
+    .fetch_one(pool)
+    .await?;
+    if saved {
+        return Ok(());
+    }
+    Err(AppError::Coded {
+        status: 409,
+        code: "RULES_NOT_SET",
+        reason:
+            "Your business hasn't set its attendance rules yet — ask the owner to finish set-up."
+                .into(),
+    })
+}
+
+/// The calendar date `at` falls on in `timezone` (AT-1).
+pub(crate) async fn day_in(
+    pool: &PgPool,
+    at: DateTime<Utc>,
+    timezone: &str,
+) -> Result<NaiveDate, AppError> {
+    Ok(
+        sqlx::query_scalar::<_, NaiveDate>("SELECT ($1::timestamptz AT TIME ZONE $2)::date")
+            .bind(at)
+            .bind(timezone)
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+pub(crate) async fn today_in(pool: &PgPool, timezone: &str) -> Result<NaiveDate, AppError> {
     Ok(
         sqlx::query_scalar::<_, NaiveDate>("SELECT (now() AT TIME ZONE $1)::date")
             .bind(timezone)
@@ -770,6 +965,9 @@ pub async fn check_in(
     let claims = extract_claims(&req)?;
     let user_id = claims.user_id_safe()?;
     let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+    // Only from the person's live phone (CL-1).
+    crate::staff::dawam::require_device(&req, pool.get_ref(), user_id).await?;
+    require_rules(pool.get_ref(), org_id).await?;
 
     let branch_org = crate::staff::resolve_branch_org(pool.get_ref(), body.branch_id).await?;
     if branch_org != org_id {
@@ -789,8 +987,9 @@ pub async fn check_in(
     .await?;
 
     let tz = branch_timezone(pool.get_ref(), body.branch_id).await?;
-    let now = Utc::now();
-    let today = today_in(pool.get_ref(), &tz).await?;
+    let stamped = crate::staff::dawam::clock::rebuild(body.offline.as_ref(), Utc::now())?;
+    let now = stamped.at;
+    let today = day_in(pool.get_ref(), now, &tz).await?;
     let (shift, business_date) =
         resolve_punch_shift(pool.get_ref(), user_id, today, &tz, now).await?;
 
@@ -803,6 +1002,12 @@ pub async fn check_in(
             return Err(AppError::BadRequest(format!(
                 "Too early — check-in for {} opens {} minutes before it starts",
                 s.name, s.checkin_window_minutes
+            )));
+        }
+        if now >= s.scheduled_end_at {
+            return Err(AppError::BadRequest(format!(
+                "{} has already ended",
+                s.name
             )));
         }
     }
@@ -826,9 +1031,9 @@ pub async fn check_in(
             check_in_at, check_in_latitude, check_in_longitude,
             check_in_distance_meters, check_in_method,
             late_minutes, created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'mobile_gps', $13, $2)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $13, $2)
         ON CONFLICT (user_id, business_date,
-                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid))
+                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_user_id IS NULL
         DO NOTHING
         RETURNING id
         "#,
@@ -846,6 +1051,7 @@ pub async fn check_in(
     .bind(body.longitude)
     .bind(distance)
     .bind(derived.late_minutes as i32)
+    .bind(if stamped.offline { "offline" } else { "mobile_gps" })
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -854,6 +1060,28 @@ pub async fn check_in(
             "You have already checked in for this shift".into(),
         ));
     };
+    if stamped.unverified {
+        crate::staff::dawam::presence::raise_flag(
+            pool.get_ref(),
+            org_id,
+            user_id,
+            Some(body.branch_id),
+            Some(id),
+            "time_unverified",
+            0,
+        )
+        .await?;
+    }
+    if body.tracking_off == Some(true) {
+        crate::staff::dawam::presence::mark_tracking_off(
+            pool.get_ref(),
+            org_id,
+            user_id,
+            body.branch_id,
+            id,
+        )
+        .await?;
+    }
     let record = load_record(pool.get_ref(), org_id, id).await?;
     Ok(HttpResponse::Created().json(record))
 }
@@ -876,6 +1104,7 @@ pub async fn check_out(
     let claims = extract_claims(&req)?;
     let user_id = claims.user_id_safe()?;
     let org_id = require_active_profile(pool.get_ref(), user_id).await?;
+    crate::staff::dawam::require_device(&req, pool.get_ref(), user_id).await?;
 
     #[derive(sqlx::FromRow)]
     struct Open {
@@ -911,7 +1140,9 @@ pub async fn check_out(
     .await?;
 
     let tz = branch_timezone(pool.get_ref(), open.branch_id).await?;
-    let now = Utc::now();
+    let stamped = crate::staff::dawam::clock::rebuild(body.offline.as_ref(), Utc::now())?;
+    // A queued check-out can't close before the check-in it follows.
+    let now = open.check_in_at.map_or(stamped.at, |i| stamped.at.max(i));
     let shift = load_shift_snapshot(pool.get_ref(), &open.work_shift_id, open.business_date, &tz)
         .await?
         .map(|mut s| {
@@ -941,7 +1172,7 @@ pub async fn check_out(
     sqlx::query(
         "UPDATE attendance_records SET \
             check_out_at = $2, check_out_latitude = $3, check_out_longitude = $4, \
-            check_out_distance_meters = $5, check_out_method = 'mobile_gps', \
+            check_out_distance_meters = $5, check_out_method = $11, \
             status = $6, late_minutes = $7, early_leave_minutes = $8, \
             overtime_minutes = $9, worked_minutes = $10, updated_at = now() \
           WHERE id = $1",
@@ -956,14 +1187,34 @@ pub async fn check_out(
     .bind(derived.early_leave_minutes as i32)
     .bind(derived.overtime_minutes as i32)
     .bind(derived.worked_minutes as i32)
+    .bind(if stamped.offline {
+        "offline"
+    } else {
+        "mobile_gps"
+    })
     .execute(pool.get_ref())
     .await?;
+    if stamped.unverified {
+        crate::staff::dawam::presence::raise_flag(
+            pool.get_ref(),
+            org_id,
+            user_id,
+            Some(open.branch_id),
+            Some(open.id),
+            "time_unverified",
+            0,
+        )
+        .await?;
+    }
 
     // The shift just closed, so price it now — a manager should see the penalty
     // immediately, not the next morning after the sweep.
     let mut conn = pool.acquire().await?;
     crate::staff::penalties::recompute_record(&mut conn, open.id, &settings).await?;
     drop(conn);
+    // Overtime: off, paid automatically, or waiting for a manager (RU-7).
+    crate::staff::dawam::presence::after_check_out(pool.get_ref(), org_id, open.id, &settings)
+        .await?;
 
     let record = load_record(pool.get_ref(), org_id, open.id).await?;
     Ok(HttpResponse::Ok().json(record))
@@ -1526,7 +1777,7 @@ pub async fn create_manual_record(
             $11, $12, $13, $14, TRUE, $15, $16, $17, $17
         )
         ON CONFLICT (user_id, business_date,
-                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid))
+                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_user_id IS NULL
         DO NOTHING
         RETURNING id
         "#,

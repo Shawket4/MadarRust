@@ -71,6 +71,14 @@ pub struct Employee {
     pub emergency_contact_name: Option<String>,
     pub emergency_contact_phone: Option<String>,
     pub notes: Option<String>,
+    /// `m` · `f` · null — only ever a soft default for late shifts (SC-13).
+    #[sqlx(default)]
+    pub gender: Option<String>,
+    /// `cash` · `bank` · `wallet`
+    #[sqlx(default)]
+    pub pay_method: String,
+    #[sqlx(default)]
+    pub pay_account: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -144,6 +152,14 @@ pub struct PutEmployeeRequest {
     pub emergency_contact_phone: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// `m` · `f`; omitted keeps what is there.
+    #[serde(default)]
+    pub gender: Option<String>,
+    /// `cash` · `bank` · `wallet`; omitted keeps what is there.
+    #[serde(default)]
+    pub pay_method: Option<String>,
+    #[serde(default)]
+    pub pay_account: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -356,7 +372,7 @@ const EMPLOYEE_COLS: &str = r#"
     p.department_id, d.name AS department_name, p.employee_code, p.job_title,
     p.hire_date, p.termination_date, p.employment_status, p.base_salary_piastres,
     p.national_id, p.photo_url, p.emergency_contact_name, p.emergency_contact_phone,
-    p.notes, p.created_at, p.updated_at
+    p.notes, p.gender, p.pay_method, p.pay_account, p.created_at, p.updated_at
 "#;
 
 #[utoipa::path(
@@ -458,6 +474,166 @@ pub(crate) async fn load_employee(
     .ok_or_else(|| AppError::NotFound("Employee not found".into()))
 }
 
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+pub struct BranchPerson {
+    pub user_id: Uuid,
+    pub name: String,
+}
+
+/// Active staff at a branch, names only: what a till shows to tag a pay-out
+/// as someone's expense advance (AV-8). Anyone who works the branch may read
+/// it; nothing about pay is in it.
+#[utoipa::path(
+    get, path = "/staff/branches/{branch_id}/people", tag = "staff",
+    params(("branch_id" = Uuid, Path)),
+    responses((status = 200, body = Vec<BranchPerson>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn branch_people(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(*branch_id)).await?;
+    let rows: Vec<BranchPerson> = sqlx::query_as(
+        "SELECT u.id AS user_id, u.name FROM user_branch_assignments a \
+           JOIN users u ON u.id = a.user_id AND u.org_id = $2 AND u.deleted_at IS NULL AND u.is_active \
+           JOIN staff_profiles p ON p.user_id = u.id AND p.employment_status = 'active' \
+          WHERE a.branch_id = $1 ORDER BY lower(u.name)",
+    )
+    .bind(*branch_id)
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
+pub struct CreateEmployeeRequest {
+    pub name: String,
+    /// Their WhatsApp number: how they sign in to Dawam.
+    pub phone: String,
+    pub branch_id: Uuid,
+    /// Piastres. Ignored without `payroll:update`, as on the profile.
+    #[serde(default)]
+    pub base_salary_piastres: Option<i64>,
+    #[serde(default)]
+    pub job_title: Option<String>,
+    /// `m` · `f`
+    #[serde(default)]
+    pub gender: Option<String>,
+}
+
+/// Add a Dawam employee: a user who signs in with a WhatsApp code, so no
+/// password or till PIN (a manager can give them a PIN later to work a till).
+/// Used by the Add Employee form and the spreadsheet import (DSH-7).
+#[utoipa::path(
+    post, path = "/staff/employees", tag = "staff",
+    request_body = CreateEmployeeRequest,
+    responses((status = 201, description = "Employee added", body = Employee), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn create_employee(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    body: web::Json<CreateEmployeeRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    crate::authz::scope::org_read_branches(pool, &claims, org_id, Some(body.branch_id)).await?;
+    crate::authz::require::require(
+        pool,
+        &claims,
+        crate::authz::Cap::HrStaffCreate,
+        Some(body.branch_id),
+    )
+    .await?;
+    // Holding the capability is never enough: the caller must hold what the
+    // new account's role gives.
+    crate::permissions::guard::require_can_create(pool, &claims, &crate::models::UserRole::Teller)
+        .await?;
+    let name = trimmed_required(&body.name, "name")?;
+    let phone = format!("+{}", crate::phone::normalize_phone(&body.phone)?);
+    let branch_ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM branches WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL)",
+    )
+    .bind(body.branch_id)
+    .bind(org_id)
+    .fetch_one(pool)
+    .await?;
+    if !branch_ok {
+        return Err(AppError::NotFound("Branch not found".into()));
+    }
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE org_id = $1 AND deleted_at IS NULL \
+            AND regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $2)",
+    )
+    .bind(org_id)
+    .bind(phone.trim_start_matches('+'))
+    .fetch_one(pool)
+    .await?;
+    if taken {
+        return Err(AppError::Conflict(format!(
+            "Someone here already has the number {phone}."
+        )));
+    }
+    if body.base_salary_piastres.is_some_and(|s| s < 0) {
+        return Err(AppError::BadRequest("Salary cannot be negative".into()));
+    }
+    let salary = if check_permission(pool, &claims, "payroll", "update")
+        .await
+        .is_ok()
+    {
+        body.base_salary_piastres
+    } else {
+        None
+    };
+    // A login row needs a credential; this one is random and thrown away, so
+    // the only way in is the WhatsApp code. Low cost: nothing can guess it.
+    let unusable = bcrypt::hash(format!("{}{}", Uuid::new_v4(), Uuid::new_v4()), 4)
+        .map_err(|_| AppError::Internal)?;
+    let mut tx = pool.begin().await?;
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (org_id, name, phone, role, password_hash) \
+         VALUES ($1, $2, $3, 'teller', $4) RETURNING id",
+    )
+    .bind(org_id)
+    .bind(&name)
+    .bind(&phone)
+    .bind(&unusable)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO user_branch_assignments (user_id, branch_id, assigned_by) VALUES ($1, $2, $3)",
+    )
+    .bind(user_id)
+    .bind(body.branch_id)
+    .bind(claims.user_id())
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO staff_profiles (user_id, org_id, job_title, hire_date, base_salary_piastres, gender) \
+         VALUES ($1, $2, $3, CURRENT_DATE, COALESCE($4, 0), $5)",
+    )
+    .bind(user_id)
+    .bind(org_id)
+    .bind(blank_to_none(body.job_title.clone()))
+    .bind(salary)
+    .bind(blank_to_none(body.gender.clone()))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    let row = load_employee(pool, org_id, user_id).await?;
+    let may_see_salary = check_permission(pool, &claims, "payroll", "read")
+        .await
+        .is_ok();
+    Ok(HttpResponse::Created().json(row.redact_salary(may_see_salary)))
+}
+
 #[utoipa::path(
     put, path = "/staff/employees/{user_id}", tag = "staff",
     params(("user_id" = Uuid, Path, description = "The employee's user ID")),
@@ -523,9 +699,11 @@ pub async fn put_employee(
         INSERT INTO staff_profiles (
             user_id, org_id, department_id, employee_code, job_title, hire_date,
             termination_date, employment_status, base_salary_piastres, national_id,
-            photo_url, emergency_contact_name, emergency_contact_phone, notes
+            photo_url, emergency_contact_name, emergency_contact_phone, notes,
+            gender, pay_method, pay_account
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 0), $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, 0), $10, $11, $12, $13, $14,
+                $15, COALESCE($16, 'cash'), $17)
         ON CONFLICT (user_id) DO UPDATE SET
             department_id           = EXCLUDED.department_id,
             employee_code           = EXCLUDED.employee_code,
@@ -540,6 +718,9 @@ pub async fn put_employee(
             emergency_contact_name  = EXCLUDED.emergency_contact_name,
             emergency_contact_phone = EXCLUDED.emergency_contact_phone,
             notes                   = EXCLUDED.notes,
+            gender                  = COALESCE($15, staff_profiles.gender),
+            pay_method              = COALESCE($16, staff_profiles.pay_method),
+            pay_account             = COALESCE($17, staff_profiles.pay_account),
             updated_at              = now()
         "#,
     )
@@ -557,8 +738,15 @@ pub async fn put_employee(
     .bind(blank_to_none(body.emergency_contact_name.clone()))
     .bind(blank_to_none(body.emergency_contact_phone.clone()))
     .bind(blank_to_none(body.notes.clone()))
+    .bind(blank_to_none(body.gender.clone()))
+    .bind(blank_to_none(body.pay_method.clone()))
+    .bind(blank_to_none(body.pay_account.clone()))
     .execute(pool.get_ref())
     .await?;
+    // RO-10: someone who leaves loses the app on every phone at once.
+    if status != "active" {
+        crate::staff::dawam::revoke_devices(pool.get_ref(), *user_id).await?;
+    }
 
     let row = load_employee(pool.get_ref(), org_id, *user_id).await?;
     let may_see_salary = check_permission(pool.get_ref(), &claims, "payroll", "read")
@@ -593,6 +781,7 @@ pub async fn delete_employee(
     if deleted == 0 {
         return Err(AppError::NotFound("Employee not found".into()));
     }
+    crate::staff::dawam::revoke_devices(pool.get_ref(), *user_id).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

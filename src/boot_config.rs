@@ -46,8 +46,32 @@ pub fn problems(lookup: impl Fn(&str) -> Option<String>, release: bool) -> Vec<S
     out
 }
 
+/// FCM push is optional: warn if `FCM_SERVICE_ACCOUNT_FILE` is set but the
+/// file can't be read or is missing the fields the sender needs, so a typo'd
+/// path fails loud instead of silently sending zero pushes.
+fn warn_on_fcm_config(lookup: impl Fn(&str) -> Option<String>) {
+    let Some(path) = lookup("FCM_SERVICE_ACCOUNT_FILE").filter(|v| !v.trim().is_empty()) else {
+        return;
+    };
+    let ok = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some_and(|v| {
+            v["project_id"].is_string()
+                && v["client_email"].is_string()
+                && v["private_key"].is_string()
+        });
+    if !ok {
+        tracing::warn!(
+            path,
+            "FCM_SERVICE_ACCOUNT_FILE is set but unreadable or missing project_id/client_email/private_key; push notifications are off"
+        );
+    }
+}
+
 /// Check the process environment; on any problem log each one and exit(1).
 pub fn validate_or_exit() {
+    warn_on_fcm_config(|k| std::env::var(k).ok());
     let found = problems(|k| std::env::var(k).ok(), !cfg!(debug_assertions));
     if found.is_empty() {
         return;

@@ -136,6 +136,9 @@ pub struct ProvisionOrgRequest {
     pub tax_rate: Option<f64>,
     pub branch: ProvisionBranch,
     pub owner: ProvisionOwner,
+    /// `pos`, `dawam`; default both. A Dawam-only customer is `["dawam"]` (SA-1).
+    #[serde(default)]
+    pub modules: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -257,8 +260,8 @@ pub async fn provision_org(
     }
     // Hashed before the transaction opens: bcrypt is slow and a transaction
     // should not wait on it.
-    let password_hash =
-        bcrypt::hash(&b.owner.password, crate::secrets::BCRYPT_COST).map_err(|_| AppError::Internal)?;
+    let password_hash = bcrypt::hash(&b.owner.password, crate::secrets::BCRYPT_COST)
+        .map_err(|_| AppError::Internal)?;
     let pin_hash = b
         .owner
         .pin
@@ -270,9 +273,9 @@ pub async fn provision_org(
     let mut tx = pool.get_ref().begin().await?;
     let org = sqlx::query_as::<_, Org>(
         r#"
-        INSERT INTO organizations (name, slug, currency_code, tax_rate, timezone)
-        VALUES ($1, $2, $3, $4, $5::timezone_name)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        INSERT INTO organizations (name, slug, currency_code, tax_rate, timezone, modules)
+        VALUES ($1, $2, $3, $4, $5::timezone_name, COALESCE($6, '{pos,dawam}'))
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -280,6 +283,7 @@ pub async fn provision_org(
     .bind(b.currency_code.as_deref().unwrap_or("EGP"))
     .bind(tax_rate)
     .bind(&timezone)
+    .bind(&b.modules)
     .fetch_one(&mut *tx)
     .await?;
 

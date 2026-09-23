@@ -194,7 +194,12 @@ pub async fn recompute_record(
     }
 
     let row: Option<Row> = sqlx::query_as(
-        "SELECT a.org_id, a.user_id, a.business_date, a.status, a.late_minutes, \
+        // A cover is paid as extra time at the coverer's own rate (CV-4); the
+        // shift it covered was someone else's, so it carries no lateness or
+        // absence of its own.
+        "SELECT a.org_id, a.user_id, a.business_date, \
+                CASE WHEN a.covered_user_id IS NULL THEN a.status ELSE 'present' END AS status, \
+                CASE WHEN a.covered_user_id IS NULL THEN a.late_minutes ELSE 0 END AS late_minutes, \
                 (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int \
                     AS scheduled_minutes, \
                 p.base_salary_piastres, \
@@ -202,7 +207,7 @@ pub async fn recompute_record(
                     SELECT 1 FROM staff_requests r \
                       JOIN leave_types lt ON lt.id = r.leave_type_id \
                      WHERE r.user_id = a.user_id AND r.kind = 'leave' \
-                       AND r.status = 'approved' AND NOT lt.is_paid \
+                       AND r.status = 'approved' AND NOT COALESCE(r.is_paid, lt.is_paid) \
                        AND r.on_date <= a.business_date \
                        AND COALESCE(r.end_date, r.on_date) >= a.business_date \
                 ) AS unpaid_leave \

@@ -25,6 +25,7 @@
 //! - [`jobs`]       — the nightly sweep: mark absences, close forgotten checkouts.
 
 pub mod attendance;
+pub mod dawam;
 pub mod directory;
 pub mod discipline;
 pub mod jobs;

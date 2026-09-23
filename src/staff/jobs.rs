@@ -68,6 +68,83 @@ async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     mark_absences(pool).await?;
     apply_pending_penalties(pool).await?;
     purge_stale_coordinates(pool).await?;
+    precompute_suggestions(pool).await?;
+    phones_that_died(pool).await?;
+    Ok(())
+}
+
+/// A shift gone quiet after a low battery reads "phone likely died" — never
+/// "left the branch" (CL-12). Pings come every 15 minutes; three missed is
+/// quiet.
+#[doc(hidden)]
+pub async fn phones_that_died(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+    let quiet: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT a.org_id, a.user_id, a.branch_id, a.id FROM attendance_records a \
+           JOIN LATERAL (SELECT at, battery_percent FROM attendance_pings p \
+                          WHERE p.attendance_record_id = a.id ORDER BY at DESC LIMIT 1) last ON true \
+          WHERE a.check_in_at IS NOT NULL AND a.check_out_at IS NULL \
+            AND last.at < now() - INTERVAL '45 minutes' \
+            AND last.battery_percent <= $1 \
+            AND NOT EXISTS (SELECT 1 FROM attendance_flags f \
+                             WHERE f.attendance_record_id = a.id AND f.kind = 'phone_died') \
+          LIMIT 500",
+    )
+    .bind(crate::staff::dawam::presence::LOW_BATTERY)
+    .fetch_all(pool)
+    .await?;
+    for (org_id, user_id, branch_id, record_id) in quiet {
+        crate::staff::dawam::presence::raise_flag(
+            pool,
+            org_id,
+            user_id,
+            Some(branch_id),
+            Some(record_id),
+            "phone_died",
+            0,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Roster suggestions for the week starting Saturday are computed from
+/// Wednesday 22:00 branch time, so the button is instant (SC-13). A branch
+/// already holding that week is skipped; the cache drops itself when the
+/// roster changes. Learning history is kept 24 months.
+#[doc(hidden)]
+pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+    let due: Vec<(Uuid, Uuid, NaiveDate)> = sqlx::query_as(
+        "WITH b AS ( \
+             SELECT b.org_id, b.id, \
+                    (now() AT TIME ZONE COALESCE(b.timezone::text, o.timezone::text)) AS local \
+               FROM branches b JOIN organizations o ON o.id = b.org_id \
+              WHERE o.is_active AND o.deleted_at IS NULL AND 'dawam' = ANY(o.modules) \
+                AND b.deleted_at IS NULL \
+         ) \
+         SELECT b.org_id, b.id, \
+                (b.local::date + (6 - EXTRACT(DOW FROM b.local)::int))::date AS week \
+           FROM b \
+          WHERE ((EXTRACT(DOW FROM b.local) = 3 AND b.local::time >= '22:00') \
+                 OR EXTRACT(DOW FROM b.local) IN (4, 5)) \
+            AND EXISTS (SELECT 1 FROM user_branch_assignments a WHERE a.branch_id = b.id) \
+            AND NOT EXISTS (SELECT 1 FROM staff_suggestion_cache c \
+                             WHERE c.branch_id = b.id \
+                               AND c.week_start = (b.local::date + (6 - EXTRACT(DOW FROM b.local)::int))) \
+          LIMIT 50",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (org_id, branch_id, week) in due {
+        if let Err(e) = crate::staff::dawam::roster::precompute(pool, org_id, branch_id, week).await
+        {
+            tracing::warn!(%branch_id, "suggestion precompute failed: {e}");
+        }
+    }
+    sqlx::query(
+        "DELETE FROM staff_suggestion_events WHERE created_at < now() - INTERVAL '24 months'",
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -214,6 +291,12 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                    SELECT 1 FROM staff_schedule_overrides ov
                     WHERE ov.user_id = p.user_id AND ov.on_date = d.business_date
                )
+               -- A confirmed public holiday marks nobody absent (RU-10).
+               AND NOT EXISTS (
+                   SELECT 1 FROM staff_holidays h
+                    WHERE h.org_id = p.org_id AND h.on_date = d.business_date
+                      AND h.decision = 'holiday'
+               )
         )
         SELECT r.org_id, r.user_id, r.branch_id, r.work_shift_id, r.business_date,
                (r.business_date + r.start_time) AT TIME ZONE r.tz AS scheduled_start_at,
@@ -257,7 +340,7 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                   scheduled_start_at, scheduled_end_at, is_manual, edit_reason) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, 'Marked automatically: no check-in') \
              ON CONFLICT (user_id, business_date, \
-                          COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
+                          COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_user_id IS NULL \
              DO NOTHING",
         )
         .bind(row.org_id)

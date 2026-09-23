@@ -109,7 +109,17 @@ impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         match e {
             sqlx::Error::RowNotFound => AppError::NotFound("Resource not found".into()),
-            other => AppError::Db(other),
+            // The database refuses these on its own (Dawam RQ-9, RQ-11), so two
+            // requests sent at once can't both land; say why in words.
+            other => match other.as_database_error().and_then(|d| d.constraint()) {
+                Some("staff_requests_no_overlap") => {
+                    AppError::Conflict("You already have a request like this for that time.".into())
+                }
+                Some("staff_requests_live_correction_unique") => {
+                    AppError::Conflict("This shift already has a correction waiting.".into())
+                }
+                _ => AppError::Db(other),
+            },
         }
     }
 }
@@ -151,6 +161,7 @@ fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
     use actix_web::http::StatusCode;
     match code {
         Some("23505") | Some("23503") => StatusCode::CONFLICT, // unique / foreign-key violation
+        Some("23P01") => StatusCode::CONFLICT,                 // exclusion (overlapping ranges)
         Some("23514") | Some("23502") => StatusCode::BAD_REQUEST, // check / not-null violation
         // 55000 = write to a non-updatable VIEW. Post-flip (menu unification)
         // the legacy catalog tables are read-only shim views, so a straggler
@@ -180,6 +191,7 @@ mod tests {
     fn classifies_sqlstates() {
         assert_eq!(status_for_sqlstate(Some("23505")), StatusCode::CONFLICT); // unique
         assert_eq!(status_for_sqlstate(Some("23503")), StatusCode::CONFLICT); // foreign key
+        assert_eq!(status_for_sqlstate(Some("23P01")), StatusCode::CONFLICT); // exclusion
         assert_eq!(status_for_sqlstate(Some("23514")), StatusCode::BAD_REQUEST); // check
         assert_eq!(status_for_sqlstate(Some("23502")), StatusCode::BAD_REQUEST); // not null
         assert_eq!(status_for_sqlstate(Some("22003")), StatusCode::BAD_REQUEST); // numeric overflow

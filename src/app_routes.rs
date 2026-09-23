@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use crate::{
     ai, analytics, auth, bookings, branches, bundles, costing, customers, delivery, devices,
     discounts, insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs,
-    payment_methods, permissions, purchasing, qr_card, realtime, recipes, refunds, reports,
+    payment_methods, permissions, purchasing, push, qr_card, realtime, recipes, refunds, reports,
     reservations, staff, stocktakes, sync, tickets, tills, uploads, users,
 };
 
@@ -30,6 +30,7 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
     .configure(tills::legacy_routes::configure)
     .configure(devices::routes::configure)
     .configure(staff::routes::configure)
+    .configure(push::routes::configure)
     .configure(tills::routes::configure)
     // One `/floor` scope: `reservations::routes` owns it and pulls the
     // cross-table operations of `floor_ops` in. A second scope on the

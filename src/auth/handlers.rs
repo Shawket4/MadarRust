@@ -279,7 +279,7 @@ async fn find_pin_holder_by_name(
 /// row, one slow verify — and only if that finds nobody, scan the holders who
 /// have no fingerprint yet (the backfill happens at their next sign-in).
 /// `Some(Err(()))` when the scan finds the PIN on more than one person.
-async fn find_pin_holder_by_pin(
+pub(crate) async fn find_pin_holder_by_pin(
     pool: &PgPool,
     org: Uuid,
     pin: &str,

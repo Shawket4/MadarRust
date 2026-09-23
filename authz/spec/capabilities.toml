@@ -2202,6 +2202,138 @@ ar = "عرض عناوين العملاء المحفوظة"
 hint_en = "The delivery addresses a customer has ordered to. Needed to dispatch an order; not needed to take one at a table."
 hint_ar = "عناوين التوصيل اللي العميل طلب عليها قبل كده. مطلوبة لتجهيز طلب توصيل، ومش مطلوبة لأخذ طلب على ترابيزة."
 
+# ── Dawam (DAWAM_TARGET_SPEC, 2026-09-22) ──────────────────────────────────
+# The staff app's acts (spec RO-7, PM-2/3): ids 226-235 of the 30 left before
+# the snapshot format must grow.
+[[cap]]
+id = 226
+key = "hr.requests.self_approve"
+group = "hr"
+tier = "configurable"
+risk = "normal"
+defaults = "o"
+protected = true
+en = "Approve your own requests"
+ar = "الموافقة على طلباتك بنفسك"
+hint_en = "Held: your own requests are approved as you send them. Not held: they wait for someone above you, and the owner is told."
+hint_ar = "لو معاك: طلباتك بتتوافق أول ما تبعتها. لو مش معاك: بتستنى حد أعلى منك، والمالك بيتبلغ."
+
+[[cap]]
+id = 227
+key = "hr.adjustments.create"
+group = "hr"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+approval = true
+limits = ["max_amount"]
+en = "Add bonuses and deductions"
+ar = "إضافة مكافآت وخصومات"
+hint_en = "Up to the amount set here. Above it, the adjustment waits for someone with a higher limit, usually the owner."
+hint_ar = "لحد المبلغ المحدد هنا. فوقه، التعديل بيستنى حد عنده حد أعلى، غالبًا المالك."
+
+[[cap]]
+id = 228
+key = "hr.advances.decide"
+group = "hr"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+approval = true
+limits = ["max_percent"]
+en = "Approve salary advances"
+ar = "الموافقة على السلف"
+hint_en = "The limit is the share of monthly salary a person may owe in advances after this one. Above it, the advance waits for the owner."
+hint_ar = "الحد هو نسبة المرتب الشهري اللي ممكن يبقى عليه سلف بعد دي. فوقه، السلفة بتستنى المالك."
+
+[[cap]]
+id = 229
+key = "hr.payroll.run"
+group = "hr"
+tier = "configurable"
+risk = "money"
+defaults = "o"
+protected = true
+en = "Run and approve payroll"
+ar = "تشغيل واعتماد المرتبات"
+hint_en = "One run for the whole business: approve, reopen and mark people paid. Needs every branch."
+hint_ar = "تشغيل واحد لكل النشاط: اعتماد وإعادة فتح وتعليم مين اتقبض. محتاج كل الفروع."
+
+[[cap]]
+id = 230
+key = "hr.shift_cover.confirm"
+group = "hr"
+tier = "configurable"
+risk = "normal"
+defaults = "om"
+en = "Confirm covered shifts"
+ar = "تأكيد تغطية الورديات"
+hint_en = "A cover is paid only once confirmed. You can't confirm a cover you are part of."
+hint_ar = "التغطية بتتدفع بس بعد التأكيد. متقدرش تأكد تغطية إنت طرف فيها."
+
+[[cap]]
+id = 231
+key = "hr.overtime.approve"
+group = "hr"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+approval = true
+limits = ["max_amount"]
+en = "Approve overtime"
+ar = "الموافقة على الوقت الإضافي"
+hint_en = "When overtime needs approval: up to the amount set here."
+hint_ar = "لما الوقت الإضافي محتاج موافقة: لحد المبلغ المحدد هنا."
+
+[[cap]]
+id = 232
+key = "hr.attendance.punch_others"
+group = "hr"
+tier = "configurable"
+risk = "normal"
+defaults = "om"
+en = "Clock someone in or out"
+ar = "تسجيل حضور أو انصراف لحد تاني"
+hint_en = "For a dead or forgotten phone. A reason is always required and the punch is marked as made by you."
+hint_ar = "للموبايل اللي فاصل أو المنسي. لازم دايمًا سبب والتسجيل بيتعلّم إنه منك."
+
+[[cap]]
+id = 233
+key = "hr.schedule.publish"
+group = "hr"
+tier = "configurable"
+risk = "normal"
+defaults = "om"
+en = "Publish the week's roster"
+ar = "نشر جدول الأسبوع"
+hint_en = "Staff see a week only once it is published, and are told."
+hint_ar = "الموظفين بيشوفوا الأسبوع بس بعد ما يتنشر، وبيتبلغوا."
+
+[[cap]]
+id = 234
+key = "hr.expense_advances.log"
+group = "hr"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+en = "Log expense advances"
+ar = "تسجيل عُهد المصاريف"
+hint_en = "Cash handed over for shop purchases. A log only: never deducted from pay."
+hint_ar = "فلوس متسلمة لمشتريات المحل. سجل بس: عمره ما بيتخصم من المرتب."
+
+[[cap]]
+id = 235
+key = "hr.roster.settings"
+group = "hr"
+tier = "configurable"
+risk = "normal"
+defaults = "o"
+protected = true
+en = "Change roster settings"
+ar = "تغيير إعدادات الجدول"
+hint_en = "How shift suggestions weigh defaults, including the gender default."
+hint_ar = "إزاي اقتراحات الورديات بتوزن الافتراضيات، ومنها افتراض النوع."
+
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
 # five system roles; a template may add or remove on top.
@@ -2221,6 +2353,11 @@ roles = ["org_admin", "branch_manager", "teller", "waiter", "kitchen"]
 "orders.void" = { own = true, max_age_minutes = 10 }
 "refunds.create" = { max_amount = 0 }
 
+[templates.restaurant.limits.branch_manager]
+"hr.adjustments.create" = { max_amount = 100000 }
+"hr.overtime.approve" = { max_amount = 100000 }
+"hr.advances.decide" = { max_percent = 50 }
+
 [templates.cafe]
 version = 1
 en = "Café"
@@ -2237,6 +2374,11 @@ remove = { teller = ["bookings.read", "bookings.edit"], branch_manager = ["booki
 [templates.cafe.limits.teller]
 "orders.void" = { own = true, max_age_minutes = 10 }
 "refunds.create" = { max_amount = 0 }
+
+[templates.cafe.limits.branch_manager]
+"hr.adjustments.create" = { max_amount = 100000 }
+"hr.overtime.approve" = { max_amount = 100000 }
+"hr.advances.decide" = { max_percent = 50 }
 
 [roles]
 org_admin      = { en = "Owner", ar = "المالك" }

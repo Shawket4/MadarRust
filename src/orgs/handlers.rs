@@ -71,6 +71,9 @@ pub struct Org {
     #[schema(value_type = Object)]
     pub social_links: serde_json::Value,
     pub is_active: bool,
+    /// Switched-on modules: `pos`, `dawam` (PS-2). Switching one off hides it
+    /// and keeps every record.
+    pub modules: Vec<String>,
     /// IANA timezone name. The org-level default that branches inherit when
     /// their own timezone is unset. Defaults to `Africa/Cairo`.
     #[schema(example = "Africa/Cairo")]
@@ -100,6 +103,8 @@ struct CreateOrgFields {
     timezone: Option<String>,
     /// Role template (`restaurant` default, or `cafe`).
     template: Option<String>,
+    /// Comma-separated (`pos,dawam`); default both.
+    modules: Option<String>,
 }
 
 /// A multipart checkbox: absent is None, and anything a form posts for "on"
@@ -126,6 +131,9 @@ pub struct UpdateOrgRequest {
     pub require_table_for_orders: Option<bool>,
     pub receipt_footer: Option<String>,
     pub is_active: Option<bool>,
+    /// `pos`, `dawam`: at least one (PS-2, SA-5). Super admin only, like the
+    /// rest of this endpoint.
+    pub modules: Option<Vec<String>>,
     /// IANA timezone name (e.g. `Africa/Cairo`). Validated against the
     /// PostgreSQL timezone database. Branches inherit this when their own
     /// timezone is unset.
@@ -297,6 +305,7 @@ pub async fn create_org(
             "receipt_footer" => fields.receipt_footer = text_field(&mut field).await?,
             "timezone" => fields.timezone = text_field(&mut field).await?,
             "template" => fields.template = text_field(&mut field).await?,
+            "modules" => fields.modules = text_field(&mut field).await?,
             _ => {
                 drain_field(&mut field).await?;
             }
@@ -369,11 +378,11 @@ pub async fn create_org(
         -- configures them in Settings afterwards.
         INSERT INTO organizations (name, slug, logo_url, currency_code, tax_rate,
                                    tax_inclusive, service_charge_rate, service_charge_taxable,
-                                   require_table_for_orders, receipt_footer, timezone)
+                                   require_table_for_orders, receipt_footer, timezone, modules)
         VALUES ($1, $2, $3, $4, $5,
                 COALESCE($6, false), COALESCE($7, 0), COALESCE($8, true),
-                COALESCE($9, false), $10, $11::timezone_name)
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+                COALESCE($9, false), $10, $11::timezone_name, COALESCE($12, '{pos,dawam}'))
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone
         "#,
     )
     .bind(&name)
@@ -387,6 +396,12 @@ pub async fn create_org(
     .bind(fields.require_table_for_orders)
     .bind(&fields.receipt_footer)
     .bind(timezone)
+    .bind(
+        fields
+            .modules
+            .as_deref()
+            .map(|m| m.split(',').map(|x| x.trim().to_string()).collect::<Vec<_>>()),
+    )
     .fetch_one(&mut *tx)
     .await?;
 
@@ -432,7 +447,7 @@ pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResp
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone
         FROM organizations
         WHERE deleted_at IS NULL
         ORDER BY name
@@ -747,9 +762,10 @@ pub async fn update_org(
             service_charge_rate = COALESCE($14, service_charge_rate),
             service_charge_taxable = COALESCE($15, service_charge_taxable),
             require_table_for_orders = COALESCE($16, require_table_for_orders),
+            modules        = COALESCE($17, modules),
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone
         "#,
     )
     .bind(*org_id)
@@ -768,6 +784,7 @@ pub async fn update_org(
     .bind(body.service_charge_rate)
     .bind(body.service_charge_taxable)
     .bind(body.require_table_for_orders)
+    .bind(&body.modules)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
@@ -984,7 +1001,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, timezone::text AS timezone
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )

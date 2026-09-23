@@ -14,6 +14,7 @@
 use actix_web::web;
 
 use crate::auth::middleware::JwtMiddleware;
+use crate::staff::dawam::{context, pay, presence, roster};
 use crate::staff::{attendance, directory, discipline, payroll, requests, schedules};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -35,6 +36,112 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/me/advances", web::get().to(payroll::my_advances))
             .route("/me/advances", web::post().to(payroll::create_my_advance))
             .route("/me/payslips", web::get().to(payroll::my_payslips))
+            // ── Dawam self-service ───────────────────────────────
+            .route("/me/context", web::get().to(context::my_context))
+            .route(
+                "/me/push-token",
+                web::put().to(crate::staff::dawam::set_push_token),
+            )
+            .route("/me/pings", web::post().to(presence::ping))
+            .route("/me/coverable", web::get().to(presence::my_coverable))
+            .route("/me/cover", web::post().to(presence::open_cover))
+            .route("/me/roster", web::get().to(roster::my_roster))
+            .route("/me/swaps", web::post().to(roster::ask_swap))
+            .route("/me/swaps/{id}", web::patch().to(roster::answer_swap))
+            .route("/me/preferences", web::put().to(roster::put_preferences))
+            .route("/me/pay/estimate", web::get().to(pay::my_estimate))
+            .route("/me/adjustments", web::get().to(pay::my_adjustments))
+            .route(
+                "/me/expense-advances",
+                web::get().to(pay::my_expense_advances),
+            )
+            .route("/me/notifications", web::get().to(pay::my_notifications))
+            .route(
+                "/me/notifications/read",
+                web::post().to(pay::read_notifications),
+            )
+            // ── Dawam management ─────────────────────────────────
+            .route("/flags", web::get().to(presence::list_flags))
+            .route("/flags/{id}", web::patch().to(presence::resolve_flag))
+            .route("/attendance/punch", web::post().to(presence::punch_for))
+            .route(
+                "/attendance/till-punch",
+                web::post().to(presence::till_punch),
+            )
+            .route(
+                "/attendance/{id}/cover",
+                web::patch().to(presence::decide_cover),
+            )
+            .route(
+                "/attendance/{id}/overtime",
+                web::patch().to(presence::decide_overtime),
+            )
+            .route(
+                "/employees/{user_id}/device",
+                web::delete().to(presence::revoke_device),
+            )
+            .route("/roster", web::get().to(roster::roster))
+            .route("/roster/publish", web::post().to(roster::publish))
+            .route("/roster/suggestions", web::get().to(roster::suggestions))
+            .route("/roster/coverage", web::get().to(roster::get_coverage))
+            .route("/roster/coverage", web::put().to(roster::put_coverage))
+            .route("/roster/fairness", web::get().to(roster::fairness))
+            .route(
+                "/reports/labour-vs-sales",
+                web::get().to(super::dawam::reports::labour_vs_sales),
+            )
+            .route(
+                "/reports/payroll-history",
+                web::get().to(super::dawam::reports::payroll_history),
+            )
+            .route(
+                "/reports/advances",
+                web::get().to(super::dawam::reports::advances),
+            )
+            .route(
+                "/roster/suggestions/decide",
+                web::post().to(roster::decide_suggestion),
+            )
+            .route("/open-shifts", web::post().to(roster::post_open_shift))
+            .route("/open-shifts", web::get().to(roster::list_open_shifts))
+            .route(
+                "/open-shifts/{id}/claim",
+                web::post().to(roster::claim_open_shift),
+            )
+            .route(
+                "/open-shifts/{id}/decision",
+                web::patch().to(roster::decide_claim),
+            )
+            .route("/swaps", web::get().to(roster::list_swaps))
+            .route("/swaps/{id}/decision", web::patch().to(roster::decide_swap))
+            .route("/holidays/{date}", web::put().to(roster::decide_holiday))
+            .route("/payroll/current", web::get().to(pay::current))
+            .route(
+                "/payroll/periods/{id}/payslips/{user_id}/paid",
+                web::patch().to(pay::mark_paid),
+            )
+            .route("/adjustments", web::get().to(pay::list_adjustments))
+            .route("/adjustments", web::post().to(pay::create_adjustment))
+            .route(
+                "/adjustments/{kind}/{id}/decision",
+                web::patch().to(pay::decide_adjustment),
+            )
+            .route(
+                "/adjustments/{kind}/{id}/stop",
+                web::post().to(pay::stop_adjustment),
+            )
+            .route(
+                "/advances/{id}/review",
+                web::patch().to(pay::review_advance),
+            )
+            .route(
+                "/expense-advances",
+                web::get().to(pay::list_expense_advances),
+            )
+            .route(
+                "/expense-advances",
+                web::post().to(pay::log_expense_advance),
+            )
             // ── Directory ────────────────────────────────────────
             .route("/departments", web::get().to(directory::list_departments))
             .route("/departments", web::post().to(directory::create_department))
@@ -47,6 +154,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::delete().to(directory::delete_department),
             )
             .route("/employees", web::get().to(directory::list_employees))
+            .route("/employees", web::post().to(directory::create_employee))
+            .route(
+                "/branches/{branch_id}/people",
+                web::get().to(directory::branch_people),
+            )
             .route(
                 "/employees/{user_id}",
                 web::get().to(directory::get_employee),

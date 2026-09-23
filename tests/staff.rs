@@ -24,7 +24,8 @@ fn get_secret() -> JwtSecret {
 }
 
 fn token_for(user_id: Uuid, org_id: Uuid, role: UserRole) -> String {
-    madar_rust::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), role, None, 24).unwrap()
+    madar_rust::auth::jwt::create_token(&get_secret(), user_id, Some(org_id), role, None, 24)
+        .unwrap()
 }
 
 macro_rules! app {
@@ -82,6 +83,13 @@ async fn seed(pool: &PgPool, timezone: &str) -> Fixture {
     sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Test Org', $2)")
         .bind(org)
         .bind(format!("org-{org}"))
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // The owner saved the rules at set-up (RU-1): people may clock in.
+    sqlx::query("INSERT INTO attendance_settings (org_id, rules_saved_at) VALUES ($1, now())")
+        .bind(org)
         .execute(pool)
         .await
         .unwrap();
@@ -224,7 +232,11 @@ async fn roster(pool: &PgPool, org: Uuid, user: Uuid, shift: Uuid, day_of_week: 
 fn stable_zone_at(base: chrono::DateTime<Utc>) -> String {
     // POSIX sign convention: `Etc/GMT-2` is two hours AHEAD of UTC.
     let shift = 12 - base.hour() as i64;
-    format!("Etc/GMT{}{}", if shift > 0 { '-' } else { '+' }, shift.abs())
+    format!(
+        "Etc/GMT{}{}",
+        if shift > 0 { '-' } else { '+' },
+        shift.abs()
+    )
 }
 
 fn stable_zone() -> String {
@@ -395,11 +407,15 @@ async fn geofencing_can_be_turned_off_per_org(pool: PgPool) {
     )
     .await;
     roster(&pool, f.org, f.employee, shift, None).await;
-    sqlx::query("INSERT INTO attendance_settings (org_id, require_geofence) VALUES ($1, FALSE)")
-        .bind(f.org)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO attendance_settings (org_id, require_geofence) VALUES ($1, FALSE)\
+         ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
+         DO UPDATE SET require_geofence = FALSE",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let token = token_for(f.employee, f.org, UserRole::Teller);
     let resp = check_in(&app, &token, f.branch, BRANCH_LAT + 0.01, BRANCH_LNG).await;
@@ -1696,7 +1712,9 @@ async fn seed_late_ladder(pool: &PgPool, org: Uuid) {
     sqlx::query(
         r#"INSERT INTO attendance_settings (org_id, late_deduction_tiers)
            VALUES ($1, '[{"from_minutes":1,"to_minutes":30,"kind":"minutes","value":30},
-                         {"from_minutes":31,"to_minutes":120,"kind":"day_fraction","value":0.5}]'::jsonb)"#,
+                         {"from_minutes":31,"to_minutes":120,"kind":"day_fraction","value":0.5}]'::jsonb)
+           ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid))
+           DO UPDATE SET late_deduction_tiers = EXCLUDED.late_deduction_tiers"#,
     )
     .bind(org)
     .execute(pool)
@@ -1792,8 +1810,8 @@ async fn an_approved_late_arrival_means_there_is_no_penalty_to_waive(pool: PgPoo
 async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool) {
     // Controlled timestamps, because the point is what a SHORTENED-but-worked day
     // classifies as — not what an instant in-and-out does.
-    use madar_rust::staff::attendance::{DayAdjustments, derive};
     use chrono::TimeZone;
+    use madar_rust::staff::attendance::{DayAdjustments, derive};
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
     // Rostered 09:00–17:00; permission to leave at 13:00; actually left at 13:00.
@@ -1833,8 +1851,8 @@ async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool
 async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool) {
     // The pure shape of the rule, without the clock: an excused window inside the
     // attendance span is credited when paid and ignored when not.
-    use madar_rust::staff::attendance::{DayAdjustments, derive};
     use chrono::TimeZone;
+    use madar_rust::staff::attendance::{DayAdjustments, derive};
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
     let base = DayAdjustments {
@@ -2080,7 +2098,7 @@ async fn each_request_kind_rejects_a_malformed_shape(pool: PgPool) {
         json!({ "kind": "early_departure", "on_date": "2026-09-01" }),
         json!({ "kind": "excuse",          "on_date": "2026-09-01", "from_time": "12:00:00" }),
         json!({ "kind": "mission",         "on_date": "2026-09-01" }),
-        json!({ "kind": "leave",           "on_date": "2026-09-01" }),
+        // Leave needs nothing more: it has no types (Dawam RQ-2).
     ] {
         let kind = body["kind"].as_str().unwrap().to_string();
         assert_eq!(
@@ -2345,7 +2363,11 @@ async fn discipline_report_is_scoped_to_the_callers_branches(pool: PgPool) {
     let resp = auth_get!(app, uri, owner);
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(body["rows"].as_array().unwrap().len(), 2, "the owner sees every branch");
+    assert_eq!(
+        body["rows"].as_array().unwrap().len(),
+        2,
+        "the owner sees every branch"
+    );
 
     let mgr = token_for(manager, f.org, UserRole::BranchManager);
     let resp = auth_get!(app, uri, mgr);
