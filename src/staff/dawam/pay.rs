@@ -59,6 +59,40 @@ pub(crate) async fn today_for_org(pool: &PgPool, org_id: Uuid) -> Result<NaiveDa
     today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo")).await
 }
 
+/// "Today" where a money act happens (AT-1): that branch's own day, else
+/// the org's. Never the database server's date.
+pub(crate) async fn today_at(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch: Option<Uuid>,
+) -> Result<NaiveDate, AppError> {
+    if let Some(b) = branch {
+        let tz: Option<String> =
+            sqlx::query_scalar("SELECT timezone::text FROM branches WHERE id = $1 AND org_id = $2")
+                .bind(b)
+                .bind(org_id)
+                .fetch_optional(pool)
+                .await?;
+        if let Some(tz) = tz {
+            return today_in(pool, &tz).await;
+        }
+    }
+    today_for_org(pool, org_id).await
+}
+
+/// An employee's own day (AT-1): their first branch's zone.
+pub(crate) async fn today_for_employee(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+) -> Result<NaiveDate, AppError> {
+    let branch = crate::staff::access::branches_of(pool, employee_id)
+        .await?
+        .into_iter()
+        .next();
+    today_at(pool, org_id, branch).await
+}
+
 /// The period covering today, created when it doesn't exist yet (PAY-1). Two
 /// callers racing to open the same month both get the one row (AT-8).
 pub(crate) async fn ensure_current_period(
@@ -233,7 +267,7 @@ pub async fn my_estimate(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
     let employee_id = me.employee_id;
     let org_id = me.org_id;
     let settings = load_settings(pool.get_ref(), org_id, None).await?;
-    let today = today_for_org(pool.get_ref(), org_id).await?;
+    let today = today_for_employee(pool.get_ref(), org_id, employee_id).await?;
     let (start, end) = period_window(today, settings.period_start_day.max(1) as u32);
     let on_payroll: bool =
         sqlx::query_scalar("SELECT on_payroll FROM employees WHERE id = $1 AND org_id = $2")
@@ -507,7 +541,8 @@ pub async fn create_adjustment(
             ));
         }
     };
-    let today = today_for_org(pool, org_id).await?;
+    // The person's own day, not the server's or the first branch's (AT-1).
+    let today = today_for_employee(pool, org_id, body.employee_id).await?;
     let effective_date = body.effective_date.unwrap_or(today);
     // Once a month is approved, fixes go into the next month (AD-10).
     period_lock::assert_open(pool, org_id, effective_date, "a pay line").await?;
@@ -1127,7 +1162,11 @@ pub async fn log_expense_advance(
     if purpose.is_empty() {
         return Err(AppError::BadRequest("Say what it's for".into()));
     }
-    let today = today_for_org(pool, org_id).await?;
+    // The day where the cash changed hands (AT-1).
+    let today = match branch {
+        Some(_) => today_at(pool, org_id, branch).await?,
+        None => today_for_employee(pool, org_id, body.employee_id).await?,
+    };
     let given_on = body.given_on.unwrap_or(today);
     if given_on > today {
         return Err(AppError::BadRequest("The date can't be in the future".into()));

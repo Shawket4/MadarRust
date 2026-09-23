@@ -1816,3 +1816,82 @@ async fn an_approved_month_refuses_every_attendance_edit(pool: PgPool) {
     );
     assert_eq!(resp.status(), 200, "{:?}", test::read_body(resp).await);
 }
+
+// ── money dates (AT-1, audit 08) ───────────────────────────────────────────
+
+/// A pay line and an expense advance with no date land on the day where
+/// the person works: their branch's day, not the database server's and not
+/// the org's first branch's. UTC−11 and UTC+14 are always on different
+/// dates, so the test holds whenever it runs. Before, the far branch's own
+/// today was refused as "in the future".
+#[sqlx::test]
+async fn money_acts_are_dated_on_the_branchs_day(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "Pacific/Pago_Pago").await;
+    let far = branch(&pool, f.org, "Kiritimati", "Pacific/Kiritimati").await;
+    let nour = employee(
+        &pool,
+        f.org,
+        "Nour",
+        None,
+        Some("+201012345677"),
+        true,
+        &[far],
+        600_000,
+    )
+    .await;
+    let there = local(&pool, Utc::now(), "Pacific/Kiritimati").await.date();
+    let first = local(&pool, Utc::now(), "Pacific/Pago_Pago").await.date();
+    assert_ne!(there, first);
+
+    let adj = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner_t(&f),
+        json!({ "employee_id": nour, "kind": "bonus", "amount_piastres": 10_000, "reason": "Great week" })
+    ))
+    .await;
+    assert_eq!(adj["effective_date"], json!(there), "{adj}");
+
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner_t(&f),
+        json!({ "employee_id": nour, "amount_piastres": 5_000, "purpose": "Milk", "via": "safe",
+                "branch_id": far, "given_on": there })
+    );
+    assert_eq!(resp.status(), 201, "{:?}", test::read_body(resp).await);
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner_t(&f),
+        json!({ "employee_id": nour, "amount_piastres": 5_000, "purpose": "Sugar", "via": "safe",
+                "branch_id": far })
+    );
+    assert_eq!(resp.status(), 201);
+    assert_eq!(json_of(resp).await["given_on"], json!(there));
+    // The day after the branch's today is still the future.
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner_t(&f),
+        json!({ "employee_id": nour, "amount_piastres": 5_000, "purpose": "Cups", "via": "safe",
+                "branch_id": far, "given_on": there + Duration::days(1) })
+    );
+    assert_eq!(resp.status(), 400);
+    // No writer can leave the day to the database any more.
+    let left: Result<u64, _> = sqlx::query(
+        "INSERT INTO expense_advances (org_id, employee_id, amount_piastres, purpose, via) \
+         VALUES ($1, $2, 100, 'x', 'safe')",
+    )
+    .bind(f.org)
+    .bind(nour)
+    .execute(&pool)
+    .await
+    .map(|r| r.rows_affected());
+    assert!(left.is_err(), "given_on has no server-date default");
+}
