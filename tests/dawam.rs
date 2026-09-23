@@ -937,9 +937,12 @@ async fn an_offline_punch_is_dated_by_the_server_not_the_phone(pool: PgPool) {
     }
     let s = shift(&pool, &f, "Morning", start, end).await;
     every_day(&pool, &f, f.a, s).await;
-    let tok = phone_token(&pool, f.a).await;
+    let phone = common::employees::session(&pool, f.a).await;
+    let tok = format!("{}|{}", phone.token, phone.device);
     let seen = now - Duration::minutes(40);
-    let stamp = |mins: i64, rebooted: bool| json!({ "server_time": seen, "elapsed_ms": mins * 60_000, "rebooted": rebooted });
+    // The last time the server spoke to this phone, signed for it (CL-11).
+    let anchor = madar_rust::staff::dawam::clock::sign_anchor(&secret(), phone.device_id, seen);
+    let stamp = |mins: i64, rebooted: bool| json!({ "server_time": seen, "elapsed_ms": mins * 60_000, "rebooted": rebooted, "anchor": anchor });
     let rec = json_of(call!(
         app,
         post,
@@ -1590,8 +1593,10 @@ async fn a_forgotten_phone_punches_on_the_till_with_a_pin(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    // The till is signed in as whoever works it; here the owner.
-    let till = token_for(f.owner, f.org, UserRole::OrgAdmin);
+    // The till is signed in as whoever works it; here the owner, on the
+    // branch's POS device with its till open.
+    let device = common::employees::open_till(&pool, f.org, f.branch, f.owner).await;
+    let till = common::employees::at_till(&token_for(f.owner, f.org, UserRole::OrgAdmin), device);
     let punch = |pin: &str| json!({ "branch_id": f.branch, "pin": pin });
 
     let resp = call!(

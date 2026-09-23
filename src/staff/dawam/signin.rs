@@ -340,19 +340,24 @@ pub async fn otp_verify(
             .execute(pool)
             .await?;
     }
-    Ok(HttpResponse::Ok().json(StaffSession {
-        needs_org: false,
-        orgs,
-        token: Some(token),
-        token_expires_at: Some(expires),
-        device_token: Some(device_token),
-        employee_id: Some(account.employee_id),
-        user_id: account.user_id,
-        name: Some(account.name.clone()),
-        role: account.role.clone(),
-        org_id: Some(account.org_id),
-        new_phone: had_phone,
-    }))
+    Ok(HttpResponse::Ok()
+        .insert_header((
+            super::clock::ANCHOR_HEADER,
+            super::clock::sign_anchor(&secret, device_id, Utc::now()),
+        ))
+        .json(StaffSession {
+            needs_org: false,
+            orgs,
+            token: Some(token),
+            token_expires_at: Some(expires),
+            device_token: Some(device_token),
+            employee_id: Some(account.employee_id),
+            user_id: account.user_id,
+            name: Some(account.name.clone()),
+            role: account.role.clone(),
+            org_id: Some(account.org_id),
+            new_phone: had_phone,
+        }))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -402,10 +407,15 @@ pub async fn refresh(
         principal::check_session(pool, employee_id, org_id, device_id, Some(&sent)).await?;
     let (token, expires_at) =
         principal::mint(&secret, employee_id, org_id, who.user_id, device_id)?;
-    Ok(HttpResponse::Ok().json(StaffTokenRefresh {
-        token,
-        expires_at,
-        employee_id,
-        org_id,
-    }))
+    Ok(HttpResponse::Ok()
+        .insert_header((
+            super::clock::ANCHOR_HEADER,
+            super::clock::sign_anchor(&secret, device_id, Utc::now()),
+        ))
+        .json(StaffTokenRefresh {
+            token,
+            expires_at,
+            employee_id,
+            org_id,
+        }))
 }

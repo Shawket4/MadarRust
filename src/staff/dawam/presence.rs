@@ -45,13 +45,16 @@ pub(crate) async fn mark_tracking_off(
         0,
     )
     .await
+    .map(|_| ())
 }
 
 /// At or under this, the employee is told to charge and silence reads "phone
 /// likely died" (CL-12).
 pub(crate) const LOW_BATTERY: i16 = 15;
 
-/// Opens a flag once per shift and kind, and tells the managers.
+/// Opens a flag once per shift and kind, and tells the managers — once, when
+/// it opens (audit 03 bug 3): a later ping only updates the minutes away.
+/// Returns whether this call opened it.
 pub(crate) async fn raise_flag(
     pool: &PgPool,
     org_id: Uuid,
@@ -60,12 +63,15 @@ pub(crate) async fn raise_flag(
     record_id: Option<Uuid>,
     kind: &str,
     minutes_away: i32,
-) -> Result<(), AppError> {
-    let inserted = sqlx::query(
+) -> Result<bool, AppError> {
+    // `xmax = 0` only on the row this statement inserted; an `ON CONFLICT
+    // DO UPDATE` also reports one row, which is what re-notified every ping.
+    let inserted: Option<bool> = sqlx::query_scalar(
         "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind, minutes_away) \
          VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (attendance_record_id, kind) WHERE resolution IS NULL AND attendance_record_id IS NOT NULL \
-         DO UPDATE SET minutes_away = GREATEST(attendance_flags.minutes_away, EXCLUDED.minutes_away)",
+         DO UPDATE SET minutes_away = GREATEST(attendance_flags.minutes_away, EXCLUDED.minutes_away) \
+         RETURNING (xmax = 0)",
     )
     .bind(org_id)
     .bind(employee_id)
@@ -73,9 +79,10 @@ pub(crate) async fn raise_flag(
     .bind(record_id)
     .bind(kind)
     .bind(minutes_away)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    if inserted.rows_affected() > 0 {
+    let opened = inserted.unwrap_or(false);
+    if opened {
         let name = employee_name(pool, employee_id).await;
         notify_managers(
             pool,
@@ -88,7 +95,36 @@ pub(crate) async fn raise_flag(
         )
         .await;
     }
-    Ok(())
+    Ok(opened)
+}
+
+/// The punch's own fix, judged like a ping's (CL-8, CL-9): the OS's mock
+/// marker, or an accuracy no real receiver reports, flags the shift
+/// "location suspicious". With tracking off there are no pings, so without
+/// this a mocked clock-in would never be noticed.
+pub(crate) async fn check_punch_fix(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    branch_id: Uuid,
+    record_id: Uuid,
+    accuracy_meters: Option<f64>,
+    is_mock: Option<bool>,
+) -> Result<bool, AppError> {
+    let suspicious = is_mock == Some(true) || accuracy_meters.is_some_and(|a| a <= 0.0);
+    if suspicious {
+        raise_flag(
+            pool,
+            org_id,
+            employee_id,
+            Some(branch_id),
+            Some(record_id),
+            "suspicious",
+            0,
+        )
+        .await?;
+    }
+    Ok(suspicious)
 }
 
 /// After a check-out: overtime off, paid automatically, or pending (RU-7).
@@ -158,14 +194,109 @@ pub struct PingResult {
     pub charge_phone: bool,
 }
 
-#[derive(sqlx::FromRow)]
-struct PriorPing {
-    at: DateTime<Utc>,
-    latitude: Option<f64>,
-    longitude: Option<f64>,
-    accuracy_meters: Option<f64>,
-    inside: bool,
+#[derive(sqlx::FromRow, Clone, Debug)]
+pub(crate) struct PriorPing {
+    pub at: DateTime<Utc>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub accuracy_meters: Option<f64>,
+    pub inside: bool,
 }
+
+/// Accuracies iOS reports in fixed steps: an honest phone repeats them, so
+/// they never read as "frozen" (audit 03 bug 11).
+const QUANTISED_ACCURACY: [f64; 7] = [5.0, 10.0, 30.0, 65.0, 100.0, 165.0, 200.0];
+/// How many readings in a row, this one included, make a frozen accuracy.
+const FROZEN_RUN: usize = 4;
+/// How many identical positions in a row, this one included, read as a
+/// replayed or cached location (CL-8). One repeat is what an OS cache hands
+/// back; three in a row across half an hour is not a person standing still.
+const IDENTICAL_RUN: usize = 3;
+
+/// The spoofing signals of one reading against the ones before it (CL-8, CL-9).
+/// `prior` is newest first.
+pub(crate) fn spoof_signals(
+    here: (f64, f64),
+    accuracy: Option<f64>,
+    is_mock: Option<bool>,
+    at: DateTime<Utc>,
+    prior: &[PriorPing],
+) -> bool {
+    let identical = prior.len() + 1 >= IDENTICAL_RUN
+        && prior
+            .iter()
+            .take(IDENTICAL_RUN - 1)
+            .all(|p| p.latitude == Some(here.0) && p.longitude == Some(here.1));
+    let frozen_accuracy = accuracy.is_some_and(|a| {
+        a <= 0.0
+            || (!QUANTISED_ACCURACY.contains(&a)
+                && prior.len() + 1 >= FROZEN_RUN
+                && prior
+                    .iter()
+                    .take(FROZEN_RUN - 1)
+                    .all(|p| p.accuracy_meters == Some(a)))
+    });
+    let too_fast = prior
+        .first()
+        .is_some_and(|p| match (p.latitude, p.longitude) {
+            (Some(lat), Some(lng)) => {
+                let secs = (at - p.at).num_seconds().max(1) as f64;
+                haversine_meters(
+                    LatLng { lat, lng },
+                    LatLng {
+                        lat: here.0,
+                        lng: here.1,
+                    },
+                ) / secs
+                    > MAX_SPEED_MPS
+            }
+            _ => false,
+        });
+    is_mock == Some(true) || identical || frozen_accuracy || too_fast
+}
+
+/// Minutes outside the fence on this shift, up to `now` (CL-7): every outside
+/// run, each from its first outside ping to the ping that found them back
+/// (or `now`), less the time an approved excuse, mission or early departure
+/// covers. Pings are oldest first; only those after `since` (a left-mid-shift
+/// flag already handled) count.
+pub(crate) fn away_minutes(
+    pings: &[(DateTime<Utc>, bool)],
+    now: DateTime<Utc>,
+    excused: &[(DateTime<Utc>, DateTime<Utc>)],
+    since: Option<DateTime<Utc>>,
+) -> i64 {
+    let mut runs: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
+    let mut out_since: Option<DateTime<Utc>> = None;
+    for (at, inside) in pings.iter().filter(|(at, _)| since.is_none_or(|s| *at > s)) {
+        match (inside, out_since) {
+            (false, None) => out_since = Some(*at),
+            (true, Some(from)) => {
+                runs.push((from, *at));
+                out_since = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(from) = out_since {
+        runs.push((from, now));
+    }
+    let mut secs = 0i64;
+    for (from, to) in runs {
+        let mut run = (to - from).num_seconds().max(0);
+        for (a, b) in excused {
+            let (lo, hi) = (from.max(*a), to.min(*b));
+            if hi > lo {
+                run -= (hi - lo).num_seconds();
+            }
+        }
+        secs += run.max(0);
+    }
+    secs / 60
+}
+
+/// Slack at the edges of an excused window: pings are 15 minutes apart.
+const EXCUSE_SLACK_MIN: i64 = 10;
 
 /// A location every 15 minutes between clock-in and clock-out (CL-4, CL-17).
 #[utoipa::path(
@@ -176,18 +307,23 @@ struct PriorPing {
 pub async fn ping(
     me: Me,
     pool: crate::db::Db,
+    secret: web::Data<crate::auth::jwt::JwtSecret>,
     body: web::Json<PingRequest>,
 ) -> Result<HttpResponse, AppError> {
     // From the employee's live phone only (CL-1, checked by StaffAuth).
     let employee_id = me.employee_id;
     let org_id = me.org_id;
     let pool = pool.get_ref();
+    // Location only after the notice was accepted on this phone (AT-5).
+    super::privacy::require_accepted(pool, &me).await?;
 
-    let now = super::clock::rebuild(body.offline.as_ref(), Utc::now())?.at;
+    let stamped = super::clock::rebuild(body.offline.as_ref(), Utc::now(), me.verifier(&secret))?;
+    let now = stamped.at;
     // Only while clocked in: location is never collected off shift (CL-17). A
     // queued ping belongs to the record that was open at ITS time.
-    let open: Option<(Uuid, Uuid, NaiveDate)> = sqlx::query_as(
-        "SELECT id, branch_id, business_date FROM attendance_records \
+    #[allow(clippy::type_complexity)]
+    let open: Option<(Uuid, Uuid, NaiveDate, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT id, branch_id, business_date, scheduled_start_at FROM attendance_records \
           WHERE employee_id = $1 AND check_in_at IS NOT NULL AND check_in_at <= $2 \
             AND (check_out_at IS NULL OR check_out_at >= $2) \
           ORDER BY check_in_at DESC LIMIT 1",
@@ -196,7 +332,7 @@ pub async fn ping(
     .bind(now)
     .fetch_optional(pool)
     .await?;
-    let Some((record_id, branch_id, business_date)) = open else {
+    let Some((record_id, branch_id, business_date, scheduled_start)) = open else {
         return Err(AppError::Conflict("You are not clocked in.".into()));
     };
     let fence: (Option<f64>, Option<f64>, Option<i32>) =
@@ -218,7 +354,7 @@ pub async fn ping(
 
     let prior: Vec<PriorPing> = sqlx::query_as(
         "SELECT at, latitude, longitude, accuracy_meters, inside FROM attendance_pings \
-          WHERE attendance_record_id = $1 AND at <= $2 ORDER BY at DESC LIMIT 3",
+          WHERE attendance_record_id = $1 AND at <= $2 ORDER BY at DESC LIMIT 4",
     )
     .bind(record_id)
     .bind(now)
@@ -226,8 +362,9 @@ pub async fn ping(
     .await?;
     sqlx::query(
         "INSERT INTO attendance_pings (org_id, employee_id, attendance_record_id, at, latitude, \
-            longitude, accuracy_meters, distance_meters, inside, is_mock, battery_percent) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            longitude, accuracy_meters, distance_meters, inside, is_mock, battery_percent, \
+            time_unverified) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(org_id)
     .bind(employee_id)
@@ -240,6 +377,7 @@ pub async fn ping(
     .bind(inside)
     .bind(body.is_mock.unwrap_or(false))
     .bind(body.battery_percent)
+    .bind(stamped.unverified)
     .execute(pool)
     .await?;
 
@@ -248,44 +386,56 @@ pub async fn ping(
     // Left mid-shift: two outside in a row, not covered by an approved excuse,
     // early departure or mission (CL-6). Nothing is charged here.
     let streak = 1 + prior.iter().take_while(|p| !p.inside).count();
-    if !inside && streak >= OUTSIDE_STREAK && !excused_now(pool, employee_id, business_date).await?
-    {
-        let first_out = prior
+    if !inside && streak >= OUTSIDE_STREAK {
+        let tz = crate::staff::branch_timezone(pool, branch_id).await?;
+        let excused =
+            excused_windows(pool, employee_id, business_date, &tz, scheduled_start).await?;
+        let slack = chrono::Duration::minutes(EXCUSE_SLACK_MIN);
+        let covered = excused
             .iter()
-            .take_while(|p| !p.inside)
-            .last()
-            .map_or(now, |p| p.at);
-        let minutes = ((now - first_out).num_minutes().max(0) as i32).max(15);
-        raise_flag(
-            pool,
-            org_id,
-            employee_id,
-            Some(branch_id),
-            Some(record_id),
-            "left_mid_shift",
-            minutes,
-        )
-        .await?;
-        flags.push("left_mid_shift".to_string());
+            .any(|(a, b)| *a - slack <= now && now <= *b + slack);
+        if !covered {
+            let since: Option<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT MAX(resolved_at) FROM attendance_flags \
+                  WHERE attendance_record_id = $1 AND kind = 'left_mid_shift' \
+                    AND resolution IS NOT NULL",
+            )
+            .bind(record_id)
+            .fetch_one(pool)
+            .await?;
+            let trail: Vec<(DateTime<Utc>, bool)> = sqlx::query_as(
+                "SELECT at, inside FROM attendance_pings \
+                  WHERE attendance_record_id = $1 AND at <= $2 ORDER BY at",
+            )
+            .bind(record_id)
+            .bind(now)
+            .fetch_all(pool)
+            .await?;
+            let minutes = away_minutes(&trail, now, &excused, since).max(15) as i32;
+            raise_flag(
+                pool,
+                org_id,
+                employee_id,
+                Some(branch_id),
+                Some(record_id),
+                "left_mid_shift",
+                minutes,
+            )
+            .await?;
+            flags.push("left_mid_shift".to_string());
+        }
     }
 
     // Spoofing (CL-8, CL-9): real GPS always drifts, so identical coordinates,
     // a perfect or frozen accuracy, the OS's mock marker, or an impossible
     // speed all raise the same flag.
-    let last = prior.first();
-    let identical = last
-        .is_some_and(|p| p.latitude == Some(body.latitude) && p.longitude == Some(body.longitude));
-    let frozen_accuracy = body.accuracy_meters.is_some_and(|a| {
-        a <= 0.0 || (prior.len() >= 2 && prior.iter().take(2).all(|p| p.accuracy_meters == Some(a)))
-    });
-    let too_fast = last.is_some_and(|p| match (p.latitude, p.longitude) {
-        (Some(lat), Some(lng)) => {
-            let secs = (now - p.at).num_seconds().max(1) as f64;
-            haversine_meters(LatLng { lat, lng }, here) / secs > MAX_SPEED_MPS
-        }
-        _ => false,
-    });
-    if body.is_mock == Some(true) || identical || frozen_accuracy || too_fast {
+    if spoof_signals(
+        (body.latitude, body.longitude),
+        body.accuracy_meters,
+        body.is_mock,
+        now,
+        &prior,
+    ) {
         raise_flag(
             pool,
             org_id,
@@ -297,6 +447,19 @@ pub async fn ping(
         )
         .await?;
         flags.push("suspicious".to_string());
+    }
+    // A queued ping whose time the server can't vouch for (CL-11).
+    if stamped.unverified {
+        raise_flag(
+            pool,
+            org_id,
+            employee_id,
+            Some(branch_id),
+            Some(record_id),
+            "time_unverified",
+            0,
+        )
+        .await?;
     }
 
     // Low battery on shift: say so once, by push as well, since the app may
@@ -325,17 +488,44 @@ pub async fn ping(
     }))
 }
 
-/// An approved excuse, early departure or mission covers being away now.
-async fn excused_now(pool: &PgPool, employee_id: Uuid, date: NaiveDate) -> Result<bool, AppError> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM staff_requests \
-          WHERE employee_id = $1 AND status = 'approved' \
-            AND kind IN ('excuse', 'early_departure', 'mission') \
-            AND on_date <= $2 AND COALESCE(end_date, on_date) >= $2)",
+/// The windows an approved excuse, early departure or mission excuses being
+/// away (CL-6), as instants in the branch's zone. An excuse's hours bound
+/// it; an early departure runs from its time past the end of the shift; a
+/// mission without hours is its whole days. On a night shift a time earlier
+/// than the shift's start is the next morning's (SC-10).
+pub(crate) async fn excused_windows(
+    pool: &PgPool,
+    employee_id: Uuid,
+    business_date: NaiveDate,
+    tz: &str,
+    shift_start: Option<DateTime<Utc>>,
+) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>, AppError> {
+    Ok(sqlx::query_as(
+        "WITH r AS ( \
+             SELECT kind, on_date, COALESCE(end_date, on_date) AS end_date, from_time, to_time, \
+                    CASE WHEN $4::timestamptz IS NOT NULL AND from_time IS NOT NULL \
+                              AND on_date = $2 \
+                              AND (on_date + from_time) AT TIME ZONE $3 < $4::timestamptz - INTERVAL '1 hour' \
+                         THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END AS shift \
+               FROM staff_requests \
+              WHERE employee_id = $1 AND status = 'approved' \
+                AND kind IN ('excuse', 'early_departure', 'mission') \
+                AND on_date <= $2 AND COALESCE(end_date, on_date) >= $2 \
+         ) \
+         SELECT CASE WHEN from_time IS NULL THEN on_date::timestamp AT TIME ZONE $3 \
+                     ELSE (on_date + from_time + shift) AT TIME ZONE $3 END, \
+                CASE WHEN kind = 'early_departure' THEN (end_date + 2)::timestamp AT TIME ZONE $3 \
+                     WHEN to_time IS NULL THEN (end_date + 1)::timestamp AT TIME ZONE $3 \
+                     ELSE (end_date + to_time + shift \
+                           + CASE WHEN from_time IS NOT NULL AND to_time <= from_time \
+                                  THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END) AT TIME ZONE $3 END \
+           FROM r",
     )
     .bind(employee_id)
-    .bind(date)
-    .fetch_one(pool)
+    .bind(business_date)
+    .bind(tz)
+    .bind(shift_start)
+    .fetch_all(pool)
     .await?)
 }
 
@@ -420,7 +610,44 @@ pub async fn list_flags(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-/// Minutes away at the person's minute rate, to the nearest 5 EGP (CL-7, RU-12).
+/// Minutes away at the person's minute rate, exact (piastres), from the
+/// rules of the shift's branch (RU-2) — what an unpaid excuse deducts (RU-12:
+/// stored amounts are exact).
+async fn away_exact(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    record_id: Option<Uuid>,
+    minutes: i32,
+) -> Result<Decimal, AppError> {
+    let salary: i64 =
+        sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
+            .bind(employee_id)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(0);
+    let (scheduled, branch): (Option<i32>, Option<Uuid>) = match record_id {
+        Some(id) => sqlx::query_as(
+            "SELECT (EXTRACT(EPOCH FROM (scheduled_end_at - scheduled_start_at)) / 60)::int, \
+                    branch_id FROM attendance_records WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or((None, None)),
+        None => (None, None),
+    };
+    let settings = load_settings(pool, org_id, branch).await?;
+    let rates = PayRates::from_base(
+        salary,
+        settings.working_days_per_month,
+        i64::from(scheduled.unwrap_or(480).max(1)),
+    );
+    Ok(rates.minutes_piastres(Decimal::from(minutes.max(0))))
+}
+
+/// The suggestion shown to the manager: time away at the minute rate, to the
+/// nearest 5 EGP, halves away from zero (CL-7).
 async fn away_cost(
     pool: &PgPool,
     org_id: Uuid,
@@ -428,33 +655,15 @@ async fn away_cost(
     record_id: Option<Uuid>,
     minutes: i32,
 ) -> Result<i64, AppError> {
-    let salary: i64 =
-        sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
-            .bind(employee_id)
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or(0);
-    let scheduled: Option<i32> = match record_id {
-        Some(id) => sqlx::query_scalar(
-            "SELECT (EXTRACT(EPOCH FROM (scheduled_end_at - scheduled_start_at)) / 60)::int \
-               FROM attendance_records WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .flatten(),
-        None => None,
-    };
-    let settings = load_settings(pool, org_id, None).await?;
-    let rates = PayRates::from_base(
-        salary,
-        settings.working_days_per_month,
-        i64::from(scheduled.unwrap_or(480).max(1)),
-    );
-    let exact = rates.minutes_piastres(Decimal::from(minutes.max(0)));
-    // Nearest 500 piastres, halves away from zero.
-    let fives = (exact / Decimal::from(500)).round();
-    Ok((fives * Decimal::from(500)).try_into().unwrap_or(0))
+    let exact = away_exact(pool, org_id, employee_id, record_id, minutes).await?;
+    Ok(nearest_five_pounds(exact))
+}
+
+/// Nearest 500 piastres, halves away from zero.
+pub(crate) fn nearest_five_pounds(piastres: Decimal) -> i64 {
+    let fives = (piastres / Decimal::from(500))
+        .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
+    (fives * Decimal::from(500)).try_into().unwrap_or(0)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -517,9 +726,12 @@ pub async fn resolve_flag(
         "ignore" => ("ignored", 0, ""),
         "confirm" => ("confirmed", 0, ""),
         "excuse_paid" => ("excused_paid", 0, ""),
+        // The exact minute pay, not the rounded suggestion (RU-12).
         "excuse_unpaid" => (
             "excused_unpaid",
-            away_cost(pool, org_id, employee_id, record_id, minutes).await?,
+            crate::costing::round_piastres(
+                away_exact(pool, org_id, employee_id, record_id, minutes).await?,
+            ),
             "Unpaid excuse",
         ),
         "deduct" => {
@@ -639,11 +851,15 @@ pub struct CoverableShift {
 }
 
 /// Rostered shifts at my branches whose owner is past grace without a punch,
-/// until the shift ends (CV-1, CV-2). Yesterday's night shift still running
-/// after midnight counts, on the day it started (SC-10). One roster function.
-async fn coverable_for(pool: &PgPool, employee_id: Uuid) -> Result<Vec<CoverableShift>, AppError> {
+/// until the shift ends (CV-1, CV-2), as of `now` (a cover queued offline is
+/// judged at its own time). Yesterday's night shift still running after
+/// midnight counts, on the day it started (SC-10). One roster function.
+async fn coverable_for(
+    pool: &PgPool,
+    employee_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<Vec<CoverableShift>, AppError> {
     let mine = branches_of(pool, employee_id).await?;
-    let now = Utc::now();
     let colleagues: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT DISTINCT e.id, e.name FROM employee_branches a \
            JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
@@ -718,7 +934,7 @@ async fn coverable_for(pool: &PgPool, employee_id: Uuid) -> Result<Vec<Coverable
     security(("bearer_jwt" = []))
 )]
 pub async fn my_coverable(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    Ok(HttpResponse::Ok().json(coverable_for(pool.get_ref(), me.employee_id).await?))
+    Ok(HttpResponse::Ok().json(coverable_for(pool.get_ref(), me.employee_id, Utc::now()).await?))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -730,6 +946,16 @@ pub struct OpenCover {
     pub latitude: Option<f64>,
     #[serde(default)]
     pub longitude: Option<f64>,
+    /// The fix's reported accuracy, metres (CL-9).
+    #[serde(default)]
+    pub accuracy_meters: Option<f64>,
+    /// The OS's mock-location marker for this fix (CL-9).
+    #[serde(default)]
+    pub is_mock: Option<bool>,
+    /// Set when the cover was queued offline: it starts at its own time, not
+    /// when the phone got a signal back (CL-11, audit 03 bug 6).
+    #[serde(default)]
+    pub offline: Option<super::clock::OfflineStamp>,
 }
 
 /// Open a colleague's missed shift as a cover: the same phone and geofence
@@ -743,24 +969,27 @@ pub struct OpenCover {
 pub async fn open_cover(
     me: Me,
     pool: crate::db::Db,
+    secret: web::Data<crate::auth::jwt::JwtSecret>,
     body: web::Json<OpenCover>,
 ) -> Result<HttpResponse, AppError> {
     let employee_id = me.employee_id;
     let org_id = me.org_id;
     let pool = pool.get_ref();
     crate::staff::attendance::require_rules(pool, org_id).await?;
-    let shift = coverable_for(pool, employee_id)
+    super::privacy::require_accepted(pool, &me).await?;
+    let stamped = super::clock::rebuild(body.offline.as_ref(), Utc::now(), me.verifier(&secret))?;
+    let shift = coverable_for(pool, employee_id, stamped.at)
         .await?
         .into_iter()
         .find(|c| c.employee_id == body.employee_id && c.work_shift_id == body.work_shift_id)
         .ok_or_else(|| AppError::Conflict("That shift can't be covered now.".into()))?;
-    let settings = load_settings(pool, org_id, Some(shift.branch_id)).await?;
+    // The same fence as a clock-in, always (CL-2).
     let distance = crate::staff::attendance::check_geofence(
         pool,
         shift.branch_id,
         body.latitude,
         body.longitude,
-        settings.require_geofence,
+        true,
     )
     .await?;
     let open: bool = sqlx::query_scalar(
@@ -780,7 +1009,7 @@ pub async fn open_cover(
             status, scheduled_start_at, scheduled_end_at, check_in_at, check_in_latitude, \
             check_in_longitude, check_in_distance_meters, check_in_method, covered_employee_id, \
             cover_status, created_by) \
-         VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, now(), $8, $9, $10, 'cover', $11, \
+         VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, $13, $8, $9, $10, 'cover', $11, \
             'pending', $12) RETURNING id",
     )
     .bind(org_id)
@@ -795,7 +1024,30 @@ pub async fn open_cover(
     .bind(distance)
     .bind(body.employee_id)
     .bind(me.user_id)
+    .bind(stamped.at)
     .fetch_one(pool)
+    .await?;
+    if stamped.unverified {
+        raise_flag(
+            pool,
+            org_id,
+            employee_id,
+            Some(shift.branch_id),
+            Some(id),
+            "time_unverified",
+            0,
+        )
+        .await?;
+    }
+    check_punch_fix(
+        pool,
+        org_id,
+        employee_id,
+        shift.branch_id,
+        id,
+        body.accuracy_meters,
+        body.is_mock,
+    )
     .await?;
     let _ = sqlx::query(
         "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind) \
@@ -1005,10 +1257,16 @@ pub struct PunchFor {
     pub employee_id: Uuid,
     /// Required (CL-13): a dead phone, a forgotten one.
     pub reason: String,
+    /// Set when the manager's phone queued the punch offline: it is dated at
+    /// its own time, not when the phone got a signal back (audit 03 bug 6).
+    #[serde(default)]
+    pub offline: Option<super::clock::OfflineStamp>,
 }
 
-/// Clock someone in, or out if they are in, now; marked as made by the
-/// manager with the reason (CL-13, CL-16).
+/// Clock someone in, or out if they are in; marked as made by the manager
+/// (`manager`) with the reason (CL-13, CL-16). The check-in window, the
+/// night shift's business date and the shift's own branch apply exactly as
+/// for the app.
 #[utoipa::path(
     post, path = "/staff/attendance/punch", tag = "staff", request_body = PunchFor,
     responses((status = 200, body = crate::staff::attendance::AttendanceRecord), AppErrorResponse),
@@ -1017,6 +1275,7 @@ pub struct PunchFor {
 pub async fn punch_for(
     req: HttpRequest,
     pool: crate::db::Db,
+    secret: web::Data<crate::auth::jwt::JwtSecret>,
     body: web::Json<PunchFor>,
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
@@ -1045,19 +1304,35 @@ pub async fn punch_for(
         return Err(AppError::BadRequest("That person has no branch.".into()));
     }
     access::require_for(pool, &claims, Cap::HrAttendancePunchOthers, &subject).await?;
-    // At the branch the caller runs (one of theirs), else the first.
-    let branch = access::decision_branch(pool, &claims, Cap::HrAttendancePunchOthers, &subject)
+    // Only the manager's own phone can vouch for a queued time; from the
+    // dashboard an offline stamp is dated but doubted.
+    let verifier = super::clock::Verifier {
+        secret: &secret,
+        device: crate::staff::principal::staff_principal(&req).map(|p| p.device_id),
+    };
+    let stamped = super::clock::rebuild(body.offline.as_ref(), Utc::now(), verifier)?;
+    // At the branch the caller runs (one of theirs); a rostered shift's own
+    // branch wins when the caller holds the right there too.
+    let fallback = access::decision_branch(pool, &claims, Cap::HrAttendancePunchOthers, &subject)
         .await?
         .ok_or_else(|| AppError::BadRequest("That person has no branch.".into()))?;
+    let branch = match shift_branch_at(pool, body.employee_id, fallback, stamped.at).await? {
+        Some(b) if b != fallback => {
+            access::require_at(pool, &claims, org_id, Cap::HrAttendancePunchOthers, b).await?;
+            b
+        }
+        _ => fallback,
+    };
 
-    let id = punch(
+    let (id, _) = punch(
         pool,
         org_id,
         body.employee_id,
         branch,
-        "manual",
+        "manager",
         reason,
         Some(by),
+        stamped,
     )
     .await?;
     notify(
@@ -1072,8 +1347,40 @@ pub async fn punch_for(
     Ok(HttpResponse::Ok().json(record))
 }
 
-/// Clock `employee_id` in at `branch` now, or out if they are in; `method`
-/// says how (CL-13, CL-16), `by` the user who did it for them.
+/// The branch of the rostered shift a punch at `at` would open, when the
+/// shift template names one.
+async fn shift_branch_at(
+    pool: &PgPool,
+    employee_id: Uuid,
+    near: Uuid,
+    at: DateTime<Utc>,
+) -> Result<Option<Uuid>, AppError> {
+    let tz = crate::staff::branch_timezone(pool, near).await?;
+    let today = crate::staff::attendance::day_in(pool, at, &tz).await?;
+    let (shift, _) =
+        crate::staff::attendance::resolve_punch_shift(pool, employee_id, today, &tz, at).await?;
+    let Some(shift) = shift else {
+        return Ok(None);
+    };
+    Ok(sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT ws.branch_id FROM work_shifts ws \
+           JOIN employee_branches eb ON eb.branch_id = ws.branch_id AND eb.employee_id = $2 \
+          WHERE ws.id = $1",
+    )
+    .bind(shift.work_shift_id)
+    .bind(employee_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten())
+}
+
+/// Clock `employee_id` in at `branch` at the stamped moment, or out if they
+/// are in; `method` says how (CL-13, CL-16), `by` the user who did it for
+/// them. The check-in lands on the business date of the shift it belongs to
+/// (a night shift after midnight is yesterday's, SC-10) and is refused before
+/// that shift's window opens (CL-3). Returns the record and whether this was
+/// a check-in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn punch(
     pool: &PgPool,
     org_id: Uuid,
@@ -1082,43 +1389,45 @@ pub(crate) async fn punch(
     method: &str,
     reason: &str,
     by: Option<Uuid>,
-) -> Result<Uuid, AppError> {
-    let open: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM attendance_records WHERE employee_id = $1 AND check_in_at IS NOT NULL \
+    stamped: super::clock::Stamped,
+) -> Result<(Uuid, bool), AppError> {
+    let at = stamped.at;
+    let open: Option<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT id, branch_id, check_in_at FROM attendance_records \
+          WHERE employee_id = $1 AND check_in_at IS NOT NULL AND check_in_at <= $2 \
             AND check_out_at IS NULL ORDER BY check_in_at DESC LIMIT 1",
     )
     .bind(employee_id)
+    .bind(at)
     .fetch_optional(pool)
     .await?;
-    let id = match open {
-        Some(id) => {
+    let (id, checked_in, flag_branch) = match open {
+        Some((id, record_branch, _)) => {
             sqlx::query(
-                "UPDATE attendance_records SET check_out_at = now(), check_out_method = $4, \
+                "UPDATE attendance_records SET check_out_at = $5, check_out_method = $4, \
                         punch_reason = $2, edited_by = $3 WHERE id = $1",
             )
             .bind(id)
             .bind(reason)
             .bind(by)
             .bind(method)
+            .bind(at)
             .execute(pool)
             .await?;
-            id
+            (id, false, record_branch)
         }
         None => {
             let tz = crate::staff::branch_timezone(pool, branch).await?;
-            let today = crate::staff::attendance::today_in(pool, &tz).await?;
-            let now = Utc::now();
-            // The one "which shift is this" resolver (SC-10): after midnight a
-            // night shift's punch lands on the day it started.
-            let (resolved, today) =
-                crate::staff::schedules::shift_at_instant(pool, employee_id, today, &tz, now)
+            let today = crate::staff::attendance::day_in(pool, at, &tz).await?;
+            let (shift, business_date) =
+                crate::staff::attendance::resolve_punch_shift(pool, employee_id, today, &tz, at)
                     .await?;
-            let shift = resolved.as_ref();
-            sqlx::query_scalar(
+            crate::staff::attendance::check_window(shift.as_ref(), at)?;
+            let id = sqlx::query_scalar(
                 "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                     business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, \
                     check_in_method, is_manual, punch_reason, created_by) \
-                 VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, now(), $10, $11, $8, $9) \
+                 VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, $12, $10, $11, $8, $9) \
                  ON CONFLICT (employee_id, business_date, \
                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL \
                  DO NOTHING RETURNING id",
@@ -1126,17 +1435,19 @@ pub(crate) async fn punch(
             .bind(org_id)
             .bind(employee_id)
             .bind(branch)
-            .bind(shift.map(|s| s.work_shift_id))
-            .bind(today)
-            .bind(shift.map(|s| s.scheduled_start_at))
-            .bind(shift.map(|s| s.scheduled_end_at))
+            .bind(shift.as_ref().map(|s| s.work_shift_id))
+            .bind(business_date)
+            .bind(shift.as_ref().map(|s| s.scheduled_start_at))
+            .bind(shift.as_ref().map(|s| s.scheduled_end_at))
             .bind(reason)
             .bind(by)
             .bind(method)
-            .bind(method == "manual")
+            .bind(method == "manager")
+            .bind(at)
             .fetch_optional(pool)
             .await?
-            .ok_or_else(|| AppError::Conflict("They already worked that shift today.".into()))?
+            .ok_or_else(|| AppError::Conflict("They already worked that shift today.".into()))?;
+            (id, true, branch)
         }
     };
     // Derive lateness, worked time and penalties like any punch.
@@ -1144,7 +1455,19 @@ pub(crate) async fn punch(
         pool, org_id, id, None, None, None, None, reason, by,
     )
     .await?;
-    Ok(id)
+    if stamped.unverified {
+        raise_flag(
+            pool,
+            org_id,
+            employee_id,
+            Some(flag_branch),
+            Some(id),
+            "time_unverified",
+            0,
+        )
+        .await?;
+    }
+    Ok((id, checked_in))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -1164,12 +1487,28 @@ pub struct TillPunchResult {
     pub record: crate::staff::attendance::AttendanceRecord,
 }
 
+fn till_only(reason: &str) -> AppError {
+    AppError::Coded {
+        status: 403,
+        code: "TILL_ONLY",
+        reason: reason.into(),
+    }
+}
+
 /// A dead or forgotten phone in a Madar org: the person clocks in or out on
 /// the branch till with their till PIN (CL-13). Marked `till` (CL-16). The
-/// till is at the branch, so there is no geofence to check. Online only: a
-/// PIN is never queued.
+/// till is at the branch, so there is no geofence to check — which is why
+/// it is accepted ONLY from a real till (audit 03 P0): a POS session (never
+/// the Dawam app's) on the branch's registered POS device, proven by its
+/// credential when it has one, with a till session open on that device at
+/// that branch. Online only: a PIN is never queued. Wrong PINs slow down
+/// like the till's own sign-in, and the branch's managers are told.
 #[utoipa::path(
     post, path = "/staff/attendance/till-punch", tag = "staff", request_body = TillPunch,
+    params(
+        ("X-Madar-Device" = String, Header, description = "The till's device id"),
+        ("X-Madar-Device-Token" = Option<String>, Header, description = "The device credential, when it has one"),
+    ),
     responses((status = 200, body = TillPunchResult), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
@@ -1178,6 +1517,10 @@ pub async fn till_punch(
     pool: crate::db::Db,
     body: web::Json<TillPunch>,
 ) -> Result<HttpResponse, AppError> {
+    // The staff app can never punch as the till, whoever is signed in on it.
+    if crate::staff::principal::staff_principal(&req).is_some() {
+        return Err(till_only("Till punches are made on the branch till."));
+    }
     let claims = caller(&req)?;
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
@@ -1199,14 +1542,55 @@ pub async fn till_punch(
             ));
         }
     }
+    // The branch's own registered POS device, proven when it can be.
+    let device = crate::devices::DeviceHeader::from_request_headers(&req)
+        .ok_or_else(|| till_only("Till punches are made on the branch till."))?;
+    let row: Option<(Option<Uuid>, Option<String>)> = sqlx::query_as(
+        "SELECT branch_id, credential_hash FROM devices \
+          WHERE id = $1 AND org_id = $2 AND retired_at IS NULL AND kind = 'pos'",
+    )
+    .bind(device)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((device_branch, credential)) = row else {
+        return Err(till_only("This device isn't a till of this business."));
+    };
+    if device_branch != Some(body.branch_id) {
+        return Err(till_only("This till belongs to another branch."));
+    }
+    if credential.is_some() {
+        let token = req
+            .headers()
+            .get(crate::devices::activation::DEVICE_TOKEN_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if !crate::devices::activation::verify_credential(pool, device, token).await? {
+            return Err(till_only(
+                "This till could not prove it is the branch's till.",
+            ));
+        }
+    }
+    let till_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tills \
+          WHERE branch_id = $1 AND device_id = $2 AND status = 'open')",
+    )
+    .bind(body.branch_id)
+    .bind(device)
+    .fetch_one(pool)
+    .await?;
+    if !till_open {
+        return Err(AppError::Coded {
+            status: 409,
+            code: "NO_TILL_SESSION",
+            reason: "Open the till first, then punch with your PIN.".into(),
+        });
+    }
     crate::staff::attendance::require_rules(pool, org_id).await?;
-    let device = req
-        .headers()
-        .get(crate::tickets::DEVICE_ID_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    // The same growing delay as the till's own sign-in.
-    crate::auth::pin_throttle::check(pool, device.as_deref(), body.branch_id).await?;
+    let device_key = device.to_string();
+    // The same growing delay as the till's own sign-in: a colleague's PIN
+    // can't be guessed at speed.
+    crate::auth::pin_throttle::check(pool, Some(&device_key), body.branch_id).await?;
     let holder = match crate::auth::handlers::find_pin_holder_by_pin(pool, org_id, body.pin.trim())
         .await?
     {
@@ -1219,11 +1603,13 @@ pub async fn till_punch(
             });
         }
         None => {
-            crate::auth::pin_throttle::record_failure(pool, device.as_deref(), body.branch_id)
+            crate::auth::pin_throttle::record_failure(pool, Some(&device_key), body.branch_id)
                 .await;
             return Err(AppError::Unauthorized("Wrong PIN".into()));
         }
     };
+    // Deliberately NOT cleared on a right PIN: someone guessing a colleague's
+    // PIN could otherwise reset the count with their own between guesses.
     // The PIN names a till user; the punch is for the employee linked to them.
     let employee: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
@@ -1239,7 +1625,7 @@ pub async fn till_punch(
         });
     };
     require_active_employee(pool, employee_id).await?;
-    let id = punch(
+    let (id, checked_in) = punch(
         pool,
         org_id,
         employee_id,
@@ -1247,18 +1633,34 @@ pub async fn till_punch(
         "till",
         "Till PIN",
         None,
+        super::clock::Stamped {
+            at: Utc::now(),
+            offline: false,
+            unverified: false,
+        },
     )
     .await?;
     let record = crate::staff::attendance::load_record(pool, org_id, id).await?;
+    let name = employee_name(pool, employee_id).await;
+    // A punch without the phone's fence: the branch's managers hear of it.
+    notify_managers(
+        pool,
+        org_id,
+        Some(record.branch_id),
+        Cap::HrAttendanceEdit,
+        Some(employee_id),
+        if checked_in {
+            "staff.n_till_punch_in"
+        } else {
+            "staff.n_till_punch_out"
+        },
+        json!({ "name": name }),
+    )
+    .await;
     Ok(HttpResponse::Ok().json(TillPunchResult {
         employee_id,
-        name: employee_name(pool, employee_id).await,
-        punched: if record.check_out_at.is_some() {
-            "out"
-        } else {
-            "in"
-        }
-        .into(),
+        name,
+        punched: if checked_in { "in" } else { "out" }.into(),
         record,
     }))
 }
@@ -1283,4 +1685,86 @@ pub async fn revoke_device(
     access::require_for(pool.get_ref(), &claims, Cap::HrStaffEdit, &subject).await?;
     super::revoke_devices(pool.get_ref(), *employee_id).await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn t(m: i64) -> DateTime<Utc> {
+        "2026-09-22T08:00:00Z".parse::<DateTime<Utc>>().unwrap() + Duration::minutes(m)
+    }
+
+    #[test]
+    fn time_away_is_every_outside_run_less_the_excused_part() {
+        // In, out for 75 minutes, back, out again for 30.
+        let pings = [
+            (t(0), true),
+            (t(15), false),
+            (t(30), false),
+            (t(90), true),
+            (t(105), false),
+        ];
+        assert_eq!(away_minutes(&pings, t(135), &[], None), 75 + 30);
+        // An excuse over 20 of those minutes.
+        assert_eq!(away_minutes(&pings, t(135), &[(t(40), t(60))], None), 85);
+        // Since a handled flag: only what came after it.
+        assert_eq!(away_minutes(&pings, t(135), &[], Some(t(90))), 30);
+        // Never counted past what is excused.
+        assert_eq!(away_minutes(&pings, t(135), &[(t(0), t(200))], None), 0);
+    }
+
+    fn p(m: i64, lat: f64, acc: f64) -> PriorPing {
+        PriorPing {
+            at: t(m),
+            latitude: Some(lat),
+            longitude: Some(31.0),
+            accuracy_meters: Some(acc),
+            inside: true,
+        }
+    }
+
+    #[test]
+    fn spoofing_needs_more_than_one_repeat_and_ignores_ios_steps() {
+        let here = (30.0, 31.0);
+        // One repeated fix (an OS cache) is not suspicious; three in a row is.
+        assert!(!spoof_signals(
+            here,
+            Some(12.0),
+            None,
+            t(30),
+            &[p(15, 30.0, 11.0), p(0, 30.1, 9.0)]
+        ));
+        assert!(spoof_signals(
+            here,
+            Some(12.0),
+            None,
+            t(30),
+            &[p(15, 30.0, 11.0), p(0, 30.0, 9.0)]
+        ));
+        // iOS's 65 m step four times running is honest; 7.3 m is frozen.
+        let steps = [p(45, 30.01, 65.0), p(30, 30.02, 65.0), p(15, 30.03, 65.0)];
+        assert!(!spoof_signals(here, Some(65.0), None, t(60), &steps));
+        let frozen = [p(45, 30.01, 7.3), p(30, 30.02, 7.3), p(15, 30.03, 7.3)];
+        assert!(spoof_signals(here, Some(7.3), None, t(60), &frozen));
+        // A perfect accuracy, the OS's own marker, or a jet.
+        assert!(spoof_signals(here, Some(0.0), None, t(0), &[]));
+        assert!(spoof_signals(here, Some(8.0), Some(true), t(0), &[]));
+        assert!(spoof_signals(
+            (31.0, 31.0),
+            Some(8.0),
+            None,
+            t(16),
+            &[p(15, 30.0, 9.0)]
+        ));
+    }
+
+    #[test]
+    fn the_suggestion_rounds_halves_away_from_zero() {
+        assert_eq!(nearest_five_pounds(Decimal::from(750)), 1000);
+        assert_eq!(nearest_five_pounds(Decimal::from(1250)), 1500);
+        assert_eq!(nearest_five_pounds(Decimal::from(749)), 500);
+        assert_eq!(nearest_five_pounds(Decimal::from(0)), 0);
+    }
 }

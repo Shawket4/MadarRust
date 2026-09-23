@@ -46,6 +46,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::put().to(crate::staff::dawam::set_push_token),
             )
             .route("/me/pings", web::post().to(presence::ping))
+            .route(
+                "/me/privacy",
+                web::post().to(crate::staff::dawam::privacy::accept),
+            )
             .route("/me/coverable", web::get().to(presence::my_coverable))
             .route("/me/cover", web::post().to(presence::open_cover))
             .route("/me/roster", web::get().to(roster::my_roster))
