@@ -2661,6 +2661,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "madar-authz"
 version = "0.1.0"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.1.0#101fa1dfd1521bf9f4033db4593f7f7caf0633a9"
 dependencies = [
  "serde",
  "serde_json",

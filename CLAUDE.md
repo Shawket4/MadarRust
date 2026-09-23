@@ -145,7 +145,7 @@ Everything below still applies:
   cargo nextest run --archive-file /tmp/madar_tests.tar.zst --workspace-remap .
   ```
   The same collision silently breaks `cargo run --bin export-openapi`: it can run ANOTHER worktree's binary and write a spec with none of your work in it. Verify before trusting it (`strings target/debug/export-openapi | grep <your-new-route>`), or run the hashed binary in `target/debug/deps/` directly.
-- **A shared `CARGO_TARGET_DIR` can also give you ANOTHER worktree's `madar-authz`.** Cargo records dep-info paths RELATIVELY (`authz/crate/src/generated.rs`), so a build made from one worktree satisfies another worktree's fingerprint for that path dependency and is reused without rebuilding. Your binary then links a capability registry your branch's migrations never created, and org provisioning dies on an FK violation that surfaces as a `409` from `orgs::tests` — nothing in the failure points at authz. It also hits `authz::registry_tests`, `provision_tests` and `e2e`. `touch authz/crate/src/*.rs` before building forces the rebuild and clears all of it. Suspect this first whenever a green branch fails only in those suites.
+- **A shared `CARGO_TARGET_DIR` could once give you ANOTHER worktree's `madar-authz`** (a path dependency, fingerprinted by relative path). It is a git dependency pinned by tag now, so that trap is gone; the same trap applies to any path dependency you add.
 - **A `mis-aligned LINKEDIT string pool` dlopen error on a proc-macro dylib means it was STRIPPED, not that the crate or the disk is broken.** Apple's `strip` on Xcode 27 / macOS 27 corrupts any dylib it touches (the same family as the POS `libmadar_frb` bug), and cargo strips automatically when a profile turns debug info off. The trap is `[profile.dev.package."*"] debug = false` in a machine-local `.cargo/config.toml`, added for build speed: it silently enables stripping, and then `libsqlx_macros` — or any proc-macro — links to a dylib nothing can `dlopen`, so the whole workspace stops compiling. Set `strip = false` explicitly in every profile block that lowers `debug`. Symptoms that mislead: the corruption is DETERMINISTIC (same hash, same size, same byte offset every rebuild) and survives `cargo clean -p`, re-signing with `codesign`, and freeing disk, because each rebuild strips again.
 - **Disk:** `target/debug/deps` accumulates `*.rcgu.o` codegen intermediates from interrupted builds and cargo never collects them — tens of GB. With no cargo running, `find target/debug/deps -maxdepth 1 -name '*.rcgu.o' -delete` is safe and rustc regenerates what it needs. `target/debug/incremental` is likewise pure scratch.
 - Test databases are named `_sqlx_test_*`; after killed runs drop leftovers: `psql -p 5433 -d postgres -Atc "select 'drop database \"'||datname||'\";' from pg_database where datname like '_sqlx_test%'" | psql -p 5433 -d postgres`.
@@ -271,13 +271,15 @@ Publish **after** `tx.commit()`, never inside the transaction.
   in its migration and RLS; `tests/dawam_migration.rs` fails otherwise.
 
 ### Permissions (architecture E — PERMISSIONS_ARCHITECTURE.md)
-- **One registry.** Every permission is a capability in `authz/spec/capabilities.toml`
-  (stable id, key, legacy cell, group, tier, risk, role defaults, core roles, EN/AR).
-  Generate with `cd authz/gen && cargo run -- --dashboard ../../../MadarDashboard --pos ../../../madar`;
-  CI runs `--check`. Never hand-edit `authz/crate/src/generated.rs`, the dashboard's
-  `src/generated/capabilities.ts`, or the POS's vendored `rust-core/crates/madar-authz`.
-- **One decision library.** `authz/crate` (`madar-authz`) resolves and decides for the
-  server AND the POS core (vendored byte-identical; `crate_hash_matches_its_files`).
+- **One registry.** Every permission is a capability in madar-shared's
+  `authz/spec/capabilities.toml` (github.com/Shawket4/madar-shared; stable id, key, legacy
+  cell, group, tier, risk, role defaults, core roles, EN/AR). Generate in a madar-shared
+  checkout with `cargo run -p authz-gen -- --dashboard ../MadarDashboard --pos ../madar`;
+  its CI runs `--check`. Never hand-edit `generated.rs` or the dashboard's
+  `src/generated/capabilities.ts`. A spec change ships as a madar-shared tag, bumped here
+  and in the POS together.
+- **One decision library.** `madar-authz` (a git dependency on madar-shared, pinned by tag;
+  the POS core pins the same tag) resolves and decides for the server AND the POS core.
   No I/O in it. Never branch on a role name in new code; ask for a capability.
 - **Anti-escalation is not optional.** Any write that changes access (users, roles,
   overrides, branch assignments) goes through `permissions::guard` / `madar_authz::guard`:

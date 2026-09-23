@@ -5,9 +5,10 @@ edition = "2024"
 default-run = "madar-rust"
 
 [dependencies]
-# The shared permission library (also vendored into the POS core). Generated
-# registry: authz/spec/capabilities.toml -> `cd authz/gen && cargo run`.
-madar-authz        = { path = "authz/crate" }
+# The shared permission library, from madar-shared (the POS core pins the same
+# tag). The registry is generated there, from authz/spec/capabilities.toml.
+# Bump the tag in both repos together; see madar-shared's README.
+madar-authz        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"
