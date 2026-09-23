@@ -2699,7 +2699,7 @@ pub(crate) async fn create_order_inner(
             format!(
                 "{}-{}-{}-{:03}",
                 branch_code,
-                biz_date.format("%y%m%d"),
+                madar_time::yymmdd(biz_date),
                 shift6,
                 order_number
             )

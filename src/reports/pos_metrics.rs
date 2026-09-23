@@ -28,10 +28,10 @@ use crate::{
     errors::{AppError, AppErrorResponse},
 };
 
-/// The longest window one call may ask for.
-pub const MAX_DAYS: i64 = 366;
-/// How many items the leaderboard carries.
-pub const TOP_ITEMS: i64 = 10;
+/// The longest window one call may ask for (`MAX_DAYS`), how many items the
+/// leaderboard carries (`TOP_ITEMS`), and the average ticket: shared with the
+/// till's offline figures through madar-shared (`madar_money::metrics`).
+pub use madar_money::metrics::{MAX_DAYS, TOP_ITEMS, average_ticket};
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -99,15 +99,6 @@ pub struct PosMetricsReport {
     pub top_items: Vec<PosMetricsItem>,
     /// Always 24 rows, hour 0 first.
     pub hourly: Vec<PosMetricsHour>,
-}
-
-/// Rounded half up; 0 when there is nothing to divide by.
-pub fn average_ticket(net_sales: i64, order_count: i64) -> i64 {
-    if order_count <= 0 {
-        0
-    } else {
-        (2 * net_sales + order_count).div_euclid(2 * order_count)
-    }
 }
 
 #[utoipa::path(

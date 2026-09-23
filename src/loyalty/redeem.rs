@@ -78,12 +78,9 @@ impl RedemptionPlan {
 
 /// Minor units a reward takes off one line: whole units at the price the line
 /// was charged per unit, modifiers included, never more than the line itself.
-///
-/// The one rule both sides share — `madar-core` prices the Charge screen with
-/// the same arithmetic, pinned by `loyalty_reward_vectors.json`.
-pub fn covered_minor(charged_per_unit: i64, line_subtotal: i64, units: i64) -> i64 {
-    (charged_per_unit.max(0) * units.max(0)).min(line_subtotal.max(0))
-}
+/// The one rule both sides share, in madar-shared (`madar_money::loyalty`),
+/// pinned by its `loyalty_reward_vectors.json`.
+pub use madar_money::loyalty::covered_minor;
 
 /// Price and validate the rewards a sale wants to spend.
 ///

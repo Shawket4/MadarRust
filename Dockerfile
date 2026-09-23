@@ -13,16 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 COPY --from=planner /app/recipe.json recipe.json
-# `madar-authz` is a LOCAL path dependency (Cargo.toml: path = "authz/crate").
-# This crate is not a workspace, so cargo-chef does not carry that crate's
-# manifest in the recipe, and `cook` runs before `COPY . .` — cargo then fails
-# with "failed to read /app/authz/crate/Cargo.toml". Stage its manifest plus an
-# empty lib so the dependency graph resolves. The real sources arrive with
-# `COPY . .` below and madar-authz is rebuilt then; keeping the stub empty here
-# means the cached dependency layer is NOT invalidated by authz source edits.
-COPY authz/crate/Cargo.toml authz/crate/Cargo.toml
-RUN mkdir -p authz/crate/src && : > authz/crate/src/lib.rs
-# This layer is only invalidated when Cargo.lock or the authz manifest changes
+# madar-authz (and the other madar-shared crates) are GIT dependencies pinned
+# by tag; cargo-chef carries them in the recipe and `cook` fetches them, so no
+# stub is needed. This layer is only invalidated when Cargo.lock changes.
 RUN cargo chef cook --release --recipe-path recipe.json
 
 COPY . .

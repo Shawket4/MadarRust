@@ -15,24 +15,16 @@ use crate::errors::AppError;
 /// Product-home default and the DB column default.
 pub const DEFAULT_TZ: &str = "Africa/Cairo";
 
-/// The first day of a week, everywhere (owner rule, 2026-09-17): SATURDAY.
-/// Every "this week"/"last week" window and every weekly bucket starts on it,
-/// read on the scope's wall clock. The POS core (`timefmt::WEEK_START`) and the
-/// dashboard (`lib/week.ts`) carry the same rule.
-pub const WEEK_START: chrono::Weekday = chrono::Weekday::Sat;
+/// The first day of a week, everywhere (owner rule, 2026-09-17): SATURDAY, and
+/// the local date the week holding a day starts on. Every "this week"/"last
+/// week" window and every weekly bucket starts on it, read on the scope's wall
+/// clock. One copy with the POS core, in madar-shared (`madar_time`); the
+/// dashboard (`lib/week.ts`) carries the same rule.
+pub use madar_time::{WEEK_START, week_start};
 
 /// Days Postgres's ISO week start (Monday) lies AFTER [`WEEK_START`]. The SQL
 /// helpers shift by it; `week_sql_shift_matches_week_start` pins the two.
 pub const WEEK_SQL_SHIFT_DAYS: i64 = 2;
-
-/// The local date the week containing `day` starts on.
-pub fn week_start(day: chrono::NaiveDate) -> chrono::NaiveDate {
-    use chrono::Datelike;
-    let back = (7 + day.weekday().num_days_from_monday() as i64
-        - WEEK_START.num_days_from_monday() as i64)
-        % 7;
-    day - chrono::Duration::days(back)
-}
 
 /// SQL: the start of the [`WEEK_START`] week holding `local` — a wall-clock
 /// `timestamp` (e.g. `x AT TIME ZONE $tz`) or a `date`; the result is a
