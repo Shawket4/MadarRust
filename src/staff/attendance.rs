@@ -96,6 +96,10 @@ pub struct AttendanceRecord {
     /// Why someone else punched for this person.
     #[sqlx(default)]
     pub punch_reason: Option<String>,
+    /// A manager set this day's status by hand; automation keeps it (AT-7).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub status_overridden: bool,
 }
 
 /// Every attendance column plus the two denormalised names, in `AttendanceRecord`
@@ -111,7 +115,7 @@ const RECORD_COLS: &str = r#"
     a.late_minutes, a.early_leave_minutes, a.overtime_minutes, a.worked_minutes,
     a.is_manual, a.notes, a.edit_reason, a.created_by, a.edited_by,
     a.created_at, a.updated_at, a.covered_employee_id, a.cover_status,
-    a.overtime_status, a.tracking_off, a.punch_reason
+    a.overtime_status, a.tracking_off, a.punch_reason, a.status_overridden
 "#;
 
 const RECORD_JOINS: &str = "FROM attendance_records a \
@@ -162,22 +166,32 @@ pub struct AttendanceSettings {
     pub orders_per_staff: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// For a branch: the rules it sets itself (every other field is the
+    /// business's, RU-2). Empty for the business.
+    #[serde(default)]
+    pub overridden: Vec<String>,
+    /// The ladder the set-up step suggests (RU-1). Never used for pricing.
+    #[sqlx(skip)]
+    #[serde(default)]
+    pub suggested_tiers: Vec<LateTier>,
 }
-
-const SETTINGS_COLS: &str = "id, org_id, branch_id, late_deduction_tiers, absence_deduction_days, \
-     default_overtime_multiplier, auto_checkout_buffer_minutes, \
-     working_days_per_month, require_geofence, excused_time_paid_default, \
-     period_start_day, overtime_mode, overtime_day_multiplier, overtime_night_multiplier, \
-     holiday_multiplier, advance_cap_percent, half_day_leave_counts, \
-     night_start, night_end, gender_mode, rules_saved_at, limit_day_hours, limit_week_hours, \
-     limit_presence_hours, limit_rest_hours, limit_overtime_day_hours, orders_per_staff, \
-     created_at, updated_at";
 
 impl AttendanceSettings {
     /// Parse the jsonb ladder. A malformed ladder is treated as "no penalties"
     /// rather than an error: payroll must still run for everyone else.
     pub(crate) fn tiers(&self) -> Vec<LateTier> {
-        serde_json::from_value(self.late_deduction_tiers.clone()).unwrap_or_default()
+        match serde_json::from_value(self.late_deduction_tiers.clone()) {
+            Ok(tiers) => tiers,
+            Err(e) => {
+                // RU-4: every write is validated, so this is a hand-edited row.
+                // Say so loudly instead of silently pricing nothing.
+                tracing::error!(
+                    org = %self.org_id, branch = ?self.branch_id, error = %e,
+                    "late_deduction_tiers does not parse: no late penalties until fixed"
+                );
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -345,6 +359,10 @@ pub struct PutAttendanceSettingsRequest {
     pub limit_overtime_day_hours: Option<Decimal>,
     #[serde(default)]
     pub orders_per_staff: Option<i32>,
+    /// Branch only: rules to take from the business again (field names, as
+    /// in `overridden`).
+    #[serde(default)]
+    pub inherit: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -388,45 +406,202 @@ pub struct Derived {
     pub status: AttendanceStatus,
 }
 
+/// An approved window of time off inside a shift, and whether it is paid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExcusedWindow {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub paid: bool,
+}
+
+impl ExcusedWindow {
+    /// Minutes of this window inside `[from, to]`.
+    pub fn minutes_within(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> i64 {
+        (self.to.min(to) - self.from.max(from)).num_minutes().max(0)
+    }
+}
+
+/// One approved late arrival or early departure: the agreed time on the
+/// business date and on the day after (a night shift's arrival after
+/// midnight), and the shift it names, if any (split days, B4).
+#[derive(Debug, Clone, Default)]
+pub struct TimedRequest {
+    pub candidates: Vec<DateTime<Utc>>,
+    pub work_shift_id: Option<Uuid>,
+    pub paid: bool,
+}
+
+/// One approved excuse: the window on the business date and on the day after.
+#[derive(Debug, Clone, Default)]
+pub struct WindowRequest {
+    pub candidates: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+    pub work_shift_id: Option<Uuid>,
+    pub paid: bool,
+}
+
 /// What the day's APPROVED requests forgive.
 ///
 /// Resolved from `staff_requests` by [`crate::staff::requests::day_adjustments`]
 /// and passed in, so this file's math stays a pure function of its arguments and
 /// the rules remain testable without a database.
 ///
-/// The three windows are the same shape seen from different ends — see the
-/// `staff_requests` migration: a late arrival is a window open at the start, an
-/// early departure one open at the end, an excuse one closed at both.
+/// A request belongs to ONE shift of the day (RQ-9, audit B4): the one it
+/// names, else the one its time falls in. [`DayAdjustments::for_shift`] picks
+/// what applies to a shift, so on a split day an arrival agreed for the
+/// evening never excuses the morning, and a night shift's after-midnight time
+/// lands on the next calendar day (B5).
 #[derive(Debug, Clone, Default)]
 pub struct DayAdjustments {
-    /// Approved `late_arrival` — the grace deadline moves to this instant.
-    pub excused_until: Option<DateTime<Utc>>,
-    /// Approved `early_departure` — leaving after this instant is not early.
-    pub excused_from: Option<DateTime<Utc>>,
-    /// Approved `excuse` windows: stepped out and came back.
-    pub excused_windows: Vec<(DateTime<Utc>, DateTime<Utc>)>,
-    /// Whether excused time counts as worked. Org default
-    /// (`excused_time_paid_default`), overridable per request by the approver.
-    pub excused_time_paid: bool,
-    /// Approved leave or mission covers the whole day.
+    pub late_arrivals: Vec<TimedRequest>,
+    pub early_departures: Vec<TimedRequest>,
+    pub excuses: Vec<WindowRequest>,
+    /// Approved leave or mission covers the whole day (or a half-day leave
+    /// under the business's "counts as the whole day" rule, RQ-8).
     pub on_leave: bool,
+    /// Whether that day off is paid (a mission always is).
+    pub leave_paid: bool,
+    /// A half-day leave: the half of the day's rostered time that is off (RQ-8).
+    pub half_off: Option<ExcusedWindow>,
+}
+
+/// [`DayAdjustments`] resolved for one shift.
+#[derive(Debug, Clone, Default)]
+pub struct ShiftAdjustments {
+    /// The grace deadline moves to this instant (a late arrival, or the end
+    /// of a first-half leave).
+    pub excused_until: Option<DateTime<Utc>>,
+    /// Leaving after this instant is not early (an early departure, or the
+    /// start of a second-half leave).
+    pub excused_from: Option<DateTime<Utc>>,
+    /// The approved early departure alone (not a half-day leave), with its pay.
+    pub early_departure: Option<(DateTime<Utc>, bool)>,
+    pub excuses: Vec<ExcusedWindow>,
+    /// The whole shift is off.
+    pub on_leave: bool,
+    /// Minutes of this shift on leave (all of it when `on_leave`), and whether
+    /// they are paid.
+    pub leave_minutes: i64,
+    pub leave_paid: bool,
 }
 
 impl DayAdjustments {
-    /// Minutes inside `[in, out]` that an approved excuse forgives.
+    /// What applies to the shift `[start, end]` (`shift` = its template).
+    /// Without a rostered window only the whole-day facts and the excuses
+    /// apply; lateness and early leave need a schedule to exist at all.
+    pub fn for_shift(
+        &self,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        shift: Option<Uuid>,
+    ) -> ShiftAdjustments {
+        let mine = |named: Option<Uuid>| named.is_none() || named == shift;
+        let window_minutes = match (start, end) {
+            (Some(s), Some(e)) => (e - s).num_minutes().max(0),
+            _ => 0,
+        };
+        let mut out = ShiftAdjustments {
+            on_leave: self.on_leave,
+            leave_paid: self.leave_paid,
+            leave_minutes: if self.on_leave { window_minutes } else { 0 },
+            ..Default::default()
+        };
+        if let (Some(s), Some(e)) = (start, end) {
+            // A late arrival's agreed time inside the shift; the latest wins
+            // (the more generous one is the one last agreed).
+            for r in self.late_arrivals.iter().filter(|r| mine(r.work_shift_id)) {
+                for c in r.candidates.iter().filter(|c| **c > s && **c <= e) {
+                    if out.excused_until.is_none_or(|cur| *c > cur) {
+                        out.excused_until = Some(*c);
+                    }
+                }
+            }
+            for r in self.early_departures.iter().filter(|r| mine(r.work_shift_id)) {
+                for c in r.candidates.iter().filter(|c| **c >= s && **c < e) {
+                    if out.early_departure.is_none_or(|(cur, _)| *c < cur) {
+                        out.early_departure = Some((*c, r.paid));
+                    }
+                }
+            }
+            out.excused_from = out.early_departure.map(|(at, _)| at);
+            for r in self.excuses.iter().filter(|r| mine(r.work_shift_id)) {
+                if let Some((from, to)) = r.candidates.iter().find(|(f, t)| *f < e && *t > s) {
+                    out.excuses.push(ExcusedWindow {
+                        from: *from,
+                        to: *to,
+                        paid: r.paid,
+                    });
+                }
+            }
+            if let Some(off) = self.half_off.filter(|_| !self.on_leave) {
+                let inside = off.minutes_within(s, e);
+                if inside > 0 {
+                    out.leave_paid = off.paid;
+                    if off.from <= s && off.to >= e {
+                        out.on_leave = true;
+                        out.leave_minutes = window_minutes;
+                    } else {
+                        out.leave_minutes = inside;
+                        if off.from <= s {
+                            // First half off: they are due when it ends.
+                            if out.excused_until.is_none_or(|cur| off.to > cur) {
+                                out.excused_until = Some(off.to);
+                            }
+                        } else if out.excused_from.is_none_or(|cur| off.from < cur) {
+                            // Second half off: they may leave when it starts.
+                            out.excused_from = Some(off.from);
+                        }
+                    }
+                }
+            }
+        } else {
+            for r in self.excuses.iter().filter(|r| mine(r.work_shift_id)) {
+                if let Some((from, to)) = r.candidates.first() {
+                    out.excuses.push(ExcusedWindow {
+                        from: *from,
+                        to: *to,
+                        paid: r.paid,
+                    });
+                }
+            }
+        }
+        out
+    }
+}
+
+impl ShiftAdjustments {
+    /// Minutes inside `[in, out]` that an approved excuse forgives, paid or
+    /// unpaid as asked.
     ///
     /// Clipped to the attendance window because an excuse that runs past
     /// check-out did not consume time the employee was being paid for anyway;
     /// crediting it would pay them for being absent twice over.
-    fn excused_minutes(&self, check_in: DateTime<Utc>, check_out: DateTime<Utc>) -> i64 {
-        self.excused_windows
+    fn excused_minutes(&self, check_in: DateTime<Utc>, check_out: DateTime<Utc>, paid: bool) -> i64 {
+        self.excuses
             .iter()
-            .map(|(from, to)| {
-                let start = (*from).max(check_in);
-                let end = (*to).min(check_out);
-                (end - start).num_minutes().max(0)
-            })
+            .filter(|w| w.paid == paid)
+            .map(|w| w.minutes_within(check_in, check_out))
             .sum()
+    }
+
+    /// Minutes of approved but UNPAID time off inside a closed shift (RQ-7):
+    /// an unpaid excuse while clocked in, and the tail of the shift an unpaid
+    /// early departure covers. Priced as an `excused_unpaid` deduction.
+    pub fn unpaid_excused_minutes(
+        &self,
+        check_in: Option<DateTime<Utc>>,
+        check_out: Option<DateTime<Utc>>,
+        scheduled_end: Option<DateTime<Utc>>,
+    ) -> i64 {
+        let (Some(in_at), Some(out_at)) = (check_in, check_out) else {
+            return 0;
+        };
+        let mut minutes = self.excused_minutes(in_at, out_at, false);
+        if let (Some((from, false)), Some(end)) = (self.early_departure, scheduled_end)
+            && out_at < end
+        {
+            minutes += (end - out_at.max(from)).num_minutes().max(0);
+        }
+        minutes
     }
 }
 
@@ -436,12 +611,19 @@ pub fn derive(
     scheduled_start_at: Option<DateTime<Utc>>,
     scheduled_end_at: Option<DateTime<Utc>>,
     shift: Option<&ResolvedShift>,
-    adjustments: &DayAdjustments,
+    day: &DayAdjustments,
 ) -> Derived {
+    let adjustments = day.for_shift(
+        scheduled_start_at,
+        scheduled_end_at,
+        shift.map(|s| s.work_shift_id),
+    );
     let rules_for = shift.map(|s| s.rules());
     let grace = rules_for.map(|r| r.grace_minutes).unwrap_or(0);
 
     let late = match (scheduled_start_at, check_in_at) {
+        // Nobody is late for a shift they have off (B3).
+        _ if adjustments.on_leave => 0,
         (Some(start), Some(actual)) => {
             rules::late_minutes(start, actual, grace, adjustments.excused_until)
         }
@@ -460,11 +642,10 @@ pub fn derive(
 
     // A PAID excuse credits the time back: the employee was permitted to be away,
     // so those minutes count toward the day. An UNPAID one leaves `worked` alone —
-    // the gap is already missing from the clocked span, which is the deduction.
-    if adjustments.excused_time_paid
-        && let (Some(in_at), Some(out_at)) = (check_in_at, check_out_at)
-    {
-        worked += adjustments.excused_minutes(in_at, out_at);
+    // the gap is missing from the clocked span, and the `excused_unpaid`
+    // deduction prices it.
+    if let (Some(in_at), Some(out_at)) = (check_in_at, check_out_at) {
+        worked += adjustments.excused_minutes(in_at, out_at, true);
     }
 
     let (overtime, early) = match (scheduled_end_at, check_out_at) {
@@ -503,14 +684,22 @@ pub fn derive(
             AttendanceStatus::Present
         }
     } else {
-        // An approved early departure shortens the day the employee OWED, so the
-        // half-day threshold shrinks with it — otherwise permission to leave at
-        // noon would still be recorded as half a day.
+        // An approved early departure (or half a day on leave) shortens the
+        // time the employee OWED, so the half-day threshold shrinks with it —
+        // otherwise permission to leave at noon would still be recorded as
+        // half a day.
         let span = shift.map(|s| s.span_minutes()).unwrap_or(0);
-        let owed = match (adjustments.excused_from, scheduled_end_at) {
-            (Some(from), Some(end)) => (span - (end - from).num_minutes().max(0)).max(0),
-            _ => span,
+        let excused_tail = match (adjustments.excused_from, scheduled_end_at) {
+            (Some(from), Some(end)) => (end - from).num_minutes().max(0),
+            _ => 0,
         };
+        let excused_head = match (adjustments.excused_until, scheduled_start_at) {
+            (Some(until), Some(start)) if adjustments.leave_minutes > 0 => {
+                (until - start).num_minutes().max(0).min(adjustments.leave_minutes)
+            }
+            _ => 0,
+        };
+        let owed = (span - excused_tail - excused_head).max(0);
         rules::classify(
             check_in_at.is_some(),
             worked,
@@ -531,8 +720,108 @@ pub fn derive(
 
 // ── Settings ──────────────────────────────────────────────────
 
-/// The effective settings for a branch: its own row, else the org-wide row, else
-/// the built-in defaults. Never fails for want of configuration.
+/// One stored rule: its column, the built-in default (SQL), and whether a
+/// branch may override it (RU-2). The pay period, the advance cap and the
+/// gender mode are the business's alone: payroll runs for the whole business
+/// (RO-9) and the gender mode is a roster setting of the owner's.
+struct RuleField {
+    name: &'static str,
+    default: &'static str,
+    branch: bool,
+}
+
+const RULE_FIELDS: &[RuleField] = &[
+    RuleField { name: "late_deduction_tiers", default: "'[]'::jsonb", branch: true },
+    RuleField { name: "absence_deduction_days", default: "1.00", branch: true },
+    RuleField { name: "default_overtime_multiplier", default: "1.50", branch: true },
+    RuleField { name: "auto_checkout_buffer_minutes", default: "120", branch: true },
+    RuleField { name: "working_days_per_month", default: "30.00", branch: true },
+    RuleField { name: "require_geofence", default: "TRUE", branch: true },
+    RuleField { name: "excused_time_paid_default", default: "TRUE", branch: true },
+    RuleField { name: "period_start_day", default: "26::smallint", branch: false },
+    RuleField { name: "overtime_mode", default: "'off'", branch: true },
+    RuleField { name: "overtime_day_multiplier", default: "1.35", branch: true },
+    RuleField { name: "overtime_night_multiplier", default: "1.70", branch: true },
+    RuleField { name: "holiday_multiplier", default: "2.00", branch: true },
+    RuleField { name: "advance_cap_percent", default: "50", branch: false },
+    RuleField { name: "half_day_leave_counts", default: "'half_shift'", branch: true },
+    RuleField { name: "night_start", default: "'22:00'::time", branch: true },
+    RuleField { name: "night_end", default: "'06:00'::time", branch: true },
+    RuleField { name: "gender_mode", default: "'soft'", branch: false },
+    RuleField { name: "limit_day_hours", default: "8", branch: true },
+    RuleField { name: "limit_week_hours", default: "48", branch: true },
+    RuleField { name: "limit_presence_hours", default: "10", branch: true },
+    RuleField { name: "limit_rest_hours", default: "12", branch: true },
+    RuleField { name: "limit_overtime_day_hours", default: "2", branch: true },
+    RuleField { name: "orders_per_staff", default: "12", branch: true },
+];
+
+/// The rules a branch may override, by name (the wire's field names).
+pub fn branch_rule_fields() -> Vec<&'static str> {
+    RULE_FIELDS.iter().filter(|f| f.branch).map(|f| f.name).collect()
+}
+
+/// `ARRAY['field', …]` of the branch row's non-NULL overridable columns.
+fn overridden_sql(row: &str) -> String {
+    let parts: Vec<String> = RULE_FIELDS
+        .iter()
+        .filter(|f| f.branch)
+        .map(|f| format!("CASE WHEN {row}.{0} IS NOT NULL THEN '{0}' END", f.name))
+        .collect();
+    format!("COALESCE(array_remove(ARRAY[{}]::text[], NULL), '{{}}'::text[])", parts.join(", "))
+}
+
+/// THE resolver (RU-2): the business's row, with a branch's overrides laid
+/// over it field by field, and the built-in defaults under both. One query, so
+/// it runs on a pool, a connection or a transaction alike.
+fn effective_settings_sql() -> String {
+    let fields: Vec<String> = RULE_FIELDS
+        .iter()
+        .map(|f| {
+            if f.branch {
+                format!("COALESCE(b.{0}, o.{0}, {1}) AS {0}", f.name, f.default)
+            } else {
+                format!("COALESCE(o.{0}, {1}) AS {0}", f.name, f.default)
+            }
+        })
+        .collect();
+    format!(
+        "WITH o AS (SELECT * FROM attendance_settings WHERE org_id = $1 AND branch_id IS NULL), \
+              b AS (SELECT * FROM attendance_settings \
+                     WHERE org_id = $1 AND $2::uuid IS NOT NULL AND branch_id = $2) \
+         SELECT COALESCE(b.id, o.id, '00000000-0000-0000-0000-000000000000'::uuid) AS id, \
+                $1::uuid AS org_id, $2::uuid AS branch_id, {}, o.rules_saved_at, \
+                COALESCE(b.created_at, o.created_at, now()) AS created_at, \
+                COALESCE(b.updated_at, o.updated_at, now()) AS updated_at, \
+                {} AS overridden \
+           FROM (SELECT 1) one LEFT JOIN o ON true LEFT JOIN b ON true",
+        fields.join(", "),
+        overridden_sql("b")
+    )
+}
+
+/// The ladder the set-up step starts from (RU-1): a few minutes cost minutes,
+/// then a quarter, a half and a whole day. A suggestion only — pricing uses a
+/// ladder the owner saved, never this one.
+pub fn suggested_tiers() -> Vec<LateTier> {
+    use rules::LateDeductionKind::{DayFraction, Minutes};
+    let tier = |from, to, kind, value: Decimal| LateTier {
+        from_minutes: from,
+        to_minutes: to,
+        kind,
+        value,
+    };
+    vec![
+        tier(1, Some(15), Minutes, Decimal::from(15)),
+        tier(16, Some(30), DayFraction, Decimal::new(25, 2)),
+        tier(31, Some(60), DayFraction, Decimal::new(50, 2)),
+        tier(61, None, DayFraction, Decimal::ONE),
+    ]
+}
+
+/// The effective settings for a branch (`None` = the business's): the
+/// business row, the branch's overrides over it field by field, and the
+/// built-in defaults beneath. Never fails for want of configuration.
 pub async fn load_settings<'e, E>(
     pool: E,
     org_id: Uuid,
@@ -541,53 +830,33 @@ pub async fn load_settings<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let row = sqlx::query_as::<_, AttendanceSettings>(&format!(
-        "SELECT {SETTINGS_COLS} FROM attendance_settings \
-         WHERE org_id = $1 AND (branch_id = $2 OR branch_id IS NULL) \
-         ORDER BY branch_id NULLS LAST LIMIT 1"
-    ))
-    .bind(org_id)
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?;
+    Ok(
+        sqlx::query_as::<_, AttendanceSettings>(&effective_settings_sql())
+            .bind(org_id)
+            .bind(branch_id)
+            .fetch_one(pool)
+            .await?,
+    )
+}
 
-    Ok(row.unwrap_or_else(|| AttendanceSettings {
-        id: Uuid::nil(),
-        org_id,
-        branch_id: None,
-        late_deduction_tiers: serde_json::json!([]),
-        absence_deduction_days: Decimal::ONE,
-        default_overtime_multiplier: Decimal::new(150, 2),
-        auto_checkout_buffer_minutes: 120,
-        working_days_per_month: Decimal::from(30),
-        require_geofence: true,
-        excused_time_paid_default: true,
-        period_start_day: 26,
-        overtime_mode: "off".into(),
-        overtime_day_multiplier: Decimal::new(135, 2),
-        overtime_night_multiplier: Decimal::new(170, 2),
-        holiday_multiplier: Decimal::from(2),
-        advance_cap_percent: Decimal::from(50),
-        half_day_leave_counts: "half_shift".into(),
-        night_start: NaiveTime::from_hms_opt(22, 0, 0).expect("valid time"),
-        night_end: NaiveTime::from_hms_opt(6, 0, 0).expect("valid time"),
-        gender_mode: "soft".into(),
-        rules_saved_at: None,
-        limit_day_hours: Decimal::from(8),
-        limit_week_hours: Decimal::from(48),
-        limit_presence_hours: Decimal::from(10),
-        limit_rest_hours: Decimal::from(12),
-        limit_overtime_day_hours: Decimal::from(2),
-        orders_per_staff: 12,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    }))
+/// Who may SEE the rules (owner decision 2026-09-23): `hr.rules.view`, at the
+/// branch asked about; the business's rules for anyone holding it somewhere.
+async fn require_rules_view(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    branch_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    match branch_id {
+        Some(b) => access::require_at(pool, claims, org_id, Cap::HrRulesView, b).await,
+        None => access::gate(pool, claims, org_id, Cap::HrRulesView).await,
+    }
 }
 
 #[utoipa::path(
     get, path = "/staff/attendance/settings", tag = "staff",
     params(SettingsQuery),
-    responses((status = 200, description = "Effective attendance settings", body = AttendanceSettings), AppErrorResponse),
+    responses((status = 200, description = "Effective attendance settings: the business's, or a branch's with its overrides", body = AttendanceSettings), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn get_attendance_settings(
@@ -597,22 +866,143 @@ pub async fn get_attendance_settings(
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    access::scope_at(
-        pool.get_ref(),
-        &claims,
-        org_id,
-        Cap::HrAttendanceRead,
-        query.branch_id,
-    )
-    .await?;
-    let settings = load_settings(pool.get_ref(), org_id, query.branch_id).await?;
+    require_rules_view(pool.get_ref(), &claims, org_id, query.branch_id).await?;
+    let mut settings = load_settings(pool.get_ref(), org_id, query.branch_id).await?;
+    settings.suggested_tiers = suggested_tiers();
     Ok(HttpResponse::Ok().json(settings))
+}
+
+/// A branch and which of its rules it overrides.
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
+pub struct BranchRules {
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    /// The fields this branch sets itself; every other one is the business's.
+    pub overridden: Vec<String>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[utoipa::path(
+    get, path = "/staff/attendance/settings/branches", tag = "staff",
+    responses((status = 200, description = "The caller's branches and which rules each overrides", body = Vec<BranchRules>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn list_branch_rules(
+    req: HttpRequest,
+    pool: crate::db::Db,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    // A manager sees their own branches' overrides only.
+    let scope = access::scope(pool.get_ref(), &claims, org_id, Cap::HrRulesView).await?;
+    let rows = sqlx::query_as::<_, BranchRules>(&format!(
+        "SELECT br.id AS branch_id, br.name AS branch_name, {} AS overridden, s.updated_at \
+           FROM branches br \
+           LEFT JOIN attendance_settings s ON s.org_id = br.org_id AND s.branch_id = br.id \
+          WHERE br.org_id = $1 AND br.deleted_at IS NULL \
+            AND ($2::uuid[] IS NULL OR br.id = ANY($2)) \
+          ORDER BY lower(br.name), br.id",
+        overridden_sql("s")
+    ))
+    .bind(org_id)
+    .bind(scope.as_deref())
+    .fetch_all(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+#[utoipa::path(
+    delete, path = "/staff/attendance/settings/branches/{branch_id}", tag = "staff",
+    params(("branch_id" = Uuid, Path, description = "Branch whose overrides go")),
+    responses((status = 204, description = "The branch follows the business's rules again"), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn delete_branch_rules(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    branch_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = scope_org(&req, &claims)?;
+    access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit).await?;
+    access::require_at(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit, *branch_id).await?;
+    sqlx::query("DELETE FROM attendance_settings WHERE org_id = $1 AND branch_id = $2")
+        .bind(org_id)
+        .bind(*branch_id)
+        .execute(pool.get_ref())
+        .await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// Bind a PUT body's value for one rule column (`None` = not sent).
+fn bind_rule<'q>(
+    q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    name: &str,
+    body: &'q PutAttendanceSettingsRequest,
+    tiers: &'q Option<serde_json::Value>,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    match name {
+        "late_deduction_tiers" => q.bind(tiers.clone()),
+        "absence_deduction_days" => q.bind(body.absence_deduction_days),
+        "default_overtime_multiplier" => q.bind(body.default_overtime_multiplier),
+        "auto_checkout_buffer_minutes" => q.bind(body.auto_checkout_buffer_minutes),
+        "working_days_per_month" => q.bind(body.working_days_per_month),
+        "require_geofence" => q.bind(body.require_geofence),
+        "excused_time_paid_default" => q.bind(body.excused_time_paid_default),
+        "period_start_day" => q.bind(body.period_start_day),
+        "overtime_mode" => q.bind(body.overtime_mode.as_deref()),
+        "overtime_day_multiplier" => q.bind(body.overtime_day_multiplier),
+        "overtime_night_multiplier" => q.bind(body.overtime_night_multiplier),
+        "holiday_multiplier" => q.bind(body.holiday_multiplier),
+        "advance_cap_percent" => q.bind(body.advance_cap_percent),
+        "half_day_leave_counts" => q.bind(body.half_day_leave_counts.as_deref()),
+        "night_start" => q.bind(body.night_start),
+        "night_end" => q.bind(body.night_end),
+        "gender_mode" => q.bind(body.gender_mode.as_deref()),
+        "limit_day_hours" => q.bind(body.limit_day_hours),
+        "limit_week_hours" => q.bind(body.limit_week_hours),
+        "limit_presence_hours" => q.bind(body.limit_presence_hours),
+        "limit_rest_hours" => q.bind(body.limit_rest_hours),
+        "limit_overtime_day_hours" => q.bind(body.limit_overtime_day_hours),
+        "orders_per_staff" => q.bind(body.orders_per_staff),
+        other => unreachable!("rule field {other} has no binding"),
+    }
+}
+
+/// Was this rule sent in the PUT body?
+fn rule_sent(name: &str, body: &PutAttendanceSettingsRequest) -> bool {
+    match name {
+        "late_deduction_tiers" => body.late_deduction_tiers.is_some(),
+        "absence_deduction_days" => body.absence_deduction_days.is_some(),
+        "default_overtime_multiplier" => body.default_overtime_multiplier.is_some(),
+        "auto_checkout_buffer_minutes" => body.auto_checkout_buffer_minutes.is_some(),
+        "working_days_per_month" => body.working_days_per_month.is_some(),
+        "require_geofence" => body.require_geofence.is_some(),
+        "excused_time_paid_default" => body.excused_time_paid_default.is_some(),
+        "period_start_day" => body.period_start_day.is_some(),
+        "overtime_mode" => body.overtime_mode.is_some(),
+        "overtime_day_multiplier" => body.overtime_day_multiplier.is_some(),
+        "overtime_night_multiplier" => body.overtime_night_multiplier.is_some(),
+        "holiday_multiplier" => body.holiday_multiplier.is_some(),
+        "advance_cap_percent" => body.advance_cap_percent.is_some(),
+        "half_day_leave_counts" => body.half_day_leave_counts.is_some(),
+        "night_start" => body.night_start.is_some(),
+        "night_end" => body.night_end.is_some(),
+        "gender_mode" => body.gender_mode.is_some(),
+        "limit_day_hours" => body.limit_day_hours.is_some(),
+        "limit_week_hours" => body.limit_week_hours.is_some(),
+        "limit_presence_hours" => body.limit_presence_hours.is_some(),
+        "limit_rest_hours" => body.limit_rest_hours.is_some(),
+        "limit_overtime_day_hours" => body.limit_overtime_day_hours.is_some(),
+        "orders_per_staff" => body.orders_per_staff.is_some(),
+        _ => false,
+    }
 }
 
 #[utoipa::path(
     put, path = "/staff/attendance/settings", tag = "staff",
     request_body = PutAttendanceSettingsRequest,
-    responses((status = 200, description = "Settings saved", body = AttendanceSettings), AppErrorResponse),
+    responses((status = 200, description = "Settings saved; the effective settings", body = AttendanceSettings), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn put_attendance_settings(
@@ -625,6 +1015,7 @@ pub async fn put_attendance_settings(
     // The rules are the business's, set by the owner for every branch (RO-9,
     // audit B2): the lateness ladder, absence cost, working days, overtime,
     // the pay period and the advance cap. A branch override is the same call.
+    // Seeing them (`hr.rules.view`) never lets anyone change them.
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit).await?;
     if let Some(b) = body.branch_id {
         access::require_at(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit, b).await?;
@@ -664,6 +1055,29 @@ pub async fn put_attendance_settings(
             "auto_checkout_buffer_minutes cannot be negative".into(),
         ));
     }
+    let inherit: Vec<String> = body.inherit.clone().unwrap_or_default();
+    let branch_fields = branch_rule_fields();
+    if body.branch_id.is_some() {
+        // RU-2: a branch overrides the rules, never the business's own settings.
+        if let Some(f) = RULE_FIELDS
+            .iter()
+            .find(|f| !f.branch && rule_sent(f.name, &body))
+        {
+            return Err(AppError::BadRequest(format!(
+                "{} is the business's setting, not a branch's",
+                f.name
+            )));
+        }
+        if let Some(bad) = inherit.iter().find(|n| !branch_fields.contains(&n.as_str())) {
+            return Err(AppError::BadRequest(format!(
+                "'{bad}' is not a rule a branch can override"
+            )));
+        }
+    } else if !inherit.is_empty() {
+        return Err(AppError::BadRequest(
+            "Only a branch can go back to the business's rules".into(),
+        ));
+    }
 
     let tiers = body
         .late_deduction_tiers
@@ -672,88 +1086,65 @@ pub async fn put_attendance_settings(
         .transpose()
         .map_err(|_| AppError::BadRequest("Invalid late deduction tiers".into()))?;
 
-    let row = sqlx::query_as::<_, AttendanceSettings>(&format!(
-        r#"
-        INSERT INTO attendance_settings (
-            org_id, branch_id, late_deduction_tiers, absence_deduction_days,
-            default_overtime_multiplier, auto_checkout_buffer_minutes,
-            working_days_per_month, require_geofence, excused_time_paid_default,
-            period_start_day, overtime_mode, overtime_day_multiplier,
-            overtime_night_multiplier, holiday_multiplier, advance_cap_percent,
-            half_day_leave_counts, night_start, night_end, gender_mode, rules_saved_at,
-            limit_day_hours, limit_week_hours, limit_presence_hours, limit_rest_hours,
-            limit_overtime_day_hours, orders_per_staff
-        ) VALUES (
-            $1, $2, COALESCE($3, '[]'::jsonb), COALESCE($4, 1.00), COALESCE($5, 1.50),
-            COALESCE($6, 120),
-            COALESCE($8, 30.00), COALESCE($9, TRUE), COALESCE($10, TRUE),
-            COALESCE($11, 26), COALESCE($12, 'off'), COALESCE($13, 1.35),
-            COALESCE($14, 1.70), COALESCE($15, 2.00), COALESCE($16, 50),
-            COALESCE($17, 'half_shift'), COALESCE($18, '22:00'), COALESCE($19, '06:00'),
-            COALESCE($7, 'soft'), CASE WHEN $2::uuid IS NULL THEN now() END,
-            COALESCE($20, 8), COALESCE($21, 48), COALESCE($22, 10), COALESCE($23, 12),
-            COALESCE($24, 2), COALESCE($25, 12)
-        )
-        ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid))
-        DO UPDATE SET
-            late_deduction_tiers         = COALESCE($3, attendance_settings.late_deduction_tiers),
-            absence_deduction_days       = COALESCE($4, attendance_settings.absence_deduction_days),
-            default_overtime_multiplier  = COALESCE($5, attendance_settings.default_overtime_multiplier),
-            auto_checkout_buffer_minutes = COALESCE($6, attendance_settings.auto_checkout_buffer_minutes),
-            working_days_per_month       = COALESCE($8, attendance_settings.working_days_per_month),
-            require_geofence             = COALESCE($9, attendance_settings.require_geofence),
-            excused_time_paid_default    = COALESCE($10, attendance_settings.excused_time_paid_default),
-            period_start_day             = COALESCE($11, attendance_settings.period_start_day),
-            overtime_mode                = COALESCE($12, attendance_settings.overtime_mode),
-            overtime_day_multiplier      = COALESCE($13, attendance_settings.overtime_day_multiplier),
-            overtime_night_multiplier    = COALESCE($14, attendance_settings.overtime_night_multiplier),
-            holiday_multiplier           = COALESCE($15, attendance_settings.holiday_multiplier),
-            advance_cap_percent          = COALESCE($16, attendance_settings.advance_cap_percent),
-            half_day_leave_counts        = COALESCE($17, attendance_settings.half_day_leave_counts),
-            night_start                  = COALESCE($18, attendance_settings.night_start),
-            night_end                    = COALESCE($19, attendance_settings.night_end),
-            gender_mode                  = COALESCE($7, attendance_settings.gender_mode),
-            limit_day_hours              = COALESCE($20, attendance_settings.limit_day_hours),
-            limit_week_hours             = COALESCE($21, attendance_settings.limit_week_hours),
-            limit_presence_hours         = COALESCE($22, attendance_settings.limit_presence_hours),
-            limit_rest_hours             = COALESCE($23, attendance_settings.limit_rest_hours),
-            limit_overtime_day_hours     = COALESCE($24, attendance_settings.limit_overtime_day_hours),
-            orders_per_staff             = COALESCE($25, attendance_settings.orders_per_staff),
-            -- Saving the business-wide rules is what lets people clock in (RU-1).
-            rules_saved_at               = CASE WHEN attendance_settings.branch_id IS NULL
-                                                THEN COALESCE(attendance_settings.rules_saved_at, now())
-                                                ELSE attendance_settings.rules_saved_at END,
-            updated_at                   = now()
-        RETURNING {SETTINGS_COLS}
-        "#
-    ))
-    .bind(org_id)
-    .bind(body.branch_id)
-    .bind(tiers)
-    .bind(body.absence_deduction_days)
-    .bind(body.default_overtime_multiplier)
-    .bind(body.auto_checkout_buffer_minutes)
-    .bind(body.gender_mode.as_deref())
-    .bind(body.working_days_per_month)
-    .bind(body.require_geofence)
-    .bind(body.excused_time_paid_default)
-    .bind(body.period_start_day)
-    .bind(body.overtime_mode.as_deref())
-    .bind(body.overtime_day_multiplier)
-    .bind(body.overtime_night_multiplier)
-    .bind(body.holiday_multiplier)
-    .bind(body.advance_cap_percent)
-    .bind(body.half_day_leave_counts.as_deref())
-    .bind(body.night_start)
-    .bind(body.night_end)
-    .bind(body.limit_day_hours)
-    .bind(body.limit_week_hours)
-    .bind(body.limit_presence_hours)
-    .bind(body.limit_rest_hours)
-    .bind(body.limit_overtime_day_hours)
-    .bind(body.orders_per_staff)
-    .fetch_one(pool.get_ref())
-    .await?;
+    // Saving the lateness ladder and the absence cost together is the RU-1
+    // step that lets people clock in; a one-field save (the gender mode, a
+    // limit) never does.
+    let saves_rules =
+        body.late_deduction_tiers.is_some() && body.absence_deduction_days.is_some();
+
+    let fields: Vec<&RuleField> = RULE_FIELDS
+        .iter()
+        .filter(|f| body.branch_id.is_none() || f.branch)
+        .collect();
+    let names: Vec<&str> = fields.iter().map(|f| f.name).collect();
+    // Parameters: $1 org, $2 branch, $3 inherit[], $4 saves_rules, then one per field.
+    let (values, updates): (Vec<String>, Vec<String>) = fields
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let n = i + 5;
+            if body.branch_id.is_some() {
+                (
+                    format!("${n}"),
+                    format!(
+                        "{0} = CASE WHEN '{0}' = ANY($3) THEN NULL \
+                                    ELSE COALESCE(${n}, attendance_settings.{0}) END",
+                        f.name
+                    ),
+                )
+            } else {
+                (
+                    format!("COALESCE(${n}, {})", f.default),
+                    format!("{0} = COALESCE(${n}, attendance_settings.{0})", f.name),
+                )
+            }
+        })
+        .unzip();
+    let sql = format!(
+        "INSERT INTO attendance_settings (org_id, branch_id, {}, rules_saved_at) \
+         VALUES ($1, $2, {}, CASE WHEN $2::uuid IS NULL AND $4 THEN now() END) \
+         ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
+         DO UPDATE SET {}, \
+             rules_saved_at = CASE WHEN attendance_settings.branch_id IS NULL AND $4 \
+                                   THEN COALESCE(attendance_settings.rules_saved_at, now()) \
+                                   ELSE attendance_settings.rules_saved_at END, \
+             updated_at = now()",
+        names.join(", "),
+        values.join(", "),
+        updates.join(", ")
+    );
+    let mut q = sqlx::query(&sql)
+        .bind(org_id)
+        .bind(body.branch_id)
+        .bind(&inherit)
+        .bind(saves_rules);
+    for f in &fields {
+        q = bind_rule(q, f.name, &body, &tiers);
+    }
+    q.execute(pool.get_ref()).await?;
+
+    let mut row = load_settings(pool.get_ref(), org_id, body.branch_id).await?;
+    row.suggested_tiers = suggested_tiers();
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -898,23 +1289,16 @@ pub(crate) async fn today_in(pool: &PgPool, timezone: &str) -> Result<NaiveDate,
 }
 
 /// What the day's approved requests forgive. Thin wrapper over
-/// [`crate::staff::requests::day_adjustments`] that supplies the org's
-/// excused-time-paid default.
-async fn adjustments_for(
+/// [`crate::staff::requests::day_adjustments`] with the branch's rules (the
+/// excused-time pay default and how half-day leave counts).
+pub(crate) async fn adjustments_for(
     pool: &PgPool,
     settings: &AttendanceSettings,
     employee_id: Uuid,
     date: NaiveDate,
     timezone: &str,
 ) -> Result<DayAdjustments, AppError> {
-    crate::staff::requests::day_adjustments(
-        pool,
-        employee_id,
-        date,
-        timezone,
-        settings.excused_time_paid_default,
-    )
-    .await
+    crate::staff::requests::day_adjustments(pool, employee_id, date, timezone, settings).await
 }
 
 /// Resolve the shift a punch at `now` belongs to, looking at both today's and
@@ -1231,9 +1615,7 @@ pub async fn check_out(
 
     // The shift just closed, so price it now — a manager should see the penalty
     // immediately, not the next morning after the sweep.
-    let mut conn = pool.acquire().await?;
-    crate::staff::penalties::recompute_record(&mut conn, open.id, &settings).await?;
-    drop(conn);
+    crate::staff::penalties::recompute_record(pool.get_ref(), open.id, &settings).await?;
     // Overtime: off, paid automatically, or waiting for a manager (RU-7).
     crate::staff::dawam::presence::after_check_out(pool.get_ref(), org_id, open.id, &settings)
         .await?;
@@ -1763,6 +2145,14 @@ pub async fn create_manual_record(
     )
     .await?;
     require_employee_in_org(pool.get_ref(), org_id, body.employee_id).await?;
+    // AT-7: after the month's payroll is approved, the fix goes into the next month.
+    crate::staff::requests::require_open_month(
+        pool.get_ref(),
+        org_id,
+        body.business_date,
+        body.business_date,
+    )
+    .await?;
 
     let reason = body.reason.trim();
     if reason.is_empty() {
@@ -1820,12 +2210,12 @@ pub async fn create_manual_record(
             scheduled_start_at, scheduled_end_at,
             check_in_at, check_in_method, check_out_at, check_out_method,
             late_minutes, early_leave_minutes, overtime_minutes, worked_minutes,
-            is_manual, notes, edit_reason, created_by, edited_by
+            is_manual, notes, edit_reason, created_by, edited_by, status_overridden
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8,
             $9, CASE WHEN $9::timestamptz IS NULL THEN NULL ELSE 'manual' END,
             $10, CASE WHEN $10::timestamptz IS NULL THEN NULL ELSE 'manual' END,
-            $11, $12, $13, $14, TRUE, $15, $16, $17, $17
+            $11, $12, $13, $14, TRUE, $15, $16, $17, $17, $18
         )
         ON CONFLICT (employee_id, business_date,
                      COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL
@@ -1855,6 +2245,8 @@ pub async fn create_manual_record(
     )
     .bind(reason)
     .bind(claims.user_id_safe().ok())
+    // A status set by hand sticks (AT-7).
+    .bind(body.status.is_some())
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -1864,9 +2256,7 @@ pub async fn create_manual_record(
         ));
     };
 
-    let mut conn = pool.acquire().await?;
-    crate::staff::penalties::recompute_record(&mut conn, id, &settings).await?;
-    drop(conn);
+    crate::staff::penalties::recompute_record(pool.get_ref(), id, &settings).await?;
 
     let record = load_record(pool.get_ref(), org_id, id).await?;
     Ok(HttpResponse::Created().json(record))
@@ -1902,6 +2292,14 @@ pub async fn correct_record(
     if reason.is_empty() {
         return Err(AppError::BadRequest("A correction needs a reason".into()));
     }
+    // AT-7: after the month's payroll is approved, the fix goes into the next month.
+    crate::staff::requests::require_open_month(
+        pool.get_ref(),
+        org_id,
+        existing.business_date,
+        existing.business_date,
+    )
+    .await?;
 
     apply_punch_correction(
         pool.get_ref(),
@@ -1926,6 +2324,10 @@ pub async fn correct_record(
 /// manager approving "I forgot to clock out at 17:00" produces exactly the
 /// record a manual edit would — same derivation, same repricing, same audit
 /// columns. Idempotent: applying the same values twice writes the same row.
+///
+/// `status_override`: a status the person sets by hand. It sticks (AT-7):
+/// later automatic re-derives keep it, until someone sets `"derived"` to hand
+/// the day back to the rules.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_punch_correction(
     pool: &PgPool,
@@ -1937,6 +2339,39 @@ pub(crate) async fn apply_punch_correction(
     notes: Option<&str>,
     reason: &str,
     editor: Option<Uuid>,
+) -> Result<(), AppError> {
+    rederive(
+        pool,
+        org_id,
+        record_id,
+        check_in_at,
+        check_out_at,
+        status_override,
+        Some((notes, reason, editor)),
+    )
+    .await
+}
+
+/// Re-derive a record from its stored punches after something it depends on
+/// changed (a request approved or cancelled, a holiday): automation, so it
+/// keeps a manager's status and never touches the audit columns — the Legal
+/// report's "who edited this and why" stays the person's (AT-7, AT-10, B10).
+pub(crate) async fn reprice_record(
+    pool: &PgPool,
+    org_id: Uuid,
+    record_id: Uuid,
+) -> Result<(), AppError> {
+    rederive(pool, org_id, record_id, None, None, None, None).await
+}
+
+async fn rederive(
+    pool: &PgPool,
+    org_id: Uuid,
+    record_id: Uuid,
+    check_in_at: Option<DateTime<Utc>>,
+    check_out_at: Option<DateTime<Utc>>,
+    status_override: Option<&str>,
+    human: Option<(Option<&str>, &str, Option<Uuid>)>,
 ) -> Result<(), AppError> {
     let existing = load_record(pool, org_id, record_id).await?;
     let check_in_at = check_in_at.or(existing.check_in_at);
@@ -1968,9 +2403,18 @@ pub(crate) async fn apply_punch_correction(
         shift.as_ref(),
         &adjustments,
     );
-    let status = match status_override {
-        Some(s) => AttendanceStatus::parse(s)?,
-        None => derived.status,
+    // A cover's own status stays what the cover flow set.
+    let (status, overridden) = match status_override {
+        Some("derived") => (derived.status, false),
+        Some(s) => (AttendanceStatus::parse(s)?, true),
+        None if existing.status_overridden => {
+            (AttendanceStatus::parse(&existing.status)?, true)
+        }
+        None => (derived.status, false),
+    };
+    let (notes, reason, editor, touched) = match human {
+        Some((notes, reason, editor)) => (notes, Some(reason), editor, true),
+        None => (None, None, None, false),
     };
 
     sqlx::query(
@@ -1980,8 +2424,10 @@ pub(crate) async fn apply_punch_correction(
             check_out_at = $4, \
             check_out_method = COALESCE(check_out_method, CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE 'manual' END), \
             status = $5, late_minutes = $6, early_leave_minutes = $7, \
-            overtime_minutes = $8, worked_minutes = $9, \
-            notes = COALESCE($10, notes), edit_reason = $11, edited_by = $12, \
+            overtime_minutes = $8, worked_minutes = $9, status_overridden = $13, \
+            notes = COALESCE($10, notes), \
+            edit_reason = CASE WHEN $14 THEN $11 ELSE edit_reason END, \
+            edited_by = CASE WHEN $14 THEN $12 ELSE edited_by END, \
             updated_at = now() \
           WHERE id = $1 AND org_id = $2",
     )
@@ -1997,19 +2443,28 @@ pub(crate) async fn apply_punch_correction(
     .bind(notes.map(str::trim).filter(|n| !n.is_empty()))
     .bind(reason)
     .bind(editor)
+    .bind(overridden)
+    .bind(touched)
     .execute(pool)
     .await?;
 
     // A correction changes what is owed. Recompute — but `penalties` leaves any
     // deduction a human has already waived or overridden exactly as it is.
-    let mut conn = pool.acquire().await?;
-    crate::staff::penalties::recompute_record(&mut conn, record_id, &settings).await?;
+    crate::staff::penalties::recompute_record(pool, record_id, &settings).await?;
     Ok(())
+}
+
+#[derive(Deserialize, IntoParams, Debug)]
+#[into_params(parameter_in = Query)]
+pub struct DeleteRecordQuery {
+    /// Why the day goes (kept with the tombstone the absence sweep honours).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[utoipa::path(
     delete, path = "/staff/attendance/{id}", tag = "staff",
-    params(("id" = Uuid, Path, description = "Attendance record ID")),
+    params(("id" = Uuid, Path, description = "Attendance record ID"), DeleteRecordQuery),
     responses((status = 204, description = "Record deleted"), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
@@ -2017,6 +2472,7 @@ pub async fn delete_record(
     req: HttpRequest,
     pool: crate::db::Db,
     id: web::Path<Uuid>,
+    query: web::Query<DeleteRecordQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
@@ -2030,15 +2486,50 @@ pub async fn delete_record(
         existing.branch_id,
     )
     .await?;
+    crate::staff::requests::require_open_month(
+        pool.get_ref(),
+        org_id,
+        existing.business_date,
+        existing.business_date,
+    )
+    .await?;
 
+    let mut tx = pool.begin().await?;
+    // AT-7: the absence sweep never writes back a day a manager deleted.
+    if existing.covered_employee_id.is_none() {
+        sqlx::query(
+            "INSERT INTO attendance_tombstones \
+                 (org_id, employee_id, business_date, work_shift_id, deleted_by, reason) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (employee_id, business_date, \
+                          COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
+             DO UPDATE SET deleted_by = EXCLUDED.deleted_by, reason = EXCLUDED.reason, \
+                           created_at = now()",
+        )
+        .bind(org_id)
+        .bind(existing.employee_id)
+        .bind(existing.business_date)
+        .bind(existing.work_shift_id)
+        .bind(claims.user_id_safe().ok())
+        .bind(
+            query
+                .reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty()),
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
     let deleted = sqlx::query("DELETE FROM attendance_records WHERE id = $1 AND org_id = $2")
         .bind(*id)
         .bind(org_id)
-        .execute(pool.get_ref())
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     if deleted == 0 {
         return Err(AppError::NotFound("Attendance record not found".into()));
     }
+    tx.commit().await?;
     Ok(HttpResponse::NoContent().finish())
 }

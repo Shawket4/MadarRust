@@ -1026,8 +1026,11 @@ async fn seed_leave_type(pool: &PgPool, org: Uuid, paid: bool) -> Uuid {
     id
 }
 
+/// RQ-2, RQ-3: leave has no types and no balances. A type an older client
+/// sends is ignored, approving writes no balance, and the approver must say
+/// paid or unpaid; cancelling approved leave needs a reason (AT-7).
 #[sqlx::test]
-async fn approving_leave_spends_the_balance_and_cancelling_refunds_it(pool: PgPool) {
+async fn approving_leave_asks_paid_or_unpaid_and_writes_no_balance(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool, "UTC").await;
     seed_profile(&pool, f.org, f.employee, 300_000).await;
@@ -1049,54 +1052,48 @@ async fn approving_leave_spends_the_balance_and_cancelling_refunds_it(pool: PgPo
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 201);
     let request: serde_json::Value = test::read_body_json(resp).await;
+    assert!(request["leave_type_id"].is_null(), "a type is never stored: {request}");
     let request_id = request["id"].as_str().unwrap().to_string();
 
     let decision_uri = format!("/staff/requests/{request_id}/decision");
+    assert_eq!(
+        auth_send!(app, patch, decision_uri, admin_token, json!({ "status": "approved" })).status(),
+        400,
+        "leave is approved as paid or unpaid — the approver must say which"
+    );
+    let resp = auth_send!(
+        app,
+        patch,
+        decision_uri,
+        admin_token,
+        json!({ "status": "approved", "is_paid": false })
+    );
+    assert_eq!(resp.status(), 200);
+    let row: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(row["is_paid"], false);
+    let balances: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM leave_balances WHERE employee_id = $1")
+            .bind(f.employee)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(balances, 0, "no balance is spent (RQ-3)");
 
+    assert_eq!(
+        auth_send!(app, patch, decision_uri, admin_token, json!({ "status": "cancelled" })).status(),
+        400,
+        "undoing an approval says why (AT-7)"
+    );
     assert_eq!(
         auth_send!(
             app,
             patch,
             decision_uri,
             admin_token,
-            json!({ "status": "approved" })
+            json!({ "status": "cancelled", "note": "Filed the wrong week" })
         )
         .status(),
         200
-    );
-    let used: Decimal = sqlx::query_scalar(
-        "SELECT used_days FROM leave_balances WHERE employee_id = $1 AND leave_type_id = $2",
-    )
-    .bind(f.employee)
-    .bind(leave_type)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(used, dec!(3), "1–3 September is three days");
-
-    assert_eq!(
-        auth_send!(
-            app,
-            patch,
-            decision_uri,
-            admin_token,
-            json!({ "status": "cancelled" })
-        )
-        .status(),
-        200
-    );
-    let used: Decimal = sqlx::query_scalar(
-        "SELECT used_days FROM leave_balances WHERE employee_id = $1 AND leave_type_id = $2",
-    )
-    .bind(f.employee)
-    .bind(leave_type)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        used,
-        Decimal::ZERO,
-        "cancelling approved leave must give the days back"
     );
 }
 
@@ -1132,7 +1129,7 @@ async fn overlapping_leave_requests_are_refused(pool: PgPool) {
         )
         .status(),
         409,
-        "two live requests over the same day would double-count the balance"
+        "two live requests over the same day can't both land (RQ-11)"
     );
 }
 
@@ -1161,9 +1158,9 @@ async fn a_decided_request_cannot_be_decided_again(pool: PgPool) {
         200
     );
     assert_eq!(
-        auth_send!(app, patch, uri, token, json!({ "status": "approved" })).status(),
+        auth_send!(app, patch, uri, token, json!({ "status": "approved", "is_paid": true })).status(),
         409,
-        "re-deciding would double the balance arithmetic"
+        "a rejected request stays rejected"
     );
 }
 
@@ -1642,8 +1639,7 @@ async fn unpaid_leave_docks_pay_but_paid_leave_does_not(pool: PgPool) {
         let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
             .await
             .unwrap();
-        let mut conn = pool.acquire().await.unwrap();
-        madar_rust::staff::penalties::recompute_record(&mut conn, record, &settings)
+        madar_rust::staff::penalties::recompute_record(&pool, record, &settings)
             .await
             .unwrap();
     }
@@ -1846,7 +1842,7 @@ async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool
     // Controlled timestamps, because the point is what a SHORTENED-but-worked day
     // classifies as — not what an instant in-and-out does.
     use chrono::TimeZone;
-    use madar_rust::staff::attendance::{DayAdjustments, derive};
+    use madar_rust::staff::attendance::{DayAdjustments, TimedRequest, derive};
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
     // Rostered 09:00–17:00; permission to leave at 13:00; actually left at 13:00.
@@ -1857,7 +1853,11 @@ async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool
         Some(at(17, 0)),
         None,
         &DayAdjustments {
-            excused_from: Some(at(13, 0)),
+            early_departures: vec![TimedRequest {
+                candidates: vec![at(13, 0)],
+                work_shift_id: None,
+                paid: true,
+            }],
             ..Default::default()
         },
     );
@@ -1887,11 +1887,15 @@ async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool)
     // The pure shape of the rule, without the clock: an excused window inside the
     // attendance span is credited when paid and ignored when not.
     use chrono::TimeZone;
-    use madar_rust::staff::attendance::{DayAdjustments, derive};
+    use madar_rust::staff::attendance::{DayAdjustments, WindowRequest, derive};
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
-    let base = DayAdjustments {
-        excused_windows: vec![(at(12, 0), at(14, 0))],
+    let excuse = |paid: bool| DayAdjustments {
+        excuses: vec![WindowRequest {
+            candidates: vec![(at(12, 0), at(14, 0))],
+            work_shift_id: None,
+            paid,
+        }],
         ..Default::default()
     };
 
@@ -1901,10 +1905,7 @@ async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool)
         Some(at(9, 0)),
         Some(at(17, 0)),
         None,
-        &DayAdjustments {
-            excused_time_paid: true,
-            ..base.clone()
-        },
+        &excuse(true),
     );
     let unpaid = derive(
         Some(at(9, 0)),
@@ -1912,10 +1913,7 @@ async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool)
         Some(at(9, 0)),
         Some(at(17, 0)),
         None,
-        &DayAdjustments {
-            excused_time_paid: false,
-            ..base
-        },
+        &excuse(false),
     );
 
     assert_eq!(unpaid.worked_minutes, 480, "the clocked span, unchanged");
@@ -1969,11 +1967,9 @@ async fn a_waived_penalty_survives_the_nightly_sweep(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
-    madar_rust::staff::penalties::recompute_record(&mut conn, record, &settings)
+    madar_rust::staff::penalties::recompute_record(&pool, record, &settings)
         .await
         .unwrap();
-    drop(conn);
 
     let (waived, reason): (Option<chrono::DateTime<Utc>>, Option<String>) =
         sqlx::query_as("SELECT waived_at, waive_reason FROM payroll_deductions WHERE id = $1")
@@ -2145,7 +2141,7 @@ async fn each_request_kind_rejects_a_malformed_shape(pool: PgPool) {
         );
     }
 
-    // And an excuse whose window ends before it starts.
+    // And an excuse whose window is empty.
     assert_eq!(
         auth_send!(
             app,
@@ -2153,11 +2149,35 @@ async fn each_request_kind_rejects_a_malformed_shape(pool: PgPool) {
             uri,
             token,
             json!({ "kind": "excuse", "on_date": "2026-09-01",
-                    "from_time": "14:00:00", "to_time": "12:00:00" })
+                    "from_time": "14:00:00", "to_time": "14:00:00" })
         )
         .status(),
         400
     );
+    // One that ends earlier on the clock runs past midnight (a night shift,
+    // B5): its end is on the next day.
+    let resp = auth_send!(
+        app,
+        post,
+        uri,
+        token,
+        json!({ "kind": "excuse", "on_date": "2026-09-01",
+                "from_time": "23:00:00", "to_time": "01:00:00" })
+    );
+    assert_eq!(resp.status(), 201);
+    let row: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(row["end_date"], "2026-09-02");
+    // A mission takes its note as the title when it has none (§3).
+    let resp = auth_send!(
+        app,
+        post,
+        uri,
+        token,
+        json!({ "kind": "mission", "on_date": "2026-09-03", "reason": "Supplier visit" })
+    );
+    assert_eq!(resp.status(), 201);
+    let row: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(row["title"], "Supplier visit");
 }
 
 #[sqlx::test]

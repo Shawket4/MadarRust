@@ -410,8 +410,7 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::App
 
     for row in rows {
         let settings = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
-        let mut conn = pool.acquire().await?;
-        penalties::recompute_record(&mut conn, row.id, &settings).await?;
+        penalties::recompute_record(pool, row.id, &settings).await?;
     }
     Ok(())
 }
