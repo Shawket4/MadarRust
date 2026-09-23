@@ -30,6 +30,7 @@
 pub mod access;
 pub mod attendance;
 pub mod dawam;
+pub mod days;
 pub mod directory;
 pub mod discipline;
 pub mod jobs;

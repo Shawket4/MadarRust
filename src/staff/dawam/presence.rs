@@ -639,13 +639,13 @@ pub struct CoverableShift {
 }
 
 /// Rostered shifts at my branches whose owner is past grace without a punch,
-/// until the shift ends (CV-1, CV-2).
+/// until the shift ends (CV-1, CV-2). Yesterday's night shift still running
+/// after midnight counts, on the day it started (SC-10). One roster function.
 async fn coverable_for(pool: &PgPool, employee_id: Uuid) -> Result<Vec<CoverableShift>, AppError> {
     let mine = branches_of(pool, employee_id).await?;
-    let mut out = Vec::new();
     let now = Utc::now();
-    let colleagues: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
-        "SELECT DISTINCT e.id, e.name, a.branch_id FROM employee_branches a \
+    let colleagues: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT DISTINCT e.id, e.name FROM employee_branches a \
            JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
           WHERE a.branch_id = ANY($1) AND e.id <> $2",
     )
@@ -653,46 +653,60 @@ async fn coverable_for(pool: &PgPool, employee_id: Uuid) -> Result<Vec<Coverable
     .bind(employee_id)
     .fetch_all(pool)
     .await?;
-    for (colleague, name, branch_id) in colleagues {
-        let tz = crate::staff::branch_timezone(pool, branch_id).await?;
-        let today = crate::staff::attendance::today_in(pool, &tz).await?;
-        for s in crate::staff::schedules::resolve_shifts_for(pool, colleague, today, &tz).await? {
-            let past_grace =
-                now > s.scheduled_start_at + chrono::Duration::minutes(i64::from(s.grace_minutes));
-            if !past_grace || now >= s.scheduled_end_at {
-                continue;
-            }
-            let punched: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM attendance_records \
-                  WHERE business_date = $1 AND work_shift_id = $2 \
-                    AND (employee_id = $3 OR covered_employee_id = $3))",
-            )
-            .bind(today)
-            .bind(s.work_shift_id)
-            .bind(colleague)
-            .fetch_one(pool)
-            .await?;
-            let on_leave: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM staff_requests WHERE employee_id = $1 \
-                   AND status = 'approved' AND kind IN ('leave', 'mission') \
-                   AND on_date <= $2 AND COALESCE(end_date, on_date) >= $2)",
-            )
-            .bind(colleague)
-            .bind(today)
-            .fetch_one(pool)
-            .await?;
-            if !punched && !on_leave {
-                out.push(CoverableShift {
-                    employee_id: colleague,
-                    employee_name: name.clone(),
-                    branch_id,
-                    work_shift_id: s.work_shift_id,
-                    shift_name: s.name.clone(),
-                    business_date: today,
-                    scheduled_start_at: s.scheduled_start_at,
-                    scheduled_end_at: s.scheduled_end_at,
-                });
-            }
+    let ids: Vec<Uuid> = colleagues.iter().map(|c| c.0).collect();
+    let names: std::collections::HashMap<Uuid, String> = colleagues.into_iter().collect();
+    // Today and yesterday in UTC dates bracket every branch's local today and
+    // yesterday; the window test below keeps only shifts running now.
+    let today = now.date_naive();
+    let shifts = crate::staff::schedules::resolve_range(
+        pool,
+        &ids,
+        today - chrono::Duration::days(2),
+        today + chrono::Duration::days(1),
+        None,
+    )
+    .await?;
+    let mut out = Vec::new();
+    for s in shifts {
+        let Some(branch_id) = s.branch_id.filter(|b| mine.contains(b)) else {
+            continue;
+        };
+        let past_grace =
+            now > s.scheduled_start_at + chrono::Duration::minutes(i64::from(s.grace_minutes));
+        if !past_grace || now >= s.scheduled_end_at {
+            continue;
+        }
+        let punched: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM attendance_records \
+              WHERE business_date = $1 AND work_shift_id = $2 \
+                AND (employee_id = $3 OR covered_employee_id = $3) \
+                AND (cover_status IS NULL OR cover_status <> 'rejected'))",
+        )
+        .bind(s.on_date)
+        .bind(s.work_shift_id)
+        .bind(s.employee_id)
+        .fetch_one(pool)
+        .await?;
+        let on_leave: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM staff_requests WHERE employee_id = $1 \
+               AND status = 'approved' AND kind IN ('leave', 'mission') \
+               AND on_date <= $2 AND COALESCE(end_date, on_date) >= $2)",
+        )
+        .bind(s.employee_id)
+        .bind(s.on_date)
+        .fetch_one(pool)
+        .await?;
+        if !punched && !on_leave {
+            out.push(CoverableShift {
+                employee_id: s.employee_id,
+                employee_name: names.get(&s.employee_id).cloned().unwrap_or_default(),
+                branch_id,
+                work_shift_id: s.work_shift_id,
+                shift_name: s.name.clone(),
+                business_date: s.on_date,
+                scheduled_start_at: s.scheduled_start_at,
+                scheduled_end_at: s.scheduled_end_at,
+            });
         }
     }
     Ok(out)
@@ -859,18 +873,28 @@ pub async fn decide_cover(
     } else {
         "rejected"
     };
-    sqlx::query("UPDATE attendance_records SET cover_status = $2, edited_by = $3 WHERE id = $1")
-        .bind(*id)
-        .bind(status)
-        .bind(by)
-        .execute(pool)
-        .await?;
+    // One decision only: a second confirm (or a race) finds nothing pending.
+    let decided = sqlx::query(
+        "UPDATE attendance_records SET cover_status = $2, edited_by = $3 \
+          WHERE id = $1 AND cover_status = 'pending'",
+    )
+    .bind(*id)
+    .bind(status)
+    .bind(by)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if decided == 0 {
+        return Err(AppError::Conflict("That cover was already decided.".into()));
+    }
+    // The flag says what was decided (CV-3).
     sqlx::query(
-        "UPDATE attendance_flags SET resolution = 'confirmed', resolved_by = $2, resolved_at = now() \
+        "UPDATE attendance_flags SET resolution = $3, resolved_by = $2, resolved_at = now() \
           WHERE attendance_record_id = $1 AND kind = 'cover' AND resolution IS NULL",
     )
     .bind(*id)
     .bind(by)
+    .bind(status)
     .execute(pool)
     .await?;
     notify(
@@ -1084,9 +1108,12 @@ pub(crate) async fn punch(
             let tz = crate::staff::branch_timezone(pool, branch).await?;
             let today = crate::staff::attendance::today_in(pool, &tz).await?;
             let now = Utc::now();
-            let shifts =
-                crate::staff::schedules::resolve_shifts_for(pool, employee_id, today, &tz).await?;
-            let shift = crate::staff::schedules::pick_shift_for_instant(&shifts, now);
+            // The one "which shift is this" resolver (SC-10): after midnight a
+            // night shift's punch lands on the day it started.
+            let (resolved, today) =
+                crate::staff::schedules::shift_at_instant(pool, employee_id, today, &tz, now)
+                    .await?;
+            let shift = resolved.as_ref();
             sqlx::query_scalar(
                 "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                     business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, \

@@ -1,6 +1,12 @@
 //! The week (SC-*): a standing pattern fills each week, managers adjust dates
 //! and publish, staff see only published weeks and are told of changes. Open
-//! shifts, swaps, preferences, public holidays and roster suggestions.
+//! shifts, swaps, preferences, public holidays and coverage needs. The
+//! suggestion engine and its guardrails are in [`super::suggest`].
+//!
+//! Every view here reads the one roster function
+//! ([`crate::staff::schedules::resolve_range`]); every write goes through the
+//! date-set writers in [`crate::staff::days`], inside one transaction with the
+//! overlap check, and tells people only after it commits.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,8 +22,14 @@ use super::{branches_of, employee_name, engine, notify, notify_managers, week_st
 use crate::authz::Cap;
 use crate::errors::{AppError, AppErrorResponse};
 use crate::staff::access;
+use crate::staff::days::{self, Block};
 use crate::staff::principal::{Me, caller};
-use crate::staff::schedules::resolve_shifts_for;
+use crate::staff::schedules::{DayTime, ResolvedShift, after_day_change, resolve_range};
+
+pub use super::suggest::{
+    __path_decide_suggestion, __path_fairness, __path_suggestions, DecideSuggestion, FairnessQuery,
+    FairnessView, SuggestQuery, Suggestion, decide_suggestion, fairness, precompute, suggestions,
+};
 
 const MAX_DAYS: i64 = 62;
 
@@ -46,6 +58,16 @@ pub struct RosterShift {
     pub shift_name: String,
     pub start_at: DateTime<Utc>,
     pub end_at: DateTime<Utc>,
+    /// Effective wall-clock times at the branch (the assignment's own, else
+    /// the block's for that weekday, else its default).
+    pub start_time: NaiveTime,
+    pub end_time: NaiveTime,
+    /// Ends the next day.
+    pub crosses_midnight: bool,
+    /// This assignment has its own from/to (show it as edited).
+    pub times_edited: bool,
+    /// The date holds its own set, not the standing pattern.
+    pub from_override: bool,
     /// Changed after its week was published (SC-4).
     pub changed: bool,
     /// On approved leave or a mission that day.
@@ -80,6 +102,29 @@ pub struct WorkShiftBrief {
     pub end_time: NaiveTime,
     pub crosses_midnight: bool,
     pub grace_minutes: i32,
+    /// Weekdays it may be rostered on (0 = Sunday … 6 = Saturday): offer it
+    /// only on those.
+    pub valid_days: Vec<i16>,
+    /// Its own times on some weekdays; show that day's times.
+    #[sqlx(skip)]
+    pub day_times: Vec<DayTime>,
+}
+
+impl WorkShiftBrief {
+    /// The block's times on `d`: that weekday's own, else its default.
+    pub fn times_on(&self, d: NaiveDate) -> (NaiveTime, NaiveTime) {
+        let dow = days::dow(d);
+        self.day_times
+            .iter()
+            .find(|t| t.day_of_week == dow)
+            .map_or((self.start_time, self.end_time), |t| {
+                (t.start_time, t.end_time)
+            })
+    }
+
+    pub fn valid_on(&self, d: NaiveDate) -> bool {
+        self.valid_days.contains(&days::dow(d))
+    }
 }
 
 #[derive(Serialize, ToSchema, sqlx::FromRow, Clone)]
@@ -90,6 +135,9 @@ pub struct RosterPerson {
     pub pref_time: Option<String>,
     pub cant_work_days: Vec<i16>,
     pub department_id: Option<Uuid>,
+    /// Who set the preferences last: `employee` or `manager` (SC-12).
+    #[sqlx(default)]
+    pub prefs_set_by: String,
 }
 
 #[derive(Serialize, ToSchema, sqlx::FromRow, Clone)]
@@ -120,7 +168,7 @@ pub struct RosterView {
     pub limits_unconfirmed: bool,
 }
 
-fn check_range(from: NaiveDate, to: NaiveDate) -> Result<(), AppError> {
+pub(crate) fn check_range(from: NaiveDate, to: NaiveDate) -> Result<(), AppError> {
     if to < from || (to - from).num_days() > MAX_DAYS {
         return Err(AppError::BadRequest(format!(
             "The range must be 0–{MAX_DAYS} days"
@@ -129,7 +177,7 @@ fn check_range(from: NaiveDate, to: NaiveDate) -> Result<(), AppError> {
     Ok(())
 }
 
-async fn published_weeks(
+pub(crate) async fn published_weeks(
     pool: &PgPool,
     branches: &[Uuid],
     from: NaiveDate,
@@ -147,104 +195,135 @@ async fn published_weeks(
     Ok(rows.into_iter().collect())
 }
 
-async fn work_shifts_of(pool: &PgPool, org_id: Uuid) -> Result<Vec<WorkShiftBrief>, AppError> {
-    Ok(sqlx::query_as(
-        "SELECT id, name, branch_id, start_time, end_time, crosses_midnight, grace_minutes \
+/// The org's live blocks with their days and weekday times.
+pub(crate) async fn work_shifts_of(
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<Vec<WorkShiftBrief>, AppError> {
+    let mut rows: Vec<WorkShiftBrief> = sqlx::query_as(
+        "SELECT id, name, branch_id, start_time, end_time, crosses_midnight, grace_minutes, \
+                valid_days \
            FROM work_shifts WHERE org_id = $1 AND is_active ORDER BY start_time",
     )
     .bind(org_id)
     .fetch_all(pool)
-    .await?)
+    .await?;
+    let times: Vec<(Uuid, i16, NaiveTime, NaiveTime)> = sqlx::query_as(
+        "SELECT work_shift_id, day_of_week, start_time, end_time FROM work_shift_day_times \
+          WHERE org_id = $1 ORDER BY day_of_week",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+    for w in &mut rows {
+        w.day_times = times
+            .iter()
+            .filter(|t| t.0 == w.id)
+            .map(|t| DayTime {
+                day_of_week: t.1,
+                start_time: t.2,
+                end_time: t.3,
+            })
+            .collect();
+    }
+    Ok(rows)
 }
 
-async fn staff_at(pool: &PgPool, branch_id: Uuid) -> Result<Vec<RosterPerson>, AppError> {
+pub(crate) async fn staff_at(
+    pool: &PgPool,
+    branch_id: Uuid,
+) -> Result<Vec<RosterPerson>, AppError> {
     Ok(sqlx::query_as(
-        "SELECT e.id AS employee_id, e.name, e.gender, e.pref_time, e.cant_work_days, e.department_id \
+        "SELECT e.id AS employee_id, e.name, e.gender, e.pref_time, e.cant_work_days, \
+                e.department_id, e.prefs_set_by \
            FROM employee_branches a \
            JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
-          WHERE a.branch_id = $1 ORDER BY lower(e.name)",
+          WHERE a.branch_id = $1 ORDER BY lower(e.name), e.id",
     )
     .bind(branch_id)
     .fetch_all(pool)
     .await?)
 }
 
-async fn on_leave_days(
+/// Approved leave and missions per person and day.
+pub(crate) async fn leave_days(
     pool: &PgPool,
-    employee_id: Uuid,
+    employees: &[Uuid],
     from: NaiveDate,
     to: NaiveDate,
-) -> Result<HashSet<NaiveDate>, AppError> {
-    let rows: Vec<(NaiveDate, NaiveDate)> = sqlx::query_as(
-        "SELECT on_date, COALESCE(end_date, on_date) FROM staff_requests \
-          WHERE employee_id = $1 AND status = 'approved' AND kind IN ('leave', 'mission') \
+) -> Result<HashSet<(Uuid, NaiveDate)>, AppError> {
+    let rows: Vec<(Uuid, NaiveDate, NaiveDate)> = sqlx::query_as(
+        "SELECT employee_id, on_date, COALESCE(end_date, on_date) FROM staff_requests \
+          WHERE employee_id = ANY($1) AND status = 'approved' AND kind IN ('leave', 'mission') \
             AND on_date <= $3 AND COALESCE(end_date, on_date) >= $2",
     )
-    .bind(employee_id)
+    .bind(employees)
     .bind(from)
     .bind(to)
     .fetch_all(pool)
     .await?;
     let mut out = HashSet::new();
-    for (a, b) in rows {
-        let mut d = a;
-        while d <= b {
-            out.insert(d);
+    for (u, a, b) in rows {
+        let mut d = a.max(from);
+        while d <= b.min(to) {
+            out.insert((u, d));
             d += Duration::days(1);
         }
     }
     Ok(out)
 }
 
-/// One person's shifts at a branch over a range: the one resolver (SC-6).
-async fn shifts_of(
+/// People's shifts over a range, from the one resolver (SC-6), as roster
+/// rows. `branch`: keep only the shifts worked there.
+pub(crate) async fn roster_rows(
     pool: &PgPool,
-    person: (Uuid, &str),
-    branch_id: Uuid,
-    shift_branch: &HashMap<Uuid, Option<Uuid>>,
+    people: &[(Uuid, String)],
+    branch: Option<Uuid>,
     from: NaiveDate,
     to: NaiveDate,
-    tz: &str,
 ) -> Result<Vec<RosterShift>, AppError> {
-    let changed: HashSet<NaiveDate> = sqlx::query_scalar::<_, NaiveDate>(
-        "SELECT on_date FROM staff_schedule_overrides \
-          WHERE employee_id = $1 AND changed_after_publish AND on_date BETWEEN $2 AND $3",
+    let ids: Vec<Uuid> = people.iter().map(|p| p.0).collect();
+    let names: HashMap<Uuid, &str> = people.iter().map(|p| (p.0, p.1.as_str())).collect();
+    let changed: HashSet<(Uuid, NaiveDate)> = sqlx::query_as::<_, (Uuid, NaiveDate)>(
+        "SELECT employee_id, on_date FROM staff_roster_changes \
+          WHERE employee_id = ANY($1) AND on_date BETWEEN $2 AND $3",
     )
-    .bind(person.0)
+    .bind(&ids)
     .bind(from)
     .bind(to)
     .fetch_all(pool)
     .await?
     .into_iter()
     .collect();
-    let leave = on_leave_days(pool, person.0, from, to).await?;
-    let mut out = Vec::new();
-    let mut d = from;
-    while d <= to {
-        for s in resolve_shifts_for(pool, person.0, d, tz).await? {
-            let at = shift_branch.get(&s.work_shift_id).copied().flatten();
-            if at.is_some_and(|b| b != branch_id) {
-                continue;
-            }
-            out.push(RosterShift {
-                employee_id: person.0,
-                employee_name: person.1.to_string(),
-                date: d,
+    let leave = leave_days(pool, &ids, from, to).await?;
+    Ok(resolve_range(pool, &ids, from, to, None)
+        .await?
+        .into_iter()
+        .filter(|s| branch.is_none_or(|b| s.branch_id == Some(b)))
+        .filter_map(|s| {
+            let branch_id = s.branch_id?;
+            Some(RosterShift {
+                employee_id: s.employee_id,
+                employee_name: names.get(&s.employee_id).copied().unwrap_or("").into(),
+                date: s.on_date,
                 branch_id,
                 work_shift_id: s.work_shift_id,
                 shift_name: s.name.clone(),
                 start_at: s.scheduled_start_at,
                 end_at: s.scheduled_end_at,
-                changed: changed.contains(&d),
-                on_leave: leave.contains(&d),
-            });
-        }
-        d += Duration::days(1);
-    }
-    Ok(out)
+                start_time: s.start_time,
+                end_time: s.end_time,
+                crosses_midnight: s.crosses_midnight,
+                times_edited: s.times_edited,
+                from_override: s.from_override,
+                changed: changed.contains(&(s.employee_id, s.on_date)),
+                on_leave: leave.contains(&(s.employee_id, s.on_date)),
+            })
+        })
+        .collect())
 }
 
-async fn open_shifts_at(
+pub(crate) async fn open_shifts_at(
     pool: &PgPool,
     branches: &[Uuid],
     from: NaiveDate,
@@ -252,35 +331,33 @@ async fn open_shifts_at(
 ) -> Result<Vec<OpenShift>, AppError> {
     let mut rows: Vec<OpenShift> = sqlx::query_as(
         "SELECT o.id, o.branch_id, o.work_shift_id, ws.name AS shift_name, o.on_date, o.status, \
-                o.claimed_by, e.name AS claimed_by_name \
+                o.claimed_by, e.name AS claimed_by_name, \
+                (o.on_date + COALESCE(dt.start_time, ws.start_time)) \
+                    AT TIME ZONE COALESCE(b.timezone::text, org.timezone::text, 'Africa/Cairo') \
+                    AS start_at, \
+                (o.on_date + COALESCE(dt.end_time, ws.end_time) \
+                    + CASE WHEN COALESCE(dt.end_time, ws.end_time) \
+                                <= COALESCE(dt.start_time, ws.start_time) \
+                           THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END) \
+                    AT TIME ZONE COALESCE(b.timezone::text, org.timezone::text, 'Africa/Cairo') \
+                    AS end_at \
            FROM staff_open_shifts o \
            JOIN work_shifts ws ON ws.id = o.work_shift_id \
+           JOIN branches b ON b.id = o.branch_id \
+           JOIN organizations org ON org.id = o.org_id \
+           LEFT JOIN work_shift_day_times dt ON dt.work_shift_id = ws.id \
+                AND dt.day_of_week = EXTRACT(DOW FROM o.on_date)::smallint \
            LEFT JOIN employees e ON e.id = o.claimed_by \
           WHERE o.branch_id = ANY($1) AND o.on_date BETWEEN $2 AND $3 \
             AND o.status IN ('open', 'claimed') \
-          ORDER BY o.on_date",
+          ORDER BY o.on_date, start_at",
     )
     .bind(branches)
     .bind(from)
     .bind(to)
     .fetch_all(pool)
     .await?;
-    for o in &mut rows {
-        let tz = crate::staff::branch_timezone(pool, o.branch_id).await?;
-        let (start, end): (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
-            "SELECT ($1::date + start_time) AT TIME ZONE $3, \
-                    ($1::date + end_time + CASE WHEN crosses_midnight THEN INTERVAL '1 day' \
-                                                ELSE INTERVAL '0 day' END) AT TIME ZONE $3 \
-               FROM work_shifts WHERE id = $2",
-        )
-        .bind(o.on_date)
-        .bind(o.work_shift_id)
-        .bind(&tz)
-        .fetch_one(pool)
-        .await?;
-        o.start_at = Some(start);
-        o.end_at = Some(end);
-    }
+    rows.dedup_by_key(|o| o.id);
     Ok(rows)
 }
 
@@ -300,31 +377,25 @@ pub async fn roster(
     check_range(query.from, query.to)?;
     let pool = pool.get_ref();
     access::require_at(pool, &claims, org_id, Cap::HrScheduleRead, query.branch_id).await?;
-    let tz = crate::staff::branch_timezone(pool, query.branch_id).await?;
     let work_shifts = work_shifts_of(pool, org_id).await?;
-    let shift_branch: HashMap<Uuid, Option<Uuid>> =
-        work_shifts.iter().map(|w| (w.id, w.branch_id)).collect();
     let staff = staff_at(pool, query.branch_id).await?;
-    let mut shifts = Vec::new();
-    for p in &staff {
-        shifts.extend(
-            shifts_of(
-                pool,
-                (p.employee_id, &p.name),
-                query.branch_id,
-                &shift_branch,
-                query.from,
-                query.to,
-                &tz,
-            )
-            .await?,
-        );
-    }
+    let people: Vec<(Uuid, String)> = staff
+        .iter()
+        .map(|p| (p.employee_id, p.name.clone()))
+        .collect();
+    // All their shifts, wherever worked: the limits count every hour, the
+    // grid shows this branch's.
+    let everywhere = roster_rows(pool, &people, None, query.from, query.to).await?;
     let published = published_weeks(pool, &[query.branch_id], query.from, query.to).await?;
     let holidays = holidays_in(pool, org_id, query.from, query.to).await?;
     let settings =
         crate::staff::attendance::load_settings(pool, org_id, Some(query.branch_id)).await?;
-    let warnings = labour_warnings(pool, &settings, &staff, &shifts, query.from, query.to).await?;
+    let warnings =
+        labour_warnings(pool, &settings, &staff, &everywhere, query.from, query.to).await?;
+    let shifts = everywhere
+        .into_iter()
+        .filter(|s| s.branch_id == query.branch_id)
+        .collect();
     Ok(HttpResponse::Ok().json(RosterView {
         branch_id: query.branch_id,
         from: query.from,
@@ -411,6 +482,8 @@ pub struct MyRosterView {
     pub team: Vec<RosterShift>,
     pub pref_time: Option<String>,
     pub cant_work_days: Vec<i16>,
+    /// `employee` or `manager`: who set my preferences last.
+    pub prefs_set_by: String,
 }
 
 /// My published shifts, open shifts to claim, and my swaps.
@@ -434,63 +507,31 @@ pub async fn my_roster(
             "You have no branch yet — ask your manager.".into(),
         ));
     };
-    let tz = crate::staff::branch_timezone(pool, home).await?;
-    let work_shifts = work_shifts_of(pool, org_id).await?;
-    let shift_branch: HashMap<Uuid, Option<Uuid>> =
-        work_shifts.iter().map(|w| (w.id, w.branch_id)).collect();
     let published = published_weeks(pool, &branches, query.from, query.to).await?;
     let name = employee_name(pool, employee_id).await;
-    let mut shifts = Vec::new();
-    for &b in &branches {
-        for mut s in shifts_of(
-            pool,
-            (employee_id, &name),
-            b,
-            &shift_branch,
-            query.from,
-            query.to,
-            &tz,
-        )
-        .await?
-        {
-            let at = shift_branch
-                .get(&s.work_shift_id)
-                .copied()
-                .flatten()
-                .unwrap_or(home);
-            s.branch_id = at;
-            if published.contains(&(at, week_start(s.date)))
-                && !shifts
-                    .iter()
-                    .any(|x: &RosterShift| x.date == s.date && x.work_shift_id == s.work_shift_id)
-            {
-                shifts.push(s);
-            }
-        }
-    }
-    let mut team = Vec::new();
+    let shifts: Vec<RosterShift> =
+        roster_rows(pool, &[(employee_id, name)], None, query.from, query.to)
+            .await?
+            .into_iter()
+            .filter(|s| published.contains(&(s.branch_id, week_start(s.date))))
+            .collect();
+    let mut colleagues: Vec<(Uuid, String)> = Vec::new();
     for &b in &branches {
         for p in staff_at(pool, b).await? {
-            if p.employee_id == employee_id {
-                continue;
-            }
-            for s in shifts_of(
-                pool,
-                (p.employee_id, &p.name),
-                b,
-                &shift_branch,
-                query.from,
-                query.to,
-                &tz,
-            )
-            .await?
-            {
-                if published.contains(&(b, week_start(s.date))) && !s.on_leave {
-                    team.push(s);
-                }
+            if p.employee_id != employee_id && !colleagues.iter().any(|c| c.0 == p.employee_id) {
+                colleagues.push((p.employee_id, p.name));
             }
         }
     }
+    let team = roster_rows(pool, &colleagues, None, query.from, query.to)
+        .await?
+        .into_iter()
+        .filter(|s| {
+            branches.contains(&s.branch_id)
+                && published.contains(&(s.branch_id, week_start(s.date)))
+                && !s.on_leave
+        })
+        .collect();
     let mut unpublished = Vec::new();
     let mut w = week_start(query.from);
     while w <= query.to {
@@ -502,13 +543,16 @@ pub async fn my_roster(
     let open_shifts = open_shifts_at(pool, &branches, query.from, query.to)
         .await?
         .into_iter()
+        .filter(|o| o.status == "open" || o.claimed_by == Some(employee_id))
         .filter(|o| published.contains(&(o.branch_id, week_start(o.on_date))))
         .collect();
-    let (pref_time, cant_work_days): (Option<String>, Vec<i16>) =
-        sqlx::query_as("SELECT pref_time, cant_work_days FROM employees WHERE id = $1")
-            .bind(employee_id)
-            .fetch_one(pool)
-            .await?;
+    let (pref_time, cant_work_days, prefs_set_by): (Option<String>, Vec<i16>, String) =
+        sqlx::query_as(
+            "SELECT pref_time, cant_work_days, prefs_set_by FROM employees WHERE id = $1",
+        )
+        .bind(employee_id)
+        .fetch_one(pool)
+        .await?;
     Ok(HttpResponse::Ok().json(MyRosterView {
         from: query.from,
         to: query.to,
@@ -519,70 +563,8 @@ pub async fn my_roster(
         team,
         pref_time,
         cant_work_days,
+        prefs_set_by,
     }))
-}
-
-/// After a date-level change: a published week tells the person (SC-4, SC-5).
-pub(crate) async fn after_day_change(
-    pool: &PgPool,
-    org_id: Uuid,
-    employee_id: Uuid,
-    on_date: NaiveDate,
-) -> Result<(), AppError> {
-    let branches = branches_of(pool, employee_id).await?;
-    let published: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM staff_week_publications \
-                        WHERE branch_id = ANY($1) AND week_start = $2)",
-    )
-    .bind(&branches)
-    .bind(week_start(on_date))
-    .fetch_one(pool)
-    .await?;
-    if published {
-        sqlx::query(
-            "UPDATE staff_schedule_overrides SET changed_after_publish = true \
-              WHERE employee_id = $1 AND on_date = $2",
-        )
-        .bind(employee_id)
-        .bind(on_date)
-        .execute(pool)
-        .await?;
-        notify(
-            pool,
-            org_id,
-            employee_id,
-            "staff.n_shift_changed",
-            json!({ "date": on_date }),
-        )
-        .await;
-    }
-    Ok(())
-}
-
-async fn set_day(
-    pool: &PgPool,
-    org_id: Uuid,
-    employee_id: Uuid,
-    on_date: NaiveDate,
-    work_shift_id: Option<Uuid>,
-    reason: &str,
-    by: Uuid,
-) -> Result<(), AppError> {
-    sqlx::query(
-        "INSERT INTO staff_schedule_overrides (org_id, employee_id, on_date, work_shift_id, reason, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         ON CONFLICT (employee_id, on_date) DO UPDATE SET work_shift_id = EXCLUDED.work_shift_id, \
-             reason = EXCLUDED.reason, created_by = EXCLUDED.created_by",
-    )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(on_date)
-    .bind(work_shift_id)
-    .bind(reason)
-    .bind(by)
-    .execute(pool)
-    .await?;
-    after_day_change(pool, org_id, employee_id, on_date).await
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -592,7 +574,8 @@ pub struct PublishWeek {
     pub week_start: NaiveDate,
 }
 
-/// Publish a week: staff see it and are told (SC-3).
+/// Publish a week: staff see it and are told (SC-3), and the week's open
+/// shifts are announced now that people can see them (SC-9).
 #[utoipa::path(
     post, path = "/staff/roster/publish", tag = "staff", request_body = PublishWeek,
     responses((status = 204), AppErrorResponse),
@@ -628,6 +611,14 @@ pub async fn publish(
     .await?
     .rows_affected();
     if fresh > 0 {
+        let open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM staff_open_shifts WHERE branch_id = $1 AND status = 'open' \
+                AND on_date BETWEEN $2 AND $2 + 6",
+        )
+        .bind(body.branch_id)
+        .bind(ws)
+        .fetch_one(pool)
+        .await?;
         for p in staff_at(pool, body.branch_id).await? {
             notify(
                 pool,
@@ -637,9 +628,30 @@ pub async fn publish(
                 json!({ "date": ws }),
             )
             .await;
+            if open > 0 {
+                notify(
+                    pool,
+                    org_id,
+                    p.employee_id,
+                    "staff.n_open_shift",
+                    json!({ "date": ws }),
+                )
+                .await;
+            }
         }
     }
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// Is `date`'s week published at `branch`?
+async fn is_published(pool: &PgPool, branch: Uuid, date: NaiveDate) -> Result<bool, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM staff_week_publications WHERE branch_id = $1 AND week_start = $2)",
+    )
+    .bind(branch)
+    .bind(week_start(date))
+    .fetch_one(pool)
+    .await?)
 }
 
 // ── open shifts ────────────────────────────────────────────────────────────
@@ -666,27 +678,38 @@ pub async fn post_open_shift(
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, body.branch_id).await?;
+    let info = days::block_info(&mut *pool.acquire().await?, org_id, body.work_shift_id).await?;
+    if info.branch_id.is_some_and(|b| b != body.branch_id) {
+        return Err(AppError::Coded {
+            status: 400,
+            code: "SHIFT_OTHER_BRANCH",
+            reason: format!("{} is another branch's shift.", info.name),
+        });
+    }
+    if !info.valid_days.contains(&days::dow(body.on_date)) {
+        return Err(AppError::Coded {
+            status: 400,
+            code: "SHIFT_NOT_ON_DAY",
+            reason: format!(
+                "{} isn't a shift on {}.",
+                info.name,
+                body.on_date.format("%A")
+            ),
+        });
+    }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date, posted_by) \
-         SELECT $1, $2, ws.id, $4, $5 FROM work_shifts ws WHERE ws.id = $3 AND ws.org_id = $1 \
-         RETURNING id",
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
     )
     .bind(org_id)
     .bind(body.branch_id)
     .bind(body.work_shift_id)
     .bind(body.on_date)
     .bind(claims.user_id_safe().ok())
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Work shift not found".into()))?;
-    let published: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM staff_week_publications WHERE branch_id = $1 AND week_start = $2)",
-    )
-    .bind(body.branch_id)
-    .bind(week_start(body.on_date))
     .fetch_one(pool)
     .await?;
-    if published {
+    // A draft week's open shift is announced when the week is published.
+    if is_published(pool, body.branch_id, body.on_date).await? {
         for p in staff_at(pool, body.branch_id).await? {
             notify(
                 pool,
@@ -706,7 +729,8 @@ pub async fn post_open_shift(
     Ok(HttpResponse::Created().json(row))
 }
 
-/// Claim an open shift; the manager approves the claim (SC-9).
+/// Claim an open shift; the manager approves the claim (SC-9). Only a
+/// published week's, and only one that fits beside the person's own shifts.
 #[utoipa::path(
     post, path = "/staff/open-shifts/{id}/claim", tag = "staff",
     params(("id" = Uuid, Path)),
@@ -721,23 +745,66 @@ pub async fn claim_open_shift(
     let employee_id = me.employee_id;
     let org_id = me.org_id;
     let pool = pool.get_ref();
-    let branches = branches_of(pool, employee_id).await?;
-    let row: Option<(Uuid, NaiveDate)> = sqlx::query_as(
+    let subject = access::subject(pool, org_id, employee_id).await?;
+    let row: Option<(Uuid, Uuid, NaiveDate, String)> = sqlx::query_as(
+        "SELECT branch_id, work_shift_id, on_date, status FROM staff_open_shifts \
+          WHERE id = $1 AND org_id = $2 AND branch_id = ANY($3)",
+    )
+    .bind(*id)
+    .bind(org_id)
+    .bind(&subject.branches)
+    .fetch_optional(pool)
+    .await?;
+    let Some((branch_id, shift_id, on_date, status)) = row else {
+        return Err(AppError::NotFound("No open shift here.".into()));
+    };
+    if status != "open" {
+        return Err(AppError::Conflict(
+            "Someone already claimed that shift.".into(),
+        ));
+    }
+    if !is_published(pool, branch_id, on_date).await? {
+        return Err(AppError::Refused {
+            code: "WEEK_NOT_PUBLISHED",
+            reason: "That week isn't published yet.".into(),
+        });
+    }
+    // Would it fit? Try it in a transaction that never commits.
+    {
+        let mut tx = pool.begin().await?;
+        let block = Block {
+            work_shift_id: shift_id,
+            times: None,
+        };
+        days::validate_block(&mut tx, &subject, on_date, &block).await?;
+        let already = resolve_range(&mut *tx, &[employee_id], on_date, on_date, None)
+            .await?
+            .iter()
+            .any(|s| s.work_shift_id == shift_id);
+        if already {
+            return Err(AppError::Refused {
+                code: "ALREADY_ROSTERED",
+                reason: "You're already on that shift.".into(),
+            });
+        }
+        days::add_block(&mut tx, org_id, employee_id, on_date, &block, None, None).await?;
+        days::check_overlaps(&mut tx, employee_id, on_date, on_date).await?;
+        tx.rollback().await?;
+    }
+    let claimed: Option<Uuid> = sqlx::query_scalar(
         "UPDATE staff_open_shifts SET status = 'claimed', claimed_by = $2, claimed_at = now() \
-          WHERE id = $1 AND org_id = $3 AND status = 'open' AND branch_id = ANY($4) \
-          RETURNING branch_id, on_date",
+          WHERE id = $1 AND org_id = $3 AND status = 'open' RETURNING id",
     )
     .bind(*id)
     .bind(employee_id)
     .bind(org_id)
-    .bind(&branches)
     .fetch_optional(pool)
     .await?;
-    let Some((branch_id, on_date)) = row else {
+    if claimed.is_none() {
         return Err(AppError::Conflict(
             "Someone already claimed that shift.".into(),
         ));
-    };
+    }
     let name = employee_name(pool, employee_id).await;
     notify_managers(
         pool,
@@ -762,7 +829,8 @@ pub struct DecideRoster {
     pub approve: bool,
 }
 
-/// Approve a claim: the shift becomes theirs for that date. Rejecting reopens it.
+/// Approve a claim: the shift becomes theirs for that date, beside the rest
+/// of their day. Rejecting reopens it. One decision only.
 #[utoipa::path(
     patch, path = "/staff/open-shifts/{id}/decision", tag = "staff", request_body = DecideRoster,
     params(("id" = Uuid, Path)),
@@ -792,24 +860,43 @@ pub async fn decide_claim(
         return Err(AppError::NotFound("No claim waiting here.".into()));
     };
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
+    let subject = access::subject(pool, org_id, claimer).await?;
+    if subject.is(&claims) {
+        return Err(AppError::Forbidden(
+            "You can't approve your own claim.".into(),
+        ));
+    }
+    let mut tx = pool.begin().await?;
     if body.approve {
-        sqlx::query(
-            "UPDATE staff_open_shifts SET status = 'filled', decided_by = $2 WHERE id = $1",
+        let won: Option<Uuid> = sqlx::query_scalar(
+            "UPDATE staff_open_shifts SET status = 'filled', decided_by = $2 \
+              WHERE id = $1 AND status = 'claimed' RETURNING id",
         )
         .bind(*id)
         .bind(by)
-        .execute(pool)
+        .fetch_optional(&mut *tx)
         .await?;
-        set_day(
-            pool,
+        if won.is_none() {
+            return Err(AppError::Conflict("That claim was already decided.".into()));
+        }
+        let block = Block {
+            work_shift_id: shift_id,
+            times: None,
+        };
+        days::validate_block(&mut tx, &subject, on_date, &block).await?;
+        days::add_block(
+            &mut tx,
             org_id,
             claimer,
             on_date,
-            Some(shift_id),
-            "Open shift claimed",
-            by,
+            &block,
+            Some("Open shift claimed"),
+            Some(by),
         )
         .await?;
+        days::check_overlaps(&mut tx, claimer, on_date, on_date).await?;
+        tx.commit().await?;
+        after_day_change(pool, org_id, claimer, on_date).await?;
         notify(
             pool,
             org_id,
@@ -819,18 +906,76 @@ pub async fn decide_claim(
         )
         .await;
     } else {
-        sqlx::query(
+        let won: Option<Uuid> = sqlx::query_scalar(
             "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL \
-              WHERE id = $1",
+              WHERE id = $1 AND status = 'claimed' RETURNING id",
         )
         .bind(*id)
-        .execute(pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        if won.is_none() {
+            return Err(AppError::Conflict("That claim was already decided.".into()));
+        }
+        tx.commit().await?;
         notify(
             pool,
             org_id,
             claimer,
             "staff.n_claim_rejected",
+            json!({ "date": on_date }),
+        )
+        .await;
+    }
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// Take an open shift back (open or claimed, never filled). A claimer hears.
+#[utoipa::path(
+    post, path = "/staff/open-shifts/{id}/cancel", tag = "staff",
+    params(("id" = Uuid, Path)),
+    responses((status = 204), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn cancel_open_shift(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = crate::staff::scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
+    let row: Option<(Uuid, NaiveDate, String)> = sqlx::query_as(
+        "SELECT branch_id, on_date, status FROM staff_open_shifts WHERE id = $1 AND org_id = $2",
+    )
+    .bind(*id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((branch_id, on_date, _)) = row else {
+        return Err(AppError::NotFound("No open shift here.".into()));
+    };
+    access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
+    let gone: Option<Option<Uuid>> = sqlx::query_scalar(
+        "UPDATE staff_open_shifts SET status = 'cancelled', decided_by = $2 \
+          WHERE id = $1 AND status IN ('open', 'claimed') \
+          RETURNING claimed_by",
+    )
+    .bind(*id)
+    .bind(claims.user_id_safe().ok())
+    .fetch_optional(pool)
+    .await?;
+    let Some(claimer) = gone else {
+        return Err(AppError::Conflict(
+            "That shift was already filled or cancelled.".into(),
+        ));
+    };
+    if let Some(c) = claimer {
+        notify(
+            pool,
+            org_id,
+            c,
+            "staff.n_open_shift_cancelled",
             json!({ "date": on_date }),
         )
         .await;
@@ -894,14 +1039,108 @@ async fn swaps_of(
 
 #[derive(Deserialize, ToSchema)]
 pub struct AskSwap {
+    /// The date of MY shift I give away.
     pub my_date: NaiveDate,
+    /// MY shift (a block I'm rostered on that date).
     pub my_shift_id: Uuid,
     pub peer_id: Uuid,
+    /// The date of the colleague's shift I take.
     pub peer_date: NaiveDate,
+    /// The COLLEAGUE's shift.
     pub peer_shift_id: Uuid,
 }
 
-/// Ask a colleague to swap: they agree first, then the manager (SC-8).
+/// Is `employee` rostered on `shift` on `date` (in its own branch's zone)?
+async fn rostered_on(
+    conn: &mut sqlx::PgConnection,
+    employee: Uuid,
+    date: NaiveDate,
+    shift: Uuid,
+) -> Result<Option<ResolvedShift>, AppError> {
+    Ok(resolve_range(&mut *conn, &[employee], date, date, None)
+        .await?
+        .into_iter()
+        .find(|s| s.work_shift_id == shift))
+}
+
+/// The two sides of a swap applied to the roster: each gives their block and
+/// takes the other's, the rest of both days unchanged (SC-8, SC-11).
+async fn apply_swap(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+    s: &Swap,
+    requester: &access::Subject,
+    peer: &access::Subject,
+    by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let mine = days::remove_block(
+        conn,
+        org_id,
+        s.requester_id,
+        s.requester_date,
+        s.requester_shift_id,
+        Some("Swap"),
+        by,
+    )
+    .await?;
+    let theirs = days::remove_block(
+        conn,
+        org_id,
+        s.peer_id,
+        s.peer_date,
+        s.peer_shift_id,
+        Some("Swap"),
+        by,
+    )
+    .await?;
+    let (Some(mine), Some(theirs)) = (mine, theirs) else {
+        return Err(AppError::Refused {
+            code: "SWAP_STALE",
+            reason: "Those shifts aren't on the roster any more.".into(),
+        });
+    };
+    let to_requester = Block {
+        work_shift_id: s.peer_shift_id,
+        times: theirs,
+    };
+    let to_peer = Block {
+        work_shift_id: s.requester_shift_id,
+        times: mine,
+    };
+    days::validate_block(conn, requester, s.peer_date, &to_requester).await?;
+    days::validate_block(conn, peer, s.requester_date, &to_peer).await?;
+    days::add_block(
+        conn,
+        org_id,
+        s.requester_id,
+        s.peer_date,
+        &to_requester,
+        Some("Swap"),
+        by,
+    )
+    .await?;
+    days::add_block(
+        conn,
+        org_id,
+        s.peer_id,
+        s.requester_date,
+        &to_peer,
+        Some("Swap"),
+        by,
+    )
+    .await?;
+    let (lo, hi) = (
+        s.requester_date.min(s.peer_date),
+        s.requester_date.max(s.peer_date),
+    );
+    days::check_overlaps(conn, s.requester_id, lo, hi).await?;
+    days::check_overlaps(conn, s.peer_id, lo, hi).await?;
+    Ok(())
+}
+
+/// Ask a colleague to swap: they agree first, then the manager (SC-8). Both
+/// shifts must be on the published roster, ahead, at a branch both work at,
+/// and must fit where they land.
 #[utoipa::path(
     post, path = "/staff/me/swaps", tag = "staff", request_body = AskSwap,
     responses((status = 201, body = Swap), AppErrorResponse),
@@ -918,20 +1157,62 @@ pub async fn ask_swap(
     if body.peer_id == employee_id {
         return Err(AppError::BadRequest("Pick a colleague.".into()));
     }
+    let requester = access::subject(pool, org_id, employee_id).await?;
     let peer = access::subject(pool, org_id, body.peer_id).await?;
     if peer.employment_status != "active" {
         return Err(AppError::NotFound("Employee not found".into()));
     }
-    let tz = crate::staff::schedules::employee_timezone(pool, org_id, employee_id).await?;
-    let mine = resolve_shifts_for(pool, employee_id, body.my_date, &tz).await?;
-    let theirs = resolve_shifts_for(pool, body.peer_id, body.peer_date, &tz).await?;
-    if !mine.iter().any(|s| s.work_shift_id == body.my_shift_id)
-        || !theirs.iter().any(|s| s.work_shift_id == body.peer_shift_id)
-    {
+    let mut conn = pool.acquire().await?;
+    let mine = rostered_on(&mut conn, employee_id, body.my_date, body.my_shift_id).await?;
+    let theirs = rostered_on(&mut conn, body.peer_id, body.peer_date, body.peer_shift_id).await?;
+    drop(conn);
+    let (Some(mine), Some(theirs)) = (mine, theirs) else {
         return Err(AppError::Conflict(
             "Those shifts aren't on the roster.".into(),
         ));
+    };
+    let now = Utc::now();
+    if mine.scheduled_start_at <= now || theirs.scheduled_start_at <= now {
+        return Err(AppError::Refused {
+            code: "SWAP_STARTED",
+            reason: "A shift that already started can't be swapped.".into(),
+        });
     }
+    for s in [&mine, &theirs] {
+        let at = s.branch_id.unwrap_or_default();
+        if !requester.branches.contains(&at) || !peer.branches.contains(&at) {
+            return Err(AppError::Refused {
+                code: "SWAP_OTHER_BRANCH",
+                reason: "You can swap only with a colleague at the same branch.".into(),
+            });
+        }
+        if !is_published(pool, at, s.on_date).await? {
+            return Err(AppError::Refused {
+                code: "WEEK_NOT_PUBLISHED",
+                reason: "That week isn't published yet.".into(),
+            });
+        }
+    }
+    // Would it fit on both sides? Try it in a transaction that never commits.
+    let draft = Swap {
+        id: Uuid::nil(),
+        requester_id: employee_id,
+        requester_name: String::new(),
+        requester_date: body.my_date,
+        requester_shift_id: body.my_shift_id,
+        requester_shift_name: mine.name.clone(),
+        peer_id: body.peer_id,
+        peer_name: String::new(),
+        peer_date: body.peer_date,
+        peer_shift_id: body.peer_shift_id,
+        peer_shift_name: theirs.name.clone(),
+        status: "awaiting_peer".into(),
+        created_at: now,
+    };
+    let mut probe = pool.begin().await?;
+    let fits = apply_swap(&mut probe, org_id, &draft, &requester, &peer, None).await;
+    probe.rollback().await?;
+    fits?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO staff_swaps (org_id, requester_id, requester_date, requester_shift_id, \
             peer_id, peer_date, peer_shift_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
@@ -1024,6 +1305,50 @@ pub async fn answer_swap(
     Ok(HttpResponse::Ok().json(row))
 }
 
+/// The one who asked takes it back before the manager decides.
+#[utoipa::path(
+    post, path = "/staff/me/swaps/{id}/cancel", tag = "staff",
+    params(("id" = Uuid, Path)),
+    responses((status = 200, body = Swap), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn cancel_swap(
+    me: Me,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let pool = pool.get_ref();
+    let peer: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE staff_swaps SET status = 'cancelled' WHERE id = $1 AND requester_id = $2 \
+            AND status IN ('awaiting_peer', 'pending') \
+          RETURNING peer_id",
+    )
+    .bind(*id)
+    .bind(me.employee_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(peer) = peer else {
+        return Err(AppError::NotFound(
+            "No swap of yours to cancel here.".into(),
+        ));
+    };
+    let name = employee_name(pool, me.employee_id).await;
+    notify(
+        pool,
+        me.org_id,
+        peer,
+        "staff.n_swap_cancelled",
+        json!({ "name": name }),
+    )
+    .await;
+    let row = swaps_of(pool, me.org_id, Some(me.employee_id), None, None)
+        .await?
+        .into_iter()
+        .find(|s| s.id == *id)
+        .ok_or(AppError::Internal)?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct SwapQuery {
@@ -1090,7 +1415,8 @@ pub async fn list_open_shifts(
     Ok(HttpResponse::Ok().json(rows))
 }
 
-/// The manager approves: both rosters update for those dates (SC-8).
+/// The manager approves: both rosters update for those dates (SC-8), in one
+/// transaction, once, and only if both shifts are still where they were.
 #[utoipa::path(
     patch, path = "/staff/swaps/{id}/decision", tag = "staff", request_body = DecideRoster,
     params(("id" = Uuid, Path)),
@@ -1123,68 +1449,28 @@ pub async fn decide_swap(
             "You can't approve a swap you're part of.".into(),
         ));
     }
-    sqlx::query("UPDATE staff_swaps SET status = $2, decided_by = $3 WHERE id = $1")
-        .bind(*id)
-        .bind(if body.approve { "approved" } else { "rejected" })
-        .bind(by)
-        .execute(pool)
-        .await?;
+    let mut tx = pool.begin().await?;
+    let won: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE staff_swaps SET status = $2, decided_by = $3 \
+          WHERE id = $1 AND status = 'pending' RETURNING id",
+    )
+    .bind(*id)
+    .bind(if body.approve { "approved" } else { "rejected" })
+    .bind(by)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if won.is_none() {
+        return Err(AppError::Conflict("That swap was already decided.".into()));
+    }
     if body.approve {
-        // Each takes the other's shift; on different dates each loses their own.
-        if s.requester_date == s.peer_date {
-            set_day(
-                pool,
-                org_id,
-                s.requester_id,
-                s.peer_date,
-                Some(s.peer_shift_id),
-                "Swap",
-                by,
-            )
-            .await?;
-            set_day(
-                pool,
-                org_id,
-                s.peer_id,
-                s.requester_date,
-                Some(s.requester_shift_id),
-                "Swap",
-                by,
-            )
-            .await?;
-        } else {
-            set_day(
-                pool,
-                org_id,
-                s.requester_id,
-                s.requester_date,
-                None,
-                "Swap",
-                by,
-            )
-            .await?;
-            set_day(
-                pool,
-                org_id,
-                s.requester_id,
-                s.peer_date,
-                Some(s.peer_shift_id),
-                "Swap",
-                by,
-            )
-            .await?;
-            set_day(pool, org_id, s.peer_id, s.peer_date, None, "Swap", by).await?;
-            set_day(
-                pool,
-                org_id,
-                s.peer_id,
-                s.requester_date,
-                Some(s.requester_shift_id),
-                "Swap",
-                by,
-            )
-            .await?;
-        }
+        apply_swap(&mut tx, org_id, &s, &requester, &peer, Some(by)).await?;
+    }
+    tx.commit().await?;
+    if body.approve {
+        after_day_change(pool, org_id, s.requester_id, s.requester_date).await?;
+        after_day_change(pool, org_id, s.requester_id, s.peer_date).await?;
+        after_day_change(pool, org_id, s.peer_id, s.peer_date).await?;
+        after_day_change(pool, org_id, s.peer_id, s.requester_date).await?;
     }
     for who in [s.requester_id, s.peer_id] {
         notify(
@@ -1203,7 +1489,7 @@ pub async fn decide_swap(
     Ok(HttpResponse::NoContent().finish())
 }
 
-// ── preferences ────────────────────────────────────────────────────────────
+// ── preferences (SC-12) ────────────────────────────────────────────────────
 
 #[derive(Deserialize, ToSchema)]
 pub struct Preferences {
@@ -1213,9 +1499,74 @@ pub struct Preferences {
     /// Days I can't work: 0 = Sunday … 6 = Saturday.
     #[serde(default)]
     pub cant_work_days: Vec<i16>,
+    /// Why (a manager's override).
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
-/// Preferred times and days I can't work; managers see them (SC-12).
+fn check_preferences(body: &Preferences) -> Result<Vec<i16>, AppError> {
+    if body
+        .pref_time
+        .as_deref()
+        .is_some_and(|p| p != "morning" && p != "evening")
+        || body.cant_work_days.iter().any(|d| !(0..=6).contains(d))
+        || body
+            .note
+            .as_deref()
+            .is_some_and(|n| n.chars().count() > 300)
+    {
+        return Err(AppError::BadRequest("Invalid preferences".into()));
+    }
+    let mut days = body.cant_work_days.clone();
+    days.sort_unstable();
+    days.dedup();
+    Ok(days)
+}
+
+async fn save_preferences(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    body: &Preferences,
+    source: &str,
+    by: Option<Uuid>,
+) -> Result<(), AppError> {
+    let days = check_preferences(body)?;
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE employees SET pref_time = $2, cant_work_days = $3, prefs_set_by = $4 \
+          WHERE id = $1",
+    )
+    .bind(employee_id)
+    .bind(body.pref_time.as_deref())
+    .bind(&days)
+    .bind(source)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO staff_preference_log \
+             (org_id, employee_id, source, pref_time, cant_work_days, changed_by, note) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(org_id)
+    .bind(employee_id)
+    .bind(source)
+    .bind(body.pref_time.as_deref())
+    .bind(&days)
+    .bind(by)
+    .bind(
+        body.note
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty()),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Preferred times and days I can't work; managers see them (SC-12). Logged.
 #[utoipa::path(
     put, path = "/staff/me/preferences", tag = "staff", request_body = Preferences,
     responses((status = 204), AppErrorResponse),
@@ -1226,21 +1577,128 @@ pub async fn put_preferences(
     pool: crate::db::Db,
     body: web::Json<Preferences>,
 ) -> Result<HttpResponse, AppError> {
-    if body
-        .pref_time
-        .as_deref()
-        .is_some_and(|p| p != "morning" && p != "evening")
-        || body.cant_work_days.iter().any(|d| !(0..=6).contains(d))
-    {
-        return Err(AppError::BadRequest("Invalid preferences".into()));
-    }
-    sqlx::query("UPDATE employees SET pref_time = $2, cant_work_days = $3 WHERE id = $1")
-        .bind(me.employee_id)
-        .bind(body.pref_time.as_deref())
-        .bind(&body.cant_work_days)
-        .execute(pool.get_ref())
-        .await?;
+    save_preferences(
+        pool.get_ref(),
+        me.org_id,
+        me.employee_id,
+        &body,
+        "employee",
+        me.user_id,
+    )
+    .await?;
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// A manager overrides someone's preferences (SC-12). Logged, and the
+/// person is told.
+#[utoipa::path(
+    put, path = "/staff/employees/{id}/preferences", tag = "staff", request_body = Preferences,
+    params(("id" = Uuid, Path)),
+    responses((status = 204), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn put_employee_preferences(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    body: web::Json<Preferences>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = crate::staff::scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrStaffEdit).await?;
+    let subject = access::subject(pool, org_id, *id).await?;
+    access::require_for(pool, &claims, Cap::HrStaffEdit, &subject).await?;
+    save_preferences(
+        pool,
+        org_id,
+        subject.id,
+        &body,
+        "manager",
+        claims.user_id_safe().ok(),
+    )
+    .await?;
+    if !subject.is(&claims) {
+        notify(pool, org_id, subject.id, "staff.n_prefs_changed", json!({})).await;
+    }
+    Ok(HttpResponse::NoContent().finish())
+}
+
+#[derive(Serialize, ToSchema, sqlx::FromRow)]
+pub struct PreferenceChange {
+    /// `employee` or `manager`.
+    pub source: String,
+    pub pref_time: Option<String>,
+    pub cant_work_days: Vec<i16>,
+    /// The manager's name, for a manager's change.
+    pub changed_by_name: Option<String>,
+    pub note: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Who changed someone's preferences, and when (SC-12, newest first).
+#[utoipa::path(
+    get, path = "/staff/employees/{id}/preferences/log", tag = "staff",
+    params(("id" = Uuid, Path)),
+    responses((status = 200, body = Vec<PreferenceChange>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn preference_log(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = crate::staff::scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    access::gate(pool, &claims, org_id, Cap::HrScheduleRead).await?;
+    let subject = access::subject(pool, org_id, *id).await?;
+    access::require_for(pool, &claims, Cap::HrScheduleRead, &subject).await?;
+    let rows: Vec<PreferenceChange> = sqlx::query_as(
+        "SELECT l.source, l.pref_time, l.cant_work_days, u.name AS changed_by_name, l.note, \
+                l.created_at \
+           FROM staff_preference_log l LEFT JOIN users u ON u.id = l.changed_by \
+          WHERE l.employee_id = $1 ORDER BY l.created_at DESC LIMIT 50",
+    )
+    .bind(subject.id)
+    .fetch_all(pool)
+    .await?;
+    Ok(HttpResponse::Ok().json(rows))
+}
+
+/// Does the org run `module` (`pos`, `dawam`)?
+pub(crate) async fn has_module(
+    pool: &PgPool,
+    org_id: Uuid,
+    module: &str,
+) -> Result<bool, AppError> {
+    Ok(
+        sqlx::query_scalar("SELECT $2 = ANY(modules) FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .bind(module)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(false),
+    )
+}
+
+/// Average orders per weekday and hour over the last 8 weeks.
+pub(crate) async fn pos_hourly(
+    pool: &PgPool,
+    branch_id: Uuid,
+    tz: &str,
+) -> Result<Vec<(i32, i32, f64)>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT EXTRACT(DOW FROM created_at AT TIME ZONE $2)::int, \
+                EXTRACT(HOUR FROM created_at AT TIME ZONE $2)::int, COUNT(*)::float8 / 8 \
+           FROM orders WHERE branch_id = $1 AND created_at > now() - INTERVAL '56 days' \
+            AND status NOT IN ('voided', 'refunded') \
+          GROUP BY 1, 2 ORDER BY 1, 2",
+    )
+    .bind(branch_id)
+    .bind(tz)
+    .fetch_all(pool)
+    .await?)
 }
 
 // ── holidays (RU-10) ───────────────────────────────────────────────────────
@@ -1355,914 +1813,6 @@ pub async fn decide_holiday(
     .await?
     .ok_or_else(|| AppError::NotFound("No public holiday on that date.".into()))?;
     Ok(HttpResponse::Ok().json(row))
-}
-
-// ── suggestions (SC-13, rule-based phase) ─────────────────────────────────
-
-#[derive(Serialize, Deserialize, ToSchema, Clone)]
-pub struct Suggestion {
-    /// Opaque; send it back to accept or reject.
-    pub id: String,
-    pub date: NaiveDate,
-    pub work_shift_id: Uuid,
-    pub shift_name: String,
-    /// Who the suggestion puts on the shift.
-    pub employee_id: Uuid,
-    pub employee_name: String,
-    /// Who it takes off it, for a reassignment.
-    pub from_employee_id: Option<Uuid>,
-    pub from_employee_name: Option<String>,
-    /// A core i18n key for the one-line reason, and its arguments.
-    pub reason_key: String,
-    pub reason_args: serde_json::Value,
-    /// 0–100.
-    pub confidence: i32,
-    /// The gender default decided it (it says so).
-    pub by_default: bool,
-}
-
-#[derive(Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct SuggestQuery {
-    pub branch_id: Uuid,
-    pub week_start: NaiveDate,
-}
-
-/// Everyone's rostered week, as the engine sees it.
-struct Board {
-    busy: HashSet<(NaiveDate, Uuid)>,
-    spans: HashMap<Uuid, Vec<engine::Span>>,
-    late_count: HashMap<Uuid, i32>,
-    /// (person, shift) → times this week, for continuity.
-    on_shift: HashMap<(Uuid, Uuid), i32>,
-    /// (date, shift) → who.
-    by_day: HashMap<(NaiveDate, Uuid), Vec<Uuid>>,
-}
-
-fn span_of(w: &WorkShiftBrief, d: NaiveDate, tz: &chrono_tz::Tz) -> Option<engine::Span> {
-    use chrono::TimeZone;
-    let end_date = if w.crosses_midnight || w.end_time <= w.start_time {
-        d + Duration::days(1)
-    } else {
-        d
-    };
-    Some(engine::Span {
-        date: d,
-        start: tz
-            .from_local_datetime(&d.and_time(w.start_time))
-            .earliest()?
-            .with_timezone(&Utc),
-        end: tz
-            .from_local_datetime(&end_date.and_time(w.end_time))
-            .earliest()?
-            .with_timezone(&Utc),
-    })
-}
-
-impl Board {
-    fn assign(&mut self, p: Uuid, w: &WorkShiftBrief, late: bool, span: engine::Span) {
-        self.busy.insert((span.date, p));
-        self.spans.entry(p).or_default().push(span);
-        if late {
-            *self.late_count.entry(p).or_default() += 1;
-        }
-        *self.on_shift.entry((p, w.id)).or_default() += 1;
-        self.by_day.entry((span.date, w.id)).or_default().push(p);
-    }
-}
-
-/// What the engine learned (SC-13): per-person fit from 24 months of events,
-/// and whether learning is frozen.
-async fn learned(
-    pool: &PgPool,
-    branch_id: Uuid,
-    late_of: &HashMap<Uuid, bool>,
-) -> Result<(HashMap<Uuid, engine::Fit>, bool), AppError> {
-    // (user, shift, +1/−1, age in days, manager side)
-    let rows: Vec<(Uuid, Uuid, f64, f64, bool)> = sqlx::query_as(
-        "SELECT employee_id, work_shift_id, CASE WHEN accepted THEN 1.0 ELSE -1.0 END::float8, \
-                EXTRACT(EPOCH FROM now() - created_at)::float8 / 86400, true \
-           FROM staff_suggestion_events \
-          WHERE branch_id = $1 AND employee_id IS NOT NULL AND work_shift_id IS NOT NULL \
-            AND created_at > now() - INTERVAL '24 months' \
-         UNION ALL \
-         SELECT claimed_by, work_shift_id, 1.0, \
-                EXTRACT(EPOCH FROM now() - COALESCE(claimed_at, created_at))::float8 / 86400, false \
-           FROM staff_open_shifts \
-          WHERE branch_id = $1 AND claimed_by IS NOT NULL AND status IN ('claimed', 'filled') \
-            AND created_at > now() - INTERVAL '24 months' \
-         UNION ALL \
-         SELECT x.uid, x.sid, x.v, EXTRACT(EPOCH FROM now() - s.created_at)::float8 / 86400, false \
-           FROM staff_swaps s \
-           JOIN employee_branches a ON a.employee_id = s.requester_id AND a.branch_id = $1 \
-          CROSS JOIN LATERAL (VALUES (s.requester_id, s.peer_shift_id, 1.0::float8), \
-                                     (s.requester_id, s.requester_shift_id, -1.0), \
-                                     (s.peer_id, s.requester_shift_id, 1.0), \
-                                     (s.peer_id, s.peer_shift_id, -1.0)) x(uid, sid, v) \
-          WHERE s.status = 'approved' AND s.created_at > now() - INTERVAL '24 months' \
-         UNION ALL \
-         SELECT employee_id, work_shift_id, CASE WHEN status = 'absent' THEN -1.0 ELSE 1.0 END::float8, \
-                EXTRACT(EPOCH FROM now() - business_date::timestamp)::float8 / 86400, false \
-           FROM attendance_records \
-          WHERE branch_id = $1 AND work_shift_id IS NOT NULL AND status <> 'on_leave' \
-            AND business_date > CURRENT_DATE - 365",
-    )
-    .bind(branch_id)
-    .fetch_all(pool)
-    .await?;
-    let signals: Vec<engine::Signal> = rows
-        .into_iter()
-        .filter_map(|(employee_id, shift, value, age_days, manager)| {
-            Some(engine::Signal {
-                employee_id,
-                late: *late_of.get(&shift)?,
-                value,
-                age_days,
-                manager,
-            })
-        })
-        .collect();
-    let (accepted, decided): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE accepted), COUNT(*) FROM staff_suggestion_events \
-          WHERE branch_id = $1 AND created_at > now() - INTERVAL '28 days'",
-    )
-    .bind(branch_id)
-    .fetch_one(pool)
-    .await?;
-    Ok((engine::learn(&signals), engine::frozen(accepted, decided)))
-}
-
-/// Hourly coverage need for the week: the typed grid, else (POS on) derived
-/// from the last 8 weeks of orders. Empty = fall back to the pattern.
-async fn coverage_need(
-    pool: &PgPool,
-    org_id: Uuid,
-    branch_id: Uuid,
-    ws: NaiveDate,
-    tz: &str,
-    orders_per_staff: i32,
-) -> Result<HashMap<(NaiveDate, i32, Option<Uuid>), i32>, AppError> {
-    let mut need = HashMap::new();
-    let grid: Vec<CoverageNeed> = coverage_rows(pool, branch_id).await?;
-    let dates: Vec<NaiveDate> = (0..7).map(|i| ws + Duration::days(i)).collect();
-    if !grid.is_empty() {
-        for d in &dates {
-            let dow = d.weekday().num_days_from_sunday() as i16;
-            for g in grid.iter().filter(|g| g.day_of_week == dow) {
-                for h in engine::band_hours(g.band_start, g.band_end) {
-                    let e = need.entry((*d, h, g.department_id)).or_insert(0);
-                    *e = (*e).max(i32::from(g.staff));
-                }
-            }
-        }
-        return Ok(need);
-    }
-    if !has_module(pool, org_id, "pos").await? {
-        return Ok(need);
-    }
-    let rows = pos_hourly(pool, branch_id, tz).await?;
-    for d in &dates {
-        let dow = d.weekday().num_days_from_sunday() as i32;
-        for (_, h, n) in rows.iter().filter(|(x, _, _)| *x == dow) {
-            let staff = engine::pos_need(*n, orders_per_staff);
-            if staff > 0 {
-                need.insert((*d, *h, None), staff);
-            }
-        }
-    }
-    Ok(need)
-}
-
-/// Average orders per weekday and hour over the last 8 weeks.
-async fn pos_hourly(
-    pool: &PgPool,
-    branch_id: Uuid,
-    tz: &str,
-) -> Result<Vec<(i32, i32, f64)>, AppError> {
-    Ok(sqlx::query_as(
-        "SELECT EXTRACT(DOW FROM created_at AT TIME ZONE $2)::int, \
-                EXTRACT(HOUR FROM created_at AT TIME ZONE $2)::int, COUNT(*)::float8 / 8 \
-           FROM orders WHERE branch_id = $1 AND created_at > now() - INTERVAL '56 days' \
-            AND status NOT IN ('voided', 'refunded') \
-          GROUP BY 1, 2 ORDER BY 1, 2",
-    )
-    .bind(branch_id)
-    .bind(tz)
-    .fetch_all(pool)
-    .await?)
-}
-
-pub(crate) async fn has_module(
-    pool: &PgPool,
-    org_id: Uuid,
-    module: &str,
-) -> Result<bool, AppError> {
-    Ok(
-        sqlx::query_scalar("SELECT $2 = ANY(modules) FROM organizations WHERE id = $1")
-            .bind(org_id)
-            .bind(module)
-            .fetch_optional(pool)
-            .await?
-            .unwrap_or(false),
-    )
-}
-
-/// Fill: the week from the pattern, leave removed. Find gaps against the
-/// coverage need (grid, POS or the pattern's own). Score: coverage first, then
-/// fair spread of late shifts, preferences, the gender default, what was
-/// learned (reliability included) and continuity. Never past a labour limit,
-/// never publishes, never changes the pattern; overtime is not a target.
-async fn suggest(
-    pool: &PgPool,
-    org_id: Uuid,
-    branch_id: Uuid,
-    ws: NaiveDate,
-) -> Result<Vec<Suggestion>, AppError> {
-    let settings = crate::staff::attendance::load_settings(pool, org_id, Some(branch_id)).await?;
-    let night = (settings.night_start, settings.night_end);
-    let limits = engine::Limits::of(&settings);
-    let tz_name = crate::staff::branch_timezone(pool, branch_id).await?;
-    let tz: chrono_tz::Tz = tz_name.parse().unwrap_or(chrono_tz::Africa::Cairo);
-    let work_shifts: Vec<WorkShiftBrief> = work_shifts_of(pool, org_id)
-        .await?
-        .into_iter()
-        .filter(|w| w.branch_id.is_none_or(|b| b == branch_id))
-        .collect();
-    let late_of: HashMap<Uuid, bool> = work_shifts
-        .iter()
-        .map(|w| {
-            (
-                w.id,
-                engine::is_late(w.start_time, w.end_time, w.crosses_midnight, night),
-            )
-        })
-        .collect();
-    let shift_branch: HashMap<Uuid, Option<Uuid>> =
-        work_shifts.iter().map(|w| (w.id, w.branch_id)).collect();
-    let staff = staff_at(pool, branch_id).await?;
-    let to = ws + Duration::days(6);
-    let mut board = Board {
-        busy: HashSet::new(),
-        spans: HashMap::new(),
-        late_count: HashMap::new(),
-        on_shift: HashMap::new(),
-        by_day: HashMap::new(),
-    };
-    // A day either side, for the rest between shifts.
-    for p in &staff {
-        for s in shifts_of(
-            pool,
-            (p.employee_id, &p.name),
-            branch_id,
-            &shift_branch,
-            ws - Duration::days(1),
-            to + Duration::days(1),
-            &tz_name,
-        )
-        .await?
-        {
-            let in_week = s.date >= ws && s.date <= to;
-            if in_week {
-                board.busy.insert((s.date, p.employee_id));
-            }
-            if s.on_leave {
-                continue;
-            }
-            board
-                .spans
-                .entry(p.employee_id)
-                .or_default()
-                .push(engine::Span {
-                    date: s.date,
-                    start: s.start_at,
-                    end: s.end_at,
-                });
-            if in_week {
-                board
-                    .by_day
-                    .entry((s.date, s.work_shift_id))
-                    .or_default()
-                    .push(p.employee_id);
-                *board
-                    .on_shift
-                    .entry((p.employee_id, s.work_shift_id))
-                    .or_default() += 1;
-                if late_of.get(&s.work_shift_id).copied().unwrap_or(false) {
-                    *board.late_count.entry(p.employee_id).or_default() += 1;
-                }
-            }
-        }
-    }
-    let (fits, frozen) = learned(pool, branch_id, &late_of).await?;
-    let decided: HashSet<String> = sqlx::query_scalar(
-        "SELECT suggestion FROM staff_suggestion_events WHERE branch_id = $1 \
-            AND on_date BETWEEN $2 AND $3",
-    )
-    .bind(branch_id)
-    .bind(ws)
-    .bind(to)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .collect();
-    let gender_mode = settings.gender_mode.as_str();
-
-    // The best person for shift `w` on `d`, or None. (score, by the gender default)
-    let best = |board: &Board,
-                w: &WorkShiftBrief,
-                d: NaiveDate,
-                dept: Option<Uuid>,
-                id_of: &dyn Fn(Uuid) -> String|
-     -> Option<(&RosterPerson, f64, bool)> {
-        let dow = d.weekday().num_days_from_sunday() as i16;
-        let late = late_of.get(&w.id).copied().unwrap_or(false);
-        let span = span_of(w, d, &tz)?;
-        let mut c: Vec<(&RosterPerson, f64, bool)> = staff
-            .iter()
-            .filter(|p| {
-                !board.busy.contains(&(d, p.employee_id))
-                    && !p.cant_work_days.contains(&dow)
-                    && dept.is_none_or(|x| p.department_id == Some(x))
-                    && !decided.contains(&id_of(p.employee_id))
-            })
-            .filter_map(|p| {
-                let learned = if frozen {
-                    None
-                } else {
-                    fits.get(&p.employee_id)
-                };
-                let stated = matches!(p.pref_time.as_deref(), Some("morning" | "evening"));
-                let pref = match p.pref_time.as_deref() {
-                    Some("morning") if late => -1.0,
-                    Some("morning") => 1.0,
-                    Some("evening") if late => 1.0,
-                    Some("evening") => -1.0,
-                    _ => 0.0,
-                };
-                // Hard mode: late shifts only to women who said or showed they want them.
-                if late
-                    && gender_mode == "hard"
-                    && p.gender.as_deref() == Some("f")
-                    && p.pref_time.as_deref() != Some("evening")
-                    && !learned.is_some_and(engine::Fit::willing_late)
-                {
-                    return None;
-                }
-                let events = learned.map_or(0, |f| f.events(late));
-                let default = if late
-                    && gender_mode != "off"
-                    && !stated
-                    && events < 3
-                    && p.gender.as_deref() == Some("m")
-                {
-                    0.15
-                } else {
-                    0.0
-                };
-                let empty = Vec::new();
-                let spans = board.spans.get(&p.employee_id).unwrap_or(&empty);
-                if !engine::fits(p.employee_id, spans, span, &limits) {
-                    return None;
-                }
-                let spread = if late {
-                    -0.1 * f64::from(*board.late_count.get(&p.employee_id).unwrap_or(&0))
-                } else {
-                    0.0
-                };
-                let continuity = if board.on_shift.contains_key(&(p.employee_id, w.id)) {
-                    0.1
-                } else {
-                    0.0
-                };
-                let fit = learned.map_or(0.0, |f| f.score(late));
-                Some((p, pref + default + fit + spread + continuity, default > 0.0))
-            })
-            .collect();
-        c.sort_by(|a, b| b.1.total_cmp(&a.1));
-        c.into_iter().next()
-    };
-    let add = |d: NaiveDate,
-               w: &WorkShiftBrief,
-               p: &RosterPerson,
-               score: f64,
-               by_default: bool,
-               key: &str,
-               args: serde_json::Value| Suggestion {
-        id: format!("add|{d}|{}|{}", w.id, p.employee_id),
-        date: d,
-        work_shift_id: w.id,
-        shift_name: w.name.clone(),
-        employee_id: p.employee_id,
-        employee_name: p.name.clone(),
-        from_employee_id: None,
-        from_employee_name: None,
-        reason_key: key.into(),
-        reason_args: args,
-        confidence: (60.0 + 25.0 * score).clamp(30.0, 95.0) as i32,
-        by_default,
-    };
-
-    let mut out = Vec::new();
-    let need = coverage_need(
-        pool,
-        org_id,
-        branch_id,
-        ws,
-        &tz_name,
-        settings.orders_per_staff,
-    )
-    .await?;
-    let dept_of: HashMap<Uuid, Option<Uuid>> = staff
-        .iter()
-        .map(|p| (p.employee_id, p.department_id))
-        .collect();
-    if need.is_empty() {
-        // Coverage need = how many the standing pattern puts on each shift and weekday.
-        let pattern: Vec<(Uuid, Option<i16>, i64)> = sqlx::query_as(
-            "SELECT s.work_shift_id, s.day_of_week, COUNT(*) FROM staff_schedules s \
-               JOIN employee_branches a ON a.employee_id = s.employee_id AND a.branch_id = $1 \
-              WHERE s.effective_from <= $3 AND (s.effective_to IS NULL OR s.effective_to >= $2) \
-              GROUP BY 1, 2",
-        )
-        .bind(branch_id)
-        .bind(ws)
-        .bind(to)
-        .fetch_all(pool)
-        .await?;
-        let mut d = ws;
-        while d <= to {
-            let dow = d.weekday().num_days_from_sunday() as i16;
-            for w in &work_shifts {
-                let need = pattern
-                    .iter()
-                    .filter(|(sid, day, _)| *sid == w.id && day.is_none_or(|x| x == dow))
-                    .map(|(_, _, n)| *n)
-                    .sum::<i64>();
-                loop {
-                    let have = board.by_day.get(&(d, w.id)).map_or(0, Vec::len) as i64;
-                    if have >= need {
-                        break;
-                    }
-                    let id_of = |u: Uuid| format!("add|{d}|{}|{u}", w.id);
-                    let Some((p, score, by_default)) = best(&board, w, d, None, &id_of) else {
-                        break;
-                    };
-                    out.push(add(
-                        d,
-                        w,
-                        p,
-                        score,
-                        by_default,
-                        "staff.sg_gap",
-                        json!({ "shift": w.name, "short": need - have }),
-                    ));
-                    let late = late_of.get(&w.id).copied().unwrap_or(false);
-                    if let Some(span) = span_of(w, d, &tz) {
-                        board.assign(p.employee_id, w, late, span);
-                    }
-                }
-            }
-            d += Duration::days(1);
-        }
-    } else {
-        // Hour by hour: cover the hour with the shift that closes the most gap.
-        let covered = |board: &Board, d: NaiveDate, h: i32, dept: Option<Uuid>| -> i32 {
-            let mut n = 0;
-            for w in &work_shifts {
-                let hours = engine::shift_hours(w.start_time, w.end_time, w.crosses_midnight);
-                for (sd, hh) in [(d, h), (d - Duration::days(1), h + 24)] {
-                    if hours.contains(&hh) {
-                        n += board.by_day.get(&(sd, w.id)).map_or(0, |v| {
-                            v.iter()
-                                .filter(|u| {
-                                    dept.is_none_or(|x| {
-                                        dept_of.get(u).copied().flatten() == Some(x)
-                                    })
-                                })
-                                .count() as i32
-                        });
-                    }
-                }
-            }
-            n
-        };
-        let mut keys: Vec<(NaiveDate, i32, Option<Uuid>)> = need.keys().copied().collect();
-        keys.sort();
-        for (d, h, dept) in keys {
-            let want = need[&(d, h, dept)];
-            loop {
-                let short = want - covered(&board, d, h, dept);
-                if short <= 0 {
-                    break;
-                }
-                // Shifts that cover this hour: starting today, or last night's.
-                let mut options: Vec<(i32, NaiveDate, &WorkShiftBrief)> = Vec::new();
-                for w in &work_shifts {
-                    let hours = engine::shift_hours(w.start_time, w.end_time, w.crosses_midnight);
-                    for (sd, hh) in [(d, h), (d - Duration::days(1), h + 24)] {
-                        if sd < ws || !hours.contains(&hh) {
-                            continue;
-                        }
-                        let closes: i32 = hours
-                            .clone()
-                            .map(|x| {
-                                let (xd, xh) = if x >= 24 {
-                                    (sd + Duration::days(1), x - 24)
-                                } else {
-                                    (sd, x)
-                                };
-                                need.get(&(xd, xh, dept))
-                                    .map_or(0, |n| (n - covered(&board, xd, xh, dept)).max(0))
-                            })
-                            .sum();
-                        options.push((closes, sd, w));
-                    }
-                }
-                options.sort_by_key(|o| std::cmp::Reverse(o.0));
-                let mut placed = false;
-                for (_, sd, w) in options {
-                    let id_of = |u: Uuid| format!("add|{sd}|{}|{u}", w.id);
-                    if let Some((p, score, by_default)) = best(&board, w, sd, dept, &id_of) {
-                        out.push(add(sd, w, p, score, by_default, "staff.sg_coverage",
-                            json!({ "shift": w.name, "hour": format!("{h:02}:00"), "short": short })));
-                        let late = late_of.get(&w.id).copied().unwrap_or(false);
-                        if let Some(span) = span_of(w, sd, &tz) {
-                            board.assign(p.employee_id, w, late, span);
-                        }
-                        placed = true;
-                        break;
-                    }
-                }
-                if !placed {
-                    break;
-                }
-            }
-        }
-    }
-
-    // Someone rostered on a day they said they can't work.
-    let mut d = ws;
-    while d <= to {
-        let dow = d.weekday().num_days_from_sunday() as i16;
-        for w in &work_shifts {
-            let assigned = board.by_day.get(&(d, w.id)).cloned().unwrap_or_default();
-            for uid in &assigned {
-                let Some(person) = staff.iter().find(|p| p.employee_id == *uid) else {
-                    continue;
-                };
-                if !person.cant_work_days.contains(&dow) {
-                    continue;
-                }
-                let id_of = |u: Uuid| format!("move|{d}|{}|{uid}|{u}", w.id);
-                if let Some((p, score, by_default)) = best(&board, w, d, None, &id_of) {
-                    out.push(Suggestion {
-                        id: id_of(p.employee_id),
-                        date: d,
-                        work_shift_id: w.id,
-                        shift_name: w.name.clone(),
-                        employee_id: p.employee_id,
-                        employee_name: p.name.clone(),
-                        from_employee_id: Some(*uid),
-                        from_employee_name: Some(person.name.clone()),
-                        reason_key: "staff.sg_cant_work".into(),
-                        reason_args: json!({ "name": person.name }),
-                        confidence: (70.0 + 20.0 * score).clamp(40.0, 95.0) as i32,
-                        by_default,
-                    });
-                    let late = late_of.get(&w.id).copied().unwrap_or(false);
-                    if let Some(span) = span_of(w, d, &tz) {
-                        board.assign(p.employee_id, w, late, span);
-                    }
-                }
-            }
-        }
-        d += Duration::days(1);
-    }
-    out.extend(pattern_updates(pool, ws, &staff, &work_shifts, &decided).await?);
-    Ok(out)
-}
-
-/// After 4 identical weeks of the same day edit, suggest making it the pattern.
-async fn pattern_updates(
-    pool: &PgPool,
-    ws: NaiveDate,
-    staff: &[RosterPerson],
-    work_shifts: &[WorkShiftBrief],
-    decided: &HashSet<String>,
-) -> Result<Vec<Suggestion>, AppError> {
-    let ids: Vec<Uuid> = staff.iter().map(|p| p.employee_id).collect();
-    // (employee, weekday, shift or null = off) edited identically on each of the 4 weeks before.
-    let rows: Vec<(Uuid, i32, Option<Uuid>)> = sqlx::query_as(
-        "SELECT employee_id, EXTRACT(DOW FROM on_date)::int, work_shift_id \
-           FROM staff_schedule_overrides \
-          WHERE employee_id = ANY($1) AND on_date >= $2 - 28 AND on_date < $2 \
-          GROUP BY 1, 2, 3 HAVING COUNT(DISTINCT on_date) = 4",
-    )
-    .bind(&ids)
-    .bind(ws)
-    .fetch_all(pool)
-    .await?;
-    let mut out = Vec::new();
-    for (uid, dow, shift) in rows {
-        let d = ws + Duration::days(i64::from((dow + 1) % 7)); // Sat = 0
-        // Already the pattern? Then there is nothing to suggest.
-        let std: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT work_shift_id FROM staff_schedules WHERE employee_id = $1 \
-                AND effective_from <= $2 AND (effective_to IS NULL OR effective_to >= $2) \
-                AND (day_of_week IS NULL OR day_of_week = $3::smallint) \
-              ORDER BY day_of_week NULLS LAST LIMIT 1",
-        )
-        .bind(uid)
-        .bind(d)
-        .bind(dow)
-        .fetch_all(pool)
-        .await?;
-        if std.first().copied() == shift {
-            continue;
-        }
-        let shift_id = shift.unwrap_or_default();
-        let id = format!("pattern|{d}|{shift_id}|{uid}");
-        if decided.contains(&id) {
-            continue;
-        }
-        let Some(p) = staff.iter().find(|p| p.employee_id == uid) else {
-            continue;
-        };
-        let name = work_shifts
-            .iter()
-            .find(|w| Some(w.id) == shift)
-            .map(|w| w.name.clone());
-        out.push(Suggestion {
-            id,
-            date: d,
-            work_shift_id: shift_id,
-            shift_name: name.clone().unwrap_or_default(),
-            employee_id: uid,
-            employee_name: p.name.clone(),
-            from_employee_id: None,
-            from_employee_name: None,
-            reason_key: if shift.is_some() {
-                "staff.sg_pattern"
-            } else {
-                "staff.sg_pattern_off"
-            }
-            .into(),
-            reason_args: json!({ "name": p.name, "shift": name, "weeks": 4 }),
-            confidence: 80,
-            by_default: false,
-        });
-    }
-    Ok(out)
-}
-
-#[utoipa::path(
-    get, path = "/staff/roster/suggestions", tag = "staff", params(SuggestQuery),
-    responses((status = 200, body = Vec<Suggestion>), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn suggestions(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    query: web::Query<SuggestQuery>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = crate::staff::scope_org(&req, &claims)?;
-    access::require_at(
-        pool.get_ref(),
-        &claims,
-        org_id,
-        Cap::HrScheduleEdit,
-        query.branch_id,
-    )
-    .await?;
-    let out = cached_suggestions(
-        pool.get_ref(),
-        org_id,
-        query.branch_id,
-        week_start(query.week_start),
-    )
-    .await?;
-    Ok(HttpResponse::Ok().json(out))
-}
-
-/// The precomputed week when it is still current (any roster input changing
-/// drops it), else computed now and kept. Decided ones are left out.
-async fn cached_suggestions(
-    pool: &PgPool,
-    org_id: Uuid,
-    branch_id: Uuid,
-    ws: NaiveDate,
-) -> Result<Vec<Suggestion>, AppError> {
-    let cached: Option<serde_json::Value> = sqlx::query_scalar(
-        "SELECT payload FROM staff_suggestion_cache WHERE branch_id = $1 AND week_start = $2",
-    )
-    .bind(branch_id)
-    .bind(ws)
-    .fetch_optional(pool)
-    .await?;
-    let all: Vec<Suggestion> = match cached.and_then(|v| serde_json::from_value(v).ok()) {
-        Some(v) => v,
-        None => precompute(pool, org_id, branch_id, ws).await?,
-    };
-    let decided: HashSet<String> = sqlx::query_scalar(
-        "SELECT suggestion FROM staff_suggestion_events WHERE branch_id = $1 \
-            AND on_date BETWEEN $2 AND $2 + 6",
-    )
-    .bind(branch_id)
-    .bind(ws)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .collect();
-    Ok(all
-        .into_iter()
-        .filter(|s| !decided.contains(&s.id))
-        .collect())
-}
-
-/// Compute one branch-week and keep it (the Wednesday 22:00 job and cache misses).
-pub(crate) async fn precompute(
-    pool: &PgPool,
-    org_id: Uuid,
-    branch_id: Uuid,
-    ws: NaiveDate,
-) -> Result<Vec<Suggestion>, AppError> {
-    let out = suggest(pool, org_id, branch_id, ws).await?;
-    sqlx::query(
-        "INSERT INTO staff_suggestion_cache (org_id, branch_id, week_start, payload) \
-         VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (branch_id, week_start) DO UPDATE SET payload = EXCLUDED.payload, \
-             computed_at = now()",
-    )
-    .bind(org_id)
-    .bind(branch_id)
-    .bind(ws)
-    .bind(json!(out))
-    .execute(pool)
-    .await?;
-    Ok(out)
-}
-
-/// Make `shift` (None = off) the standing pattern for `d`'s weekday from `d`
-/// on. Rows covering that weekday end the day before; an every-day row is
-/// split so the other weekdays keep it, except where they have their own.
-async fn set_pattern_day(
-    pool: &PgPool,
-    org_id: Uuid,
-    employee_id: Uuid,
-    d: NaiveDate,
-    shift: Option<Uuid>,
-) -> Result<(), AppError> {
-    let dow = d.weekday().num_days_from_sunday() as i16;
-    let mut tx = pool.begin().await?;
-    type Row = (Uuid, Uuid, Option<i16>, NaiveDate, Option<NaiveDate>);
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, work_shift_id, day_of_week, effective_from, effective_to \
-           FROM staff_schedules WHERE employee_id = $1 AND org_id = $2 \
-            AND (effective_to IS NULL OR effective_to >= $3) \
-            AND (day_of_week IS NULL OR day_of_week = $4) FOR UPDATE",
-    )
-    .bind(employee_id)
-    .bind(org_id)
-    .bind(d)
-    .bind(dow)
-    .fetch_all(&mut *tx)
-    .await?;
-    for (id, ws_id, day, from, until) in rows {
-        if day.is_none() {
-            let start = from.max(d);
-            for other in (0..7i16).filter(|x| *x != dow) {
-                sqlx::query(
-                    "INSERT INTO staff_schedules \
-                         (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to) \
-                     SELECT $1, $2, $3, $4, $5, $6 WHERE NOT EXISTS ( \
-                         SELECT 1 FROM staff_schedules WHERE employee_id = $2 AND day_of_week = $4 \
-                            AND (effective_to IS NULL OR effective_to >= $5) \
-                            AND ($6::date IS NULL OR effective_from <= $6))",
-                )
-                .bind(org_id)
-                .bind(employee_id)
-                .bind(ws_id)
-                .bind(other)
-                .bind(start)
-                .bind(until)
-                .execute(&mut *tx)
-                .await?;
-            }
-        }
-        if from >= d {
-            sqlx::query("DELETE FROM staff_schedules WHERE id = $1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-        } else {
-            sqlx::query("UPDATE staff_schedules SET effective_to = $2 WHERE id = $1")
-                .bind(id)
-                .bind(d - Duration::days(1))
-                .execute(&mut *tx)
-                .await?;
-        }
-    }
-    if let Some(shift) = shift {
-        sqlx::query(
-            "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, effective_from) \
-             SELECT $1, $2, id, $4, $5 FROM work_shifts WHERE id = $3 AND org_id = $1",
-        )
-        .bind(org_id)
-        .bind(employee_id)
-        .bind(shift)
-        .bind(dow)
-        .bind(d)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
-}
-
-#[derive(Deserialize, ToSchema)]
-pub struct DecideSuggestion {
-    pub branch_id: Uuid,
-    pub id: String,
-    pub accept: bool,
-}
-
-/// Accept (changes that date only) or reject; either way it is remembered.
-#[utoipa::path(
-    post, path = "/staff/roster/suggestions/decide", tag = "staff", request_body = DecideSuggestion,
-    responses((status = 204), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn decide_suggestion(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    body: web::Json<DecideSuggestion>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = crate::staff::scope_org(&req, &claims)?;
-    let by = claims.user_id_safe()?;
-    let pool = pool.get_ref();
-    access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
-    access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, body.branch_id).await?;
-    let parts: Vec<&str> = body.id.split('|').collect();
-    let bad = || AppError::BadRequest("Unknown suggestion".into());
-    let date: NaiveDate = parts.get(1).and_then(|d| d.parse().ok()).ok_or_else(bad)?;
-    let shift: Uuid = parts.get(2).and_then(|d| d.parse().ok()).ok_or_else(bad)?;
-    let pattern = parts.first() == Some(&"pattern");
-    let (from, to): (Option<Uuid>, Uuid) = match parts.first() {
-        Some(&"add" | &"pattern") if parts.len() == 4 => {
-            (None, parts[3].parse().map_err(|_| bad())?)
-        }
-        Some(&"move") if parts.len() == 5 => (
-            Some(parts[3].parse().map_err(|_| bad())?),
-            parts[4].parse().map_err(|_| bad())?,
-        ),
-        _ => return Err(bad()),
-    };
-    crate::staff::require_employee_in_org(pool, org_id, to).await?;
-    if body.accept && pattern {
-        // The standing pattern itself: the one suggestion that changes it,
-        // and only once a manager with pattern rights for that person says so.
-        let subject = access::subject(pool, org_id, to).await?;
-        access::require_for(pool, &claims, Cap::HrScheduleEdit, &subject).await?;
-        set_pattern_day(pool, org_id, to, date, (!shift.is_nil()).then_some(shift)).await?;
-    } else if body.accept {
-        if let Some(from) = from {
-            set_day(pool, org_id, from, date, None, "Suggestion accepted", by).await?;
-        }
-        set_day(
-            pool,
-            org_id,
-            to,
-            date,
-            Some(shift),
-            "Suggestion accepted",
-            by,
-        )
-        .await?;
-    }
-    sqlx::query(
-        "INSERT INTO staff_suggestion_events (org_id, branch_id, suggestion, employee_id, on_date, \
-            accepted, decided_by, work_shift_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT id FROM work_shifts WHERE id = $8))",
-    )
-    .bind(org_id)
-    .bind(body.branch_id)
-    .bind(&body.id)
-    .bind(to)
-    .bind(date)
-    .bind(body.accept)
-    .bind(by)
-    .bind((!pattern).then_some(shift))
-    .execute(pool)
-    .await?;
-    // A rejection asks for the next best, so the kept week is recomputed.
-    sqlx::query("DELETE FROM staff_suggestion_cache WHERE branch_id = $1 AND week_start = $2")
-        .bind(body.branch_id)
-        .bind(week_start(date))
-        .execute(pool)
-        .await?;
-    Ok(HttpResponse::NoContent().finish())
 }
 
 // ── Coverage needs (SC-13) ────────────────────────────────────────────────
@@ -2406,90 +1956,4 @@ pub async fn put_coverage(
     }
     tx.commit().await?;
     Ok(HttpResponse::NoContent().finish())
-}
-
-// ── Fairness audit (SC-13 guardrail) ──────────────────────────────────────
-
-#[derive(Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct FairnessQuery {
-    /// Any day of the month.
-    pub month: NaiveDate,
-}
-
-#[derive(Serialize, ToSchema, sqlx::FromRow)]
-pub struct FairnessRow {
-    /// `m` · `f` · null (not set)
-    pub gender: Option<String>,
-    pub people: i64,
-    /// Said they prefer evenings.
-    pub willing: i64,
-    pub shifts: i64,
-    pub night_shifts: i64,
-}
-
-#[derive(Serialize, ToSchema)]
-pub struct FairnessView {
-    pub month: NaiveDate,
-    /// Night share by gender against stated willingness.
-    pub rows: Vec<FairnessRow>,
-    /// Suggestions managers decided in the last 4 weeks, and how many they accepted.
-    pub decided_4w: i64,
-    pub accepted_4w: i64,
-    /// Learning is paused: under 40% accepted over 4 weeks.
-    pub learning_frozen: bool,
-}
-
-/// Owner only, monthly: who works the nights, by gender, against who said
-/// they want them.
-#[utoipa::path(
-    get, path = "/staff/roster/fairness", tag = "staff", params(FairnessQuery),
-    responses((status = 200, body = FairnessView), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn fairness(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    query: web::Query<FairnessQuery>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = crate::staff::scope_org(&req, &claims)?;
-    let pool = pool.get_ref();
-    access::require_everywhere(pool, &claims, org_id, Cap::HrRosterSettings).await?;
-    let settings = crate::staff::attendance::load_settings(pool, org_id, None).await?;
-    let month = query.month.with_day(1).unwrap_or(query.month);
-    let rows: Vec<FairnessRow> = sqlx::query_as(
-        "SELECT p.gender, COUNT(DISTINCT p.id) AS people, \
-                COUNT(DISTINCT p.id) FILTER (WHERE p.pref_time = 'evening') AS willing, \
-                COUNT(a.id) AS shifts, \
-                COUNT(a.id) FILTER (WHERE dawam_night_minutes(a.scheduled_start_at, \
-                    a.scheduled_end_at, br.timezone::text, $3, $4) > 0) AS night_shifts \
-           FROM employees p \
-           LEFT JOIN attendance_records a ON a.employee_id = p.id \
-                AND a.business_date >= $2 AND a.business_date < ($2 + INTERVAL '1 month')::date \
-                AND a.scheduled_start_at IS NOT NULL AND a.status <> 'on_leave' \
-           LEFT JOIN branches br ON br.id = a.branch_id \
-          WHERE p.org_id = $1 AND p.employment_status = 'active' \
-          GROUP BY p.gender ORDER BY p.gender NULLS LAST",
-    )
-    .bind(org_id)
-    .bind(month)
-    .bind(settings.night_start)
-    .bind(settings.night_end)
-    .fetch_all(pool)
-    .await?;
-    let (accepted, decided): (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*) FILTER (WHERE accepted), COUNT(*) FROM staff_suggestion_events \
-          WHERE org_id = $1 AND created_at > now() - INTERVAL '28 days'",
-    )
-    .bind(org_id)
-    .fetch_one(pool)
-    .await?;
-    Ok(HttpResponse::Ok().json(FairnessView {
-        month,
-        rows,
-        decided_4w: decided,
-        accepted_4w: accepted,
-        learning_frozen: engine::frozen(accepted, decided),
-    }))
 }

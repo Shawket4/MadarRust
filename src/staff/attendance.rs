@@ -36,7 +36,7 @@ use crate::{
         principal::{Me, caller},
         require_employee_in_org,
         rules::{self, AttendanceStatus, LateTier},
-        schedules::{ResolvedShift, pick_shift_for_instant, resolve_shifts_for},
+        schedules::{ResolvedShift, resolve_shifts_for},
         scope_org, validate_range,
     },
 };
@@ -927,36 +927,9 @@ async fn resolve_punch_shift(
     timezone: &str,
     now: DateTime<Utc>,
 ) -> Result<(Option<ResolvedShift>, NaiveDate), AppError> {
-    let mut best: Option<(ResolvedShift, NaiveDate)> = None;
-
-    for date in [today, today.pred_opt().unwrap_or(today)] {
-        let candidates = resolve_shifts_for(pool, employee_id, date, timezone).await?;
-        // Yesterday only ever contributes a shift that actually runs into today.
-        let candidates: Vec<ResolvedShift> = if date == today {
-            candidates
-        } else {
-            candidates
-                .into_iter()
-                .filter(|s| s.scheduled_end_at > now)
-                .collect()
-        };
-        if let Some(pick) = pick_shift_for_instant(&candidates, now) {
-            let closer = best.as_ref().is_none_or(|(current, _)| {
-                (pick.scheduled_start_at - now).num_seconds().abs()
-                    < (current.scheduled_start_at - now).num_seconds().abs()
-            });
-            if closer {
-                best = Some((pick.clone(), date));
-            }
-        }
-    }
-
-    Ok(match best {
-        Some((shift, date)) => (Some(shift), date),
-        // Unrostered day: still a real attendance record, just with nothing to
-        // be late for.
-        None => (None, today),
-    })
+    // The one "which shift is this" resolver, shared with the manager and till
+    // punches and covers (SC-10).
+    crate::staff::schedules::shift_at_instant(pool, employee_id, today, timezone, now).await
 }
 
 #[utoipa::path(
@@ -1159,20 +1132,26 @@ pub async fn check_out(
     let stamped = crate::staff::dawam::clock::rebuild(body.offline.as_ref(), Utc::now())?;
     // A queued check-out can't close before the check-in it follows.
     let now = open.check_in_at.map_or(stamped.at, |i| stamped.at.max(i));
-    let shift = load_shift_snapshot(pool.get_ref(), &open.work_shift_id, open.business_date, &tz)
-        .await?
-        .map(|mut s| {
-            // Judge against the window the record was OPENED with, not whatever
-            // the shift says today — editing a shift must not retro-move a
-            // historical checkout.
-            if let Some(start) = open.scheduled_start_at {
-                s.scheduled_start_at = start;
-            }
-            if let Some(end) = open.scheduled_end_at {
-                s.scheduled_end_at = end;
-            }
-            s
-        });
+    let shift = load_shift_snapshot(
+        pool.get_ref(),
+        employee_id,
+        &open.work_shift_id,
+        open.business_date,
+        &tz,
+    )
+    .await?
+    .map(|mut s| {
+        // Judge against the window the record was OPENED with, not whatever
+        // the shift says today — editing a shift must not retro-move a
+        // historical checkout.
+        if let Some(start) = open.scheduled_start_at {
+            s.scheduled_start_at = start;
+        }
+        if let Some(end) = open.scheduled_end_at {
+            s.scheduled_end_at = end;
+        }
+        s
+    });
     let adjustments = adjustments_for(
         pool.get_ref(),
         &settings,
@@ -1246,6 +1225,7 @@ pub async fn check_out(
 /// checkout and correction, where the record already names its shift.
 pub(crate) async fn load_shift_snapshot(
     pool: &PgPool,
+    employee_id: Uuid,
     work_shift_id: &Option<Uuid>,
     business_date: NaiveDate,
     timezone: &str,
@@ -1253,23 +1233,47 @@ pub(crate) async fn load_shift_snapshot(
     let Some(shift_id) = work_shift_id else {
         return Ok(None);
     };
+    // The assignment's EFFECTIVE window when the person is rostered on it that
+    // day (its own from/to, else the block's weekday time, else the default).
+    if let Some(s) = resolve_shifts_for(pool, employee_id, business_date, timezone)
+        .await?
+        .into_iter()
+        .find(|s| s.work_shift_id == *shift_id)
+    {
+        return Ok(Some(s));
+    }
+    // Not rostered on it (a manual record for any shift): the block's own
+    // times that weekday.
     Ok(sqlx::query_as::<_, ResolvedShift>(
         r#"
         SELECT ws.id AS work_shift_id, ws.name, ws.grace_minutes, ws.break_minutes,
                ws.paid_break, ws.half_day_threshold_minutes,
                ws.overtime_threshold_minutes, ws.overtime_multiplier,
                ws.checkin_window_minutes,
-               ($2::date + ws.start_time) AT TIME ZONE $3 AS scheduled_start_at,
-               ($2::date + ws.end_time
-                    + CASE WHEN ws.crosses_midnight
+               ($2::date + COALESCE(dt.start_time, ws.start_time)) AT TIME ZONE $3
+                   AS scheduled_start_at,
+               ($2::date + COALESCE(dt.end_time, ws.end_time)
+                    + CASE WHEN COALESCE(dt.end_time, ws.end_time)
+                                <= COALESCE(dt.start_time, ws.start_time)
                            THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END
-               ) AT TIME ZONE $3 AS scheduled_end_at
-          FROM work_shifts ws WHERE ws.id = $1
+               ) AT TIME ZONE $3 AS scheduled_end_at,
+               $4::uuid AS employee_id, $2::date AS on_date, ws.branch_id,
+               COALESCE(dt.start_time, ws.start_time) AS start_time,
+               COALESCE(dt.end_time, ws.end_time) AS end_time,
+               COALESCE(dt.end_time, ws.end_time) <= COALESCE(dt.start_time, ws.start_time)
+                   AS crosses_midnight,
+               false AS times_edited, false AS from_override
+          FROM work_shifts ws
+          LEFT JOIN work_shift_day_times dt
+                 ON dt.work_shift_id = ws.id
+                AND dt.day_of_week = EXTRACT(DOW FROM $2::date)::smallint
+         WHERE ws.id = $1
         "#,
     )
     .bind(shift_id)
     .bind(business_date)
     .bind(timezone)
+    .bind(employee_id)
     .fetch_optional(pool)
     .await?)
 }
@@ -1636,7 +1640,19 @@ pub async fn team_presence(
 
     let rows = sqlx::query_as::<_, PresenceRow>(
         r#"
-        WITH roster AS (
+        WITH shifts AS (
+            -- Today's roster from the one roster function (SC-6): date changes,
+            -- split days, day-scoped blocks and their effective times.
+            SELECT r.employee_id,
+                   SUM(EXTRACT(EPOCH FROM (r.end_at - r.start_at)) / 60)::bigint AS minutes,
+                   MIN(r.start_at) AS due_at
+              FROM dawam_roster(
+                       ARRAY(SELECT id FROM employees
+                              WHERE org_id = $1 AND employment_status = 'active'),
+                       $2, $2, $3) r
+             GROUP BY r.employee_id
+        ),
+        roster AS (
             -- Everyone active, with the minutes they are rostered for today and
             -- when that shift was due to start.
             SELECT p.id AS employee_id,
@@ -1650,30 +1666,10 @@ pub async fn team_presence(
                      WHERE eb.employee_id = p.id
                      ORDER BY eb.assigned_at
                      LIMIT 1)                                     AS branch_name,
-                   COALESCE((
-                       SELECT SUM(EXTRACT(EPOCH FROM (
-                                  ws.end_time - ws.start_time
-                                  + CASE WHEN ws.crosses_midnight
-                                         THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END
-                              )) / 60)::bigint
-                         FROM staff_schedules s
-                         JOIN work_shifts ws ON ws.id = s.work_shift_id AND ws.is_active
-                        WHERE s.employee_id = p.id
-                          AND s.effective_from <= $2
-                          AND (s.effective_to IS NULL OR s.effective_to >= $2)
-                          AND (s.day_of_week IS NULL
-                               OR s.day_of_week = EXTRACT(DOW FROM $2::date)::smallint)
-                   ), 0)                                          AS scheduled_minutes,
-                   (SELECT MIN(($2::date + ws.start_time) AT TIME ZONE $3)
-                      FROM staff_schedules s
-                      JOIN work_shifts ws ON ws.id = s.work_shift_id AND ws.is_active
-                     WHERE s.employee_id = p.id
-                       AND s.effective_from <= $2
-                       AND (s.effective_to IS NULL OR s.effective_to >= $2)
-                       AND (s.day_of_week IS NULL
-                            OR s.day_of_week = EXTRACT(DOW FROM $2::date)::smallint)
-                   )                                              AS due_at
+                   COALESCE(sh.minutes, 0)                        AS scheduled_minutes,
+                   sh.due_at                                      AS due_at
               FROM employees p
+              LEFT JOIN shifts sh ON sh.employee_id = p.id
              WHERE p.org_id = $1 AND p.employment_status = 'active'
         ),
         today AS (
@@ -1786,8 +1782,14 @@ pub async fn create_manual_record(
     }
 
     let tz = branch_timezone(pool.get_ref(), body.branch_id).await?;
-    let shift =
-        load_shift_snapshot(pool.get_ref(), &body.work_shift_id, body.business_date, &tz).await?;
+    let shift = load_shift_snapshot(
+        pool.get_ref(),
+        body.employee_id,
+        &body.work_shift_id,
+        body.business_date,
+        &tz,
+    )
+    .await?;
     let settings = load_settings(pool.get_ref(), org_id, Some(body.branch_id)).await?;
     let adjustments = adjustments_for(
         pool.get_ref(),
@@ -1948,8 +1950,14 @@ pub(crate) async fn apply_punch_correction(
     }
 
     let tz = branch_timezone(pool, existing.branch_id).await?;
-    let shift =
-        load_shift_snapshot(pool, &existing.work_shift_id, existing.business_date, &tz).await?;
+    let shift = load_shift_snapshot(
+        pool,
+        existing.employee_id,
+        &existing.work_shift_id,
+        existing.business_date,
+        &tz,
+    )
+    .await?;
     let settings = load_settings(pool, org_id, Some(existing.branch_id)).await?;
     let adjustments = adjustments_for(
         pool,

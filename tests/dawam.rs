@@ -210,6 +210,26 @@ fn t(h: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, 0, 0).unwrap()
 }
 
+async fn publish_week(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    f: &F,
+    day: NaiveDate,
+) {
+    let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
+    let resp = call!(
+        app,
+        post,
+        "/staff/roster/publish",
+        owner,
+        json!({ "branch_id": f.branch, "week_start": day })
+    );
+    assert_eq!(resp.status(), 204);
+}
+
 async fn keys_for(pool: &PgPool, u: Uuid) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT key FROM staff_notifications WHERE employee_id = $1 ORDER BY created_at",
@@ -471,6 +491,8 @@ async fn a_swap_needs_the_colleague_then_the_manager(pool: PgPool) {
     let day = Utc::now().date_naive() + Duration::days(3);
     let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
     let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
+    // Swaps are of the published roster only (SC-3, SC-8).
+    publish_week(&app, &f, day).await;
 
     let resp = call!(
         app,
@@ -537,6 +559,8 @@ async fn a_claimed_open_shift_is_the_claimers_once_approved(pool: PgPool) {
     let day = Utc::now().date_naive() + Duration::days(2);
     let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
     let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
+    // Staff claim only in a published week (SC-9).
+    publish_week(&app, &f, day).await;
     let resp = call!(
         app,
         post,

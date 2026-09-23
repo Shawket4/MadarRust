@@ -8,7 +8,7 @@ use std::ops::Range;
 use chrono::{DateTime, NaiveDate, NaiveTime, Timelike, Utc};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -98,7 +98,7 @@ pub struct Span {
 }
 
 /// A roster past a labour limit. Warns, never blocks (RU-13).
-#[derive(Serialize, ToSchema, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LabourWarning {
     pub employee_id: Uuid,
     /// The day (or, for a week's limit, the Saturday it starts).
@@ -190,6 +190,15 @@ pub fn decay(age_days: f64) -> f64 {
     0.5f64.powf(age_days.max(0.0) / 56.0)
 }
 
+/// The gender default's weight where a stated preference is 1.0 (SC-12).
+pub const GENDER_DEFAULT: f64 = 0.15;
+
+/// How much each side of learning counts: what the employee does (claims,
+/// swaps, turning up) weighs more than what managers pick for them (design
+/// §4.1: "the objective uses both, with employee fit weighted higher").
+pub const MANAGER_WEIGHT: f64 = 0.4;
+pub const EMPLOYEE_WEIGHT: f64 = 0.6;
+
 /// A person's learned fit, per class (day, late), kept apart per side.
 #[derive(Default, Clone, Debug)]
 pub struct Fit {
@@ -204,7 +213,7 @@ impl Fit {
     }
     pub fn score(&self, late: bool) -> f64 {
         let c = usize::from(late);
-        0.5 * Self::term(self.acc[0][c]) + 0.5 * Self::term(self.acc[1][c])
+        MANAGER_WEIGHT * Self::term(self.acc[0][c]) + EMPLOYEE_WEIGHT * Self::term(self.acc[1][c])
     }
     pub fn events(&self, late: bool) -> u32 {
         let c = usize::from(late);
