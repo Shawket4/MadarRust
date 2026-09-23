@@ -19,7 +19,6 @@ use crate::geo::osrm::{LatLng, haversine_meters};
 use crate::staff::access;
 use crate::staff::attendance::{AttendanceSettings, load_settings, require_active_employee};
 use crate::staff::principal::{Me, caller};
-use crate::staff::rules::PayRates;
 
 /// Two pings in a row outside the fence is "left" (CL-6).
 const OUTSIDE_STREAK: usize = 2;
@@ -626,30 +625,31 @@ async fn away_exact(
     record_id: Option<Uuid>,
     minutes: i32,
 ) -> Result<Decimal, AppError> {
+    let settings = load_settings(pool, org_id, None).await?;
+    // With a record: the same facts payroll prices (the salary in force that
+    // day, the day's rostered minutes, the shift's branch rules — AT-9).
+    if let Some(id) = record_id
+        && let Some(day) = crate::staff::penalties::load_facts(pool, id, &settings).await?
+    {
+        return Ok(crate::staff::pricing::minutes_piastres_exact(
+            day.facts.base_salary_piastres,
+            day.rules.working_days_per_month,
+            day.facts.day_minutes.max(day.facts.scheduled_minutes),
+            i64::from(minutes),
+        ));
+    }
     let salary: i64 =
         sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
             .bind(employee_id)
             .fetch_optional(pool)
             .await?
             .unwrap_or(0);
-    let (scheduled, branch): (Option<i32>, Option<Uuid>) = match record_id {
-        Some(id) => sqlx::query_as(
-            "SELECT (EXTRACT(EPOCH FROM (scheduled_end_at - scheduled_start_at)) / 60)::int, \
-                    branch_id FROM attendance_records WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .unwrap_or((None, None)),
-        None => (None, None),
-    };
-    let settings = load_settings(pool, org_id, branch).await?;
-    let rates = PayRates::from_base(
+    Ok(crate::staff::pricing::minutes_piastres_exact(
         salary,
         settings.working_days_per_month,
-        i64::from(scheduled.unwrap_or(480).max(1)),
-    );
-    Ok(rates.minutes_piastres(Decimal::from(minutes.max(0))))
+        crate::staff::pricing::DEFAULT_SHIFT_MINUTES,
+        i64::from(minutes),
+    ))
 }
 
 /// The suggestion shown to the manager: time away at the minute rate, to the
@@ -787,16 +787,28 @@ pub async fn resolve_flag(
                 return Err(crate::authz::require::denied(Cap::HrDeductionsCreate));
             }
         };
+        // One name for unpaid excused time everywhere: `excused_unpaid`.
+        // The row carries `created_by`, which is what keeps the sweep's
+        // automatic `excused_unpaid` line from overwriting a manager's.
         let source = if resolution == "deducted" {
             "left_mid_shift"
         } else {
-            "unpaid_excuse"
+            "excused_unpaid"
         };
+        // The sweep may already hold an `excused_unpaid` line for this record
+        // (an approved unpaid excuse): the flag's minutes add to it, and the
+        // manager's name on it keeps the sweep from re-pricing it.
         deduction_id = Some(
             sqlx::query_scalar(
                 "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
                     effective_date, source, attendance_record_id, created_by, status) \
                  VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, $7, $8, $9) \
+                 ON CONFLICT (attendance_record_id, source) \
+                     WHERE attendance_record_id IS NOT NULL AND source <> 'manual' \
+                 DO UPDATE SET amount_piastres = payroll_deductions.amount_piastres + EXCLUDED.amount_piastres, \
+                               reason = payroll_deductions.reason || ' · ' || EXCLUDED.reason, \
+                               created_by = EXCLUDED.created_by, status = EXCLUDED.status, \
+                               updated_at = now() \
                  RETURNING id",
             )
             .bind(org_id)
@@ -1203,27 +1215,16 @@ pub async fn decide_overtime(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrOvertimeApprove).await?;
-    let row: Option<(
-        Uuid,
-        Uuid,
-        i32,
-        Option<i32>,
-        NaiveDate,
-        Option<Decimal>,
-        Option<Decimal>,
-    )> = sqlx::query_as(
-        "SELECT a.employee_id, a.branch_id, a.overtime_minutes, \
-                    (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int, \
-                    a.business_date, ws.ot_day_multiplier, ws.ot_night_multiplier \
-               FROM attendance_records a LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id \
-              WHERE a.id = $1 AND a.org_id = $2 AND a.overtime_status = 'pending'",
+    let row: Option<(Uuid, Uuid, i32, NaiveDate)> = sqlx::query_as(
+        "SELECT a.employee_id, a.branch_id, a.overtime_minutes, a.business_date \
+           FROM attendance_records a \
+          WHERE a.id = $1 AND a.org_id = $2 AND a.overtime_status = 'pending'",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(pool)
     .await?;
-    let Some((employee_id, branch_id, minutes, scheduled, on_date, shift_day, shift_night)) = row
-    else {
+    let Some((employee_id, branch_id, minutes, on_date)) = row else {
         return Err(AppError::NotFound("No overtime waiting here.".into()));
     };
     let subject = access::subject(pool, org_id, employee_id).await?;
@@ -1236,36 +1237,17 @@ pub async fn decide_overtime(
     // An approved month is a snapshot: its overtime is decided (AD-10).
     crate::staff::period_lock::assert_open(pool, org_id, on_date, "this overtime").await?;
     if body.approve {
-        // Priced exactly as payroll will price it (AT-9): the salary in
-        // force that day, the branch's rules, the shift's own rates, and the
-        // night minutes at the night rate (RU-8).
+        // Priced exactly as payroll will price it (AT-9): the same facts
+        // (the salary in force that day, the day's rostered minutes, the
+        // night minutes) through the same function under the branch's rules
+        // and the shift's own rates (RU-8), as if already approved.
         let settings = load_settings(pool, org_id, Some(branch_id)).await?;
-        let (salary, night): (i64, i64) = sqlx::query_as(
-            "SELECT COALESCE((SELECT h.base_salary_piastres FROM employee_salary_history h \
-                               WHERE h.employee_id = a.employee_id AND h.effective_from <= a.business_date \
-                               ORDER BY h.effective_from DESC LIMIT 1), e.base_salary_piastres), \
-                    COALESCE(dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $2, $3), 0)::bigint \
-               FROM attendance_records a JOIN employees e ON e.id = a.employee_id \
-               JOIN branches br ON br.id = a.branch_id WHERE a.id = $1",
-        )
-        .bind(*id)
-        .bind(settings.night_start)
-        .bind(settings.night_end)
-        .fetch_one(pool)
-        .await?;
-        let rules =
-            crate::staff::pricing::ShiftRules::from_settings(&settings, shift_day, shift_night);
-        let total = i64::from(minutes.max(0));
-        let night = night.clamp(0, total);
-        let amount = crate::staff::pricing::overtime_piastres(
-            salary,
-            rules.working_days_per_month,
-            i64::from(scheduled.unwrap_or(480).max(1)),
-            total - night,
-            night,
-            rules.overtime_day_multiplier,
-            rules.overtime_night_multiplier,
-        );
+        let day = crate::staff::penalties::load_facts(pool, *id, &settings)
+            .await?
+            .ok_or_else(|| AppError::NotFound("No overtime waiting here.".into()))?;
+        let mut facts = day.facts.clone();
+        facts.overtime_status = Some("approved".into());
+        let amount = crate::staff::pricing::price_shift(&facts, &day.rules).overtime_piastres;
         let mut ask = AuthzRequest::of(Cap::HrOvertimeApprove);
         ask.amount = Some(amount);
         let pending = crate::authz::Pending {

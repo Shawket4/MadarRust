@@ -45,9 +45,7 @@ use crate::{
     },
 };
 
-/// Fallback shift length when a record has no scheduled window — a standard
-/// eight-hour day. Only ever used as the per-minute divisor.
-const DEFAULT_SHIFT_MINUTES: i64 = 480;
+use crate::staff::pricing::DEFAULT_SHIFT_MINUTES;
 
 /// Statuses that mean the payslips are frozen.
 pub(crate) fn is_closed_status(status: &str) -> bool {
@@ -583,7 +581,10 @@ async fn deduction_for_edit(
         return Err(AppError::NotFound("Deduction not found".into()));
     };
     let subject = access::subject(pool, org_id, row.0).await?;
-    access::require_for(pool, claims, Cap::HrPayrollEdit, &subject).await?;
+    // A waive, override or unwaive is a deduction decision (AD-7, AD-8): the
+    // manager's deduction capability at one of the person's branches; the
+    // limit on raising is judged by the caller.
+    access::require_for(pool, claims, Cap::HrDeductionsCreate, &subject).await?;
     period_lock::assert_open(pool, org_id, row.1, what).await?;
     Ok(row)
 }
@@ -607,7 +608,7 @@ pub async fn override_deduction(
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrDeductionsCreate).await?;
     let (employee_id, _, current, waived) =
         deduction_for_edit(pool.get_ref(), &claims, org_id, *id, "an override").await?;
 
@@ -716,7 +717,7 @@ pub async fn waive_deduction(
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrDeductionsCreate).await?;
     let (employee_id, _, amount, _) =
         deduction_for_edit(pool.get_ref(), &claims, org_id, *id, "a waiver").await?;
 
@@ -793,7 +794,7 @@ pub async fn unwaive_deduction(
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
-    access::gate(pool.get_ref(), &claims, org_id, Cap::HrPayrollEdit).await?;
+    access::gate(pool.get_ref(), &claims, org_id, Cap::HrDeductionsCreate).await?;
     let (employee_id, _, amount, waived) =
         deduction_for_edit(pool.get_ref(), &claims, org_id, *id, "undoing a waiver").await?;
     let reason = body.reason.trim();
@@ -1438,6 +1439,7 @@ pub(crate) async fn compute_payslips(
     struct Rec {
         employee_id: Uuid,
         branch_id: Uuid,
+        work_shift_id: Option<Uuid>,
         business_date: NaiveDate,
         status: String,
         late_minutes: i32,
@@ -1455,7 +1457,7 @@ pub(crate) async fn compute_payslips(
     }
     let recs: Vec<Rec> = sqlx::query_as(
         r#"
-        SELECT a.employee_id, a.branch_id, a.business_date, a.status, a.late_minutes,
+        SELECT a.employee_id, a.branch_id, a.work_shift_id, a.business_date, a.status, a.late_minutes,
                COALESCE(a.worked_minutes, 0) AS worked_minutes,
                COALESCE(a.overtime_minutes, 0) AS overtime_minutes, a.overtime_status,
                COALESCE(dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $5, $6), 0)::bigint
@@ -1493,6 +1495,13 @@ pub(crate) async fn compute_payslips(
     .await?;
 
     let rules = rules_by_branch(&mut *conn, org_id).await?;
+    // Every rostered minute of each person's day, from THE roster function,
+    // is the minute rate's divisor (RU-5, RU-6) — exactly as the sweep and the
+    // overtime approval build it (AT-9).
+    let ids: Vec<Uuid> = staff.iter().map(|p| p.employee_id).collect();
+    let rostered =
+        crate::staff::penalties::rostered_by_day(&mut *conn, &ids, start_date, end_date, None)
+            .await?;
 
     #[derive(Default)]
     struct Totals {
@@ -1526,15 +1535,38 @@ pub(crate) async fn compute_payslips(
             .unwrap_or(settings);
         let shift_rules = ShiftRules::from_settings(branch_rules, r.shift_ot_day, r.shift_ot_night);
         let status = crate::staff::rules::AttendanceStatus::parse(&r.status)?;
+        let scheduled_minutes = r
+            .scheduled_minutes
+            .map(i64::from)
+            .filter(|m| *m > 0)
+            .unwrap_or(DEFAULT_SHIFT_MINUTES);
+        let day_minutes = if r.is_cover {
+            scheduled_minutes
+        } else {
+            pricing::day_minutes_of(
+                rostered
+                    .get(&(r.employee_id, r.business_date))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                r.work_shift_id,
+                scheduled_minutes,
+            )
+        };
         let facts = ShiftFacts {
             base_salary_piastres: salary,
-            scheduled_minutes: r
-                .scheduled_minutes
-                .map(i64::from)
-                .filter(|m| *m > 0)
-                .unwrap_or(DEFAULT_SHIFT_MINUTES),
+            scheduled_minutes,
+            day_minutes,
             status,
-            unpaid_leave: r.unpaid_leave,
+            // The deduction side (absence, unpaid leave, late, excused time) is
+            // read from the rows the sweep wrote with this same function; the
+            // leave facts here only keep the day's earnings honest.
+            leave_minutes: if status == crate::staff::rules::AttendanceStatus::OnLeave {
+                scheduled_minutes
+            } else {
+                0
+            },
+            leave_paid: !r.unpaid_leave,
+            unpaid_excused_minutes: 0,
             late_minutes: i64::from(r.late_minutes),
             worked_minutes: i64::from(r.worked_minutes),
             overtime_minutes: i64::from(r.overtime_minutes),
