@@ -4,7 +4,7 @@
 use crate::{CapMeta, GroupMeta, Kinds, LimitKey, Limits, Risk, RoleKind, TemplateMeta, Tier};
 
 pub const SPEC_VERSION: u32 = 2;
-pub const SPEC_HASH: &str = "6c87e3330823bed8";
+pub const SPEC_HASH: &str = "679bc717e26c4288";
 pub const WORDS: usize = 4;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -202,6 +202,7 @@ pub enum Cap {
     HrSchedulePublish = 233,
     HrExpenseAdvancesLog = 234,
     HrRosterSettings = 235,
+    HrRulesEdit = 236,
 }
 
 pub static CAPS: &[CapMeta] = &[
@@ -341,9 +342,9 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::DeliverySettingsRead, key: "delivery.settings.read", legacy: Some(("delivery_settings", "read")), group: "delivery", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See delivery settings", ar: "عرض إعدادات التوصيل", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::DeliverySettingsEdit, key: "delivery.settings.edit", legacy: Some(("delivery_settings", "update")), group: "delivery", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Edit delivery zones, fees and hours", ar: "تعديل مناطق التوصيل والرسوم والمواعيد", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::DeliverySettingsDelete, key: "delivery.settings.delete", legacy: Some(("delivery_settings", "delete")), group: "delivery", tier: Tier::Advanced, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Remove delivery zones", ar: "حذف مناطق التوصيل", hint_en: None, hint_ar: None },
-    CapMeta { cap: Cap::HrStaffCreate, key: "hr.staff.create", legacy: Some(("staff", "create")), group: "hr", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Add HR records", ar: "إضافة ملفات الموظفين", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::HrStaffCreate, key: "hr.staff.create", legacy: Some(("staff", "create")), group: "hr", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Add HR records", ar: "إضافة ملفات الموظفين", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::HrStaffRead, key: "hr.staff.read", legacy: Some(("staff", "read")), group: "hr", tier: Tier::Configurable, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See HR records", ar: "عرض ملفات الموظفين", hint_en: None, hint_ar: None },
-    CapMeta { cap: Cap::HrStaffEdit, key: "hr.staff.edit", legacy: Some(("staff", "update")), group: "hr", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Edit HR records", ar: "تعديل ملفات الموظفين", hint_en: None, hint_ar: None },
+    CapMeta { cap: Cap::HrStaffEdit, key: "hr.staff.edit", legacy: Some(("staff", "update")), group: "hr", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Edit HR records", ar: "تعديل ملفات الموظفين", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::HrStaffDelete, key: "hr.staff.delete", legacy: Some(("staff", "delete")), group: "hr", tier: Tier::Advanced, risk: Risk::Pii, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Delete HR records", ar: "حذف ملفات الموظفين", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::HrScheduleCreate, key: "hr.schedule.create", legacy: Some(("work_shifts", "create")), group: "hr", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Add shifts to the roster", ar: "إضافة ورديات للجدول", hint_en: None, hint_ar: None },
     CapMeta { cap: Cap::HrScheduleRead, key: "hr.schedule.read", legacy: Some(("work_shifts", "read")), group: "hr", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "See the roster", ar: "عرض جدول الورديات", hint_en: None, hint_ar: None },
@@ -397,6 +398,7 @@ pub static CAPS: &[CapMeta] = &[
     CapMeta { cap: Cap::HrSchedulePublish, key: "hr.schedule.publish", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Publish the week's roster", ar: "نشر جدول الأسبوع", hint_en: Some("Staff see a week only once it is published, and are told."), hint_ar: Some("الموظفين بيشوفوا الأسبوع بس بعد ما يتنشر، وبيتبلغوا.") },
     CapMeta { cap: Cap::HrExpenseAdvancesLog, key: "hr.expense_advances.log", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(3), core: Kinds(0), approval: false, limits: &[], pos: false, protected: false, en: "Log expense advances", ar: "تسجيل ع\u{64f}هد المصاريف", hint_en: Some("Cash handed over for shop purchases. A log only: never deducted from pay."), hint_ar: Some("فلوس متسلمة لمشتريات المحل. سجل بس: عمره ما بيتخصم من المرتب.") },
     CapMeta { cap: Cap::HrRosterSettings, key: "hr.roster.settings", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Normal, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Change roster settings", ar: "تغيير إعدادات الجدول", hint_en: Some("How shift suggestions weigh defaults, including the gender default."), hint_ar: Some("إزاي اقتراحات الورديات بتوزن الافتراضيات، ومنها افتراض النوع.") },
+    CapMeta { cap: Cap::HrRulesEdit, key: "hr.rules.edit", legacy: None, group: "hr", tier: Tier::Configurable, risk: Risk::Money, defaults: Kinds(1), core: Kinds(0), approval: false, limits: &[], pos: false, protected: true, en: "Change attendance and pay rules", ar: "تغيير قواعد الحضور والمرتبات", hint_en: Some("The business-wide rules: lateness and absence costs, working days, overtime, the pay period and the advance cap. Needs every branch."), hint_ar: Some("قواعد النشاط كله: خصم التأخير والغياب، أيام الشغل، الوقت الإضافي، فترة المرتب وحد السلف. محتاج كل الفروع.") },
 ];
 
 pub static GROUPS: &[GroupMeta] = &[

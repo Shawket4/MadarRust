@@ -1661,7 +1661,7 @@ legacy = "staff:create"
 group = "hr"
 tier = "advanced"
 risk = "pii"
-defaults = "o"
+defaults = "om"
 en = "Add HR records"
 ar = "إضافة ملفات الموظفين"
 
@@ -1683,7 +1683,7 @@ legacy = "staff:update"
 group = "hr"
 tier = "advanced"
 risk = "pii"
-defaults = "o"
+defaults = "om"
 en = "Edit HR records"
 ar = "تعديل ملفات الموظفين"
 
@@ -2204,7 +2204,7 @@ hint_ar = "عناوين التوصيل اللي العميل طلب عليها �
 
 # ── Dawam (DAWAM_TARGET_SPEC, 2026-09-22) ──────────────────────────────────
 # The staff app's acts (spec RO-7, PM-2/3): ids 226-235 of the 30 left before
-# the snapshot format must grow.
+# the snapshot format must grow. 236 (hr.rules.edit) came with Phase A.
 [[cap]]
 id = 226
 key = "hr.requests.self_approve"
@@ -2333,6 +2333,19 @@ en = "Change roster settings"
 ar = "تغيير إعدادات الجدول"
 hint_en = "How shift suggestions weigh defaults, including the gender default."
 hint_ar = "إزاي اقتراحات الورديات بتوزن الافتراضيات، ومنها افتراض النوع."
+
+[[cap]]
+id = 236
+key = "hr.rules.edit"
+group = "hr"
+tier = "configurable"
+risk = "money"
+defaults = "o"
+protected = true
+en = "Change attendance and pay rules"
+ar = "تغيير قواعد الحضور والمرتبات"
+hint_en = "The business-wide rules: lateness and absence costs, working days, overtime, the pay period and the advance cap. Needs every branch."
+hint_ar = "قواعد النشاط كله: خصم التأخير والغياب، أيام الشغل، الوقت الإضافي، فترة المرتب وحد السلف. محتاج كل الفروع."
 
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the

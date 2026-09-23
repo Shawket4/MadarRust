@@ -292,11 +292,11 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         // PATCH /floor/tables/{id}/state and its replay op).
         ("waiter", "floor_plan", "read", true),
         // ── staff / attendance / payroll ──────────────────────────
-        // Being an employee is a `staff_profiles` row, not a role, so nothing is
-        // granted here to make someone staff. These gate the ADMIN surface only;
-        // `/staff/me/*` is own-row scoped and needs no permission, which is what
-        // lets a teller clock in and read their own payslip while seeing nobody
-        // else's salary.
+        // Being an employee is an `employees` row (Dawam Phase A), not a role,
+        // so nothing is granted here to make someone staff. These gate the ADMIN
+        // surface only; `/staff/me/*` is the staff app's own employee and needs
+        // no permission, which is what lets anyone clock in and read their own
+        // payslip while seeing nobody else's salary.
         ("org_admin", "staff", "create", true),
         ("org_admin", "staff", "read", true),
         ("org_admin", "staff", "update", true),
@@ -319,9 +319,13 @@ pub async fn seed_role_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("org_admin", "payroll", "delete", true),
         // Branch manager runs the roster and approves requests, and may correct
         // an attendance record. Deliberately NOT granted `payroll` (salaries stay
-        // with the owner) nor `staff` create/delete (hiring is an org decision);
-        // `staff` read is needed to see who is on the roster at all.
+        // with the owner) nor `staff` delete. `staff` read is needed to see who
+        // is on the roster at all; create and update are Dawam's RO-1 and RO-4:
+        // a manager adds people at their own branches and signs a phone out
+        // (salary stays behind `payroll`, and branch scope limits both).
         ("branch_manager", "staff", "read", true),
+        ("branch_manager", "staff", "create", true),
+        ("branch_manager", "staff", "update", true),
         ("branch_manager", "work_shifts", "read", true),
         ("branch_manager", "work_shifts", "update", true),
         ("branch_manager", "attendance", "create", true),
