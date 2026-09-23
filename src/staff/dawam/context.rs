@@ -202,13 +202,9 @@ pub async fn my_context(
     .bind(pay.clone().flatten())
     .fetch_all(pool)
     .await?;
-    let work_shifts: Vec<WorkShiftBrief> = sqlx::query_as(
-        "SELECT id, name, branch_id, start_time, end_time, crosses_midnight, grace_minutes \
-           FROM work_shifts WHERE org_id = $1 AND is_active ORDER BY start_time",
-    )
-    .bind(org_id)
-    .fetch_all(pool)
-    .await?;
+    // With each block's days and weekday times (offer it only on its days).
+    let work_shifts: Vec<WorkShiftBrief> =
+        crate::staff::dawam::roster::work_shifts_of(pool, org_id).await?;
     let s = load_settings(pool, org_id, None).await?;
     let caps = CAPS
         .iter()

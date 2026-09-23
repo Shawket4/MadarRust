@@ -43,6 +43,17 @@ pub struct DisciplineRow {
     pub late_days: i64,
     pub absent_days: i64,
     pub total_late_minutes: i64,
+    /// Colleagues' shifts this person covered, confirmed by a manager (CV-7).
+    /// A cover is never a present day of the coverer's own.
+    #[serde(default)]
+    pub covers_given: i64,
+    /// Covers still waiting for the manager.
+    #[serde(default)]
+    pub covers_pending: i64,
+    /// Their own shifts a colleague covered (not rejected): the absence stays
+    /// theirs (CV-6), this says someone stepped in.
+    #[serde(default)]
+    pub covered_by_others: i64,
     /// 1 = best in this department: fewest absences, then fewest lates, then
     /// least total late time. Ties share a rank (SQL `RANK()`), so a
     /// department where everyone has a clean record is all `1`s.
@@ -84,12 +95,31 @@ pub async fn discipline_report(
     let rows = sqlx::query_as::<_, DisciplineRow>(
         r#"
         WITH per_user AS (
+            -- Days, not rows: a split day is one day (SC-11). A cover row is
+            -- the coverer's cover, never their own present day (CV-7).
             SELECT a.employee_id, sp.name AS employee_name,
                    sp.department_id, d.name AS department_name,
-                   COUNT(*) FILTER (WHERE a.status = 'present') AS present_days,
-                   COUNT(*) FILTER (WHERE a.status = 'late')    AS late_days,
-                   COUNT(*) FILTER (WHERE a.status = 'absent')  AS absent_days,
-                   COALESCE(SUM(a.late_minutes), 0)::bigint     AS total_late_minutes
+                   COUNT(DISTINCT a.business_date) FILTER (
+                       WHERE a.status = 'present' AND a.covered_employee_id IS NULL
+                   ) AS present_days,
+                   COUNT(DISTINCT a.business_date) FILTER (
+                       WHERE a.status = 'late' AND a.covered_employee_id IS NULL
+                   ) AS late_days,
+                   COUNT(DISTINCT a.business_date) FILTER (
+                       WHERE a.status = 'absent' AND a.covered_employee_id IS NULL
+                   ) AS absent_days,
+                   COALESCE(SUM(a.late_minutes) FILTER (
+                       WHERE a.covered_employee_id IS NULL), 0)::bigint AS total_late_minutes,
+                   COUNT(*) FILTER (
+                       WHERE a.covered_employee_id IS NOT NULL AND a.cover_status = 'confirmed'
+                   ) AS covers_given,
+                   COUNT(*) FILTER (
+                       WHERE a.covered_employee_id IS NOT NULL AND a.cover_status = 'pending'
+                   ) AS covers_pending,
+                   (SELECT COUNT(*) FROM attendance_records c
+                     WHERE c.covered_employee_id = a.employee_id
+                       AND c.business_date BETWEEN $2 AND $3
+                       AND c.cover_status IS DISTINCT FROM 'rejected') AS covered_by_others
               FROM attendance_records a
               JOIN employees sp ON sp.id = a.employee_id
               LEFT JOIN departments d ON d.id = sp.department_id

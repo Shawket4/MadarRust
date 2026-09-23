@@ -51,6 +51,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/me/roster", web::get().to(roster::my_roster))
             .route("/me/swaps", web::post().to(roster::ask_swap))
             .route("/me/swaps/{id}", web::patch().to(roster::answer_swap))
+            .route("/me/swaps/{id}/cancel", web::post().to(roster::cancel_swap))
             .route("/me/preferences", web::put().to(roster::put_preferences))
             .route("/me/pay/estimate", web::get().to(pay::my_estimate))
             .route("/me/adjustments", web::get().to(pay::my_adjustments))
@@ -90,6 +91,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/roster/coverage", web::put().to(roster::put_coverage))
             .route("/roster/fairness", web::get().to(roster::fairness))
             .route(
+                "/roster/fairness/audits",
+                web::get().to(crate::staff::dawam::suggest::fairness_audits),
+            )
+            .route(
+                "/employees/{id}/preferences",
+                web::put().to(roster::put_employee_preferences),
+            )
+            .route(
+                "/employees/{id}/preferences/log",
+                web::get().to(roster::preference_log),
+            )
+            .route(
                 "/reports/labour-vs-sales",
                 web::get().to(super::dawam::reports::labour_vs_sales),
             )
@@ -114,6 +127,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/open-shifts/{id}/decision",
                 web::patch().to(roster::decide_claim),
+            )
+            .route(
+                "/open-shifts/{id}/cancel",
+                web::post().to(roster::cancel_open_shift),
             )
             .route("/swaps", web::get().to(roster::list_swaps))
             .route("/swaps/{id}/decision", web::patch().to(roster::decide_swap))
@@ -214,6 +231,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/schedules/day",
                 web::get().to(schedules::get_scheduled_day),
+            )
+            .route("/schedules/days", web::put().to(schedules::put_day))
+            .route("/schedules/days", web::delete().to(schedules::reset_day))
+            .route("/schedules/days/times", web::put().to(schedules::put_times))
+            .route(
+                "/schedules/days/move",
+                web::post().to(schedules::move_shift),
             )
             .route("/schedules", web::get().to(schedules::list_assignments))
             .route("/schedules", web::post().to(schedules::create_assignment))

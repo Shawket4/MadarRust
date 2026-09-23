@@ -80,6 +80,7 @@ pub async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     apply_pending_penalties(pool).await?;
     purge_stale_coordinates(pool).await?;
     precompute_suggestions(pool).await?;
+    crate::staff::dawam::suggest::monthly_fairness(pool).await?;
     phones_that_died(pool).await?;
     Ok(())
 }
@@ -141,7 +142,7 @@ pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), crate::errors::
                  OR EXTRACT(DOW FROM b.local) IN (4, 5)) \
             AND EXISTS (SELECT 1 FROM employee_branches a WHERE a.branch_id = b.id) \
             AND NOT EXISTS (SELECT 1 FROM staff_suggestion_cache c \
-                             WHERE c.branch_id = b.id \
+                             WHERE c.branch_id = b.id AND NOT c.stale \
                                AND c.week_start = (b.local::date + (6 - EXTRACT(DOW FROM b.local)::int))) \
           LIMIT 50",
     )
@@ -255,7 +256,8 @@ async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), crate::errors::A
 
 // ── 2. Absences ───────────────────────────────────────────────
 
-async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+#[doc(hidden)]
+pub async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
     #[derive(sqlx::FromRow)]
     struct Missing {
         org_id: Uuid,
@@ -268,57 +270,31 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
         excused: bool,
     }
 
-    // Yesterday and today only: a sweep that reached back further would resurrect
-    // absences an operator had deliberately deleted.
+    // Yesterday and today only, in each shift's BRANCH-local calendar (AT-1):
+    // a sweep that reached back further would resurrect absences an operator
+    // had deliberately deleted. The roster comes from the one roster function
+    // (SC-6, AT-9): a date change beats the weekday row beats the every-day
+    // row, so a shift given by a date change (a day edit, swap, claim or
+    // accepted suggestion) is missed like any other, a split day's shifts are
+    // each their own, and a day off marks nobody.
     let missing: Vec<Missing> = sqlx::query_as(&format!(
         r#"
-        WITH days AS (
-            SELECT d::date AS business_date
-              FROM generate_series(CURRENT_DATE - 1, CURRENT_DATE, INTERVAL '1 day') d
-        ),
-        rostered AS (
-            SELECT p.org_id,
-                   p.id AS employee_id,
-                   d.business_date,
-                   ws.id AS work_shift_id,
-                   COALESCE(ws.branch_id, (
-                       SELECT eb.branch_id FROM employee_branches eb
-                        WHERE eb.employee_id = p.id ORDER BY eb.assigned_at LIMIT 1
-                   )) AS branch_id,
-                   COALESCE(b.timezone::text, o.timezone::text, 'Africa/Cairo') AS tz,
-                   ws.start_time, ws.end_time, ws.crosses_midnight
+        WITH people AS (
+            SELECT p.id
               FROM employees p
               JOIN organizations o ON o.id = p.org_id AND {LIVE_ORG}
-              CROSS JOIN days d
-              JOIN staff_schedules s
-                ON s.employee_id = p.id
-               AND s.effective_from <= d.business_date
-               AND (s.effective_to IS NULL OR s.effective_to >= d.business_date)
-               AND (s.day_of_week IS NULL
-                    OR s.day_of_week = EXTRACT(DOW FROM d.business_date)::smallint)
-              JOIN work_shifts ws ON ws.id = s.work_shift_id AND ws.is_active
-              LEFT JOIN branches b ON b.id = ws.branch_id AND b.deleted_at IS NULL
              WHERE p.employment_status = 'active'
-               -- An explicit override (including a day off) wins outright; those
-               -- days are simply not rostered.
-               AND NOT EXISTS (
-                   SELECT 1 FROM staff_schedule_overrides ov
-                    WHERE ov.employee_id = p.id AND ov.on_date = d.business_date
-               )
-               -- A confirmed public holiday marks nobody absent (RU-10).
-               AND NOT EXISTS (
-                   SELECT 1 FROM staff_holidays h
-                    WHERE h.org_id = p.org_id AND h.on_date = d.business_date
-                      AND h.decision = 'holiday'
-               )
+        ),
+        rostered AS (
+            SELECT e.org_id, r.employee_id, r.branch_id, r.work_shift_id,
+                   r.on_date AS business_date, r.start_at, r.end_at, r.tz
+              FROM dawam_roster(ARRAY(SELECT id FROM people),
+                                CURRENT_DATE - 2, CURRENT_DATE + 1) r
+              JOIN employees e ON e.id = r.employee_id
         )
         SELECT r.org_id, r.employee_id, r.branch_id, r.work_shift_id, r.business_date,
-               (r.business_date + r.start_time) AT TIME ZONE r.tz AS scheduled_start_at,
-               (r.business_date + r.end_time
-                    + CASE WHEN r.crosses_midnight
-                           THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END
-               ) AT TIME ZONE r.tz AS scheduled_end_at,
-               -- One table now covers leave AND missions: both are whole-day
+               r.start_at AS scheduled_start_at, r.end_at AS scheduled_end_at,
+               -- One table covers leave AND missions: both are whole-day
                -- approvals, so a day either is excused or is an absence.
                EXISTS (
                    SELECT 1 FROM staff_requests sr
@@ -329,18 +305,25 @@ async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
                ) AS excused
           FROM rostered r
          WHERE r.branch_id IS NOT NULL
+           AND r.business_date >= (now() AT TIME ZONE r.tz)::date - 1
+           AND r.business_date <= (now() AT TIME ZONE r.tz)::date
            -- The shift must be over before its absence is a fact.
-           AND now() > (r.business_date + r.end_time
-                    + CASE WHEN r.crosses_midnight
-                           THEN INTERVAL '1 day' ELSE INTERVAL '0 day' END
-               ) AT TIME ZONE r.tz
+           AND now() > r.end_at
+           -- A confirmed public holiday marks nobody absent (RU-10).
+           AND NOT EXISTS (
+               SELECT 1 FROM staff_holidays h
+                WHERE h.org_id = r.org_id AND h.on_date = r.business_date
+                  AND h.decision = 'holiday'
+           )
            AND NOT EXISTS (
                SELECT 1 FROM attendance_records a
                 WHERE a.employee_id = r.employee_id
                   AND a.business_date = r.business_date
+                  AND a.covered_employee_id IS NULL
                   AND COALESCE(a.work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)
                       = r.work_shift_id
            )
+         ORDER BY r.business_date, r.employee_id
          LIMIT 500
         "#
     ))

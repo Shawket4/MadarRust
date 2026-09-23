@@ -5,7 +5,8 @@
 //! - `signin`   — WhatsApp code sign-in and the one live phone (RO-1..RO-5).
 //! - `presence` — pings, flags, covers, overtime approval, punch for someone.
 //! - `roster`   — the week: publish, open shifts, swaps, preferences,
-//!   holidays and suggestions (SC-*).
+//!   holidays and coverage needs (SC-*).
+//! - `suggest`  — roster suggestions, learning and their guardrails (SC-13).
 //! - `pay`      — the current period, the employee's estimate, adjustments
 //!   under limits, advances under the cap, paid-per-person, expense
 //!   advances, and the inbox.
@@ -18,6 +19,7 @@ pub mod presence;
 pub mod reports;
 pub mod roster;
 pub mod signin;
+pub mod suggest;
 
 use actix_web::{HttpResponse, web};
 use chrono::{Datelike, Duration, NaiveDate};
