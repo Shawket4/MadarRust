@@ -59,3 +59,9 @@ openpgp-revocs.d/
 # the cleaned imports built from them. Kept locally, never committed.
 /drops/
 /drops_clean/
+
+# Firebase / FCM credentials — the server key lives outside the repo (see
+# FCM_SERVICE_ACCOUNT_FILE in .env.example). These patterns are the second lock.
+*firebase-adminsdk*.json
+*service-account*.json
+**/AuthKey_*.p8
