@@ -27,50 +27,13 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppErrorResponse};
 
-/// Every wire type, in the order the POS lists them (`ALL_TYPES`).
-pub const ALL_TYPES: &[&str] = &[
-    "category",
-    "menu_item",
-    "bundle",
-    "ingredient",
-    "payment_method",
-    "payment_availability",
-    "discount",
-    "branch_settings",
-    "device",
-    "teller",
-    "floor_section",
-    "floor_table",
-    "table_occupancy",
-    "table_transfer",
-    "open_ticket",
-    "kitchen_ticket",
-    "delivery",
-    "booking",
-    "till",
-    "cash_movement",
-    "order",
-    "refund",
-    "addon_item",
-    "customer",
-    "staff_drink",
-];
-/// Ledger types: never checksummed; windowed in full snapshots.
-///
-/// `staff_drink` belongs here rather than among the state types: the rows are
-/// dated and grow forever, and a till only ever needs the business day it is
-/// working. The 48-hour window covers today and yesterday, which spans the
-/// business-day boundary in any timezone — a device coming back at 01:00 local
-/// still sees the day it is counting against.
-pub const LEDGER_TYPES: &[&str] = &["till", "cash_movement", "order", "refund", "staff_drink"];
-/// How far back a full snapshot's ledger window reaches.
-pub const LEDGER_WINDOW_HOURS: i64 = 48;
+/// Every wire type (`ALL_TYPES`), the ledger types (`LEDGER_TYPES`, never
+/// checksummed, windowed in full snapshots — `staff_drink` among them), the
+/// ledger window (`LEDGER_WINDOW_HOURS`) and `is_ledger`: one copy with the POS
+/// core, in madar-shared (`madar_sync`).
+pub use madar_sync::{ALL_TYPES, LEDGER_TYPES, LEDGER_WINDOW_HOURS, is_ledger};
 const DEFAULT_LIMIT: i64 = 2000;
 const MAX_LIMIT: i64 = 5000;
-
-pub fn is_ledger(ty: &str) -> bool {
-    LEDGER_TYPES.contains(&ty)
-}
 
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]

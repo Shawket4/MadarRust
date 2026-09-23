@@ -15,6 +15,9 @@ madar-money        = { git = "https://github.com/Shawket4/madar-shared", tag = "
 # Business-day rules the till runs too (week start, business date, YYMMDD,
 # day bounds with the DST-gap rule), same tag.
 madar-time         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
+# /sync/pull contract pieces the till runs too (type lists, ledger
+# classification, the R-checksum, kitchen UUIDv5 ids), same tag.
+madar-sync         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"
