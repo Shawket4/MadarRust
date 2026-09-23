@@ -2543,6 +2543,31 @@ async fn one_day_is_priced_identically_by_every_path(pool: PgPool) {
             ("late_penalty".to_string(), LATE)
         ]
     );
+    // E2E D-B2 (AT-13): the server's own wording comes with a stable code and
+    // its figures, so each client says it in its language.
+    let codes: Vec<(String, Value, Value)> = slip["breakdown"]["deductions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["source"].as_str().unwrap().to_string(),
+                l["reason_code"].clone(),
+                l["reason_vars"].clone(),
+            )
+        })
+        .collect();
+    let code_of = |src: &str| {
+        codes
+            .iter()
+            .find(|(s, _, _)| s == src)
+            .map(|(_, c, v)| (c.clone(), v.clone()))
+            .unwrap()
+    };
+    assert_eq!(code_of("late_penalty").0, json!("late"));
+    assert!(code_of("late_penalty").1["minutes"].as_i64().unwrap() > 0);
+    assert_eq!(code_of("absence").0, json!("absent_no_punch"));
+    assert_eq!(code_of("excused_unpaid").0, json!("unpaid_excuse"));
     let deductions = LATE + HALF_ABSENCE + EXCUSED;
     assert_eq!(slip["deductions_piastres"], json!(deductions));
     assert_eq!(slip["net_piastres"], json!(600_000 + OVERTIME - deductions));

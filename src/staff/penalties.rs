@@ -92,18 +92,33 @@ pub async fn recompute_for_day(conn: &mut PgConnection, day: &PricedDay) -> Resu
         "late_penalty",
         price.late_penalty_piastres,
         &format!("Late by {} minutes", day.facts.late_minutes),
+        Some((
+            "late",
+            serde_json::json!({ "minutes": day.facts.late_minutes }),
+        )),
     )
     .await?;
 
     // ── Absence / unpaid leave (RU-5, RQ-3, RQ-8) ───────────────
-    let absent_reason = match (price.absent_minutes > 0, price.unpaid_leave_minutes > 0) {
-        (true, true) => "Absent from the worked half · unpaid half-day leave",
-        (true, false) => "Absent — no check-in recorded",
-        (false, true) => "Unpaid leave",
-        (false, false) => "",
-    };
-    written +=
-        upsert_auto_deduction(conn, day, "absence", price.absence_piastres, absent_reason).await?;
+    let (absent_reason, absent_code) =
+        match (price.absent_minutes > 0, price.unpaid_leave_minutes > 0) {
+            (true, true) => (
+                "Absent from the worked half · unpaid half-day leave",
+                "absent_half_unpaid_leave",
+            ),
+            (true, false) => ("Absent — no check-in recorded", "absent_no_punch"),
+            (false, true) => ("Unpaid leave", "unpaid_leave"),
+            (false, false) => ("", ""),
+        };
+    written += upsert_auto_deduction(
+        conn,
+        day,
+        "absence",
+        price.absence_piastres,
+        absent_reason,
+        Some((absent_code, serde_json::json!({}))),
+    )
+    .await?;
 
     // ── Unpaid excused time (RQ-7) ──────────────────────────────
     written += upsert_auto_deduction(
@@ -115,6 +130,10 @@ pub async fn recompute_for_day(conn: &mut PgConnection, day: &PricedDay) -> Resu
             "Unpaid excused time: {} minutes",
             day.facts.unpaid_excused_minutes
         ),
+        Some((
+            "unpaid_excused_minutes",
+            serde_json::json!({ "minutes": day.facts.unpaid_excused_minutes }),
+        )),
     )
     .await?;
 
@@ -135,7 +154,10 @@ async fn upsert_auto_deduction(
     source: &str,
     amount: i64,
     reason: &str,
+    // The stable code + figures clients word in their own language (AT-13).
+    code: Option<(&str, serde_json::Value)>,
 ) -> Result<u64, AppError> {
+    let (code, vars) = code.map_or((None, None), |(c, v)| (Some(c), Some(v)));
     // A row a person wrote (a flag's unpaid excuse carries `created_by`) is a
     // decision, like a waiver: the sweep never deletes or re-prices it.
     if amount <= 0 {
@@ -157,13 +179,15 @@ async fn upsert_auto_deduction(
     let affected = sqlx::query(
         "INSERT INTO payroll_deductions \
              (org_id, employee_id, amount_piastres, original_amount_piastres, reason, \
-              effective_date, source, attendance_record_id) \
-         VALUES ($1, $2, $3, $3, $4, $5, $6, $7) \
+              effective_date, source, attendance_record_id, reason_code, reason_vars) \
+         VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9) \
          ON CONFLICT (attendance_record_id, source) \
              WHERE attendance_record_id IS NOT NULL AND source <> 'manual' \
          DO UPDATE SET amount_piastres          = EXCLUDED.amount_piastres, \
                        original_amount_piastres = EXCLUDED.original_amount_piastres, \
                        reason                   = EXCLUDED.reason, \
+                       reason_code              = EXCLUDED.reason_code, \
+                       reason_vars              = EXCLUDED.reason_vars, \
                        updated_at               = now() \
               WHERE payroll_deductions.waived_at IS NULL \
                 AND payroll_deductions.overridden_at IS NULL \
@@ -176,6 +200,8 @@ async fn upsert_auto_deduction(
     .bind(day.business_date)
     .bind(source)
     .bind(day.record_id)
+    .bind(code)
+    .bind(vars)
     .execute(&mut *conn)
     .await?
     .rows_affected();

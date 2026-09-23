@@ -810,6 +810,12 @@ pub async fn resolve_flag(
         };
         // One name for unpaid excused time (orchestrator decision 2):
         // `excused_unpaid`, never the old `unpaid_excuse`.
+        // The server's own words get a code; a manager's typed reason doesn't.
+        let reason_code = match (resolution, reason) {
+            ("excused_unpaid", _) => Some("unpaid_excuse"),
+            ("deducted", "Left mid-shift") => Some("left_mid_shift"),
+            _ => None,
+        };
         let source = if resolution == "deducted" {
             "left_mid_shift"
         } else {
@@ -823,8 +829,8 @@ pub async fn resolve_flag(
         deduction_id = Some(
             sqlx::query_scalar(
                 "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
-                    effective_date, source, attendance_record_id, created_by, status) \
-                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, NULL, $7, $8) \
+                    effective_date, source, attendance_record_id, created_by, status, reason_code) \
+                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, NULL, $7, $8, $9) \
                  RETURNING id",
             )
             .bind(org_id)
@@ -835,6 +841,7 @@ pub async fn resolve_flag(
             .bind(source)
             .bind(by)
             .bind(status)
+            .bind(reason_code)
             .fetch_one(pool)
             .await?,
         );

@@ -1619,6 +1619,8 @@ pub(crate) async fn compute_payslips(
         effective_date: NaiveDate,
         recurring: bool,
         waived: bool,
+        reason_code: Option<String>,
+        reason_vars: Option<serde_json::Value>,
     }
     async fn load_adjustments(
         conn: &mut sqlx::PgConnection,
@@ -1636,12 +1638,18 @@ pub(crate) async fn compute_payslips(
         } else {
             "false"
         };
+        // Only deductions carry the server's reason codes (AT-13).
+        let codes = if table == "payroll_deductions" {
+            "reason_code, reason_vars"
+        } else {
+            "NULL::text AS reason_code, NULL::jsonb AS reason_vars"
+        };
         let rows: Vec<AdjRow> = sqlx::query_as(&format!(
             // A recurring allowance or deduction counts in every period from
             // its start month until stopped (AD-3): `ends_on` applies whether
             // the line started this period or earlier.
             "SELECT id, employee_id, amount_piastres, percent_of_base, reason, source, \
-                    effective_date, recurring, {waived} AS waived FROM {table} \
+                    effective_date, recurring, {waived} AS waived, {codes} FROM {table} \
               WHERE org_id = $1 AND status = 'approved' \
                 AND ($4::uuid IS NULL OR employee_id = $4) \
                 AND effective_date <= $3 \
@@ -1703,6 +1711,10 @@ pub(crate) async fn compute_payslips(
                     "id": row.id, "reason": row.reason, "piastres": amount,
                     "source": row.source, "effective_date": row.effective_date,
                     "recurring": row.recurring,
+                    // A stable code + figures for the server's own wording, so
+                    // each client says it in its language (AT-13); null for a
+                    // person's own words.
+                    "reason_code": row.reason_code, "reason_vars": row.reason_vars,
                 });
                 if row.waived {
                     line["waived"] = json!(true);
