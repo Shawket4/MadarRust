@@ -126,7 +126,9 @@ pub async fn recompute_for_day(conn: &mut PgConnection, day: &PricedDay) -> Resu
 /// `amount == 0` means the rule no longer owes anything (a correction fixed the
 /// lateness, say). The existing row is DELETED rather than zeroed, so a payslip
 /// never carries a meaningless "EGP 0" line — but only if no human has touched it,
-/// because a waived row is a record of a decision and must survive.
+/// because a waived row is a record of a decision and must survive. A row a
+/// manager wrote by hand from a flag (`created_by` set, e.g. an unpaid excuse
+/// of a mid-shift absence) is theirs too: never rewritten, never deleted.
 async fn upsert_auto_deduction(
     conn: &mut PgConnection,
     day: &PricedDay,

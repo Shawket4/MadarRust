@@ -6,6 +6,8 @@
 //! - `presence` — pings, flags, covers, overtime approval, punch for someone.
 //! - `roster`   — the week: publish, open shifts, swaps, preferences,
 //!   holidays and coverage needs (SC-*).
+//! - `holidays` — public holidays: suggested every year, decided by the
+//!   owner, re-pricing the day (RU-10).
 //! - `suggest`  — roster suggestions, learning and their guardrails (SC-13).
 //! - `pay`      — the current period, the employee's estimate, adjustments
 //!   under limits, advances under the cap, paid-per-person, expense
@@ -14,6 +16,7 @@
 pub mod clock;
 pub mod context;
 pub mod engine;
+pub mod holidays;
 pub mod pay;
 pub mod presence;
 pub mod privacy;

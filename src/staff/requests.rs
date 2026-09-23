@@ -29,7 +29,7 @@
 //! approves their own request any other way.
 
 use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -130,6 +130,16 @@ pub struct StaffRequest {
     #[sqlx(default)]
     #[serde(default)]
     pub record_check_out_at: Option<DateTime<Utc>>,
+    /// The request is the CALLER's own (worked out for whoever asks).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub is_own: bool,
+    /// The caller may approve or reject it now: it is pending, not their own,
+    /// at one of their branches, and — a manager's request — they outrank
+    /// the requester (RQ-5). The same checks the decision makes.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub can_decide: bool,
 }
 
 const REQUEST_SELECT: &str = r#"
@@ -355,10 +365,10 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
     if body.work_shift_id.is_some()
         && !matches!(
             body.kind.as_str(),
-            "late_arrival" | "early_departure" | "excuse"
+            "late_arrival" | "early_departure" | "excuse" | "correction"
         )
     {
-        return bad("Only a late arrival, early departure or excuse names a shift");
+        return bad("Only a late arrival, early departure, excuse or correction names a shift");
     }
     match body.kind.as_str() {
         "leave" => {
@@ -414,8 +424,10 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
             shape.end_date = Some(end);
         }
         "correction" => {
-            if body.attendance_record_id.is_none() {
-                return bad("A correction needs the attendance record it fixes");
+            // The record it fixes, or — a rostered shift nobody clocked yet —
+            // the shift (RQ-9).
+            if body.attendance_record_id.is_none() && body.work_shift_id.is_none() {
+                return bad("A correction needs the attendance record or the shift it fixes");
             }
             match (body.from_time, body.to_time) {
                 (None, None) => return bad("A correction needs a proposed time"),
@@ -430,6 +442,115 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
         }
     }
     Ok(shape)
+}
+
+// ── Where a request sits on its shift (RQ-11, B4, B5) ─────────
+
+/// A rostered shift on the branch's wall clock.
+struct LocalShift {
+    id: Uuid,
+    start: NaiveDateTime,
+    end: NaiveDateTime,
+    /// The branch's wall clock now.
+    now: NaiveDateTime,
+}
+
+/// The person's rostered shifts of `date`, on the wall clock of the branch the
+/// day is priced at. Empty when nothing is rostered or no branch is known.
+async fn local_shifts(
+    pool: &PgPool,
+    employee_id: Uuid,
+    date: NaiveDate,
+) -> Result<Vec<LocalShift>, AppError> {
+    let Some(branch) = request_branch(pool, employee_id, date).await? else {
+        return Ok(Vec::new());
+    };
+    let tz = crate::staff::branch_timezone(pool, branch).await?;
+    let shifts = crate::staff::schedules::resolve_shifts_for(pool, employee_id, date, &tz).await?;
+    let now: NaiveDateTime = sqlx::query_scalar("SELECT (now() AT TIME ZONE $1)::timestamp")
+        .bind(&tz)
+        .fetch_one(pool)
+        .await?;
+    Ok(shifts
+        .into_iter()
+        .map(|s| {
+            let end_day = if s.crosses_midnight || s.end_time <= s.start_time {
+                s.on_date + Duration::days(1)
+            } else {
+                s.on_date
+            };
+            LocalShift {
+                id: s.work_shift_id,
+                start: s.on_date.and_time(s.start_time),
+                end: end_day.and_time(s.end_time),
+                now,
+            }
+        })
+        .collect())
+}
+
+/// `time` on the shift's side of midnight: the business date or the day
+/// after, whichever lies inside (or nearer) the shift.
+fn place(shift: &LocalShift, date: NaiveDate, time: NaiveTime) -> NaiveDateTime {
+    let distance = |at: NaiveDateTime| {
+        if at < shift.start {
+            (shift.start - at).num_seconds()
+        } else if at > shift.end {
+            (at - shift.end).num_seconds()
+        } else {
+            0
+        }
+    };
+    let same = date.and_time(time);
+    let next = same + Duration::days(1);
+    if distance(next) < distance(same) {
+        next
+    } else {
+        same
+    }
+}
+
+/// A timed request's excused window on the branch's wall clock, resolved on
+/// the shift it is for (the named one, else the one its time falls in): a
+/// late arrival runs from the shift's start to the arrival, an early
+/// departure from the departure to the shift's end, an excuse between its
+/// two times on the shift's side of midnight. `None` when no shift answers
+/// (the database then compares `on_date + time`, as before).
+fn request_window(
+    shifts: &[LocalShift],
+    kind: &str,
+    on_date: NaiveDate,
+    work_shift_id: Option<Uuid>,
+    from: Option<NaiveTime>,
+    to: Option<NaiveTime>,
+) -> Option<(NaiveDateTime, NaiveDateTime)> {
+    let key = match kind {
+        "late_arrival" => to?,
+        "early_departure" | "excuse" => from?,
+        _ => return None,
+    };
+    let shift = match work_shift_id {
+        Some(id) => shifts.iter().find(|s| s.id == id)?,
+        None => shifts.iter().find(|s| {
+            let at = place(s, on_date, key);
+            at >= s.start && at <= s.end
+        })?,
+    };
+    Some(match kind {
+        "late_arrival" => (shift.start, place(shift, on_date, to?).max(shift.start)),
+        "early_departure" => (place(shift, on_date, from?).min(shift.end), shift.end),
+        _ => {
+            let f = place(shift, on_date, from?);
+            let mut t = place(shift, on_date, to?);
+            if t <= f {
+                t = f.date().and_time(to?);
+                if t <= f {
+                    t += Duration::days(1);
+                }
+            }
+            (f, t)
+        }
+    })
 }
 
 // ── The classifier's input ────────────────────────────────────
@@ -497,7 +618,7 @@ pub(crate) async fn day_adjustments(
         r#"
         SELECT r.kind, r.is_half_day, r.leave_half, r.work_shift_id,
                COALESCE(r.is_paid, lt.is_paid) AS is_paid,
-               (r.kind = 'excuse' AND r.end_date IS NOT DISTINCT FROM r.on_date + 1) AS crosses,
+               COALESCE(r.kind = 'excuse' AND r.end_date = r.on_date + 1, false) AS crosses,
                ($2::date + r.from_time) AT TIME ZONE $3     AS from0,
                ($2::date + 1 + r.from_time) AT TIME ZONE $3 AS from1,
                ($2::date + r.to_time) AT TIME ZONE $3       AS to0,
@@ -588,32 +709,17 @@ pub(crate) async fn day_adjustments(
 /// changed by a request or a manual attendance edit (RQ-4, AT-7): after
 /// approval the fix goes into the next month. Every day of `[from, to]` is
 /// checked, so a leave can't reach back into a closed month through its end.
+///
+/// A thin delegate to THE closed-month check, `period_lock` (409
+/// `PERIOD_CLOSED`), so requests, attendance edits and pay lines answer alike.
 pub(crate) async fn require_open_month(
     pool: &PgPool,
     org_id: Uuid,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<(), AppError> {
-    let closed: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM payroll_periods WHERE org_id = $1 \
-            AND start_date <= $3 AND end_date >= $2 \
-            AND status IN ('generated', 'paid', 'closed'))",
-    )
-    .bind(org_id)
-    .bind(from)
-    .bind(to.max(from))
-    .fetch_one(pool)
-    .await?;
-    if closed {
-        return Err(AppError::Coded {
-            status: 409,
-            code: "MONTH_CLOSED",
-            reason: "That month's payroll is already approved — it can't change now. \
-                     Fix it in next month's pay instead."
-                .into(),
-        });
-    }
-    Ok(())
+    crate::staff::period_lock::assert_range_open(pool, org_id, from, to.max(from), "this change")
+        .await
 }
 
 // ── Who decides (RQ-5) ────────────────────────────────────────
@@ -716,6 +822,54 @@ async fn enrich(pool: &PgPool, rows: &mut [StaffRequest]) -> Result<(), AppError
     Ok(())
 }
 
+/// Fill `is_own` / `can_decide` for the caller, with the same checks
+/// [`decide_request`] makes, so no client guesses them.
+async fn mark_for_caller(
+    pool: &PgPool,
+    org_id: Uuid,
+    claims: Option<&Claims>,
+    my_employee: Option<Uuid>,
+    rows: &mut [StaffRequest],
+) -> Result<(), AppError> {
+    let mut seen: HashMap<Uuid, (bool, bool)> = HashMap::new();
+    for r in rows.iter_mut() {
+        let (own, may) = match seen.get(&r.employee_id) {
+            Some(v) => *v,
+            None => {
+                let subject = access::subject(pool, org_id, r.employee_id).await?;
+                let own =
+                    my_employee == Some(r.employee_id) || claims.is_some_and(|c| subject.is(c));
+                let may = match claims {
+                    Some(c) if !own => {
+                        access::require_for(pool, c, Cap::HrLeaveEdit, &subject)
+                            .await
+                            .is_ok()
+                            && match subject.user_id {
+                                Some(user) if is_decider(pool, Some(user)).await? => {
+                                    crate::permissions::guard::require_dominance(
+                                        pool,
+                                        c,
+                                        user,
+                                        Cap::HrLeaveEdit,
+                                    )
+                                    .await
+                                    .is_ok()
+                                }
+                                _ => true,
+                            }
+                    }
+                    _ => false,
+                };
+                seen.insert(r.employee_id, (own, may));
+                (own, may)
+            }
+        };
+        r.is_own = own;
+        r.can_decide = may && r.status == "pending";
+    }
+    Ok(())
+}
+
 // ── Requests CRUD ─────────────────────────────────────────────
 
 async fn insert_request(
@@ -774,15 +928,67 @@ async fn insert_request(
         }
     }
 
-    // `staff_requests_no_overlap` and `staff_requests_one_correction` are the
+    // A correction that names a shift instead of a record (RQ-9): the shift
+    // must be the person's, rostered that day and already started. If the
+    // day has a record for it by now, the correction fixes that record.
+    let mut record_id = body.attendance_record_id;
+    let mut shift_id = body.work_shift_id;
+    let needs_shifts = matches!(
+        body.kind.as_str(),
+        "late_arrival" | "early_departure" | "excuse"
+    ) || (body.kind == "correction" && record_id.is_none());
+    let shifts = if needs_shifts {
+        local_shifts(pool, employee_id, body.on_date).await?
+    } else {
+        Vec::new()
+    };
+    if body.kind == "correction" {
+        if record_id.is_some() {
+            shift_id = None;
+        } else if let Some(shift) = shift_id {
+            if !shifts.iter().any(|s| s.id == shift) {
+                return Err(AppError::BadRequest(
+                    "That shift isn't on your roster that day".into(),
+                ));
+            }
+            // Nobody corrects a shift that hasn't started yet.
+            if shifts.iter().any(|s| s.id == shift && s.start > s.now) {
+                return Err(AppError::BadRequest("That shift hasn't started yet".into()));
+            }
+            record_id = sqlx::query_scalar(
+                "SELECT id FROM attendance_records \
+                  WHERE employee_id = $1 AND business_date = $2 AND work_shift_id = $3 \
+                    AND covered_employee_id IS NULL",
+            )
+            .bind(employee_id)
+            .bind(body.on_date)
+            .bind(shift)
+            .fetch_optional(pool)
+            .await?;
+            if record_id.is_some() {
+                shift_id = None;
+            }
+        }
+    }
+    let window = request_window(
+        &shifts,
+        &body.kind,
+        body.on_date,
+        body.work_shift_id,
+        body.from_time,
+        body.to_time,
+    );
+
+    // `staff_requests_no_overlap` and the one-live-correction indexes are the
     // arbiters: a violation comes back as a DB error, mapped to the right 409
     // message in `AppError::from`.
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO staff_requests \
              (org_id, employee_id, kind, on_date, end_date, from_time, to_time, \
               is_half_day, leave_half, work_shift_id, title, location, \
-              attendance_record_id, reason) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, FALSE), $9, $10, $11, $12, $13, $14) \
+              attendance_record_id, reason, window_from, window_to) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, FALSE), $9, $10, $11, $12, $13, $14, \
+                 $15, $16) \
          RETURNING id",
     )
     .bind(org_id)
@@ -794,11 +1000,13 @@ async fn insert_request(
     .bind(body.to_time)
     .bind(body.is_half_day)
     .bind(shape.leave_half)
-    .bind(body.work_shift_id)
+    .bind(shift_id)
     .bind(shape.title)
     .bind(clean(body.location.as_ref()))
-    .bind(body.attendance_record_id)
+    .bind(record_id)
     .bind(clean(body.reason.as_ref()))
+    .bind(window.map(|w| w.0))
+    .bind(window.map(|w| w.1))
     .fetch_one(pool)
     .await?;
 
@@ -916,6 +1124,11 @@ pub async fn list_requests(
     .fetch_all(pool.get_ref())
     .await?;
     enrich(pool.get_ref(), &mut rows).await?;
+    let me: Option<Uuid> = req
+        .extensions()
+        .get::<StaffPrincipal>()
+        .map(|m| m.employee_id);
+    mark_for_caller(pool.get_ref(), org_id, Some(&claims), me, &mut rows).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -949,6 +1162,9 @@ pub async fn create_request_admin(
         body.is_paid,
     )
     .await?;
+    let mut rows = [row];
+    mark_for_caller(pool.get_ref(), org_id, Some(&claims), None, &mut rows).await?;
+    let [row] = rows;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -973,6 +1189,9 @@ pub async fn create_my_request(
     // A linked, active manager acts through their account (`caller`).
     let claims: Option<Claims> = req.extensions().get::<Claims>().cloned();
     let row = after_filing(pool, org_id, claims.as_ref(), &subject, row, body.is_paid).await?;
+    let mut rows = [row];
+    mark_for_caller(pool, org_id, None, Some(employee_id), &mut rows).await?;
+    let [row] = rows;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -989,6 +1208,9 @@ pub async fn my_requests(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
     .fetch_all(pool.get_ref())
     .await?;
     enrich(pool.get_ref(), &mut rows).await?;
+    for r in rows.iter_mut() {
+        r.is_own = true;
+    }
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -1002,10 +1224,11 @@ struct Existing {
     from_time: Option<NaiveTime>,
     to_time: Option<NaiveTime>,
     attendance_record_id: Option<Uuid>,
+    work_shift_id: Option<Uuid>,
 }
 
 const EXISTING_COLS: &str = "employee_id, kind, on_date, end_date, status, from_time, to_time, \
-     attendance_record_id";
+     attendance_record_id, work_shift_id";
 
 fn check_transition(existing: &str, decision: &str) -> Result<(), AppError> {
     if existing == decision {
@@ -1161,7 +1384,10 @@ pub async fn decide_request(
         )
         .await;
     }
-    let row = load_request(pool, *id).await?;
+    let mut rows = [load_request(pool, *id).await?];
+    let my_employee = me.as_ref().map(|m| m.employee_id);
+    mark_for_caller(pool, org_id, claims.as_ref(), my_employee, &mut rows).await?;
+    let [row] = rows;
     Ok(HttpResponse::Ok().json(row))
 }
 
@@ -1233,11 +1459,25 @@ async fn apply_decision(
     tx.commit().await?;
 
     // ── An approved correction rewrites the punch ───────────────
-    if decision == "approved"
-        && locked.kind == "correction"
-        && let Some(record_id) = locked.attendance_record_id
-        && let Err(e) = apply_correction(pool, org_id, &locked, record_id, actor).await
-    {
+    // A correction of a shift nobody clocked writes that shift's record
+    // first (RQ-9), and from then on points at it.
+    let record = if decision == "approved" && locked.kind == "correction" {
+        match (locked.attendance_record_id, locked.work_shift_id) {
+            (Some(r), _) => Some(Ok(r)),
+            (None, Some(shift)) => {
+                Some(record_for_shift(pool, org_id, id, &locked, shift, actor).await)
+            }
+            (None, None) => None,
+        }
+    } else {
+        None
+    };
+    let applied = match record {
+        Some(Ok(record_id)) => apply_correction(pool, org_id, &locked, record_id, actor).await,
+        Some(Err(e)) => Err(e),
+        None => Ok(()),
+    };
+    if let Err(e) = applied {
         sqlx::query(
             "UPDATE staff_requests SET status = $2, decided_by = NULL, decided_at = NULL, \
                  decision_note = NULL, updated_at = now() \
@@ -1264,6 +1504,77 @@ async fn apply_decision(
         .await?;
     }
     Ok(())
+}
+
+/// The record an approved correction of an unclocked shift writes (RQ-9):
+/// the rostered shift of that day, as the sweep would have written it but
+/// set by a person, so a manager's earlier deletion of the day doesn't hide
+/// it. If the day got a record meanwhile (the sweep's absence), that one.
+async fn record_for_shift(
+    pool: &PgPool,
+    org_id: Uuid,
+    request_id: Uuid,
+    request: &Existing,
+    shift_id: Uuid,
+    actor: Option<Uuid>,
+) -> Result<Uuid, AppError> {
+    let Some(branch) = request_branch(pool, request.employee_id, request.on_date).await? else {
+        return Err(AppError::Conflict(
+            "That shift is no longer on the roster".into(),
+        ));
+    };
+    let tz = crate::staff::branch_timezone(pool, branch).await?;
+    let shift = crate::staff::schedules::resolve_shifts_for(
+        pool,
+        request.employee_id,
+        request.on_date,
+        &tz,
+    )
+    .await?
+    .into_iter()
+    .find(|s| s.work_shift_id == shift_id)
+    .ok_or_else(|| AppError::Conflict("That shift is no longer on the roster".into()))?;
+    sqlx::query(
+        "INSERT INTO attendance_records \
+             (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
+              scheduled_start_at, scheduled_end_at, is_manual, created_by, edit_reason) \
+         VALUES ($1, $2, $3, $4, $5, 'absent', $6, $7, FALSE, $8, \
+                 'Written by an approved punch correction') \
+         ON CONFLICT (employee_id, business_date, \
+                      COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
+            WHERE covered_employee_id IS NULL \
+         DO NOTHING",
+    )
+    .bind(org_id)
+    .bind(request.employee_id)
+    .bind(shift.branch_id.unwrap_or(branch))
+    .bind(shift_id)
+    .bind(request.on_date)
+    .bind(shift.scheduled_start_at)
+    .bind(shift.scheduled_end_at)
+    .bind(actor)
+    .execute(pool)
+    .await?;
+    let record_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM attendance_records \
+          WHERE employee_id = $1 AND business_date = $2 AND work_shift_id = $3 \
+            AND covered_employee_id IS NULL",
+    )
+    .bind(request.employee_id)
+    .bind(request.on_date)
+    .bind(shift_id)
+    .fetch_one(pool)
+    .await?;
+    // From now on the request fixes that record (and the one-live-correction
+    // rule per record applies).
+    sqlx::query(
+        "UPDATE staff_requests SET attendance_record_id = $2, updated_at = now() WHERE id = $1",
+    )
+    .bind(request_id)
+    .bind(record_id)
+    .execute(pool)
+    .await?;
+    Ok(record_id)
 }
 
 /// Write an approved correction's proposed times to the record, in the

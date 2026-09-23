@@ -115,7 +115,8 @@ impl From<sqlx::Error> for AppError {
                 Some("staff_requests_no_overlap") => {
                     AppError::Conflict("You already have a request like this for that time.".into())
                 }
-                Some("staff_requests_live_correction_unique") => {
+                Some("staff_requests_live_correction_unique")
+                | Some("staff_requests_live_shift_correction_unique") => {
                     AppError::Conflict("This shift already has a correction waiting.".into())
                 }
                 _ => AppError::Db(other),

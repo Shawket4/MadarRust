@@ -89,9 +89,16 @@ where
     Ok(())
 }
 
+/// 409 with the machine code `PERIOD_CLOSED`, so every client branches on
+/// one code whichever handler refused (the rules module's month guard
+/// delegates here too).
 fn closed(what: &str, day: NaiveDate) -> AppError {
-    AppError::Conflict(format!(
-        "PERIOD_CLOSED: that month's payroll is approved — {what} dated {day} can't change it. \
-         Add it to the next open month instead."
-    ))
+    AppError::Coded {
+        status: 409,
+        code: "PERIOD_CLOSED",
+        reason: format!(
+            "PERIOD_CLOSED: that month's payroll is approved — {what} dated {day} can't change it. \
+             Add it to the next open month instead."
+        ),
+    }
 }
