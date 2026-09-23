@@ -847,7 +847,7 @@ pub(crate) async fn mint_ticket_ref(
     Ok(format!(
         "T-{}-{}-{:04}",
         branch_code,
-        biz_date.format("%y%m%d"),
+        madar_time::yymmdd(biz_date),
         seq
     ))
 }

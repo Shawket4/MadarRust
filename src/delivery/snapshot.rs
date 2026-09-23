@@ -613,7 +613,7 @@ pub async fn apply_snapshot(
     let order_ref = format!(
         "{}-{}-{:04}",
         branch_code,
-        biz_date.format("%y%m%d"),
+        madar_time::yymmdd(biz_date),
         ref_seq
     );
 

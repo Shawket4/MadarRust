@@ -1735,7 +1735,7 @@ pub async fn create_delivery_order(
     .bind(biz_date)
     .fetch_one(&mut *tx)
     .await?;
-    let delivery_ref = format!("D-{}-{}-{:04}", branch_code, biz_date.format("%y%m%d"), seq);
+    let delivery_ref = format!("D-{}-{}-{:04}", branch_code, madar_time::yymmdd(biz_date), seq);
 
     // WHO (design §2.4). A card's customer as is; otherwise the live customer
     // holding this phone, created on first contact. A matched customer's

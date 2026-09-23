@@ -4,7 +4,7 @@
 //! topic after commit, and messages the guest best-effort.
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use utoipa::{IntoParams, ToSchema};
@@ -26,27 +26,14 @@ use crate::sync::ActingContext;
 
 /// Bookings group by plain calendar date in the branch zone: the day runs
 /// local midnight → next local midnight, so a 00:30 booking belongs to the
-/// date it happens on. (Staff attendance keeps its own night-shift date.)
-fn local_midnight(tz: chrono_tz::Tz, date: NaiveDate) -> DateTime<Utc> {
-    // A DST gap can swallow midnight; step forward until the wall clock exists.
-    let mut t = date.and_time(NaiveTime::MIN);
-    for _ in 0..4 {
-        if let Some(d) = tz.from_local_datetime(&t).earliest() {
-            return d.with_timezone(&Utc);
-        }
-        t += Duration::minutes(30);
-    }
-    Utc.from_utc_datetime(&date.and_time(NaiveTime::MIN))
-}
-
+/// date it happens on. (Staff attendance keeps its own night-shift date.) A DST
+/// gap that swallows midnight starts the day at the first wall-clock time that
+/// exists. The rule is madar-shared's `madar_time::day_bounds`, the till's too.
 pub(crate) fn service_day_bounds(
     tz: chrono_tz::Tz,
     date: NaiveDate,
 ) -> (DateTime<Utc>, DateTime<Utc>) {
-    (
-        local_midnight(tz, date),
-        local_midnight(tz, date + Duration::days(1)),
-    )
+    madar_time::day_bounds(tz, date)
 }
 
 /// Today's calendar date in the branch zone.
@@ -57,6 +44,7 @@ pub(crate) fn service_today(tz: chrono_tz::Tz, now: DateTime<Utc>) -> NaiveDate 
 #[cfg(test)]
 mod day_tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn half_past_midnight_belongs_to_its_calendar_date() {
@@ -94,19 +82,6 @@ mod day_tests {
             service_today(tz, after),
             NaiveDate::from_ymd_opt(2026, 9, 11).unwrap()
         );
-    }
-
-    #[test]
-    fn dst_days_are_23_and_25_hours() {
-        let tz: chrono_tz::Tz = "Europe/London".parse().unwrap();
-        let (s, e) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 3, 29).unwrap());
-        assert_eq!(e - s, Duration::hours(23));
-        let (s, e) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 10, 25).unwrap());
-        assert_eq!(e - s, Duration::hours(25));
-        // Midnight itself skipped (Asia/Beirut springs forward at 00:00).
-        let tz: chrono_tz::Tz = "Asia/Beirut".parse().unwrap();
-        let (s, e) = service_day_bounds(tz, NaiveDate::from_ymd_opt(2026, 3, 29).unwrap());
-        assert_eq!(e - s, Duration::hours(23));
     }
 }
 

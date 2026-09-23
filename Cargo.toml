@@ -12,6 +12,9 @@ madar-authz        = { git = "https://github.com/Shawket4/madar-shared", tag = "
 # Money rules the till runs too (tax engine, refund split, staff pool/comp,
 # reward cover, POS-metrics average): one copy, in madar-shared, same tag.
 madar-money        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
+# Business-day rules the till runs too (week start, business date, YYMMDD,
+# day bounds with the DST-gap rule), same tag.
+madar-time         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"
