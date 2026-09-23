@@ -8,7 +8,7 @@
 //! date-set writers in [`crate::staff::days`], inside one transaction with the
 //! overlap check, and tells people only after it commits.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
@@ -24,7 +24,7 @@ use crate::errors::{AppError, AppErrorResponse};
 use crate::staff::access;
 use crate::staff::days::{self, Block};
 use crate::staff::principal::{Me, caller};
-use crate::staff::schedules::{DayTime, ResolvedShift, after_day_change, resolve_range};
+use crate::staff::schedules::{DayTime, ResolvedShift, resolve_range};
 
 pub use super::suggest::{
     __path_decide_suggestion, __path_fairness, __path_suggestions, DecideSuggestion, FairnessQuery,
@@ -149,6 +149,15 @@ pub struct HolidayView {
     pub decision: Option<String>,
 }
 
+/// A person's date that holds its own set (a date change), not the pattern.
+#[derive(Serialize, ToSchema, sqlx::FromRow, Clone)]
+pub struct DateSet {
+    pub employee_id: Uuid,
+    pub date: NaiveDate,
+    /// The date is a day off by date change (it holds no shift).
+    pub day_off: bool,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct RosterView {
     pub branch_id: Uuid,
@@ -166,6 +175,10 @@ pub struct RosterView {
     pub warnings: Vec<engine::LabourWarning>,
     /// The limits are not yet confirmed by a lawyer; say so beside them.
     pub limits_unconfirmed: bool,
+    /// The dates that hold their own set (a date change), a day off included:
+    /// the ones "back to the pattern" applies to.
+    #[serde(default)]
+    pub date_sets: Vec<DateSet>,
 }
 
 pub(crate) fn check_range(from: NaiveDate, to: NaiveDate) -> Result<(), AppError> {
@@ -396,6 +409,18 @@ pub async fn roster(
         .into_iter()
         .filter(|s| s.branch_id == query.branch_id)
         .collect();
+    let ids: Vec<Uuid> = staff.iter().map(|p| p.employee_id).collect();
+    let date_sets: Vec<DateSet> = sqlx::query_as(
+        "SELECT employee_id, on_date AS date, bool_and(work_shift_id IS NULL) AS day_off \
+           FROM staff_schedule_overrides \
+          WHERE employee_id = ANY($1) AND on_date BETWEEN $2 AND $3 \
+          GROUP BY employee_id, on_date ORDER BY on_date, employee_id",
+    )
+    .bind(&ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool)
+    .await?;
     Ok(HttpResponse::Ok().json(RosterView {
         branch_id: query.branch_id,
         from: query.from,
@@ -411,6 +436,7 @@ pub async fn roster(
         holidays,
         warnings,
         limits_unconfirmed: true,
+        date_sets,
     }))
 }
 
@@ -896,7 +922,9 @@ pub async fn decide_claim(
         .await?;
         days::check_overlaps(&mut tx, claimer, on_date, on_date).await?;
         tx.commit().await?;
-        after_day_change(pool, org_id, claimer, on_date).await?;
+        // Marked as changed; the claim's own notice tells them.
+        days::mark_changed_and_tell(pool, org_id, &BTreeSet::from([(claimer, on_date)]), false)
+            .await?;
         notify(
             pool,
             org_id,
@@ -1467,10 +1495,14 @@ pub async fn decide_swap(
     }
     tx.commit().await?;
     if body.approve {
-        after_day_change(pool, org_id, s.requester_id, s.requester_date).await?;
-        after_day_change(pool, org_id, s.requester_id, s.peer_date).await?;
-        after_day_change(pool, org_id, s.peer_id, s.peer_date).await?;
-        after_day_change(pool, org_id, s.peer_id, s.requester_date).await?;
+        // Marked as changed; the approval notice below tells them.
+        let touched = BTreeSet::from([
+            (s.requester_id, s.requester_date),
+            (s.requester_id, s.peer_date),
+            (s.peer_id, s.peer_date),
+            (s.peer_id, s.requester_date),
+        ]);
+        days::mark_changed_and_tell(pool, org_id, &touched, false).await?;
     }
     for who in [s.requester_id, s.peer_id] {
         notify(

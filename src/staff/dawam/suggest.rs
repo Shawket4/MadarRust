@@ -591,6 +591,7 @@ impl Problem {
     /// proposal to another person, or swap two proposals' people, whenever
     /// the objective (candidate scores − late-shift spread) improves.
     /// Deterministic order, a time and move budget.
+    #[allow(clippy::needless_range_loop)] // props[i] is replaced in place
     fn improve(&self, board: &mut Board, props: &mut [Proposal]) {
         let started = Instant::now();
         let mut moves = 0usize;
@@ -1121,12 +1122,14 @@ async fn pattern_updates(
     let ids: Vec<Uuid> = staff.iter().map(|p| p.employee_id).collect();
     // (employee, weekday, shift or null = off) edited identically on each of the
     // 4 weeks before — and the ONLY change that date (a split day is not a
-    // single-shift pattern).
+    // single-shift pattern). A swap or a claimed open shift is a trade between
+    // colleagues, not what the manager wants the week to be: it doesn't count.
     let rows: Vec<(Uuid, i32, Option<Uuid>)> = sqlx::query_as(
         "SELECT employee_id, EXTRACT(DOW FROM on_date)::int, work_shift_id \
            FROM staff_schedule_overrides o \
           WHERE employee_id = ANY($1) AND on_date >= $2 - 28 AND on_date < $2 \
             AND start_time IS NULL \
+            AND COALESCE(o.reason, '') NOT IN ('Swap', 'Open shift claimed') \
             AND (SELECT COUNT(*) FROM staff_schedule_overrides x \
                   WHERE x.employee_id = o.employee_id AND x.on_date = o.on_date) = 1 \
           GROUP BY 1, 2, 3 HAVING COUNT(DISTINCT on_date) = 4",
@@ -1834,4 +1837,257 @@ pub async fn fairness_audits(
         })
         .collect();
     Ok(HttpResponse::Ok().json(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(h: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(h, 0, 0).unwrap()
+    }
+
+    fn person(name: &str, gender: Option<&str>, pref: Option<&str>) -> RosterPerson {
+        RosterPerson {
+            employee_id: Uuid::new_v4(),
+            name: name.into(),
+            gender: gender.map(Into::into),
+            pref_time: pref.map(Into::into),
+            cant_work_days: Vec::new(),
+            department_id: None,
+            prefs_set_by: "employee".into(),
+        }
+    }
+
+    fn block(name: &str, start: NaiveTime, end: NaiveTime, days: &[i16]) -> WorkShiftBrief {
+        WorkShiftBrief {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            branch_id: None,
+            start_time: start,
+            end_time: end,
+            crosses_midnight: end <= start,
+            grace_minutes: 15,
+            valid_days: days.to_vec(),
+            day_times: Vec::new(),
+        }
+    }
+
+    /// A Saturday.
+    fn week() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, 3).unwrap()
+    }
+
+    fn problem(staff: Vec<RosterPerson>, shifts: Vec<WorkShiftBrief>) -> Problem {
+        let night = (t(22), t(6));
+        let late = shifts
+            .iter()
+            .map(|w| engine::is_late(w.start_time, w.end_time, w.crosses_midnight, night))
+            .collect();
+        Problem {
+            week: week(),
+            tz: chrono_tz::UTC,
+            staff,
+            shifts,
+            late,
+            limits: engine::Limits {
+                day: 8 * 60,
+                week: 48 * 60,
+                presence: 10 * 60,
+                rest: 12 * 60,
+            },
+            gender_mode: "soft".into(),
+            spans: HashMap::new(),
+            by_day: HashMap::new(),
+            pattern_need: HashMap::new(),
+            need: HashMap::new(),
+            leave: HashSet::new(),
+            fits: HashMap::new(),
+            frozen: false,
+            reliability: HashMap::new(),
+            late_history: HashMap::new(),
+            usual: HashSet::new(),
+            decided: HashSet::new(),
+        }
+    }
+
+    fn span(p: &Problem, date: NaiveDate, shift: usize) -> engine::Span {
+        p.slot(date, shift).unwrap().span
+    }
+
+    #[test]
+    fn a_block_is_offered_only_on_its_days_at_that_days_times() {
+        let all: Vec<i16> = (0..7).collect();
+        let mut brunch = block("Brunch", t(10), t(14), &[6, 0, 1, 2, 3, 4]);
+        brunch.day_times.push(crate::staff::schedules::DayTime {
+            day_of_week: 0,
+            start_time: t(11),
+            end_time: t(15),
+        });
+        let staff = vec![person("Amal", None, None)];
+        let mut p = problem(staff, vec![brunch, block("Day", t(8), t(12), &all)]);
+        let fri = week() + Duration::days(6);
+        let sun = week() + Duration::days(1);
+        p.pattern_need.insert((fri, 0), 1);
+        p.pattern_need.insert((sun, 0), 1);
+        let out = p.solve();
+        assert!(out.iter().all(|s| s.date != fri), "not a Friday shift");
+        let on_sun = out.iter().find(|s| s.date == sun).unwrap();
+        assert_eq!(
+            (on_sun.start_time, on_sun.end_time),
+            (Some(t(11)), Some(t(15)))
+        );
+    }
+
+    #[test]
+    fn a_second_shift_that_day_needs_a_two_hour_gap() {
+        let all: Vec<i16> = (0..7).collect();
+        let staff = vec![person("Amal", None, None)];
+        let mut p = problem(
+            staff,
+            vec![
+                block("Morning", t(8), t(11), &all),
+                block("Lunch", t(12), t(15), &all),
+                block("Evening", t(13), t(16), &all),
+            ],
+        );
+        let d = week() + Duration::days(2);
+        let u = p.staff[0].employee_id;
+        p.spans.insert(u, vec![span(&p, d, 0)]);
+        p.by_day.insert((d, 0), vec![u]);
+        p.pattern_need.insert((d, 1), 1);
+        p.pattern_need.insert((d, 2), 1);
+        let out = p.solve();
+        // Lunch starts an hour after the morning ends: too close. Evening,
+        // two hours after: a split day.
+        assert!(!out.iter().any(|s| s.work_shift_id == p.shifts[1].id));
+        let ev = out
+            .iter()
+            .find(|s| s.work_shift_id == p.shifts[2].id)
+            .unwrap();
+        assert_eq!(ev.employee_id, u);
+        assert_eq!(ev.id, format!("add|{d}|{}|{u}", p.shifts[2].id));
+    }
+
+    #[test]
+    fn the_gender_default_decides_only_when_nothing_else_does_and_says_so() {
+        let all: Vec<i16> = (0..7).collect();
+        let d = week() + Duration::days(3);
+        let staff = vec![
+            person("Amal", Some("f"), None),
+            person("Bassem", Some("m"), None),
+        ];
+        let mut p = problem(staff, vec![block("Late", t(16), t(23), &all)]);
+        p.pattern_need.insert((d, 0), 1);
+        let out = p.solve();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].employee_name, "Bassem");
+        assert!(out[0].by_default, "the default decided it");
+        assert!(out[0].confidence <= 40);
+
+        // A stated preference outweighs it, and then it decided nothing.
+        let staff = vec![
+            person("Amal", Some("f"), Some("evening")),
+            person("Bassem", Some("m"), None),
+        ];
+        let mut p = problem(staff, vec![block("Late", t(16), t(23), &all)]);
+        p.pattern_need.insert((d, 0), 1);
+        let out = p.solve();
+        assert_eq!(out[0].employee_name, "Amal");
+        assert!(!out[0].by_default);
+
+        // Off: no default at all.
+        let staff = vec![
+            person("Amal", Some("f"), None),
+            person("Bassem", Some("m"), None),
+        ];
+        let mut p = problem(staff, vec![block("Late", t(16), t(23), &all)]);
+        p.gender_mode = "off".into();
+        p.pattern_need.insert((d, 0), 1);
+        let out = p.solve();
+        assert!(!out[0].by_default);
+        assert_eq!(
+            out[0].employee_name, "Amal",
+            "a tie goes to the staff order"
+        );
+    }
+
+    #[test]
+    fn a_labour_limit_is_never_broken_and_leave_and_cant_work_days_are_respected() {
+        let all: Vec<i16> = (0..7).collect();
+        let d = week() + Duration::days(3);
+        let tired = person("Amal", None, None);
+        let away = person("Bassem", None, None);
+        let mut busy = person("Cyrine", None, None);
+        busy.cant_work_days = vec![days::dow(d)];
+        let mut p = problem(
+            vec![tired, away, busy],
+            vec![block("Day", t(9), t(17), &all)],
+        );
+        let (a, b) = (p.staff[0].employee_id, p.staff[1].employee_id);
+        // Amal worked till 23:00 the night before: 12 h rest not met.
+        let before = d - Duration::days(1);
+        let late_before = engine::Span {
+            date: before,
+            start: before.and_time(t(15)).and_utc(),
+            end: before.and_time(t(23)).and_utc(),
+        };
+        p.spans.insert(a, vec![late_before]);
+        p.leave.insert((b, d));
+        p.pattern_need.insert((d, 0), 1);
+        let out = p.solve();
+        assert!(out.is_empty(), "nobody may take it: {out:?}");
+    }
+
+    #[test]
+    fn the_solve_is_deterministic_and_never_double_books() {
+        let all: Vec<i16> = (0..7).collect();
+        let staff: Vec<RosterPerson> = (0..6)
+            .map(|i| {
+                person(
+                    &format!("P{i}"),
+                    Some(if i % 2 == 0 { "f" } else { "m" }),
+                    None,
+                )
+            })
+            .collect();
+        let mut p = problem(
+            staff,
+            vec![
+                block("Morning", t(8), t(14), &all),
+                block("Evening", t(15), t(21), &all),
+                block("Night", t(22), t(6), &all),
+            ],
+        );
+        for i in 0..7 {
+            let d = week() + Duration::days(i);
+            for w in 0..3 {
+                p.pattern_need.insert((d, w), 1);
+            }
+        }
+        let a = p.solve();
+        let b = p.solve();
+        assert_eq!(a, b);
+        assert!(!a.is_empty());
+        // Nobody twice on one slot, and no one person's two shifts overlap.
+        let mut spans: HashMap<Uuid, Vec<engine::Span>> = HashMap::new();
+        for s in &a {
+            let w = p
+                .shifts
+                .iter()
+                .position(|w| w.id == s.work_shift_id)
+                .unwrap();
+            let sp = span(&p, s.date, w);
+            let mine = spans.entry(s.employee_id).or_default();
+            assert!(
+                mine.iter().all(|x| !(x.start < sp.end && sp.start < x.end)),
+                "overlap for {}",
+                s.employee_name
+            );
+            mine.push(sp);
+        }
+        for (u, list) in &spans {
+            assert!(engine::breaks(*u, list, &p.limits).is_empty(), "{list:?}");
+        }
+    }
 }

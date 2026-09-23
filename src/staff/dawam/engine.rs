@@ -337,6 +337,25 @@ mod tests {
     }
 
     #[test]
+    fn the_employee_side_of_learning_outweighs_the_managers() {
+        let u = Uuid::new_v4();
+        let sig = |value: f64, manager: bool| Signal {
+            employee_id: u,
+            late: true,
+            value,
+            age_days: 0.0,
+            manager,
+        };
+        // A manager keeps rejecting late shifts for them; they keep taking them.
+        let f = &learn(&[sig(-1.0, true), sig(1.0, false)])[&u];
+        assert!(f.score(true) > 0.0);
+        let only_manager = learn(&[sig(1.0, true)])[&u].score(true);
+        let only_employee = learn(&[sig(1.0, false)])[&u].score(true);
+        assert!(only_employee > only_manager);
+        assert!((only_employee / only_manager - EMPLOYEE_WEIGHT / MANAGER_WEIGHT).abs() < 1e-9);
+    }
+
+    #[test]
     fn learning_decays_and_freezes() {
         assert!((decay(56.0) - 0.5).abs() < 1e-9);
         let u = Uuid::from_u128(1);
