@@ -14,7 +14,13 @@
 //!   * `source = 'excused_unpaid'` — approved but unpaid time off inside a
 //!     shift: an unpaid excuse or early departure (RQ-7).
 //!
-//! ## Two properties this module must never lose
+//! The ladder and absence arithmetic are the same `rules` helpers
+//! `pricing::price_shift` uses (AT-9), under the BRANCH's rules (RU-2) — a
+//! branch override reaches the penalty. TODO(phase-b merge): fold the share
+//! maths below (split days, half-day leave, unpaid excused time) into
+//! `pricing::price_shift` so payroll and the estimate price a day identically.
+//!
+//! ## Three properties this module must never lose
 //!
 //! **Idempotent.** It runs at check-out, on every attendance correction, and on
 //! every nightly sweep. Running it twice must not dock anyone twice — hence the
@@ -25,6 +31,11 @@
 //! undo every act of judgement made during the day, which is worse than having no
 //! override feature at all — the manager would believe the waiver held.
 //!
+//! **An approved month is frozen.** A record dated inside an approved, paid or
+//! closed period is not re-priced (AD-10): its payslip is a snapshot. A
+//! correction of such a day changes the record, not the money; the manager
+//! adds a line to the next month.
+//!
 //! ## Approved requests suppress penalties
 //!
 //! An approved `late_arrival` moves the grace deadline, so the lateness the ladder
@@ -33,18 +44,14 @@
 //! of asking permission: the request removes the penalty at its source rather than
 //! generating one and cancelling it.
 
-use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgPool};
-use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::authz::Cap;
-use crate::errors::{AppError, AppErrorResponse};
-use crate::staff::{access, principal::caller, scope_org};
-use crate::staff::attendance::AttendanceSettings;
+use crate::errors::AppError;
+use crate::staff::attendance::{AttendanceSettings, load_settings};
+use crate::staff::period_lock;
 use crate::staff::rules::{
     self, AttendanceStatus, PayRates, absence_deduction_piastres, late_deduction_piastres,
     select_late_tier,
@@ -150,7 +157,10 @@ pub async fn recompute_for_day(
         day,
         "excused_unpaid",
         excused_amount,
-        &format!("Unpaid excused time: {} minutes", day.unpaid_excused_minutes),
+        &format!(
+            "Unpaid excused time: {} minutes",
+            day.unpaid_excused_minutes
+        ),
     )
     .await?;
 
@@ -229,7 +239,11 @@ async fn day_rostered_minutes(
         crate::staff::schedules::resolve_shifts_for(pool, employee_id, date, timezone).await?;
     let rostered: i64 = shifts
         .iter()
-        .map(|s| (s.scheduled_end_at - s.scheduled_start_at).num_minutes().max(0))
+        .map(|s| {
+            (s.scheduled_end_at - s.scheduled_start_at)
+                .num_minutes()
+                .max(0)
+        })
         .sum();
     let own_listed = own_shift.is_some_and(|id| shifts.iter().any(|s| s.work_shift_id == id));
     Ok(if own_listed {
@@ -244,7 +258,8 @@ async fn day_rostered_minutes(
 /// The path used by check-out, corrections, request decisions and the sweep,
 /// where the caller has a record id and nothing else. Employees with no salary
 /// on file price at zero rather than failing — an incomplete profile must not
-/// block a clock-out.
+/// block a clock-out. A record in an approved month is left exactly as it is
+/// (AD-10). The salary is the one in force ON THAT DAY (PAY-13).
 pub async fn recompute_record(
     pool: &PgPool,
     record_id: Uuid,
@@ -271,7 +286,10 @@ pub async fn recompute_record(
         "SELECT a.org_id, a.employee_id, a.branch_id, a.work_shift_id, a.business_date, \
                 a.status, a.covered_employee_id IS NOT NULL AS is_cover, a.late_minutes, \
                 a.scheduled_start_at, a.scheduled_end_at, a.check_in_at, a.check_out_at, \
-                p.base_salary_piastres \
+                COALESCE((SELECT h.base_salary_piastres FROM employee_salary_history h \
+                           WHERE h.employee_id = a.employee_id AND h.effective_from <= a.business_date \
+                           ORDER BY h.effective_from DESC LIMIT 1), p.base_salary_piastres) \
+                    AS base_salary_piastres \
            FROM attendance_records a \
            LEFT JOIN employees p ON p.id = a.employee_id \
           WHERE a.id = $1",
@@ -282,6 +300,18 @@ pub async fn recompute_record(
 
     let Some(row) = row else {
         return Ok(0);
+    };
+    // An approved month is a snapshot: the penalty rows stay as they were.
+    if period_lock::is_closed(pool, row.org_id, row.business_date).await? {
+        return Ok(0);
+    }
+    // Priced under the record's own branch's rules (RU-2).
+    let branch_settings;
+    let settings = if settings.branch_id == Some(row.branch_id) {
+        settings
+    } else {
+        branch_settings = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
+        &branch_settings
     };
     let scheduled_minutes = match (row.scheduled_start_at, row.scheduled_end_at) {
         (Some(s), Some(e)) => (e - s).num_minutes().max(1),
@@ -360,78 +390,4 @@ pub async fn recompute_record(
     };
     let mut conn = pool.acquire().await?;
     recompute_for_day(&mut conn, &day, settings).await
-}
-
-// ── Undoing a waiver (AT-7) ───────────────────────────────────
-
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct UnwaiveDeductionRequest {
-    /// Required: undoing a decision says why (AT-7, AT-10).
-    pub reason: String,
-}
-
-/// Take a waiver back: the deduction counts again, re-priced by its rule if it
-/// is an automatic one. Who, when and why are kept on the row. Allowed until
-/// the month's payroll is approved (AT-7), with the same right as waiving.
-#[utoipa::path(
-    patch, path = "/staff/payroll/deductions/{id}/unwaive", tag = "staff",
-    params(("id" = Uuid, Path, description = "Deduction ID")),
-    request_body = UnwaiveDeductionRequest,
-    responses((status = 204, description = "The waiver is undone"), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn unwaive_deduction(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    id: web::Path<Uuid>,
-    body: web::Json<UnwaiveDeductionRequest>,
-) -> Result<HttpResponse, AppError> {
-    let claims = caller(&req)?;
-    let org_id = scope_org(&req, &claims)?;
-    let pool = pool.get_ref();
-    access::gate(pool, &claims, org_id, Cap::HrPayrollEdit).await?;
-    let row: Option<(Uuid, NaiveDate, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT d.employee_id, d.effective_date, d.attendance_record_id, a.branch_id \
-           FROM payroll_deductions d \
-           LEFT JOIN attendance_records a ON a.id = d.attendance_record_id \
-          WHERE d.id = $1 AND d.org_id = $2",
-    )
-    .bind(*id)
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await?;
-    let Some((employee_id, date, record, branch)) = row else {
-        return Err(AppError::NotFound("Deduction not found".into()));
-    };
-    let subject = access::subject(pool, org_id, employee_id).await?;
-    access::require_for(pool, &claims, Cap::HrPayrollEdit, &subject).await?;
-    let reason = body.reason.trim();
-    if reason.is_empty() {
-        return Err(AppError::BadRequest(
-            "Say why the waiver is taken back".into(),
-        ));
-    }
-    crate::staff::requests::require_open_month(pool, org_id, date, date).await?;
-
-    let updated = sqlx::query(
-        "UPDATE payroll_deductions SET waived_at = NULL, waived_by = NULL, waive_reason = NULL, \
-             unwaived_at = now(), unwaived_by = $3, unwaive_reason = $4, updated_at = now() \
-          WHERE id = $1 AND org_id = $2 AND waived_at IS NOT NULL",
-    )
-    .bind(*id)
-    .bind(org_id)
-    .bind(claims.user_id_safe().ok())
-    .bind(reason)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    if updated == 0 {
-        return Err(AppError::Conflict("That deduction isn't waived.".into()));
-    }
-    // An automatic deduction is priced again by today's rule for its day.
-    if let Some(record) = record {
-        let settings = crate::staff::attendance::load_settings(pool, org_id, branch).await?;
-        recompute_record(pool, record, &settings).await?;
-    }
-    Ok(HttpResponse::NoContent().finish())
 }

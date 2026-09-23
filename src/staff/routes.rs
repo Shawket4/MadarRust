@@ -162,6 +162,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/advances/{id}/review",
                 web::patch().to(pay::review_advance),
             )
+            .route("/advances/record", web::post().to(pay::record_advance))
             .route(
                 "/expense-advances",
                 web::get().to(pay::list_expense_advances),
@@ -300,14 +301,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/requests/{id}/decision",
                 web::patch().to(requests::decide_request),
             )
-            // ── Payroll ──────────────────────────────────────────
+            // ── Payroll. The legacy creates (`POST /payroll/{bonuses,deductions}`,
+            //    `PATCH /payroll/advances/{id}/decision`) are retired: every pay
+            //    line and advance goes through the limits (`/adjustments`,
+            //    `/advances/{id}/review`, `/advances/record`). ─────────
             .route(
                 "/payroll/deductions",
                 web::get().to(payroll::list_deductions),
-            )
-            .route(
-                "/payroll/deductions",
-                web::post().to(payroll::create_deduction),
             )
             .route(
                 "/payroll/deductions/{id}",
@@ -323,10 +323,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route(
                 "/payroll/deductions/{id}/unwaive",
-                web::patch().to(crate::staff::penalties::unwaive_deduction),
+                web::patch().to(payroll::unwaive_deduction),
             )
+            .route("/payroll/audit", web::get().to(payroll::list_audit))
             .route("/payroll/bonuses", web::get().to(payroll::list_bonuses))
-            .route("/payroll/bonuses", web::post().to(payroll::create_bonus))
             .route(
                 "/payroll/bonuses/{id}",
                 web::delete().to(payroll::delete_bonus),
@@ -335,10 +335,6 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/payroll/advances",
                 web::post().to(payroll::create_advance_admin),
-            )
-            .route(
-                "/payroll/advances/{id}/decision",
-                web::patch().to(payroll::decide_advance),
             )
             .route("/payroll/periods", web::get().to(payroll::list_periods))
             .route("/payroll/periods", web::post().to(payroll::create_period))

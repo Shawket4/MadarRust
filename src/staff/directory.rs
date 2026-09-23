@@ -93,6 +93,11 @@ pub struct Employee {
     /// `cash` · `bank` · `wallet`
     pub pay_method: String,
     pub pay_account: Option<String>,
+    /// Paid through Dawam (the default). Off for someone who uses the app
+    /// and is rostered but is not paid here (an owner, say): the payroll
+    /// run, the estimate and the payslips skip them.
+    #[sqlx(default)]
+    pub on_payroll: bool,
     /// `morning` · `evening` · null
     pub pref_time: Option<String>,
     /// Days they can't work: 0 = Sunday … 6 = Saturday.
@@ -239,6 +244,10 @@ pub struct PutEmployeeRequest {
     pub pay_method: Option<String>,
     #[serde(default)]
     pub pay_account: Option<String>,
+    /// Paid through Dawam. Like the salary, ignored unless the caller has
+    /// `hr.payroll.edit` for every branch.
+    #[serde(default)]
+    pub on_payroll: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -471,6 +480,7 @@ const EMPLOYEE_SELECT: &str = r#"
            e.hire_date, e.termination_date, e.employment_status, e.base_salary_piastres,
            e.national_id, e.photo_url, e.emergency_contact_name, e.emergency_contact_phone,
            e.notes, e.gender, e.pay_method, e.pay_account, e.pref_time, e.cant_work_days,
+           e.on_payroll,
            COALESCE(ARRAY(SELECT eb.branch_id FROM employee_branches eb
                            WHERE eb.employee_id = e.id ORDER BY eb.assigned_at, eb.branch_id),
                     '{}') AS branch_ids,
@@ -818,7 +828,8 @@ pub async fn create_employee(
     if body.base_salary_piastres.is_some_and(|s| s < 0) {
         return Err(AppError::BadRequest("Salary cannot be negative".into()));
     }
-    let salary = if access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await? {
+    let may_edit_pay = access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await?;
+    let salary = if may_edit_pay {
         body.base_salary_piastres
     } else {
         None
@@ -982,11 +993,13 @@ pub async fn put_employee(
     if body.base_salary_piastres.is_some_and(|s| s < 0) {
         return Err(AppError::BadRequest("Salary cannot be negative".into()));
     }
-    let salary = if access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await? {
+    let may_edit_pay = access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await?;
+    let salary = if may_edit_pay {
         body.base_salary_piastres
     } else {
         None
     };
+    let on_payroll = if may_edit_pay { body.on_payroll } else { None };
     let name = match body.name.as_deref() {
         Some(n) => Some(trimmed_required(n, "name")?),
         None => None,
@@ -1015,6 +1028,7 @@ pub async fn put_employee(
             gender                  = COALESCE($19, gender),
             pay_method              = COALESCE($20, pay_method),
             pay_account             = COALESCE($21, pay_account),
+            on_payroll              = COALESCE($22, on_payroll),
             updated_at              = now()
         WHERE id = $1 AND org_id = $2
         "#,
@@ -1040,6 +1054,7 @@ pub async fn put_employee(
     .bind(blank_to_none(body.gender.clone()))
     .bind(blank_to_none(body.pay_method.clone()))
     .bind(blank_to_none(body.pay_account.clone()))
+    .bind(on_payroll)
     .execute(&mut *tx)
     .await?;
     if let Some(wanted) = &body.branch_ids {

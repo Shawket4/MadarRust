@@ -80,6 +80,7 @@ pub fn spawn(pool: PgPool) {
 /// One pass of the sweep (the tests drive it directly).
 #[doc(hidden)]
 pub async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+    open_pay_periods(pool).await?;
     close_forgotten_checkouts(pool).await?;
     close_unrostered(pool).await?;
     mark_absences(pool).await?;
@@ -126,6 +127,24 @@ pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), crate::errors::App
             record_id,
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// A pay period opens itself on the business's start day (PAY-1), whether
+/// or not anyone looks at payroll that day: the app's estimate and the
+/// dashboard read the same row.
+#[doc(hidden)]
+pub async fn open_pay_periods(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+    let orgs: Vec<(Uuid, i16, Option<String>)> = sqlx::query_as(&format!(
+        "SELECT o.id, COALESCE(s.period_start_day, 26),                 (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL                   ORDER BY b.created_at LIMIT 1)            FROM organizations o            LEFT JOIN attendance_settings s ON s.org_id = o.id AND s.branch_id IS NULL           WHERE {LIVE_ORG}"
+    ))
+    .fetch_all(pool)
+    .await?;
+    for (org_id, start_day, tz) in orgs {
+        let today = crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo")).await?;
+        crate::staff::dawam::pay::ensure_period_for(pool, org_id, today, start_day.max(1) as u32)
+            .await?;
     }
     Ok(())
 }

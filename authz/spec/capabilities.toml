@@ -2227,10 +2227,10 @@ risk = "money"
 defaults = "om"
 approval = true
 limits = ["max_amount"]
-en = "Add bonuses and deductions"
-ar = "إضافة مكافآت وخصومات"
-hint_en = "Up to the amount set here. Above it, the adjustment waits for someone with a higher limit, usually the owner."
-hint_ar = "لحد المبلغ المحدد هنا. فوقه، التعديل بيستنى حد عنده حد أعلى، غالبًا المالك."
+en = "Add bonuses"
+ar = "إضافة مكافآت"
+hint_en = "Up to the amount set here. Above it, the bonus waits for someone with a higher limit, usually the owner. Deductions have their own limit."
+hint_ar = "لحد المبلغ المحدد هنا. فوقه، المكافأة بتستنى حد عنده حد أعلى، غالبًا المالك. الخصومات ليها حد منفصل."
 
 [[cap]]
 id = 228
@@ -2364,6 +2364,25 @@ ar = "عرض قواعد الحضور والمرتبات"
 hint_en = "Read-only: the business's rules and the overrides of your branches. Changing them needs the owner."
 hint_ar = "للعرض بس: قواعد النشاط وتعديلات فروعك. تغييرها محتاج المالك."
 # --- end phase-b rules ---
+# --- phase-b payroll ---
+# AD-5: bonuses and deductions have SEPARATE limits. `hr.adjustments.create`
+# (227) keeps the bonus limit; this one carries the deduction limit. Id 245 is
+# deliberately away from the next free id so parallel Phase B agents do not
+# collide on ids.
+[[cap]]
+id = 245
+key = "hr.deductions.create"
+group = "hr"
+tier = "configurable"
+risk = "money"
+defaults = "om"
+approval = true
+limits = ["max_amount"]
+en = "Add deductions"
+ar = "إضافة خصومات"
+hint_en = "Up to the amount set here. Above it, the deduction waits for someone with a higher limit, usually the owner. Bonuses have their own limit."
+hint_ar = "لحد المبلغ المحدد هنا. فوقه، الخصم بيستنى حد عنده حد أعلى، غالبًا المالك. المكافآت ليها حد منفصل."
+# --- end phase-b payroll ---
 
 # ============================================================================
 # Role templates (Phase 7). `defaults` above IS the restaurant template for the
@@ -2386,6 +2405,7 @@ roles = ["org_admin", "branch_manager", "teller", "waiter", "kitchen"]
 
 [templates.restaurant.limits.branch_manager]
 "hr.adjustments.create" = { max_amount = 100000 }
+"hr.deductions.create" = { max_amount = 100000 }
 "hr.overtime.approve" = { max_amount = 100000 }
 "hr.advances.decide" = { max_percent = 50 }
 
@@ -2408,6 +2428,7 @@ remove = { teller = ["bookings.read", "bookings.edit"], branch_manager = ["booki
 
 [templates.cafe.limits.branch_manager]
 "hr.adjustments.create" = { max_amount = 100000 }
+"hr.deductions.create" = { max_amount = 100000 }
 "hr.overtime.approve" = { max_amount = 100000 }
 "hr.advances.decide" = { max_percent = 50 }
 

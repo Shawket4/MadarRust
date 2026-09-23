@@ -527,7 +527,11 @@ impl DayAdjustments {
                     }
                 }
             }
-            for r in self.early_departures.iter().filter(|r| mine(r.work_shift_id)) {
+            for r in self
+                .early_departures
+                .iter()
+                .filter(|r| mine(r.work_shift_id))
+            {
                 for c in r.candidates.iter().filter(|c| **c >= s && **c < e) {
                     if out.early_departure.is_none_or(|(cur, _)| *c < cur) {
                         out.early_departure = Some((*c, r.paid));
@@ -587,7 +591,12 @@ impl ShiftAdjustments {
     /// Clipped to the attendance window because an excuse that runs past
     /// check-out did not consume time the employee was being paid for anyway;
     /// crediting it would pay them for being absent twice over.
-    fn excused_minutes(&self, check_in: DateTime<Utc>, check_out: DateTime<Utc>, paid: bool) -> i64 {
+    fn excused_minutes(
+        &self,
+        check_in: DateTime<Utc>,
+        check_out: DateTime<Utc>,
+        paid: bool,
+    ) -> i64 {
         self.excuses
             .iter()
             .filter(|w| w.paid == paid)
@@ -706,9 +715,10 @@ pub fn derive(
             _ => 0,
         };
         let excused_head = match (adjustments.excused_until, scheduled_start_at) {
-            (Some(until), Some(start)) if adjustments.leave_minutes > 0 => {
-                (until - start).num_minutes().max(0).min(adjustments.leave_minutes)
-            }
+            (Some(until), Some(start)) if adjustments.leave_minutes > 0 => (until - start)
+                .num_minutes()
+                .max(0)
+                .min(adjustments.leave_minutes),
             _ => 0,
         };
         let owed = (span - excused_tail - excused_head).max(0);
@@ -743,34 +753,130 @@ struct RuleField {
 }
 
 const RULE_FIELDS: &[RuleField] = &[
-    RuleField { name: "late_deduction_tiers", default: "'[]'::jsonb", branch: true },
-    RuleField { name: "absence_deduction_days", default: "1.00", branch: true },
-    RuleField { name: "default_overtime_multiplier", default: "1.50", branch: true },
-    RuleField { name: "auto_checkout_buffer_minutes", default: "120", branch: true },
-    RuleField { name: "working_days_per_month", default: "30.00", branch: true },
-    RuleField { name: "require_geofence", default: "TRUE", branch: true },
-    RuleField { name: "excused_time_paid_default", default: "TRUE", branch: true },
-    RuleField { name: "period_start_day", default: "26::smallint", branch: false },
-    RuleField { name: "overtime_mode", default: "'off'", branch: true },
-    RuleField { name: "overtime_day_multiplier", default: "1.35", branch: true },
-    RuleField { name: "overtime_night_multiplier", default: "1.70", branch: true },
-    RuleField { name: "holiday_multiplier", default: "2.00", branch: true },
-    RuleField { name: "advance_cap_percent", default: "50", branch: false },
-    RuleField { name: "half_day_leave_counts", default: "'half_shift'", branch: true },
-    RuleField { name: "night_start", default: "'22:00'::time", branch: true },
-    RuleField { name: "night_end", default: "'06:00'::time", branch: true },
-    RuleField { name: "gender_mode", default: "'soft'", branch: false },
-    RuleField { name: "limit_day_hours", default: "8", branch: true },
-    RuleField { name: "limit_week_hours", default: "48", branch: true },
-    RuleField { name: "limit_presence_hours", default: "10", branch: true },
-    RuleField { name: "limit_rest_hours", default: "12", branch: true },
-    RuleField { name: "limit_overtime_day_hours", default: "2", branch: true },
-    RuleField { name: "orders_per_staff", default: "12", branch: true },
+    RuleField {
+        name: "late_deduction_tiers",
+        default: "'[]'::jsonb",
+        branch: true,
+    },
+    RuleField {
+        name: "absence_deduction_days",
+        default: "1.00",
+        branch: true,
+    },
+    RuleField {
+        name: "default_overtime_multiplier",
+        default: "1.50",
+        branch: true,
+    },
+    RuleField {
+        name: "auto_checkout_buffer_minutes",
+        default: "120",
+        branch: true,
+    },
+    RuleField {
+        name: "working_days_per_month",
+        default: "30.00",
+        branch: true,
+    },
+    RuleField {
+        name: "require_geofence",
+        default: "TRUE",
+        branch: true,
+    },
+    RuleField {
+        name: "excused_time_paid_default",
+        default: "TRUE",
+        branch: true,
+    },
+    RuleField {
+        name: "period_start_day",
+        default: "26::smallint",
+        branch: false,
+    },
+    RuleField {
+        name: "overtime_mode",
+        default: "'off'",
+        branch: true,
+    },
+    RuleField {
+        name: "overtime_day_multiplier",
+        default: "1.35",
+        branch: true,
+    },
+    RuleField {
+        name: "overtime_night_multiplier",
+        default: "1.70",
+        branch: true,
+    },
+    RuleField {
+        name: "holiday_multiplier",
+        default: "2.00",
+        branch: true,
+    },
+    RuleField {
+        name: "advance_cap_percent",
+        default: "50",
+        branch: false,
+    },
+    RuleField {
+        name: "half_day_leave_counts",
+        default: "'half_shift'",
+        branch: true,
+    },
+    RuleField {
+        name: "night_start",
+        default: "'22:00'::time",
+        branch: true,
+    },
+    RuleField {
+        name: "night_end",
+        default: "'06:00'::time",
+        branch: true,
+    },
+    RuleField {
+        name: "gender_mode",
+        default: "'soft'",
+        branch: false,
+    },
+    RuleField {
+        name: "limit_day_hours",
+        default: "8",
+        branch: true,
+    },
+    RuleField {
+        name: "limit_week_hours",
+        default: "48",
+        branch: true,
+    },
+    RuleField {
+        name: "limit_presence_hours",
+        default: "10",
+        branch: true,
+    },
+    RuleField {
+        name: "limit_rest_hours",
+        default: "12",
+        branch: true,
+    },
+    RuleField {
+        name: "limit_overtime_day_hours",
+        default: "2",
+        branch: true,
+    },
+    RuleField {
+        name: "orders_per_staff",
+        default: "12",
+        branch: true,
+    },
 ];
 
 /// The rules a branch may override, by name (the wire's field names).
 pub fn branch_rule_fields() -> Vec<&'static str> {
-    RULE_FIELDS.iter().filter(|f| f.branch).map(|f| f.name).collect()
+    RULE_FIELDS
+        .iter()
+        .filter(|f| f.branch)
+        .map(|f| f.name)
+        .collect()
 }
 
 /// `ARRAY['field', …]` of the branch row's non-NULL overridable columns.
@@ -780,7 +886,10 @@ fn overridden_sql(row: &str) -> String {
         .filter(|f| f.branch)
         .map(|f| format!("CASE WHEN {row}.{0} IS NOT NULL THEN '{0}' END", f.name))
         .collect();
-    format!("COALESCE(array_remove(ARRAY[{}]::text[], NULL), '{{}}'::text[])", parts.join(", "))
+    format!(
+        "COALESCE(array_remove(ARRAY[{}]::text[], NULL), '{{}}'::text[])",
+        parts.join(", ")
+    )
 }
 
 /// THE resolver (RU-2): the business's row, with a branch's overrides laid
@@ -937,7 +1046,14 @@ pub async fn delete_branch_rules(
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit).await?;
-    access::require_at(pool.get_ref(), &claims, org_id, Cap::HrRulesEdit, *branch_id).await?;
+    access::require_at(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        Cap::HrRulesEdit,
+        *branch_id,
+    )
+    .await?;
     sqlx::query("DELETE FROM attendance_settings WHERE org_id = $1 AND branch_id = $2")
         .bind(org_id)
         .bind(*branch_id)
@@ -1080,7 +1196,10 @@ pub async fn put_attendance_settings(
                 f.name
             )));
         }
-        if let Some(bad) = inherit.iter().find(|n| !branch_fields.contains(&n.as_str())) {
+        if let Some(bad) = inherit
+            .iter()
+            .find(|n| !branch_fields.contains(&n.as_str()))
+        {
             return Err(AppError::BadRequest(format!(
                 "'{bad}' is not a rule a branch can override"
             )));
@@ -1101,8 +1220,7 @@ pub async fn put_attendance_settings(
     // Saving the lateness ladder and the absence cost together is the RU-1
     // step that lets people clock in; a one-field save (the gender mode, a
     // limit) never does.
-    let saves_rules =
-        body.late_deduction_tiers.is_some() && body.absence_deduction_days.is_some();
+    let saves_rules = body.late_deduction_tiers.is_some() && body.absence_deduction_days.is_some();
 
     let fields: Vec<&RuleField> = RULE_FIELDS
         .iter()
@@ -2214,7 +2332,6 @@ pub async fn team_presence(
     Ok(HttpResponse::Ok().json(body))
 }
 
-
 #[utoipa::path(
     post, path = "/staff/attendance", tag = "staff",
     request_body = ManualRecordRequest,
@@ -2552,9 +2669,7 @@ async fn rederive(
     let (status, overridden) = match status_override {
         Some("derived") => (derived.status, false),
         Some(s) => (AttendanceStatus::parse(s)?, true),
-        None if existing.status_overridden => {
-            (AttendanceStatus::parse(&existing.status)?, true)
-        }
+        None if existing.status_overridden => (AttendanceStatus::parse(&existing.status)?, true),
         None => (derived.status, false),
     };
     let (notes, reason, editor, touched) = match human {

@@ -43,7 +43,9 @@ use crate::{
     errors::{AppError, AppErrorResponse},
     staff::{
         access,
-        attendance::{AttendanceSettings, DayAdjustments, ExcusedWindow, TimedRequest, WindowRequest},
+        attendance::{
+            AttendanceSettings, DayAdjustments, ExcusedWindow, TimedRequest, WindowRequest,
+        },
         principal::{Me, StaffPrincipal, caller},
         scope_org, validate_decision,
     },
@@ -315,11 +317,13 @@ async fn local_instant_near(
         return Ok(same);
     };
     let next = local_instant(pool, date + Duration::days(1), time, timezone).await?;
-    Ok(if (next - anchor).num_seconds().abs() < (same - anchor).num_seconds().abs() {
-        next
-    } else {
-        same
-    })
+    Ok(
+        if (next - anchor).num_seconds().abs() < (same - anchor).num_seconds().abs() {
+            next
+        } else {
+            same
+        },
+    )
 }
 
 /// Trim free text; a note of nothing but punctuation (the "." people type to
@@ -668,9 +672,11 @@ async fn paid_default_for(
     date: NaiveDate,
 ) -> Result<bool, AppError> {
     let branch = request_branch(pool, employee_id, date).await?;
-    Ok(crate::staff::attendance::load_settings(pool, org_id, branch)
-        .await?
-        .excused_time_paid_default)
+    Ok(
+        crate::staff::attendance::load_settings(pool, org_id, branch)
+            .await?
+            .excused_time_paid_default,
+    )
 }
 
 /// Fill the fields the server works out: who decides a pending request, and
@@ -1193,9 +1199,7 @@ async fn apply_decision(
         ("approved", "leave") => body_is_paid,
         ("approved", "excuse" | "early_departure") => Some(match body_is_paid {
             Some(paid) => paid,
-            None => {
-                paid_default_for(pool, org_id, existing.employee_id, existing.on_date).await?
-            }
+            None => paid_default_for(pool, org_id, existing.employee_id, existing.on_date).await?,
         }),
         _ => None,
     };
