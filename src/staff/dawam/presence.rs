@@ -10,7 +10,9 @@ use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::{branches_of, employee_name, notify, notify_managers, owners, user_name};
+use super::{
+    branches_of, employee_name, notify, notify_managers, notify_managers_once, owners, user_name,
+};
 use crate::authz::{Cap, Decision, Request as AuthzRequest};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::geo::osrm::{LatLng, haversine_meters};
@@ -66,12 +68,12 @@ pub(crate) async fn raise_flag(
 ) -> Result<bool, AppError> {
     // `xmax = 0` only on the row this statement inserted; an `ON CONFLICT
     // DO UPDATE` also reports one row, which is what re-notified every ping.
-    let inserted: Option<bool> = sqlx::query_scalar(
+    let row: Option<(Uuid, bool)> = sqlx::query_as(
         "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind, minutes_away) \
          VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (attendance_record_id, kind) WHERE resolution IS NULL AND attendance_record_id IS NOT NULL \
          DO UPDATE SET minutes_away = GREATEST(attendance_flags.minutes_away, EXCLUDED.minutes_away) \
-         RETURNING (xmax = 0)",
+         RETURNING id, (xmax = 0)",
     )
     .bind(org_id)
     .bind(employee_id)
@@ -81,10 +83,13 @@ pub(crate) async fn raise_flag(
     .bind(minutes_away)
     .fetch_optional(pool)
     .await?;
-    let opened = inserted.unwrap_or(false);
-    if opened {
+    let opened = row.map(|(_, inserted)| inserted).unwrap_or(false);
+    if let Some((flag, true)) = row {
+        // Once per flag (06 B7): the next ping updates the same open flag and
+        // must not push to every manager again; the notice is also keyed by the
+        // flag, so a repeat can never write or push twice.
         let name = employee_name(pool, employee_id).await;
-        notify_managers(
+        notify_managers_once(
             pool,
             org_id,
             branch_id,
@@ -92,6 +97,7 @@ pub(crate) async fn raise_flag(
             Some(employee_id),
             &format!("staff.n_flag_{kind}"),
             json!({ "name": name, "minutes": minutes_away }),
+            &format!("flag:{flag}"),
         )
         .await;
     }
