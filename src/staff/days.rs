@@ -125,6 +125,7 @@ async fn day_rows(
     .await?)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_row(
     conn: &mut PgConnection,
     org_id: Uuid,
@@ -489,6 +490,17 @@ pub(crate) async fn mark_changed(
     org_id: Uuid,
     changes: &BTreeSet<(Uuid, NaiveDate)>,
 ) -> Result<(), AppError> {
+    mark_changed_and_tell(pool, org_id, changes, true).await
+}
+
+/// [`mark_changed`], saying whether to tell: a swap or a claim decision
+/// sends its own notice, so the change is only marked.
+pub(crate) async fn mark_changed_and_tell(
+    pool: &PgPool,
+    org_id: Uuid,
+    changes: &BTreeSet<(Uuid, NaiveDate)>,
+    tell: bool,
+) -> Result<(), AppError> {
     let mut told: BTreeSet<Uuid> = BTreeSet::new();
     for &(employee_id, date) in changes {
         let published: bool = sqlx::query_scalar(
@@ -512,7 +524,7 @@ pub(crate) async fn mark_changed(
         .bind(date)
         .execute(pool)
         .await?;
-        if told.insert(employee_id) {
+        if tell && told.insert(employee_id) {
             notify(
                 pool,
                 org_id,

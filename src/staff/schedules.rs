@@ -75,6 +75,12 @@ pub struct WorkShift {
     pub half_day_threshold_minutes: Option<i32>,
     pub overtime_threshold_minutes: i32,
     pub overtime_multiplier: Decimal,
+    /// This block's own day-overtime rate; `None` = the branch's rules (RU-8).
+    #[schema(value_type = Option<f64>)]
+    pub ot_day_multiplier: Option<Decimal>,
+    /// This block's own night-overtime rate; `None` = the branch's rules.
+    #[schema(value_type = Option<f64>)]
+    pub ot_night_multiplier: Option<Decimal>,
     pub checkin_window_minutes: i32,
     pub is_active: bool,
     /// The weekdays the block may be rostered on (0 = Sunday … 6 = Saturday).
@@ -94,8 +100,8 @@ pub struct WorkShift {
 
 const WORK_SHIFT_COLS: &str = "id, org_id, branch_id, name, start_time, end_time, \
      crosses_midnight, grace_minutes, break_minutes, paid_break, half_day_threshold_minutes, \
-     overtime_threshold_minutes, overtime_multiplier, checkin_window_minutes, is_active, \
-     valid_days, created_at, updated_at";
+     overtime_threshold_minutes, overtime_multiplier, ot_day_multiplier, ot_night_multiplier, \
+     checkin_window_minutes, is_active, valid_days, created_at, updated_at";
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct ScheduleAssignment {
@@ -214,6 +220,15 @@ pub struct UpsertWorkShiftRequest {
     pub overtime_threshold_minutes: Option<i32>,
     #[serde(default)]
     pub overtime_multiplier: Option<Decimal>,
+    /// The block's own day-overtime rate (RU-8). Omit to keep it, null to go
+    /// back to the branch's rules.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<f64>, nullable)]
+    pub ot_day_multiplier: Option<Option<Decimal>>,
+    /// The block's own night-overtime rate. Omit to keep, null to clear.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<f64>, nullable)]
+    pub ot_night_multiplier: Option<Option<Decimal>>,
     #[serde(default)]
     pub checkin_window_minutes: Option<i32>,
     #[serde(default)]
@@ -574,6 +589,15 @@ pub async fn my_schedule(
 
 // ── Work shifts ───────────────────────────────────────────────
 
+/// `absent` → None, `null` → Some(None), value → Some(Some(v)).
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
 fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError> {
     let name = body.name.trim();
     if name.is_empty() {
@@ -611,12 +635,23 @@ fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError
             "overtime_multiplier must be positive".into(),
         ));
     }
-    if let Some(days) = &body.valid_days {
-        if days.is_empty() || days.iter().any(|d| !(0..=6).contains(d)) {
-            return Err(AppError::BadRequest(
-                "valid_days needs at least one day, 0 (Sunday) through 6 (Saturday)".into(),
-            ));
+    for (label, value) in [
+        ("ot_day_multiplier", body.ot_day_multiplier.flatten()),
+        ("ot_night_multiplier", body.ot_night_multiplier.flatten()),
+    ] {
+        // numeric(4,2): above zero, below 100.
+        if value.is_some_and(|v| v <= Decimal::ZERO || v >= Decimal::from(100)) {
+            return Err(AppError::BadRequest(format!(
+                "{label} must be above 0 and below 100"
+            )));
         }
+    }
+    if let Some(days) = &body.valid_days
+        && (days.is_empty() || days.iter().any(|d| !(0..=6).contains(d)))
+    {
+        return Err(AppError::BadRequest(
+            "valid_days needs at least one day, 0 (Sunday) through 6 (Saturday)".into(),
+        ));
     }
     if let Some(times) = &body.day_times {
         let mut seen = BTreeSet::new();
@@ -776,11 +811,12 @@ pub async fn create_work_shift(
         INSERT INTO work_shifts (
             org_id, branch_id, name, start_time, end_time, grace_minutes, break_minutes,
             paid_break, half_day_threshold_minutes, overtime_threshold_minutes,
-            overtime_multiplier, checkin_window_minutes, is_active, valid_days
+            overtime_multiplier, checkin_window_minutes, is_active, valid_days,
+            ot_day_multiplier, ot_night_multiplier
         ) VALUES (
             $1, $2, $3, $4, $5, COALESCE($6, 15), COALESCE($7, 0),
             COALESCE($8, TRUE), $9, COALESCE($10, 15),
-            COALESCE($11, 1.50), COALESCE($12, 120), COALESCE($13, TRUE), $14
+            COALESCE($11, 1.50), COALESCE($12, 120), COALESCE($13, TRUE), $14, $15, $16
         ) RETURNING id
         "#,
     )
@@ -798,6 +834,8 @@ pub async fn create_work_shift(
     .bind(body.checkin_window_minutes)
     .bind(body.is_active)
     .bind(&valid_days)
+    .bind(body.ot_day_multiplier.flatten())
+    .bind(body.ot_night_multiplier.flatten())
     .fetch_one(&mut *tx)
     .await?;
     write_day_times(&mut tx, org_id, id, &day_times).await?;
@@ -870,7 +908,9 @@ pub async fn update_work_shift(
 
     let mut tx = pool.get_ref().begin().await?;
     // Taking a day away from a block that people are rostered on that day,
-    // by weekday or by date, would silently unroster them: move them first.
+    // by a weekday row naming it or by a future date, would silently unroster
+    // them: move them first. An every-day row means "on the block's days", so
+    // it follows the change, which is marked and told like any other (SC-4).
     let dropped: Vec<i16> = before
         .valid_days
         .iter()
@@ -926,6 +966,8 @@ pub async fn update_work_shift(
             checkin_window_minutes     = COALESCE($13, checkin_window_minutes),
             is_active                  = COALESCE($14, is_active),
             valid_days                 = $15,
+            ot_day_multiplier          = CASE WHEN $16 THEN $17 ELSE ot_day_multiplier END,
+            ot_night_multiplier        = CASE WHEN $18 THEN $19 ELSE ot_night_multiplier END,
             updated_at                 = now()
          WHERE id = $1 AND org_id = $2
         "#,
@@ -945,6 +987,10 @@ pub async fn update_work_shift(
     .bind(body.checkin_window_minutes)
     .bind(body.is_active)
     .bind(&valid_days)
+    .bind(body.ot_day_multiplier.is_some())
+    .bind(body.ot_day_multiplier.flatten())
+    .bind(body.ot_night_multiplier.is_some())
+    .bind(body.ot_night_multiplier.flatten())
     .execute(&mut *tx)
     .await?;
     write_day_times(&mut tx, org_id, *id, &day_times).await?;
