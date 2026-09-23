@@ -561,6 +561,10 @@ where
 /// side at one branch from contaminating each other's carryover; the branch
 /// fallback matters because 926 of the 932 tills in production carry no
 /// device_id at all, and those branches each ran a single drawer.
+///
+/// The device key is `COALESCE(.., false)`: for a device-less row `device_id =
+/// $2` is NULL, and Postgres sorts NULL FIRST in a DESC key — an older
+/// device-less close used to beat this device's own (madar-shared T2).
 async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     exec: E,
     branch_id: Uuid,
@@ -570,7 +574,7 @@ async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
         "SELECT closing_cash_declared FROM tills \
           WHERE branch_id = $1 AND status IN ('closed','force_closed') \
             AND closing_cash_declared IS NOT NULL \
-          ORDER BY ($2::uuid IS NOT NULL AND device_id = $2) DESC, opened_at DESC \
+          ORDER BY COALESCE(device_id = $2, false) DESC, opened_at DESC \
           LIMIT 1",
     )
     .bind(branch_id)
