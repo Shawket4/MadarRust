@@ -73580,6 +73580,13 @@
               "null"
             ],
             "description": "The till a `TILL_OPEN_AT_OTHER_BRANCH` / `TILL_OPEN_ELSEWHERE` refusal\nis about (`TillBrief`). Omitted everywhere else."
+          },
+          "vars": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The figures of a coded refusal (`CodedVars`), for the client's own\nwording. Omitted everywhere else."
           }
         }
       },
@@ -96395,6 +96402,7 @@
           "end_time",
           "crosses_midnight",
           "grace_minutes",
+          "checkin_window_minutes",
           "valid_days",
           "day_times"
         ],
@@ -96405,6 +96413,11 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "checkin_window_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How long before its start a check-in opens — the window the server\nenforces (CL-3), so the app says \"opens at\" the same time."
           },
           "crosses_midnight": {
             "type": "boolean"

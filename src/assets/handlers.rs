@@ -425,6 +425,7 @@ pub async fn top_up(
             code: Some("TOO_MANY_HASHES".into()),
             till: None,
             retry_after_seconds: None,
+            vars: None,
         }));
     }
     let org_id: Uuid = sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")

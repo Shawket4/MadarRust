@@ -1902,3 +1902,83 @@ async fn the_reports_read_the_clock_the_till_and_the_payslips(pool: PgPool) {
         403
     );
 }
+
+/// E2E (app B1/B2): a punch refusal carries a stable code and its figures, so
+/// an Arabic phone words it in Arabic (AT-13, CL-2, CL-3) instead of showing
+/// "Forbidden: You are 1201 m…"; and the context carries the check-in window
+/// the server enforces, so the app says "opens at" the same time.
+#[sqlx::test]
+async fn punch_refusals_carry_a_code_and_their_figures(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Shift times are the branch's wall clock.
+    let local: chrono::NaiveDateTime = sqlx::query_scalar(
+        "SELECT now() AT TIME ZONE COALESCE(b.timezone::text, 'Africa/Cairo') FROM branches b WHERE b.id = $1",
+    )
+    .bind(f.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let start = (local + Duration::hours(4)).time();
+    let end = (local + Duration::hours(8)).time();
+    if end < start || (local + Duration::hours(8)).date() != local.date() {
+        return; // skip the hours when the shift would run into tomorrow
+    }
+    let s = shift(&pool, &f, "Late", start, end).await;
+    every_day(&pool, &f, f.a, s).await;
+    let tok = phone_token(&pool, f.a).await;
+
+    // The window the server enforces is in the app's context.
+    let me = json_of(call!(app, get, "/staff/me/context", tok)).await;
+    let late = me["work_shifts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == json!(s))
+        .unwrap();
+    let window: i32 =
+        sqlx::query_scalar("SELECT checkin_window_minutes FROM work_shifts WHERE id = $1")
+            .bind(s)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(late["checkin_window_minutes"], json!(window));
+
+    // Too early, inside the fence: CHECKIN_TOO_EARLY with the shift and window.
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/check-in",
+        tok,
+        json!({ "branch_id": f.branch, "latitude": LAT, "longitude": LNG })
+    );
+    assert_eq!(resp.status(), 400);
+    let body = json_of(resp).await;
+    assert_eq!(body["code"], "CHECKIN_TOO_EARLY", "{body}");
+    assert_eq!(body["vars"]["shift"], "Late");
+    assert_eq!(body["vars"]["minutes"], json!(window));
+    assert!(body["vars"]["opens_at"].is_string(), "{body}");
+    assert!(
+        !body["error"].as_str().unwrap().starts_with("Bad request"),
+        "no HTTP prefix in the sentence: {body}"
+    );
+
+    // Far from the branch: OUTSIDE_FENCE with the distance and the radius.
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/check-in",
+        tok,
+        json!({ "branch_id": f.branch, "latitude": LAT + 0.01, "longitude": LNG })
+    );
+    assert_eq!(resp.status(), 403);
+    let body = json_of(resp).await;
+    assert_eq!(body["code"], "OUTSIDE_FENCE", "{body}");
+    let d = body["vars"]["distance_m"].as_i64().unwrap();
+    let r = body["vars"]["radius_m"].as_i64().unwrap();
+    assert!(d > r && (1_000..1_200).contains(&d), "{body}");
+    assert!(
+        !body["error"].as_str().unwrap().starts_with("Forbidden"),
+        "{body}"
+    );
+}

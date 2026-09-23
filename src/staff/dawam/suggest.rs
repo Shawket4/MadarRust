@@ -1868,6 +1868,7 @@ mod tests {
             end_time: end,
             crosses_midnight: end <= start,
             grace_minutes: 15,
+            checkin_window_minutes: 120,
             valid_days: days.to_vec(),
             day_times: Vec::new(),
         }

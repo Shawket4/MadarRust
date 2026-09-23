@@ -51,6 +51,17 @@ pub enum AppError {
         reason: String,
     },
 
+    /// A coded refusal that also carries its figures (`vars`), so a client can
+    /// word it in its own language (AT-13): e.g. `OUTSIDE_FENCE`
+    /// `{distance_m, radius_m}`. `reason` stays the English sentence.
+    #[error("{reason}")]
+    CodedVars {
+        status: u16,
+        code: &'static str,
+        reason: String,
+        vars: serde_json::Value,
+    },
+
     #[error("Database error: {0}")]
     Db(sqlx::Error),
 
@@ -96,6 +107,11 @@ pub struct ErrorBody {
     /// a countdown rather than inventing one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_seconds: Option<i64>,
+    /// The figures of a coded refusal (`CodedVars`), for the client's own
+    /// wording. Omitted everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub vars: Option<serde_json::Value>,
 }
 
 /// Convert sqlx errors into `AppError`. `RowNotFound` — what `fetch_one` /
@@ -148,7 +164,8 @@ impl AppError {
             AppError::PinThrottled { .. } => Some("PIN_THROTTLED".to_string()),
             AppError::Refused { code, .. }
             | AppError::RefusedWith { code, .. }
-            | AppError::Coded { code, .. } => Some((*code).to_string()),
+            | AppError::Coded { code, .. }
+            | AppError::CodedVars { code, .. } => Some((*code).to_string()),
             _ => None,
         }
     }
@@ -224,6 +241,10 @@ impl actix_web::ResponseError for AppError {
                 AppError::PinThrottled { seconds } => Some(*seconds),
                 _ => None,
             },
+            vars: match self {
+                AppError::CodedVars { vars, .. } => Some(vars.clone()),
+                _ => None,
+            },
         };
         match self {
             AppError::Unauthorized(_) => HttpResponse::Unauthorized().json(body),
@@ -234,11 +255,13 @@ impl actix_web::ResponseError for AppError {
             AppError::Conflict(_) => HttpResponse::Conflict().json(body),
             AppError::Refused { .. } => HttpResponse::Conflict().json(body),
             AppError::RefusedWith { .. } => HttpResponse::Conflict().json(body),
-            AppError::Coded { status, .. } => HttpResponse::build(
-                actix_web::http::StatusCode::from_u16(*status)
-                    .unwrap_or(actix_web::http::StatusCode::BAD_REQUEST),
-            )
-            .json(body),
+            AppError::Coded { status, .. } | AppError::CodedVars { status, .. } => {
+                HttpResponse::build(
+                    actix_web::http::StatusCode::from_u16(*status)
+                        .unwrap_or(actix_web::http::StatusCode::BAD_REQUEST),
+                )
+                .json(body)
+            }
             AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
             AppError::TooManyRequests(_) => HttpResponse::TooManyRequests().json(body),

@@ -1308,20 +1308,26 @@ pub(crate) async fn check_geofence(
 
     let (Some(b_lat), Some(b_lng)) = (branch.latitude, branch.longitude) else {
         if require {
-            return Err(AppError::BadRequest(
-                "This branch has no coordinates set, so location cannot be verified. \
-                 Set them on the branch, or turn off geofencing in attendance settings."
+            return Err(AppError::CodedVars {
+                status: 400,
+                code: "BRANCH_NO_LOCATION",
+                reason: "This branch has no coordinates set, so location cannot be verified. \
+                 Set them on the branch."
                     .into(),
-            ));
+                vars: serde_json::json!({}),
+            });
         }
         return Ok(None);
     };
 
     let (Some(lat), Some(lng)) = (latitude, longitude) else {
         if require {
-            return Err(AppError::BadRequest(
-                "Location is required to check in at this branch".into(),
-            ));
+            return Err(AppError::CodedVars {
+                status: 400,
+                code: "LOCATION_REQUIRED",
+                reason: "Location is required to check in at this branch".into(),
+                vars: serde_json::json!({}),
+            });
         }
         return Ok(None);
     };
@@ -1338,9 +1344,18 @@ pub(crate) async fn check_geofence(
     );
     let radius = branch.geo_radius_meters.unwrap_or(200).max(0) as f64;
     if require && distance > radius {
-        return Err(AppError::Forbidden(format!(
-            "You are {distance:.0} m from the branch — you must be within {radius:.0} m to clock in"
-        )));
+        // Coded with its figures so the app words it in the person's language
+        // (AT-13, CL-2).
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "OUTSIDE_FENCE",
+            reason: format!(
+                "You are {distance:.0} m from the branch — you must be within {radius:.0} m to clock in"
+            ),
+            vars: serde_json::json!({
+                "distance_m": distance.round() as i64, "radius_m": radius.round() as i64
+            }),
+        });
     }
     Ok(Some(distance))
 }
@@ -1361,12 +1376,18 @@ pub(crate) async fn require_active_employee(
             .await?;
     match row {
         Some((org_id, status)) if status == "active" => Ok(org_id),
-        Some((_, status)) => Err(AppError::Forbidden(format!(
-            "Your employment is {status} — contact your manager"
-        ))),
-        None => Err(AppError::Forbidden(
-            "You're not an employee here — ask your manager to add you".into(),
-        )),
+        Some((_, status)) => Err(AppError::CodedVars {
+            status: 403,
+            code: "EMPLOYMENT_NOT_ACTIVE",
+            reason: format!("Your employment is {status} — contact your manager"),
+            vars: serde_json::json!({ "status": status }),
+        }),
+        None => Err(AppError::CodedVars {
+            status: 403,
+            code: "NOT_AN_EMPLOYEE",
+            reason: "You're not an employee here — ask your manager to add you".into(),
+            vars: serde_json::json!({}),
+        }),
     }
 }
 
@@ -1473,15 +1494,21 @@ pub async fn check_in(
 
     let branch_org = crate::staff::resolve_branch_org(pool.get_ref(), body.branch_id).await?;
     if branch_org != org_id {
-        return Err(AppError::Forbidden(
-            "That branch belongs to a different organization".into(),
-        ));
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "BRANCH_OTHER_ORG",
+            reason: "That branch belongs to a different organization".into(),
+            vars: serde_json::json!({}),
+        });
     }
     let mine = crate::staff::access::branches_of(pool.get_ref(), employee_id).await?;
     if !mine.contains(&body.branch_id) {
-        return Err(AppError::Forbidden(
-            "You don't work at that branch — ask your manager to add you to it.".into(),
-        ));
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "NOT_YOUR_BRANCH",
+            reason: "You don't work at that branch — ask your manager to add you to it.".into(),
+            vars: serde_json::json!({}),
+        });
     }
 
     let settings = load_settings(pool.get_ref(), org_id, Some(body.branch_id)).await?;
@@ -1554,9 +1581,12 @@ pub async fn check_in(
     .await?;
 
     let Some(id) = inserted else {
-        return Err(AppError::Conflict(
-            "You have already checked in for this shift".into(),
-        ));
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "ALREADY_CHECKED_IN",
+            reason: "You have already checked in for this shift".into(),
+            vars: serde_json::json!({}),
+        });
     };
     if stamped.unverified {
         crate::staff::dawam::presence::raise_flag(
@@ -1612,16 +1642,25 @@ pub(crate) fn check_window(
     let opens_at =
         s.scheduled_start_at - chrono::Duration::minutes(s.checkin_window_minutes.max(0) as i64);
     if now < opens_at {
-        return Err(AppError::BadRequest(format!(
-            "Too early — check-in for {} opens {} minutes before it starts",
-            s.name, s.checkin_window_minutes
-        )));
+        return Err(AppError::CodedVars {
+            status: 400,
+            code: "CHECKIN_TOO_EARLY",
+            reason: format!(
+                "Too early — check-in for {} opens {} minutes before it starts",
+                s.name, s.checkin_window_minutes
+            ),
+            vars: serde_json::json!({
+                "shift": s.name, "minutes": s.checkin_window_minutes, "opens_at": opens_at
+            }),
+        });
     }
     if now >= s.scheduled_end_at {
-        return Err(AppError::BadRequest(format!(
-            "{} has already ended",
-            s.name
-        )));
+        return Err(AppError::CodedVars {
+            status: 400,
+            code: "SHIFT_ENDED",
+            reason: format!("{} has already ended", s.name),
+            vars: serde_json::json!({ "shift": s.name }),
+        });
     }
     Ok(())
 }

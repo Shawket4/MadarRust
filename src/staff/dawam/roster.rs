@@ -105,6 +105,9 @@ pub struct WorkShiftBrief {
     pub end_time: NaiveTime,
     pub crosses_midnight: bool,
     pub grace_minutes: i32,
+    /// How long before its start a check-in opens — the window the server
+    /// enforces (CL-3), so the app says "opens at" the same time.
+    pub checkin_window_minutes: i32,
     /// Weekdays it may be rostered on (0 = Sunday … 6 = Saturday): offer it
     /// only on those.
     pub valid_days: Vec<i16>,
@@ -209,7 +212,7 @@ pub(crate) async fn work_shifts_of(
 ) -> Result<Vec<WorkShiftBrief>, AppError> {
     let mut rows: Vec<WorkShiftBrief> = sqlx::query_as(
         "SELECT id, name, branch_id, start_time, end_time, crosses_midnight, grace_minutes, \
-                valid_days \
+                checkin_window_minutes, valid_days \
            FROM work_shifts WHERE org_id = $1 AND is_active ORDER BY start_time",
     )
     .bind(org_id)
