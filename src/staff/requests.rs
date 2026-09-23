@@ -140,6 +140,11 @@ pub struct StaffRequest {
     #[sqlx(default)]
     #[serde(default)]
     pub can_decide: bool,
+    /// A day of it is in an approved or paid month: approving or cancelling
+    /// approved time is refused (PERIOD_CLOSED); rejecting still works.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub month_closed: bool,
 }
 
 const REQUEST_SELECT: &str = r#"
@@ -866,6 +871,15 @@ async fn mark_for_caller(
         };
         r.is_own = own;
         r.can_decide = may && r.status == "pending";
+        // Dated in an approved or paid month (RQ-4): approving is refused with
+        // PERIOD_CLOSED (rejecting isn't), so clients offer Reject only.
+        r.month_closed = crate::staff::period_lock::any_closed_in(
+            pool,
+            org_id,
+            r.on_date,
+            r.end_date.unwrap_or(r.on_date),
+        )
+        .await?;
     }
     Ok(())
 }

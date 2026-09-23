@@ -66,10 +66,7 @@ pub async fn assert_open<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    if is_closed(conn, org_id, day).await? {
-        return Err(closed(what, day));
-    }
-    Ok(())
+    closed_as(conn, org_id, day, day, what).await
 }
 
 /// 409 when any day of `[from, to]` falls in a closed period.
@@ -83,22 +80,49 @@ pub async fn assert_range_open<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    if any_closed_in(conn, org_id, from, to).await? {
-        return Err(closed(what, from));
-    }
-    Ok(())
+    closed_as(conn, org_id, from, to, what).await
 }
 
-/// 409 with the machine code `PERIOD_CLOSED`, so every client branches on
-/// one code whichever handler refused (the rules module's month guard
-/// delegates here too).
-fn closed(what: &str, day: NaiveDate) -> AppError {
-    AppError::Coded {
+/// 409 with the machine code `PERIOD_CLOSED` when a closed period overlaps
+/// `[from, to]`, so every client branches on one code whichever handler
+/// refused (the rules module's month guard delegates here too). `vars.paid`
+/// says the month is PAID — it can never be reopened, so a client offers only
+/// "pick a day in an open month", not "reopen it first".
+async fn closed_as<'e, E>(
+    conn: E,
+    org_id: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+    what: &str,
+) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    // NULL = nothing closed overlaps; else whether any overlapping one is paid.
+    let paid: Option<bool> = sqlx::query_scalar(&format!(
+        "SELECT bool_or(status IN ('paid', 'closed')) FROM payroll_periods \
+          WHERE org_id = $1 AND status IN ({CLOSED}) AND start_date <= $3 AND end_date >= $2"
+    ))
+    .bind(org_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(conn)
+    .await?;
+    let Some(paid) = paid else { return Ok(()) };
+    Err(AppError::CodedVars {
         status: 409,
         code: "PERIOD_CLOSED",
-        reason: format!(
-            "PERIOD_CLOSED: that month's payroll is approved — {what} dated {day} can't change it. \
-             Add it to the next open month instead."
-        ),
-    }
+        reason: if paid {
+            format!(
+                "PERIOD_CLOSED: that month is paid — {what} dated {from} can't change it. \
+                 Add it to the next open month instead."
+            )
+        } else {
+            format!(
+                "PERIOD_CLOSED: that month's payroll is approved — {what} dated {from} can't change it. \
+                 Reopen it first, or add it to the next open month."
+            )
+        },
+        vars: serde_json::json!({ "date": from, "paid": paid }),
+    })
 }

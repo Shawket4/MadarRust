@@ -555,6 +555,24 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
         (409, Some("PERIOD_CLOSED")),
         "filing into an approved month"
     );
+    // E2E suggestions: the refusal says whether the month is PAID (a paid
+    // month can't be reopened), and a pending request in it reads
+    // month_closed, so clients offer Reject, not Approve.
+    assert_eq!(b["vars"]["paid"], json!(false), "{b}");
+    assert_eq!(b["vars"]["date"], json!("2026-08-20"), "{b}");
+    let (_, list) = send!(app, "GET", "/staff/requests".to_string(), f.owner_token());
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == pending["id"])
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (row["can_decide"].clone(), row["month_closed"].clone()),
+        (json!(true), json!(true)),
+        "{row}"
+    );
     // A leave reaching back into the closed month through its END is refused too.
     let (st, _) = send!(
         app,
@@ -616,6 +634,20 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
         f.owner_token()
     );
     assert_eq!(st, 409);
+    // Once August is PAID the refusal says so.
+    sqlx::query("UPDATE payroll_periods SET status = 'paid' WHERE org_id = $1 AND name = 'August'")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, b) = send!(
+        app,
+        "POST",
+        "/staff/requests".to_string(),
+        f.owner_token(),
+        json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-08-21" })
+    );
+    assert_eq!((st, b["vars"]["paid"].clone()), (409, json!(true)), "{b}");
     // September is still open.
     let (st, _) = send!(
         app,

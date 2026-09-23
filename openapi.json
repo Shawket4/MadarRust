@@ -90401,6 +90401,10 @@
               "null"
             ]
           },
+          "month_closed": {
+            "type": "boolean",
+            "description": "A day of it is in an approved or paid month: approving or cancelling\napproved time is refused (PERIOD_CLOSED); rejecting still works."
+          },
           "on_date": {
             "type": "string",
             "format": "date"
