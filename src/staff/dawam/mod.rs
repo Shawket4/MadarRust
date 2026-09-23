@@ -52,16 +52,34 @@ pub(crate) fn hash_token(token: &str) -> String {
 /// A message for an employee's inbox (APP-6): a core i18n key and its
 /// arguments, so it reads in the person's own language.
 pub(crate) async fn notify(pool: &PgPool, org_id: Uuid, employee_id: Uuid, key: &str, args: Value) {
+    notify_keyed(pool, org_id, employee_id, key, args, None).await;
+}
+
+/// [`notify`], at most once per `dedupe` key per person when one is given
+/// (APP-6, 06 B7): a repeat — the same open flag seen again on the next ping —
+/// writes no inbox row and sends no push.
+async fn notify_keyed(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    key: &str,
+    args: Value,
+    dedupe: Option<&str>,
+) {
     let res = sqlx::query(
-        "INSERT INTO staff_notifications (org_id, employee_id, key, args) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO staff_notifications (org_id, employee_id, key, args, dedupe_key) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (employee_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING",
     )
     .bind(org_id)
     .bind(employee_id)
     .bind(key)
     .bind(&args)
+    .bind(dedupe)
     .execute(pool)
     .await;
     match res {
+        Ok(r) if r.rows_affected() == 0 => {} // already told: no second push
         Ok(_) => crate::push::send(
             pool,
             Recipient::Employee(employee_id),
@@ -109,6 +127,30 @@ pub async fn set_push_token(
     } else {
         crate::push::register(pool, me.org_id, who, PUSH_APP, token, locale, "").await?;
     }
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// `POST /staff/me/sign-out` — the staff app signs out (APP-6, 06 B3): this
+/// phone's device is revoked, so its token can't be refreshed again, and the
+/// employee's Dawam pushes stop at once — a signed-out phone never shows the
+/// next person's names or amounts. Idempotent.
+#[utoipa::path(
+    post, path = "/staff/me/sign-out", tag = "staff",
+    operation_id = "staff_sign_out",
+    responses((status = 204), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn sign_out(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
+    let pool = pool.get_ref();
+    sqlx::query(
+        "UPDATE staff_devices SET revoked_at = now() \
+          WHERE id = $1 AND employee_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(me.device_id)
+    .bind(me.employee_id)
+    .execute(pool)
+    .await?;
+    crate::push::revoke_all(pool, Recipient::Employee(me.employee_id), PUSH_APP).await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -164,9 +206,48 @@ pub(crate) async fn notify_managers(
     key: &str,
     args: Value,
 ) {
+    notify_managers_keyed(pool, org_id, branch_id, cap, except, key, args, None).await;
+}
+
+/// [`notify_managers`] once per `dedupe` key per manager (see `notify_keyed`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn notify_managers_once(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Option<Uuid>,
+    cap: Cap,
+    except: Option<Uuid>,
+    key: &str,
+    args: Value,
+    dedupe: &str,
+) {
+    notify_managers_keyed(
+        pool,
+        org_id,
+        branch_id,
+        cap,
+        except,
+        key,
+        args,
+        Some(dedupe),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn notify_managers_keyed(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Option<Uuid>,
+    cap: Cap,
+    except: Option<Uuid>,
+    key: &str,
+    args: Value,
+    dedupe: Option<&str>,
+) {
     if let Ok(ids) = managers_of(pool, org_id, branch_id, cap).await {
         for id in ids.into_iter().filter(|id| Some(*id) != except) {
-            notify(pool, org_id, id, key, args.clone()).await;
+            notify_keyed(pool, org_id, id, key, args.clone(), dedupe).await;
         }
     }
 }

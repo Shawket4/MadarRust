@@ -45,6 +45,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/me/push-token",
                 web::put().to(crate::staff::dawam::set_push_token),
             )
+            .route(
+                "/me/sign-out",
+                web::post().to(crate::staff::dawam::sign_out),
+            )
             .route("/me/pings", web::post().to(presence::ping))
             .route("/me/coverable", web::get().to(presence::my_coverable))
             .route("/me/cover", web::post().to(presence::open_cover))

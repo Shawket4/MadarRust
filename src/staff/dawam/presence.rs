@@ -10,7 +10,9 @@ use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::{branches_of, employee_name, notify, notify_managers, owners, user_name};
+use super::{
+    branches_of, employee_name, notify, notify_managers, notify_managers_once, owners, user_name,
+};
 use crate::authz::{Cap, Decision, Request as AuthzRequest};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::geo::osrm::{LatLng, haversine_meters};
@@ -61,11 +63,12 @@ pub(crate) async fn raise_flag(
     kind: &str,
     minutes_away: i32,
 ) -> Result<(), AppError> {
-    let inserted = sqlx::query(
+    let flag: Option<Uuid> = sqlx::query_scalar(
         "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind, minutes_away) \
          VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (attendance_record_id, kind) WHERE resolution IS NULL AND attendance_record_id IS NOT NULL \
-         DO UPDATE SET minutes_away = GREATEST(attendance_flags.minutes_away, EXCLUDED.minutes_away)",
+         DO UPDATE SET minutes_away = GREATEST(attendance_flags.minutes_away, EXCLUDED.minutes_away) \
+         RETURNING id",
     )
     .bind(org_id)
     .bind(employee_id)
@@ -73,11 +76,13 @@ pub(crate) async fn raise_flag(
     .bind(record_id)
     .bind(kind)
     .bind(minutes_away)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    if inserted.rows_affected() > 0 {
+    if let Some(flag) = flag {
+        // Once per flag (06 B7): the next ping updates the same open flag and
+        // must not push to every manager again.
         let name = employee_name(pool, employee_id).await;
-        notify_managers(
+        notify_managers_once(
             pool,
             org_id,
             branch_id,
@@ -85,6 +90,7 @@ pub(crate) async fn raise_flag(
             Some(employee_id),
             &format!("staff.n_flag_{kind}"),
             json!({ "name": name, "minutes": minutes_away }),
+            &format!("flag:{flag}"),
         )
         .await;
     }
