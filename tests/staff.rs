@@ -1056,12 +1056,22 @@ async fn approving_leave_asks_paid_or_unpaid_and_writes_no_balance(pool: PgPool)
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 201);
     let request: serde_json::Value = test::read_body_json(resp).await;
-    assert!(request["leave_type_id"].is_null(), "a type is never stored: {request}");
+    assert!(
+        request["leave_type_id"].is_null(),
+        "a type is never stored: {request}"
+    );
     let request_id = request["id"].as_str().unwrap().to_string();
 
     let decision_uri = format!("/staff/requests/{request_id}/decision");
     assert_eq!(
-        auth_send!(app, patch, decision_uri, admin_token, json!({ "status": "approved" })).status(),
+        auth_send!(
+            app,
+            patch,
+            decision_uri,
+            admin_token,
+            json!({ "status": "approved" })
+        )
+        .status(),
         400,
         "leave is approved as paid or unpaid — the approver must say which"
     );
@@ -1084,7 +1094,14 @@ async fn approving_leave_asks_paid_or_unpaid_and_writes_no_balance(pool: PgPool)
     assert_eq!(balances, 0, "no balance is spent (RQ-3)");
 
     assert_eq!(
-        auth_send!(app, patch, decision_uri, admin_token, json!({ "status": "cancelled" })).status(),
+        auth_send!(
+            app,
+            patch,
+            decision_uri,
+            admin_token,
+            json!({ "status": "cancelled" })
+        )
+        .status(),
         400,
         "undoing an approval says why (AT-7)"
     );
@@ -1162,7 +1179,14 @@ async fn a_decided_request_cannot_be_decided_again(pool: PgPool) {
         200
     );
     assert_eq!(
-        auth_send!(app, patch, uri, token, json!({ "status": "approved", "is_paid": true })).status(),
+        auth_send!(
+            app,
+            patch,
+            uri,
+            token,
+            json!({ "status": "approved", "is_paid": true })
+        )
+        .status(),
         409,
         "a rejected request stays rejected"
     );
@@ -1571,10 +1595,21 @@ async fn a_paid_period_cannot_be_regenerated(pool: PgPool) {
     let token = token_for(f.admin, f.org, UserRole::OrgAdmin);
 
     generate(&app, &token, period).await;
+    // Paid means every payslip marked paid by hand (PAY-7); `status: paid`
+    // by hand is refused.
     let req = test::TestRequest::patch()
         .uri(&format!("/staff/payroll/periods/{period}/status"))
         .auth(&token)
         .set_json(&json!({ "status": "paid" }))
+        .to_request();
+    assert_eq!(test::call_service(&app, req).await.status(), 409);
+    let req = test::TestRequest::patch()
+        .uri(&format!(
+            "/staff/payroll/periods/{period}/payslips/{}/paid",
+            f.employee
+        ))
+        .auth(&token)
+        .set_json(&json!({ "method": "cash" }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 200);
 
@@ -1589,20 +1624,38 @@ async fn a_paid_period_cannot_be_regenerated(pool: PgPool) {
 async fn a_paid_period_cannot_go_back_to_draft(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool, "UTC").await;
+    seed_profile(&pool, f.org, f.employee, 300_000).await;
     let period = seed_period(&pool, f.org).await;
     let token = token_for(f.admin, f.org, UserRole::OrgAdmin);
 
+    // Approved = generated, paid = everyone marked paid: neither by hand.
     let uri = format!("/staff/payroll/periods/{period}/status");
     assert_eq!(
         auth_send!(app, patch, uri, token, json!({ "status": "generated" })).status(),
-        200
+        409
     );
+    assert_eq!(generate(&app, &token, period).await.status(), 200);
     assert_eq!(
         auth_send!(app, patch, uri, token, json!({ "status": "paid" })).status(),
+        409
+    );
+    let paid = format!(
+        "/staff/payroll/periods/{period}/payslips/{}/paid",
+        f.employee
+    );
+    assert_eq!(
+        auth_send!(app, patch, paid, token, json!({ "method": "cash" })).status(),
         200
     );
     assert_eq!(
-        auth_send!(app, patch, uri, token, json!({ "status": "draft" })).status(),
+        auth_send!(
+            app,
+            patch,
+            uri,
+            token,
+            json!({ "status": "draft", "reason": "r" })
+        )
+        .status(),
         409
     );
 }
@@ -2015,13 +2068,24 @@ async fn a_waived_deduction_does_not_reach_the_payslip(pool: PgPool) {
     assert_eq!(before, 260_000);
 
     let uri = format!("/staff/payroll/deductions/{id}/waive");
-    auth_send!(
+    // The month is approved: reopen it first (a reason is kept), the waiver
+    // lands, then approve again (PAY-6).
+    let resp = auth_send!(
+        app,
+        patch,
+        format!("/staff/payroll/periods/{period}/status"),
+        admin_token,
+        json!({ "status": "draft", "reason": "a waiver" })
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = auth_send!(
         app,
         patch,
         uri,
         admin_token,
         json!({ "reason": "Reversed" })
     );
+    assert_eq!(resp.status(), 200);
     generate(&app, &admin_token, period).await;
 
     let after: i64 = sqlx::query_scalar("SELECT net_piastres FROM payslips WHERE employee_id = $1")

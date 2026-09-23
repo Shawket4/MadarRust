@@ -15,6 +15,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use uuid::Uuid;
 
 use crate::costing::service::round_piastres;
 use crate::staff::attendance::AttendanceSettings;
@@ -22,6 +23,10 @@ use crate::staff::rules::{
     AttendanceStatus, LateTier, PayRates, absence_deduction_piastres, late_deduction_piastres,
     select_late_tier,
 };
+
+/// Fallback shift length when a record has no scheduled window — a standard
+/// eight-hour day. Only ever used as the per-minute divisor.
+pub const DEFAULT_SHIFT_MINUTES: i64 = 480;
 
 /// The rules a shift is priced under: the branch's override when it has one,
 /// else the business's (RU-2), plus the shift template's own overtime rates
@@ -65,11 +70,21 @@ pub struct ShiftFacts {
     /// The monthly salary in force ON THAT DAY — the full salary, never a
     /// prorated one (audit B2).
     pub base_salary_piastres: i64,
-    /// The rostered length of that day's shift (RU-6).
+    /// The rostered length of THIS shift.
     pub scheduled_minutes: i64,
+    /// Every rostered minute of the person's day (RU-5, RU-6): the divisor of
+    /// the minute rate and of a missed shift's share. `0` means a one-shift
+    /// day (same as `scheduled_minutes`).
+    pub day_minutes: i64,
     pub status: AttendanceStatus,
-    /// `on_leave` under an unpaid leave: excused, docked a day (RQ-3).
-    pub unpaid_leave: bool,
+    /// Minutes of this shift on approved leave (all of it for a day off), and
+    /// whether that leave is paid (RQ-3, RQ-8). Unpaid leave is docked like an
+    /// absence; a half day docks the off half's share.
+    pub leave_minutes: i64,
+    pub leave_paid: bool,
+    /// Approved but unpaid time off inside the shift: an unpaid excuse or the
+    /// unpaid tail of an early departure (RQ-7), at the plain minute rate.
+    pub unpaid_excused_minutes: i64,
     pub late_minutes: i64,
     pub worked_minutes: i64,
     /// Overtime past the shift's threshold, as the clock measured it.
@@ -92,8 +107,15 @@ pub struct ShiftFacts {
 pub struct ShiftPrice {
     /// The lateness ladder's charge (0 when nothing owed).
     pub late_penalty_piastres: i64,
-    /// A missed day (or an unpaid leave day) at the absence policy.
+    /// A missed shift (or unpaid leave) at the absence policy: its SHARE of
+    /// the day (RU-5) — missing both halves of a split day is one absence.
     pub absence_piastres: i64,
+    /// Minutes of this shift missed without leave, and minutes on unpaid
+    /// leave: what `absence_piastres` docked, for the line's wording.
+    pub absent_minutes: i64,
+    pub unpaid_leave_minutes: i64,
+    /// Approved but unpaid time off inside the shift, at the plain rate (RQ-7).
+    pub excused_unpaid_piastres: i64,
     /// The overtime that COUNTS (0 in `off` mode; in `approval` mode only
     /// when approved).
     pub overtime_minutes: i64,
@@ -112,6 +134,39 @@ impl ShiftPrice {
             .saturating_add(self.cover_piastres)
             .saturating_add(self.holiday_piastres)
     }
+
+    /// Everything this shift takes off it (before any human waives a line).
+    pub fn deductions_piastres(&self) -> i64 {
+        self.late_penalty_piastres
+            .saturating_add(self.absence_piastres)
+            .saturating_add(self.excused_unpaid_piastres)
+    }
+}
+
+/// Every rostered minute of a person's day (RU-5, RU-6) from the roster's
+/// shifts `(work_shift_id, minutes)` and the record's own shift. A shift no
+/// longer on the roster (edited since) still counts its own minutes, so a
+/// share never exceeds the whole. The sweep, the estimate and payroll all
+/// build the divisor this way.
+pub fn day_minutes_of(rostered: &[(Uuid, i64)], own_shift: Option<Uuid>, own_minutes: i64) -> i64 {
+    let total: i64 = rostered.iter().map(|(_, m)| (*m).max(0)).sum();
+    let own_listed = own_shift.is_some_and(|id| rostered.iter().any(|(s, _)| *s == id));
+    if own_listed {
+        total.max(own_minutes)
+    } else {
+        total + own_minutes.max(0)
+    }
+}
+
+/// The plain rates a shift is priced at: the day rate is `salary ÷ working
+/// days`, the minute rate divides that by EVERY rostered minute of the day
+/// (RU-6), never by an average.
+pub fn rates_of(f: &ShiftFacts, r: &ShiftRules) -> PayRates {
+    PayRates::from_base(
+        f.base_salary_piastres,
+        r.working_days_per_month,
+        f.day_minutes.max(f.scheduled_minutes).max(1),
+    )
 }
 
 /// Does this shift's overtime count under the rules (RU-7)?
@@ -148,11 +203,8 @@ pub fn overtime_piastres(
 
 /// Price one shift under one set of rules.
 pub fn price_shift(f: &ShiftFacts, r: &ShiftRules) -> ShiftPrice {
-    let rates = PayRates::from_base(
-        f.base_salary_piastres,
-        r.working_days_per_month,
-        f.scheduled_minutes.max(1),
-    );
+    let day_minutes = f.day_minutes.max(f.scheduled_minutes).max(1);
+    let rates = rates_of(f, r);
     let mut out = ShiftPrice::default();
 
     // A cover is someone else's shift: extra time, no discipline (CV-4, CV-5).
@@ -166,22 +218,35 @@ pub fn price_shift(f: &ShiftFacts, r: &ShiftRules) -> ShiftPrice {
     }
 
     // ── lateness ladder (RU-3, RU-4) ────────────────────────────
-    if let Some(tier) = select_late_tier(&r.late_tiers, f.late_minutes) {
+    // Nobody is late for a shift they have off (B3).
+    if !matches!(
+        f.status,
+        AttendanceStatus::OnLeave | AttendanceStatus::Absent
+    ) && let Some(tier) = select_late_tier(&r.late_tiers, f.late_minutes)
+    {
         out.late_penalty_piastres = late_deduction_piastres(tier, &rates);
     }
 
-    // ── absence / unpaid leave (RU-5, RQ-3) ─────────────────────
-    match (f.status, f.unpaid_leave) {
-        (AttendanceStatus::Absent, _) => {
-            out.absence_piastres =
-                absence_deduction_piastres(&rates, Decimal::ONE, r.absence_deduction_days);
-        }
-        (AttendanceStatus::OnLeave, true) => {
-            // Unpaid leave is priced like an absence (RQ-3, locked in the spec).
-            out.absence_piastres =
-                absence_deduction_piastres(&rates, Decimal::ONE, r.absence_deduction_days);
-        }
-        _ => {}
+    // ── absence / unpaid leave (RU-5, RQ-3, RQ-8) ───────────────
+    // A missed shift costs its SHARE of the day's absence cost: the morning
+    // half of a split day is half an absence, and missing both halves is one
+    // absence, not two. Unpaid leave is priced like an absence (RQ-3, locked
+    // in the spec); paid leave costs nothing. On a half-day leave only the
+    // worked half can be missed.
+    let own_leave = f.leave_minutes.clamp(0, f.scheduled_minutes.max(0));
+    out.absent_minutes = match f.status {
+        AttendanceStatus::Absent => (f.scheduled_minutes - own_leave).max(0),
+        _ => 0,
+    };
+    out.unpaid_leave_minutes = if f.leave_paid { 0 } else { own_leave };
+    let docked =
+        Decimal::from(out.absent_minutes + out.unpaid_leave_minutes) / Decimal::from(day_minutes);
+    out.absence_piastres = absence_deduction_piastres(&rates, docked, r.absence_deduction_days);
+
+    // ── unpaid excused time (RQ-7) ──────────────────────────────
+    if f.unpaid_excused_minutes > 0 {
+        out.excused_unpaid_piastres =
+            round_piastres(rates.minutes_piastres(Decimal::from(f.unpaid_excused_minutes))).max(0);
     }
 
     // ── overtime (RU-7, RU-8, RU-9) ─────────────────────────────
@@ -193,7 +258,7 @@ pub fn price_shift(f: &ShiftFacts, r: &ShiftRules) -> ShiftPrice {
         out.overtime_piastres = overtime_piastres(
             f.base_salary_piastres,
             r.working_days_per_month,
-            f.scheduled_minutes,
+            day_minutes,
             total - night,
             night,
             r.overtime_day_multiplier,
@@ -263,19 +328,38 @@ pub fn percent_of_salary(base_salary_piastres: i64, percent: Decimal) -> i64 {
     .max(0)
 }
 
+/// Minutes of pay at the plain rate, exact (a repeating decimal, usually):
+/// what an unpaid excuse deducts before the one rounding (RU-12).
+pub fn minutes_piastres_exact(
+    base_salary_piastres: i64,
+    working_days_per_month: Decimal,
+    day_minutes: i64,
+    minutes: i64,
+) -> Decimal {
+    let rates = PayRates::from_base(
+        base_salary_piastres,
+        working_days_per_month,
+        day_minutes.max(1),
+    );
+    rates
+        .minutes_piastres(Decimal::from(minutes.max(0)))
+        .max(Decimal::ZERO)
+}
+
 /// Minutes of pay at the plain rate, rounded once.
 pub fn minutes_piastres(
     base_salary_piastres: i64,
     working_days_per_month: Decimal,
-    scheduled_minutes: i64,
+    day_minutes: i64,
     minutes: i64,
 ) -> i64 {
-    let rates = PayRates::from_base(
+    round_piastres(minutes_piastres_exact(
         base_salary_piastres,
         working_days_per_month,
-        scheduled_minutes.max(1),
-    );
-    round_piastres(rates.minutes_piastres(Decimal::from(minutes.max(0)))).max(0)
+        day_minutes,
+        minutes,
+    ))
+    .max(0)
 }
 
 /// A suggested amount, to the nearest 5 EGP, halves away from zero (RU-12).
@@ -366,8 +450,11 @@ mod tests {
         ShiftFacts {
             base_salary_piastres: 600_000,
             scheduled_minutes: 480,
+            day_minutes: 0,
             status: AttendanceStatus::Present,
-            unpaid_leave: false,
+            leave_minutes: 0,
+            leave_paid: true,
+            unpaid_excused_minutes: 0,
             late_minutes: 0,
             worked_minutes: 480,
             overtime_minutes: 0,
@@ -491,22 +578,150 @@ mod tests {
         let p = price_shift(
             &ShiftFacts {
                 status: AttendanceStatus::OnLeave,
-                unpaid_leave: true,
+                leave_minutes: 480,
+                leave_paid: false,
                 ..facts()
             },
             &harsh,
         );
         // RQ-3: the absence cost (2 days here), not one day.
         assert_eq!(p.absence_piastres, 46_154);
+        assert_eq!(p.unpaid_leave_minutes, 480);
         // Paid leave costs nothing.
         let p = price_shift(
             &ShiftFacts {
                 status: AttendanceStatus::OnLeave,
+                leave_minutes: 480,
+                leave_paid: true,
                 ..facts()
             },
             &harsh,
         );
         assert_eq!(p.absence_piastres, 0);
+    }
+
+    // Rules' facts (RU-5, RQ-7, RQ-8), priced here so the sweep, the
+    // estimate and payroll agree (AT-9, orchestrator decision #3).
+    #[test]
+    fn a_missed_shift_of_a_split_day_costs_its_share_of_the_day() {
+        // Morning 4 h + evening 4 h: missing the morning is half an absence,
+        // 600000 × (240/480) / 26 = 11538.46 → 11538; both halves = 23077.
+        let morning = ShiftFacts {
+            status: AttendanceStatus::Absent,
+            scheduled_minutes: 240,
+            day_minutes: 480,
+            worked_minutes: 0,
+            ..facts()
+        };
+        let p = price_shift(&morning, &rules());
+        assert_eq!(p.absence_piastres, 11_538);
+        assert_eq!(p.absent_minutes, 240);
+        let evening = ShiftFacts { ..morning.clone() };
+        let both = p.absence_piastres + price_shift(&evening, &rules()).absence_piastres;
+        assert_eq!(both, 23_076, "two halves ≈ one absence, each rounded once");
+        // The minute rate on a split day divides by the WHOLE day (RU-6):
+        // 30 min late on the 4-hour morning of an 8-hour day = 600000×60/12480
+        // for the 16–30 rung, not 600000×60/(26×240).
+        let late = ShiftFacts {
+            status: AttendanceStatus::Late,
+            late_minutes: 24,
+            scheduled_minutes: 240,
+            day_minutes: 480,
+            ..facts()
+        };
+        assert_eq!(price_shift(&late, &rules()).late_penalty_piastres, 2_885);
+        // A shift no longer on the roster still counts its own minutes.
+        assert_eq!(day_minutes_of(&[(Uuid::nil(), 240)], None, 240), 480);
+        let own = Uuid::new_v4();
+        assert_eq!(
+            day_minutes_of(&[(own, 240), (Uuid::nil(), 240)], Some(own), 240),
+            480
+        );
+        assert_eq!(day_minutes_of(&[(own, 100)], Some(own), 240), 240);
+        assert_eq!(day_minutes_of(&[], None, 480), 480);
+    }
+
+    #[test]
+    fn a_half_day_of_unpaid_leave_docks_the_off_half_and_nothing_else() {
+        // Second half off, unpaid, present for the first: 240/480 of a day.
+        let p = price_shift(
+            &ShiftFacts {
+                status: AttendanceStatus::Present,
+                leave_minutes: 240,
+                leave_paid: false,
+                worked_minutes: 240,
+                ..facts()
+            },
+            &rules(),
+        );
+        assert_eq!(p.absence_piastres, 11_538);
+        assert_eq!(p.unpaid_leave_minutes, 240);
+        assert_eq!(p.absent_minutes, 0);
+        // Absent on the worked half too: the whole day, once.
+        let p = price_shift(
+            &ShiftFacts {
+                status: AttendanceStatus::Absent,
+                leave_minutes: 240,
+                leave_paid: false,
+                worked_minutes: 0,
+                ..facts()
+            },
+            &rules(),
+        );
+        assert_eq!(p.absence_piastres, 23_077);
+        assert_eq!((p.absent_minutes, p.unpaid_leave_minutes), (240, 240));
+        // A paid half day and a lateness on the worked half: only the ladder.
+        let p = price_shift(
+            &ShiftFacts {
+                status: AttendanceStatus::Late,
+                late_minutes: 10,
+                leave_minutes: 240,
+                leave_paid: true,
+                ..facts()
+            },
+            &rules(),
+        );
+        assert_eq!((p.absence_piastres, p.late_penalty_piastres), (0, 721));
+        // Nobody is late for a shift they have off (B3).
+        let p = price_shift(
+            &ShiftFacts {
+                status: AttendanceStatus::OnLeave,
+                late_minutes: 40,
+                leave_minutes: 480,
+                ..facts()
+            },
+            &rules(),
+        );
+        assert_eq!(p.late_penalty_piastres, 0);
+    }
+
+    #[test]
+    fn unpaid_excused_minutes_cost_the_plain_minute_rate() {
+        // 90 min of an unpaid excuse: 600000×90/12480 = 4326.9 → 4327.
+        let p = price_shift(
+            &ShiftFacts {
+                unpaid_excused_minutes: 90,
+                ..facts()
+            },
+            &rules(),
+        );
+        assert_eq!(p.excused_unpaid_piastres, 4_327);
+        assert_eq!(p.deductions_piastres(), 4_327);
+        assert_eq!(
+            minutes_piastres_exact(600_000, dec!(26), 480, 90).round_dp(6),
+            dec!(4326.923077)
+        );
+        // Alongside a lateness: both, independently rounded.
+        let p = price_shift(
+            &ShiftFacts {
+                unpaid_excused_minutes: 90,
+                late_minutes: 14,
+                status: AttendanceStatus::Late,
+                ..facts()
+            },
+            &rules(),
+        );
+        assert_eq!(p.deductions_piastres(), 4_327 + 721);
     }
 
     #[test]

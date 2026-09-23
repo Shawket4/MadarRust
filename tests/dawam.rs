@@ -770,7 +770,7 @@ async fn paying_everyone_pays_the_period_and_locks_reopening(pool: PgPool) {
         patch,
         format!("/staff/payroll/periods/{id}/status"),
         owner,
-        json!({ "status": "draft" })
+        json!({ "status": "draft", "reason": "a line was missing" })
     );
     assert_eq!(reopen.status(), 409, "someone is already paid");
 
@@ -812,6 +812,16 @@ async fn expense_advances_are_logged_never_deducted(pool: PgPool) {
         owner,
         json!({
         "employee_id": f.a, "amount_piastres": 20_000, "purpose": "Milk", "via": "till" })
+    );
+    // A till pay-out is tagged on the POS, never typed here (AV-10).
+    assert_eq!(resp.status(), 400);
+    let resp = call!(
+        app,
+        post,
+        "/staff/expense-advances",
+        owner,
+        json!({
+        "employee_id": f.a, "amount_piastres": 20_000, "purpose": "Milk", "via": "safe" })
     );
     assert_eq!(resp.status(), 201);
     let mine = json_of(call!(
@@ -1105,10 +1115,16 @@ async fn nobody_clocks_in_before_the_rules_are_saved(pool: PgPool) {
     .await;
     assert!(partial["rules_saved_at"].is_null(), "{partial}");
     assert!(
-        partial["suggested_tiers"].as_array().is_some_and(|t| !t.is_empty()),
+        partial["suggested_tiers"]
+            .as_array()
+            .is_some_and(|t| !t.is_empty()),
         "the set-up step gets a suggested ladder to start from: {partial}"
     );
-    assert_eq!(partial["late_deduction_tiers"], json!([]), "a suggestion is never saved by itself");
+    assert_eq!(
+        partial["late_deduction_tiers"],
+        json!([]),
+        "a suggestion is never saved by itself"
+    );
     let resp = call!(app, post, "/staff/me/check-in", tok, here.clone());
     assert_eq!(resp.status(), 409);
     let saved = json_of(call!(
@@ -1177,16 +1193,21 @@ async fn night_overtime_is_the_overtime_inside_the_night_window(pool: PgPool) {
         .find(|p| p["employee_id"] == json!(f.a))
         .unwrap();
     assert_eq!(sara["overtime_minutes"], 120);
-    let m: f64 = sara["breakdown"]["overtime_multiplier"]
-        .as_str()
-        .map_or_else(
-            || sara["breakdown"]["overtime_multiplier"].as_f64().unwrap(),
-            |x| x.parse().unwrap(),
-        );
-    assert!(
-        (m - 1.525).abs() < 1e-9,
-        "one night hour at 1.70, one day hour at 1.35: {m}"
-    );
+    // Each shift is priced on its own (AT-9): the evening's hour is all
+    // night, the morning's all day; the breakdown says so per shift.
+    assert_eq!(sara["breakdown"]["night_overtime_minutes"], 60, "{sara}");
+    let shifts = sara["breakdown"]["overtime_shifts"].as_array().unwrap();
+    let night_minutes: Vec<i64> = shifts
+        .iter()
+        .map(|s| s["night_minutes"].as_i64().unwrap())
+        .collect();
+    assert_eq!(night_minutes, vec![60, 0], "{sara}");
+    let rate = |v: &Value| {
+        v.as_str()
+            .map_or_else(|| v.as_f64().unwrap(), |x| x.parse::<f64>().unwrap())
+    };
+    assert!((rate(&shifts[0]["night_multiplier"]) - 1.70).abs() < 1e-9);
+    assert!((rate(&shifts[0]["day_multiplier"]) - 1.35).abs() < 1e-9);
 }
 
 // ── the roster engine (SC-12, SC-13, RU-13, PS-2) ────────────────────────────

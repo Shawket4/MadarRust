@@ -394,11 +394,9 @@ async fn an_approved_month_is_frozen_until_reopened(pool: PgPool) {
     let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
         .await
         .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
     madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
         .await
         .unwrap();
-    drop(conn);
     let (penalty_id, penalty): (Uuid, i64) = sqlx::query_as(
         "SELECT id, amount_piastres FROM payroll_deductions WHERE attendance_record_id = $1",
     )
@@ -482,11 +480,9 @@ async fn an_approved_month_is_frozen_until_reopened(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
     let touched = madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
         .await
         .unwrap();
-    drop(conn);
     assert_eq!(touched, 0);
     let still: i64 =
         sqlx::query_scalar("SELECT amount_piastres FROM payroll_deductions WHERE id = $1")
@@ -526,11 +522,9 @@ async fn an_approved_month_is_frozen_until_reopened(pool: PgPool) {
             .unwrap();
     assert_eq!(slips, 0, "a draft holds no frozen payslips");
     // Now the penalty recomputes (the record was corrected to 0 late).
-    let mut conn = pool.acquire().await.unwrap();
     madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
         .await
         .unwrap();
-    drop(conn);
     let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE id = $1")
         .bind(penalty_id)
         .fetch_one(&pool)
@@ -805,6 +799,25 @@ async fn people_not_on_payroll_are_skipped_but_keep_the_app(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(slips, 0);
+    // The month's totals count only the people on it, and it is Paid once
+    // THEY are paid: nobody has to "pay" Amal 0 EGP (PAY-7).
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner)).await;
+    assert_eq!(cur["totals"]["people"], 1, "{cur}");
+    assert_eq!(cur["paid_count"], 0);
+    let resp = call!(
+        app,
+        patch,
+        format!(
+            "/staff/payroll/periods/{}/payslips/{}/paid",
+            f.period, f.bassem
+        ),
+        owner,
+        json!({ "method": "cash" })
+    );
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    assert_eq!(period_status(&pool, f.period).await, "paid");
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner)).await;
+    assert_eq!(cur["paid_count"], 1);
     let ctx = json_of(call!(
         app,
         get,
@@ -987,8 +1000,17 @@ async fn bonus_and_deduction_limits_are_separate_and_percent_lines_are_valued(po
         .execute(&pool)
         .await
         .unwrap();
-    let ctx_mgr_employee =
-        common::employees::employee(&pool, f.org, "Mgr", Some(f.mgr), None, false, &[f.a], 0).await;
+    let ctx_mgr_employee = common::employees::employee(
+        &pool,
+        f.org,
+        "Mgr",
+        Some(f.mgr),
+        Some("+201012345670"),
+        true,
+        &[f.a],
+        0,
+    )
+    .await;
     let ctx = json_of(call!(
         app,
         get,
@@ -996,8 +1018,8 @@ async fn bonus_and_deduction_limits_are_separate_and_percent_lines_are_valued(po
         phone_token(&pool, ctx_mgr_employee).await
     ))
     .await;
-    assert_eq!(ctx["adjustment_limit_piastres"], 100_000);
-    assert_eq!(ctx["deduction_limit_piastres"], 20_000);
+    assert_eq!(ctx["adjustment_limit_piastres"], 100_000, "{ctx}");
+    assert_eq!(ctx["deduction_limit_piastres"], 20_000, "{ctx}");
 
     let bonus = json_of(call!(
         app,
@@ -1195,7 +1217,6 @@ async fn overtime_is_valued_at_the_night_rate_under_the_branch_rules(pool: PgPoo
 
 #[sqlx::test]
 async fn late_penalties_use_the_branch_rules_and_that_days_rostered_minutes(pool: PgPool) {
-    let pool2 = pool.clone();
     let f = seed(&pool).await;
     // Branch B: 30 working days, and a ladder where 1–30 min costs 30 min.
     sqlx::query(
@@ -1212,10 +1233,9 @@ async fn late_penalties_use_the_branch_rules_and_that_days_rostered_minutes(pool
     // rate: 500000×30/(30×360) = 1388.9 → 1389 (not the 8-hour 1042).
     let rec = day(&pool, &f, f.bassem, f.b, f.start, "late", 9, 360, 10, 0).await;
     // The caller passes the BUSINESS rules; the record's branch's apply.
-    let org_settings = madar_rust::staff::attendance::load_settings(&pool2, f.org, None)
+    let org_settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
         .await
         .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
     madar_rust::staff::penalties::recompute_record(&pool, rec, &org_settings)
         .await
         .unwrap();
@@ -1285,9 +1305,11 @@ async fn a_joiner_mid_period_earns_overtime_at_the_full_rate(pool: PgPool) {
         ((600_000i128 * paid_days as i128 * 2 + window as i128) / (2 * window as i128)) as i64;
     assert_eq!(slip["base_piastres"], expected_base);
     assert_eq!(slip["breakdown"]["paid_days"], paid_days);
-    // 600000×600×1.35/12480 = 38942.3 → 38942, on the FULL salary.
-    assert_eq!(slip["overtime_piastres"], 38_942);
-    assert_eq!(slip["net_piastres"], expected_base + 38_942);
+    // Each shift is priced once (AT-9): 120 min × 1.35 on the FULL salary =
+    // 600000×120×1.35/12480 = 7788.46 → 7788, five times = 38940 (not the
+    // prorated 20099 of audit B2, and not one rounding of the aggregate).
+    assert_eq!(slip["overtime_piastres"], 5 * 7_788);
+    assert_eq!(slip["net_piastres"], expected_base + 5 * 7_788);
 }
 
 #[sqlx::test]
@@ -1331,7 +1353,6 @@ async fn a_salary_change_mid_period_pays_each_day_at_its_rate(pool: PgPool) {
     let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
         .await
         .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
     madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
         .await
         .unwrap();
@@ -1361,11 +1382,9 @@ async fn overrides_are_limited_zero_is_allowed_and_a_waiver_is_final(pool: PgPoo
     let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
         .await
         .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
     madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
         .await
         .unwrap();
-    drop(conn);
     let id: Uuid =
         sqlx::query_scalar("SELECT id FROM payroll_deductions WHERE attendance_record_id = $1")
             .bind(rec)
@@ -1414,11 +1433,9 @@ async fn overrides_are_limited_zero_is_allowed_and_a_waiver_is_final(pool: PgPoo
     assert_eq!(row["amount_piastres"], 0);
     assert_eq!(row["original_amount_piastres"], 23_077);
     // A recompute never brings it back (AD-8).
-    let mut conn = pool.acquire().await.unwrap();
     madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
         .await
         .unwrap();
-    drop(conn);
     let amount: i64 =
         sqlx::query_scalar("SELECT amount_piastres FROM payroll_deductions WHERE id = $1")
             .bind(id)
@@ -1698,13 +1715,16 @@ async fn the_money_path_from_punch_to_payslip(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
+    // Rostered from TODAY (in the branch's zone): the sweep would otherwise
+    // rightly mark yesterday's shift absent and price it.
     sqlx::query(
         "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, effective_from) \
-         VALUES ($1, $2, $3, CURRENT_DATE - 60)",
+         VALUES ($1, $2, $3, (now() AT TIME ZONE $4)::date)",
     )
     .bind(f.org)
     .bind(f.amal)
     .bind(shift)
+    .bind(&tz)
     .execute(&pool)
     .await
     .unwrap();
@@ -1718,7 +1738,7 @@ async fn the_money_path_from_punch_to_payslip(pool: PgPool) {
         phone,
         json!({ "branch_id": f.a, "latitude": LAT, "longitude": LNG })
     );
-    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    assert!(resp.status().is_success(), "{}", text_of(resp).await);
     let resp = call!(
         app,
         post,
@@ -1730,7 +1750,7 @@ async fn the_money_path_from_punch_to_payslip(pool: PgPool) {
 
     // 2. The penalty row exists at the ladder's figure…
     let (id, amount, source): (Uuid, i64, String) = sqlx::query_as(
-        "SELECT id, amount_piastres, source FROM payroll_deductions WHERE employee_id = $1",
+        "SELECT id, amount_piastres, source FROM payroll_deductions WHERE employee_id = $1 AND source <> 'absence'",
     )
     .bind(f.amal)
     .fetch_one(&pool)
@@ -1742,15 +1762,18 @@ async fn the_money_path_from_punch_to_payslip(pool: PgPool) {
     assert_eq!(est["slip"]["deductions_piastres"], 11_538);
     assert_eq!(est["slip"]["net_piastres"], 600_000 - 11_538);
 
-    // 3. The nightly sweep changes nothing.
+    // 3. The nightly sweep changes nothing on this day (it may well mark
+    //    yesterday's rostered shift absent — that is its job).
     madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
-    let rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE employee_id = $1")
-            .bind(f.amal)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(rows, 1);
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT source, amount_piastres FROM payroll_deductions \
+          WHERE attendance_record_id = (SELECT attendance_record_id FROM payroll_deductions WHERE id = $1)",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![("late_penalty".to_string(), 11_538)]);
 
     // 4. The manager waives it; the sweep leaves the waiver alone.
     let resp = call!(
@@ -2040,11 +2063,9 @@ async fn every_new_money_act_refuses_the_wrong_person(pool: PgPool) {
     let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
         .await
         .unwrap();
-    let mut conn = pool.acquire().await.unwrap();
     madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
         .await
         .unwrap();
-    drop(conn);
     let ded: Uuid =
         sqlx::query_scalar("SELECT id FROM payroll_deductions WHERE attendance_record_id = $1")
             .bind(rec)
@@ -2061,12 +2082,44 @@ async fn every_new_money_act_refuses_the_wrong_person(pool: PgPool) {
     .await;
     let manual_id = manual["id"].as_str().unwrap();
 
-    // A teller holds none of it.
+    // Rights before the body (AT-11): a bad `kind` from someone with no pay
+    // rights is 403, not a 400 that names the fields; from the owner it is 400.
+    for (m, path) in [
+        ("post", "/staff/adjustments".to_string()),
+        ("patch", format!("/staff/adjustments/x/{ded}/decision")),
+        ("post", format!("/staff/adjustments/x/{ded}/stop")),
+    ] {
+        let body = json!({ "employee_id": f.amal, "kind": "x", "amount_piastres": 1, "reason": "r", "approve": true });
+        let resp = match m {
+            "post" => call!(app, post, path, teller, body),
+            _ => call!(app, patch, path, teller, body),
+        };
+        assert_eq!(resp.status(), 403, "teller {m} {path}");
+    }
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "x", "amount_piastres": 1, "reason": "r" })
+    );
+    assert_eq!(resp.status(), 400);
+    // A teller holds none of it (AT-11: one refusal per gate).
     for (m, path, body) in [
         (
             "patch",
             format!("/staff/payroll/deductions/{ded}/unwaive"),
             json!({ "reason": "r" }),
+        ),
+        (
+            "patch",
+            format!("/staff/payroll/deductions/{ded}/waive"),
+            json!({ "reason": "r" }),
+        ),
+        (
+            "patch",
+            format!("/staff/payroll/deductions/{ded}/override"),
+            json!({ "amount_piastres": 1, "reason": "r" }),
         ),
         (
             "post",
@@ -2101,14 +2154,23 @@ async fn every_new_money_act_refuses_the_wrong_person(pool: PgPool) {
         mgr
     );
     assert_eq!(resp.status(), 403, "Bassem is at B");
-    let resp = call!(
-        app,
-        patch,
-        format!("/staff/payroll/deductions/{ded}/unwaive"),
-        mgr,
-        json!({ "reason": "r" })
-    );
-    assert_eq!(resp.status(), 403);
+    for (path, body) in [
+        (
+            format!("/staff/payroll/deductions/{ded}/unwaive"),
+            json!({ "reason": "r" }),
+        ),
+        (
+            format!("/staff/payroll/deductions/{ded}/waive"),
+            json!({ "reason": "r" }),
+        ),
+        (
+            format!("/staff/payroll/deductions/{ded}/override"),
+            json!({ "amount_piastres": 1, "reason": "r" }),
+        ),
+    ] {
+        let resp = call!(app, patch, path, mgr, body);
+        assert_eq!(resp.status(), 403, "A's manager on B's line: {path}");
+    }
     let resp = call!(
         app,
         patch,
@@ -2151,4 +2213,365 @@ async fn every_new_money_act_refuses_the_wrong_person(pool: PgPool) {
         json!({ "employee_id": mgr_emp, "kind": "bonus", "amount_piastres": 1, "reason": "me" })
     );
     assert_eq!(resp.status(), 403);
+}
+
+// ── PAY-13: a first salary applies from the start, a raise from today ───────
+
+#[sqlx::test]
+async fn a_first_salary_counts_from_hire_and_a_raise_from_today(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    // Added with no salary, given one mid-month: the whole month is paid at
+    // it (nothing was ever paid at 0), not the days since it was typed.
+    let dina =
+        common::employees::employee(&pool, f.org, "Dina", None, None, false, &[f.a], 0).await;
+    // PUT replaces the profile: keep the hire date the fixture gave her.
+    let hired: NaiveDate = sqlx::query_scalar("SELECT hire_date FROM employees WHERE id = $1")
+        .bind(dina)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let resp = call!(
+        app,
+        put,
+        format!("/staff/employees/{dina}"),
+        owner,
+        json!({ "name": "Dina", "hire_date": hired, "base_salary_piastres": 400_000 })
+    );
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    let slip = slip_of(&app, &f, dina).await;
+    assert_eq!(slip["base_piastres"], 400_000, "{slip}");
+    // A raise is dated today: earlier days keep the old figure.
+    let resp = call!(
+        app,
+        put,
+        format!("/staff/employees/{dina}"),
+        owner,
+        json!({ "name": "Dina", "hire_date": hired, "base_salary_piastres": 500_000 })
+    );
+    assert_eq!(resp.status(), 200);
+    let rows: Vec<(NaiveDate, i64)> = sqlx::query_as(
+        "SELECT effective_from, base_salary_piastres FROM employee_salary_history \
+          WHERE employee_id = $1 ORDER BY effective_from",
+    )
+    .bind(dina)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].1, 400_000);
+    assert_eq!(rows[1].1, 500_000);
+    let slip = slip_of(&app, &f, dina).await;
+    let base = slip["base_piastres"].as_i64().unwrap();
+    assert!(base >= 400_000 && base <= 500_000, "{slip}");
+}
+
+// ── AT-9: one day, one price, every path (orchestrator decision #3) ─────────
+
+async fn shift(pool: &PgPool, org: Uuid, branch: Uuid, name: &str, from: &str, to: &str) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO work_shifts (org_id, branch_id, name, start_time, end_time, grace_minutes) \
+         VALUES ($1, $2, $3, $4::time, $5::time, 0) RETURNING id",
+    )
+    .bind(org)
+    .bind(branch)
+    .bind(name)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn roster(pool: &PgPool, f: &F, who: Uuid, shifts: &[Uuid]) {
+    for s in shifts {
+        sqlx::query(
+            "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, effective_from) \
+             VALUES ($1, $2, $3, '2026-01-01')",
+        )
+        .bind(f.org)
+        .bind(who)
+        .bind(s)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// Like [`day`], for a shift ON THE ROSTER (`work_shift_id` set).
+#[allow(clippy::too_many_arguments)]
+async fn rostered_day(
+    pool: &PgPool,
+    f: &F,
+    emp: Uuid,
+    branch: Uuid,
+    shift_id: Uuid,
+    date: NaiveDate,
+    status: &str,
+    start_hour: u32,
+    sched_minutes: i64,
+    late: i32,
+    ot: i32,
+) -> Uuid {
+    let id = day(
+        pool,
+        f,
+        emp,
+        branch,
+        date,
+        status,
+        start_hour,
+        sched_minutes,
+        late,
+        ot,
+    )
+    .await;
+    sqlx::query("UPDATE attendance_records SET work_shift_id = $2 WHERE id = $1")
+        .bind(id)
+        .bind(shift_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn rows_of(pool: &PgPool, rec: Uuid) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT source, amount_piastres FROM payroll_deductions \
+          WHERE attendance_record_id = $1 ORDER BY source",
+    )
+    .bind(rec)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn deduction_lines(slip: &Value) -> Vec<(String, i64)> {
+    let mut v: Vec<(String, i64)> = slip["breakdown"]["deductions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| {
+            (
+                l["source"].as_str().unwrap_or("?").to_string(),
+                l["piastres"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// A split day (09–13 late and with overtime, 17–21 missed) priced by hand,
+/// by `price_shift` on the facts `load_facts` gathers, by the sweep's rows,
+/// by the live estimate, by the flag's suggestion / unpaid excuse, by the
+/// overtime approval and by the approved payslip: the same piastres in
+/// every place.
+#[sqlx::test]
+async fn one_day_is_priced_identically_by_every_path(pool: PgPool) {
+    use madar_rust::staff::pricing::{self, ShiftFacts};
+    use madar_rust::staff::rules::AttendanceStatus;
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let morning = shift(&pool, f.org, f.a, "Morning", "09:00", "13:00").await;
+    let evening = shift(&pool, f.org, f.a, "Evening", "17:00", "21:00").await;
+    roster(&pool, &f, f.amal, &[morning, evening]).await;
+    let d = f.start;
+    // 24 minutes late for the morning, 30 minutes past its end; the evening missed.
+    let am = rostered_day(&pool, &f, f.amal, f.a, morning, d, "late", 9, 240, 24, 30).await;
+    let pm = rostered_day(&pool, &f, f.amal, f.a, evening, d, "absent", 17, 240, 0, 0).await;
+
+    // By hand (600,000 pt, 26 days, the DAY is 480 minutes — RU-5/RU-6):
+    //   late 24 min → rung 16–30 → 60 min of pay = 600000×60/12480 = 2884.6 → 2885
+    //   overtime 30 min at 1.35 = 600000×30×1.35/12480 = 1947.1 → 1947
+    //   the missed evening = half the day = 600000×(240/480)/26 = 11538.46 → 11538
+    const LATE: i64 = 2_885;
+    const OVERTIME: i64 = 1_947;
+    const HALF_ABSENCE: i64 = 11_538;
+
+    // 1. The pure function on hand-built facts.
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, Some(f.a))
+        .await
+        .unwrap();
+    let rules = pricing::ShiftRules::from_settings(&settings, None, None);
+    let am_facts = ShiftFacts {
+        base_salary_piastres: 600_000,
+        scheduled_minutes: 240,
+        day_minutes: 480,
+        status: AttendanceStatus::Late,
+        leave_minutes: 0,
+        leave_paid: true,
+        unpaid_excused_minutes: 0,
+        late_minutes: 24,
+        worked_minutes: 246,
+        overtime_minutes: 30,
+        night_overtime_minutes: 0,
+        overtime_status: Some("pending".into()),
+        is_confirmed_cover: false,
+        is_other_cover: false,
+        holiday: false,
+    };
+    let am_price = pricing::price_shift(&am_facts, &rules);
+    assert_eq!(
+        (
+            am_price.late_penalty_piastres,
+            am_price.overtime_piastres,
+            am_price.absence_piastres
+        ),
+        (LATE, OVERTIME, 0)
+    );
+    let pm_price = pricing::price_shift(
+        &ShiftFacts {
+            status: AttendanceStatus::Absent,
+            late_minutes: 0,
+            worked_minutes: 0,
+            overtime_minutes: 0,
+            overtime_status: None,
+            ..am_facts.clone()
+        },
+        &rules,
+    );
+    assert_eq!(pm_price.absence_piastres, HALF_ABSENCE);
+
+    // 2. The facts the sweep gathers from the record and the roster are those.
+    let loaded = madar_rust::staff::penalties::load_facts(&pool, am, &settings)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.facts.day_minutes, 480, "the roster's whole day");
+    assert_eq!(loaded.facts.scheduled_minutes, 240);
+    assert_eq!(loaded.facts.late_minutes, 24);
+    assert_eq!(loaded.facts.overtime_minutes, 30);
+    assert_eq!(loaded.facts.base_salary_piastres, 600_000);
+    assert_eq!(loaded.price(), am_price);
+
+    // 3. The sweep's rows.
+    for rec in [am, pm] {
+        madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        rows_of(&pool, am).await,
+        vec![("late_penalty".to_string(), LATE)]
+    );
+    assert_eq!(
+        rows_of(&pool, pm).await,
+        vec![("absence".to_string(), HALF_ABSENCE)]
+    );
+
+    // 4. The flag's suggestion for 30 minutes away is the same minute rate
+    //    (600000×30/12480 = 1442.3 → nearest 5 EGP 1500), and resolving it as
+    //    an unpaid excuse writes the exact figure under the ONE source name.
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, \
+             kind, minutes_away) VALUES ($1, $2, $3, $4, 'left_mid_shift', 30) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.a)
+    .bind(am)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let flags = json_of(call!(
+        app,
+        get,
+        format!("/staff/flags?branch_id={}", f.a),
+        owner
+    ))
+    .await;
+    let mine = flags
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == json!(flag))
+        .cloned()
+        .unwrap();
+    assert_eq!(mine["suggested_deduction_piastres"], json!(1_500));
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/flags/{flag}"),
+        owner,
+        json!({ "action": "excuse_unpaid" })
+    );
+    assert_eq!(resp.status(), 200);
+    const EXCUSED: i64 = 1_442;
+    assert_eq!(
+        rows_of(&pool, am).await,
+        vec![
+            ("excused_unpaid".to_string(), EXCUSED),
+            ("late_penalty".to_string(), LATE)
+        ],
+        "decision #2: one source name for unpaid excused time"
+    );
+    // The sweep runs again (a check-out, a correction, the night): the
+    // manager's line survives, the automatic ones are re-priced in place.
+    madar_rust::staff::penalties::recompute_record(&pool, am, &settings)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows_of(&pool, am).await,
+        vec![
+            ("excused_unpaid".to_string(), EXCUSED),
+            ("late_penalty".to_string(), LATE)
+        ]
+    );
+
+    // 5. The live estimate reads exactly those rows and prices the overtime
+    //    with the same function.
+    let phone = phone_token(&pool, f.amal).await;
+    let est = json_of(call!(app, get, "/staff/me/pay/estimate", phone)).await;
+    let slip = &est["slip"];
+    assert_eq!(slip["overtime_piastres"], json!(OVERTIME), "{est}");
+    assert_eq!(
+        deduction_lines(slip),
+        vec![
+            ("absence".to_string(), HALF_ABSENCE),
+            ("excused_unpaid".to_string(), EXCUSED),
+            ("late_penalty".to_string(), LATE)
+        ]
+    );
+    let deductions = LATE + HALF_ABSENCE + EXCUSED;
+    assert_eq!(slip["deductions_piastres"], json!(deductions));
+    assert_eq!(slip["net_piastres"], json!(600_000 + OVERTIME - deductions));
+
+    // 6. Under approval mode the overtime waits, and the approval prices it
+    //    through the same facts; the estimate then shows the same figure.
+    sqlx::query("UPDATE attendance_settings SET overtime_mode = 'approval' WHERE org_id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let est = json_of(call!(app, get, "/staff/me/pay/estimate", phone)).await;
+    assert_eq!(
+        est["slip"]["overtime_piastres"],
+        json!(0),
+        "pending overtime is not paid"
+    );
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{am}/overtime"),
+        owner,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    let est = json_of(call!(app, get, "/staff/me/pay/estimate", phone)).await;
+    assert_eq!(est["slip"]["overtime_piastres"], json!(OVERTIME));
+
+    // 7. The approved payslip is the estimate, frozen.
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    let frozen = slip_of(&app, &f, f.amal).await;
+    assert_eq!(frozen["overtime_piastres"], json!(OVERTIME));
+    assert_eq!(frozen["deductions_piastres"], json!(deductions));
+    assert_eq!(
+        frozen["net_piastres"],
+        json!(600_000 + OVERTIME - deductions)
+    );
+    assert_eq!(deduction_lines(&frozen), deduction_lines(&est["slip"]));
 }

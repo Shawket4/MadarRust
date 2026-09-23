@@ -962,7 +962,7 @@ async fn an_unpaid_excuse_deducts_the_exact_minutes_not_the_suggestion(pool: PgP
     );
     assert_eq!(resp.status(), 200);
     let amount: i64 = sqlx::query_scalar(
-        "SELECT amount_piastres FROM payroll_deductions WHERE employee_id = $1 AND source = 'unpaid_excuse'",
+        "SELECT amount_piastres FROM payroll_deductions WHERE employee_id = $1 AND source = 'excused_unpaid'",
     )
     .bind(f.a)
     .fetch_one(&pool)

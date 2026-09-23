@@ -78,6 +78,8 @@ pub async fn labour_vs_sales(
     // branch's rules, the shift's own rates, night minutes at the night rate.
     #[derive(sqlx::FromRow)]
     struct Row {
+        employee_id: Uuid,
+        work_shift_id: Option<Uuid>,
         business_date: NaiveDate,
         branch_id: Uuid,
         salary: i64,
@@ -92,7 +94,7 @@ pub async fn labour_vs_sales(
         shift_night: Option<Decimal>,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT a.business_date, a.branch_id, \
+        "SELECT a.employee_id, a.work_shift_id, a.business_date, a.branch_id, \
                 COALESCE((SELECT h.base_salary_piastres FROM employee_salary_history h \
                            WHERE h.employee_id = a.employee_id AND h.effective_from <= a.business_date \
                            ORDER BY h.effective_from DESC LIMIT 1), p.base_salary_piastres) AS salary, \
@@ -115,18 +117,41 @@ pub async fn labour_vs_sales(
     .bind(settings.night_end)
     .fetch_all(pool)
     .await?;
-    let mut by_branch: BTreeMap<Uuid, crate::staff::attendance::AttendanceSettings> = BTreeMap::new();
+    let mut by_branch: BTreeMap<Uuid, crate::staff::attendance::AttendanceSettings> =
+        BTreeMap::new();
     let mut days: BTreeMap<(NaiveDate, Uuid), (i64, i64)> = BTreeMap::new();
+    // The minute rate divides by every rostered minute of the day (RU-6),
+    // built from the roster exactly as payroll builds it (AT-9).
+    let mut ids: Vec<Uuid> = rows.iter().map(|r| r.employee_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let rostered = crate::staff::penalties::rostered_by_day(pool, &ids, q.from, q.to, None).await?;
     for r in rows {
-        if !by_branch.contains_key(&r.branch_id) {
-            by_branch.insert(r.branch_id, load_settings(pool, org_id, Some(r.branch_id)).await?);
+        if let std::collections::btree_map::Entry::Vacant(slot) = by_branch.entry(r.branch_id) {
+            slot.insert(load_settings(pool, org_id, Some(r.branch_id)).await?);
         }
         let branch_rules = &by_branch[&r.branch_id];
-        let rules = crate::staff::pricing::ShiftRules::from_settings(branch_rules, r.shift_day, r.shift_night);
-        let scheduled = i64::from(r.scheduled.unwrap_or(480).max(1));
+        let rules = crate::staff::pricing::ShiftRules::from_settings(
+            branch_rules,
+            r.shift_day,
+            r.shift_night,
+        );
+        let own = i64::from(r.scheduled.unwrap_or(480).max(1));
         if r.is_cover && r.cover_status.as_deref() != Some("confirmed") {
             continue;
         }
+        let scheduled = if r.is_cover {
+            own
+        } else {
+            crate::staff::pricing::day_minutes_of(
+                rostered
+                    .get(&(r.employee_id, r.business_date))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+                r.work_shift_id,
+                own,
+            )
+        };
         let plain = crate::staff::pricing::minutes_piastres(
             r.salary,
             rules.working_days_per_month,
@@ -134,8 +159,10 @@ pub async fn labour_vs_sales(
             i64::from(r.worked),
         );
         let premium = if !r.is_cover
-            && crate::staff::pricing::overtime_counts(&rules.overtime_mode, r.overtime_status.as_deref())
-        {
+            && crate::staff::pricing::overtime_counts(
+                &rules.overtime_mode,
+                r.overtime_status.as_deref(),
+            ) {
             let total = i64::from(r.overtime.max(0));
             let night = r.night.clamp(0, total);
             crate::staff::pricing::overtime_piastres(
@@ -176,14 +203,12 @@ pub async fn labour_vs_sales(
     }
     let out: Vec<LabourDay> = days
         .into_iter()
-        .map(|((date, branch_id), (labour, sales))| {
-            LabourDay {
-                date,
-                branch_id,
-                labour_piastres: labour,
-                sales_piastres: sales,
-                labour_share_bp: (sales > 0).then(|| labour * 10_000 / sales),
-            }
+        .map(|((date, branch_id), (labour, sales))| LabourDay {
+            date,
+            branch_id,
+            labour_piastres: labour,
+            sales_piastres: sales,
+            labour_share_bp: (sales > 0).then(|| labour * 10_000 / sales),
         })
         .collect();
     Ok(HttpResponse::Ok().json(out))

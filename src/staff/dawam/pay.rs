@@ -21,8 +21,8 @@ use crate::errors::{AppError, AppErrorResponse};
 use crate::staff::access;
 use crate::staff::attendance::{load_settings, today_in};
 use crate::staff::payroll::{
-    ComputedPayslip, PERIOD_COLS, PAYSLIP_SELECT, PayrollPeriod, PayrollTotals,
-    Payslip, SalaryAdvance, audit, compute_payslips, create_cap, installment_of, load_advance,
+    ComputedPayslip, PAYSLIP_SELECT, PERIOD_COLS, PayrollPeriod, PayrollTotals, Payslip,
+    SalaryAdvance, audit, compute_payslips, create_cap, installment_of, load_advance,
     settle_period_if_all_paid,
 };
 use crate::staff::period_lock;
@@ -427,6 +427,33 @@ fn table_of(kind: &str) -> Result<&'static str, AppError> {
     }
 }
 
+/// The table and capability for a pay line of `kind`, with the rights checked
+/// BEFORE the body is judged (AT-11): someone who may add neither bonuses nor
+/// deductions anywhere gets 403, never a 400 that tells them the field names.
+async fn gate_kind(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    kind: &str,
+) -> Result<(&'static str, Cap), AppError> {
+    match table_of(kind) {
+        Ok(table) => {
+            let cap = create_cap(table);
+            access::gate(pool, claims, org_id, cap).await?;
+            Ok((table, cap))
+        }
+        Err(bad_kind) => {
+            if access::gate(pool, claims, org_id, Cap::HrAdjustmentsCreate)
+                .await
+                .is_err()
+            {
+                access::gate(pool, claims, org_id, Cap::HrDeductionsCreate).await?;
+            }
+            Err(bad_kind)
+        }
+    }
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct NewAdjustment {
     pub employee_id: Uuid,
@@ -467,9 +494,7 @@ pub async fn create_adjustment(
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
-    let table = table_of(&body.kind)?;
-    let cap = create_cap(table);
-    access::gate(pool, &claims, org_id, cap).await?;
+    let (table, cap) = gate_kind(pool, &claims, org_id, &body.kind).await?;
     let subject = access::subject(pool, org_id, body.employee_id).await?;
     if subject.is(&claims) {
         return Err(AppError::Forbidden(
@@ -650,9 +675,7 @@ pub async fn decide_adjustment(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     let (kind, id) = path.into_inner();
-    let table = table_of(&kind)?;
-    let cap = create_cap(table);
-    access::gate(pool, &claims, org_id, cap).await?;
+    let (table, cap) = gate_kind(pool, &claims, org_id, &kind).await?;
     let a = load_adjustment(pool, id).await?;
     if a.status != "pending" || a.kind != kind {
         return Err(AppError::Conflict(
@@ -750,9 +773,7 @@ pub async fn stop_adjustment(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     let (kind, id) = path.into_inner();
-    let table = table_of(&kind)?;
-    let cap = create_cap(table);
-    access::gate(pool, &claims, org_id, cap).await?;
+    let (table, cap) = gate_kind(pool, &claims, org_id, &kind).await?;
     // For a line of someone the caller manages — never "anywhere" (audit B-3).
     let line = load_adjustment(pool, id).await?;
     if line.kind != kind {
@@ -1130,7 +1151,9 @@ pub async fn log_expense_advance(
     let today = today_for_org(pool, org_id).await?;
     let given_on = body.given_on.unwrap_or(today);
     if given_on > today {
-        return Err(AppError::BadRequest("The date can't be in the future".into()));
+        return Err(AppError::BadRequest(
+            "The date can't be in the future".into(),
+        ));
     }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO expense_advances (org_id, employee_id, branch_id, amount_piastres, purpose, via, \
