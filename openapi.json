@@ -68200,6 +68200,14 @@
           "cant_work_days"
         ],
         "properties": {
+          "advance_cap_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Their salary-advance cap, decided by the server (AV-5, AT-3); shown\nunder the same visibility as the salary."
+          },
           "base_salary_piastres": {
             "type": [
               "integer",

@@ -745,6 +745,13 @@ pub async fn resolve_flag(
         }
         None => None,
     };
+    // Confirming a cover from its flag confirms the COVER, not only the flag
+    // (CV-5: it is paid once a manager confirms it, and it leaves Approvals).
+    // (A cover flag always names its record; one without has no cover to
+    // decide, and only the flag is resolved.)
+    if let (true, Some(record)) = (body.action == "confirm" && kind == "cover", record_id) {
+        decide_cover_record(pool, &claims, org_id, by, record, true).await?;
+    }
     let (resolution, amount, reason) = match body.action.as_str() {
         "ignore" => ("ignored", 0, ""),
         "confirm" => ("confirmed", 0, ""),
@@ -1119,6 +1126,80 @@ pub struct Decide {
     pub approve: bool,
 }
 
+/// Decide one pending cover (CV-5): confirmed pays it, rejected pays nothing.
+/// The one place a cover is decided — the covers list (`decide_cover`) and
+/// the cover's own flag on the Team board (`resolve_flag` "confirm") both call
+/// it, so either settles the record AND its flag (CV-3).
+async fn decide_cover_record(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    by: Uuid,
+    id: Uuid,
+    approve: bool,
+) -> Result<(), AppError> {
+    // The two people involved, and their accounts (if any).
+    #[allow(clippy::type_complexity)]
+    let row: Option<(Uuid, Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT a.employee_id, a.branch_id, a.covered_employee_id, c.user_id, o.user_id \
+           FROM attendance_records a \
+           JOIN employees c ON c.id = a.employee_id \
+           LEFT JOIN employees o ON o.id = a.covered_employee_id \
+          WHERE a.id = $1 AND a.org_id = $2 AND a.cover_status = 'pending'",
+    )
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((coverer, branch_id, _owner, coverer_user, owner_user)) = row else {
+        return Err(AppError::NotFound("No cover waiting here.".into()));
+    };
+    access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
+    if Some(by) == coverer_user || Some(by) == owner_user {
+        return Err(AppError::Forbidden(
+            "You can't confirm a cover you're part of.".into(),
+        ));
+    }
+    let status = if approve { "confirmed" } else { "rejected" };
+    // One decision only: a second confirm (or a race) finds nothing pending.
+    let decided = sqlx::query(
+        "UPDATE attendance_records SET cover_status = $2, edited_by = $3 \
+          WHERE id = $1 AND cover_status = 'pending'",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(by)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if decided == 0 {
+        return Err(AppError::Conflict("That cover was already decided.".into()));
+    }
+    // The flag says what was decided (CV-3).
+    sqlx::query(
+        "UPDATE attendance_flags SET resolution = $3, resolved_by = $2, resolved_at = now() \
+          WHERE attendance_record_id = $1 AND kind = 'cover' AND resolution IS NULL",
+    )
+    .bind(id)
+    .bind(by)
+    .bind(status)
+    .execute(pool)
+    .await?;
+    notify(
+        pool,
+        org_id,
+        coverer,
+        if approve {
+            "staff.n_cover_confirmed"
+        } else {
+            "staff.n_cover_rejected"
+        },
+        json!({}),
+    )
+    .await;
+    Ok(())
+}
+
 /// Confirm or reject a cover. Rejecting pays nothing (CV-5); the confirmer is
 /// neither person involved.
 #[utoipa::path(
@@ -1138,69 +1219,7 @@ pub async fn decide_cover(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrShiftCoverConfirm).await?;
-    // The two people involved, and their accounts (if any).
-    #[allow(clippy::type_complexity)]
-    let row: Option<(Uuid, Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT a.employee_id, a.branch_id, a.covered_employee_id, c.user_id, o.user_id \
-           FROM attendance_records a \
-           JOIN employees c ON c.id = a.employee_id \
-           LEFT JOIN employees o ON o.id = a.covered_employee_id \
-          WHERE a.id = $1 AND a.org_id = $2 AND a.cover_status = 'pending'",
-    )
-    .bind(*id)
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await?;
-    let Some((coverer, branch_id, _owner, coverer_user, owner_user)) = row else {
-        return Err(AppError::NotFound("No cover waiting here.".into()));
-    };
-    access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
-    if Some(by) == coverer_user || Some(by) == owner_user {
-        return Err(AppError::Forbidden(
-            "You can't confirm a cover you're part of.".into(),
-        ));
-    }
-    let status = if body.approve {
-        "confirmed"
-    } else {
-        "rejected"
-    };
-    // One decision only: a second confirm (or a race) finds nothing pending.
-    let decided = sqlx::query(
-        "UPDATE attendance_records SET cover_status = $2, edited_by = $3 \
-          WHERE id = $1 AND cover_status = 'pending'",
-    )
-    .bind(*id)
-    .bind(status)
-    .bind(by)
-    .execute(pool)
-    .await?
-    .rows_affected();
-    if decided == 0 {
-        return Err(AppError::Conflict("That cover was already decided.".into()));
-    }
-    // The flag says what was decided (CV-3).
-    sqlx::query(
-        "UPDATE attendance_flags SET resolution = $3, resolved_by = $2, resolved_at = now() \
-          WHERE attendance_record_id = $1 AND kind = 'cover' AND resolution IS NULL",
-    )
-    .bind(*id)
-    .bind(by)
-    .bind(status)
-    .execute(pool)
-    .await?;
-    notify(
-        pool,
-        org_id,
-        coverer,
-        if body.approve {
-            "staff.n_cover_confirmed"
-        } else {
-            "staff.n_cover_rejected"
-        },
-        json!({}),
-    )
-    .await;
+    decide_cover_record(pool, &claims, org_id, by, *id, body.approve).await?;
     let record = crate::staff::attendance::load_record(pool, org_id, *id).await?;
     Ok(HttpResponse::Ok().json(record))
 }

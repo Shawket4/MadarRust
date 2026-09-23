@@ -871,6 +871,18 @@ async fn the_app_boots_from_one_context_call(pool: PgPool) {
         .find(|p| p["employee_id"] == json!(f.a))
         .unwrap();
     assert_eq!(myself["base_salary_piastres"], 600_000);
+    // The advance cap is the server's figure (AV-5, AT-3; E2E DW3): the app
+    // no longer works it out in f64. Same visibility as the salary.
+    let cap: i64 = sqlx::query_scalar("SELECT dawam_advance_cap($1, 600000)")
+        .bind(f.org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(myself["advance_cap_piastres"], cap);
+    assert!(
+        colleague["advance_cap_piastres"].is_null(),
+        "no colleague's cap"
+    );
     assert_eq!(me["settings"]["period_start_day"], 26);
 }
 

@@ -2761,3 +2761,110 @@ async fn swaps_and_claims_never_suggest_a_new_pattern(pool: PgPool) {
     assert_eq!(patterns.len(), 1, "{list}");
     assert_eq!(patterns[0]["employee_id"], json!(f.b));
 }
+
+/// E2E D-B1: "Confirm the cover" on the cover's own flag (the Team board)
+/// confirms the COVER — it is paid (CV-5) and leaves Approvals — not only the
+/// flag; and the covers list's decision resolves the flag (CV-3). One decision
+/// settles both, whichever screen it came from.
+#[sqlx::test]
+async fn confirming_a_cover_flag_confirms_the_cover_and_deciding_a_cover_resolves_its_flag(
+    pool: PgPool,
+) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let cover = async |day: i64| -> (Uuid, Uuid) {
+        let rec: Uuid = sqlx::query_scalar(
+            "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
+             business_date, status, check_in_method, covered_employee_id, cover_status) \
+             VALUES ($1, $2, $3, $4, $5, 'present', 'cover', $6, 'pending') RETURNING id",
+        )
+        .bind(f.org)
+        .bind(f.a)
+        .bind(f.br_a)
+        .bind(m)
+        .bind(today() - Duration::days(day))
+        .bind(f.b)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let flag: Uuid = sqlx::query_scalar(
+            "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind) \
+             VALUES ($1, $2, $3, $4, 'cover') RETURNING id",
+        )
+        .bind(f.org)
+        .bind(f.a)
+        .bind(f.br_a)
+        .bind(rec)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        (rec, flag)
+    };
+    let status_of = async |rec: Uuid| -> (Option<String>, Option<String>) {
+        sqlx::query_as(
+            "SELECT a.cover_status, f.resolution FROM attendance_records a \
+               JOIN attendance_flags f ON f.attendance_record_id = a.id AND f.kind = 'cover' \
+              WHERE a.id = $1",
+        )
+        .bind(rec)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    // From the Team board: the flag's "Confirm the cover".
+    let (rec, flag) = cover(1).await;
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/flags/{flag}"),
+        f.owner(),
+        json!({ "action": "confirm" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(
+        status_of(rec).await,
+        (Some("confirmed".into()), Some("confirmed".into()))
+    );
+    // Decided once: the covers list finds nothing pending any more.
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/attendance/{rec}/cover"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 404);
+
+    // From the covers list (Approvals): the flag follows.
+    let (rec2, _) = cover(2).await;
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/attendance/{rec2}/cover"),
+        f.owner(),
+        json!({ "approve": false })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(
+        status_of(rec2).await,
+        (Some("rejected".into()), Some("rejected".into()))
+    );
+
+    // "Ignore" on a cover flag decides nothing: the cover still waits.
+    let (rec3, flag3) = cover(3).await;
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/flags/{flag3}"),
+        f.owner(),
+        json!({ "action": "ignore" })
+    ))
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(status_of(rec3).await.0.as_deref(), Some("pending"));
+}
