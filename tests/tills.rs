@@ -2504,3 +2504,80 @@ async fn an_old_client_with_no_device_resumes_its_own_till(pool: PgPool) {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["code"], "TILL_OPEN_ELSEWHERE");
 }
+
+/// T2 (madar-shared discovery): the drawer carryover prefers the DEVICE's own
+/// last close, and a device-less till (926 of 932 in production) must not beat
+/// it. `device_id = $2` is NULL for such a row, and Postgres sorts NULL FIRST in
+/// a DESC key — so an older device-less close of 500 won over this device's
+/// newer 900, the till (which pre-fills 900) got a false "edited" flag, and a
+/// live open was asked for an edit reason it had no reason to give.
+#[sqlx::test]
+async fn carryover_prefers_the_devices_own_close_over_an_older_deviceless_one(pool: PgPool) {
+    use madar_rust::sync::ActingContext;
+    use madar_rust::tills::handlers::{OpenMeta, OpenTillRequest, open_till_inner};
+
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    let device = Uuid::new_v4();
+    sqlx::query("INSERT INTO devices (id, org_id, branch_id, code) VALUES ($1, $2, $3, 'D1')")
+        .bind(device)
+        .bind(org_id)
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let closed = |device: Option<Uuid>, opened: &'static str, declared: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO tills (branch_id, teller_id, status, opening_cash, opened_at, closed_at,
+                                    closing_cash_declared, device_id)
+                 VALUES ($1, $2, 'closed', 0, $3::timestamptz, $3::timestamptz + interval '8 hours', $4, $5)",
+            )
+            .bind(branch_id)
+            .bind(user_id)
+            .bind(opened)
+            .bind(declared)
+            .bind(device)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    // Till A: no device, older, declared 500. Till B: this device, newer, 900.
+    closed(None, "2026-09-01T08:00:00Z", 500).await;
+    closed(Some(device), "2026-09-10T08:00:00Z", 900).await;
+
+    let (till, created) = open_till_inner(
+        &pool,
+        None,
+        branch_id,
+        OpenTillRequest {
+            id: Some(Uuid::new_v4()),
+            opening_cash: 900,
+            opening_cash_edited: None,
+            edit_reason: None,
+            opened_at: None,
+            device_id: Some(device),
+            verification: None,
+        },
+        ActingContext {
+            teller_id: user_id,
+            org_id,
+            role: UserRole::OrgAdmin,
+            replay: false,
+            own_till_only: false,
+        },
+        OpenMeta::default(),
+    )
+    .await
+    .expect("opening at this drawer's own carryover needs no edit reason");
+    assert!(created);
+    assert_eq!(
+        till.opening_cash_original,
+        Some(900),
+        "the device's own last close is the carryover"
+    );
+    assert!(!till.opening_cash_was_edited, "no false edit flag");
+}
