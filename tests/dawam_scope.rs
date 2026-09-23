@@ -691,15 +691,18 @@ fn org_wide(f: &F) -> Vec<(&'static str, String, Value)> {
             "/staff/work-shifts".into(),
             json!({ "name": "Everywhere", "start_time": "08:00:00", "end_time": "16:00:00" }),
         ),
+        // The legacy creates are retired (Phase B payroll): every pay line
+        // goes through /staff/adjustments and every advance through review.
+        // Opening a month is the whole business's (hr.payroll.run everywhere).
         (
             "POST",
-            "/staff/payroll/bonuses".into(),
-            json!({ "employee_id": f.y, "amount_piastres": 100, "reason": "r", "effective_date": today }),
+            "/staff/payroll/periods".into(),
+            json!({ "name": "x", "start_date": "2031-01-01", "end_date": "2031-01-31" }),
         ),
         (
             "PATCH",
-            format!("/staff/payroll/advances/{}/decision", f.adv_x),
-            json!({ "status": "approved" }),
+            format!("/staff/advances/{}/review", f.adv_x),
+            json!({ "approve": true }),
         ),
     ]
 }

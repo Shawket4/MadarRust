@@ -98,6 +98,11 @@ pub struct Employee {
     /// run, the estimate and the payslips skip them.
     #[sqlx(default)]
     pub on_payroll: bool,
+    /// The owner's cap on what this person may owe in salary advances, in
+    /// piastres (AV-5): the server's figure, so no client recomputes it.
+    /// Hidden with the salary.
+    #[sqlx(default)]
+    pub advance_cap_piastres: Option<i64>,
     /// `morning` · `evening` · null
     pub pref_time: Option<String>,
     /// Days they can't work: 0 = Sunday … 6 = Saturday.
@@ -123,6 +128,7 @@ impl Employee {
             };
         if !visible {
             self.base_salary_piastres = None;
+            self.advance_cap_piastres = None;
         }
         self
     }
@@ -481,6 +487,7 @@ const EMPLOYEE_SELECT: &str = r#"
            e.national_id, e.photo_url, e.emergency_contact_name, e.emergency_contact_phone,
            e.notes, e.gender, e.pay_method, e.pay_account, e.pref_time, e.cant_work_days,
            e.on_payroll,
+           dawam_advance_cap(e.org_id, e.base_salary_piastres) AS advance_cap_piastres,
            COALESCE(ARRAY(SELECT eb.branch_id FROM employee_branches eb
                            WHERE eb.employee_id = e.id ORDER BY eb.assigned_at, eb.branch_id),
                     '{}') AS branch_ids,
