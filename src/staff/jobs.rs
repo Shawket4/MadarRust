@@ -461,7 +461,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
         business_date: NaiveDate,
         scheduled_start_at: DateTime<Utc>,
         scheduled_end_at: DateTime<Utc>,
-        excused: bool,
+        tz: String,
     }
 
     // Yesterday and today only, in each shift's BRANCH-local calendar (AT-1):
@@ -487,16 +487,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
               JOIN employees e ON e.id = r.employee_id
         )
         SELECT r.org_id, r.employee_id, r.branch_id, r.work_shift_id, r.business_date,
-               r.start_at AS scheduled_start_at, r.end_at AS scheduled_end_at,
-               -- One table covers leave AND missions: both are whole-day
-               -- approvals, so a day either is excused or is an absence.
-               EXISTS (
-                   SELECT 1 FROM staff_requests sr
-                    WHERE sr.employee_id = r.employee_id AND sr.status = 'approved'
-                      AND sr.kind IN ('leave', 'mission')
-                      AND sr.on_date <= r.business_date
-                      AND COALESCE(sr.end_date, sr.on_date) >= r.business_date
-               ) AS excused
+               r.start_at AS scheduled_start_at, r.end_at AS scheduled_end_at, r.tz
           FROM rostered r
          WHERE r.branch_id IS NOT NULL
            AND r.business_date >= (now() AT TIME ZONE r.tz)::date - 1
@@ -533,7 +524,47 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
     .fetch_all(pool)
     .await?;
 
+    // On leave or absent is decided by the same function pricing uses
+    // (`adjustments_for(..).for_shift(..)`): a full-day leave or mission, or
+    // a half-day leave that covers this whole block, is `on_leave`; a
+    // half-day leave that leaves part of the block to work is an ABSENCE
+    // from that part, priced with its leave half (RQ-3, RQ-8, Mac E2E RQ-F1).
+    let mut rules: std::collections::HashMap<
+        (Uuid, Uuid),
+        crate::staff::attendance::AttendanceSettings,
+    > = std::collections::HashMap::new();
     for row in missing {
+        let off = async {
+            let key = (row.org_id, row.branch_id);
+            if !rules.contains_key(&key) {
+                let s = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
+                rules.insert(key, s);
+            }
+            let adjustments = crate::staff::attendance::adjustments_for(
+                pool,
+                &rules[&key],
+                row.employee_id,
+                row.business_date,
+                &row.tz,
+            )
+            .await?;
+            Ok::<bool, AppError>(
+                adjustments
+                    .for_shift(
+                        Some(row.scheduled_start_at),
+                        Some(row.scheduled_end_at),
+                        Some(row.work_shift_id),
+                    )
+                    .on_leave,
+            )
+        };
+        let on_leave = match off.await {
+            Ok(v) => v,
+            Err(e) => {
+                skipped("mark_absences", row.org_id, Some(row.employee_id), &e);
+                continue;
+            }
+        };
         if let Err(e) = sqlx::query(
             "INSERT INTO attendance_records \
                  (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
@@ -548,7 +579,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
         .bind(row.branch_id)
         .bind(row.work_shift_id)
         .bind(row.business_date)
-        .bind(if row.excused { "on_leave" } else { "absent" })
+        .bind(if on_leave { "on_leave" } else { "absent" })
         .bind(row.scheduled_start_at)
         .bind(row.scheduled_end_at)
         .execute(pool)

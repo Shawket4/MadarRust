@@ -2384,3 +2384,91 @@ async fn team_refusals_carry_codes(pool: PgPool) {
     )
     .await;
 }
+
+/// Mac E2E RQ-F1 (RQ-3, RQ-8): a no-show on a HALF-day leave day is an
+/// absence from the worked half, not a leave day: the sweep writes it
+/// absent and prices it as the reprice path does — the worked half always,
+/// plus the leave half when that leave is unpaid. A full-day leave is still
+/// on_leave. (600,000 a month over the default 30 days: a day is 20,000.)
+#[sqlx::test]
+async fn a_half_day_leave_no_show_is_priced_by_the_sweep(pool: PgPool) {
+    let f = seed(&pool, &tz_at(20)).await;
+    let day = shift(
+        &pool,
+        &f,
+        "Day",
+        NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
+        NaiveTime::from_hms_opt(16, 0, 0).unwrap(),
+    )
+    .await;
+    let full = employee(
+        &pool,
+        f.org,
+        "Fatma",
+        None,
+        None,
+        false,
+        &[f.branch],
+        600_000,
+    )
+    .await;
+    for who in [f.a, f.b, full] {
+        every_day(&pool, &f, who, day).await;
+    }
+    let today = local(&pool, Utc::now(), &f.tz).await.date();
+    for (who, half, paid) in [(f.a, true, false), (f.b, true, true), (full, false, true)] {
+        sqlx::query(
+            "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, end_date, is_half_day, \
+                 leave_half, status, decided_at, is_paid) \
+             VALUES ($1, $2, 'leave', $3, $3, $4, CASE WHEN $4 THEN 'first' END, 'approved', now(), $5)",
+        )
+        .bind(f.org)
+        .bind(who)
+        .bind(today)
+        .bind(half)
+        .bind(paid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let outcome = |who: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<i64>, Option<String>)>(
+                "SELECT a.status, d.amount_piastres, d.reason_code FROM attendance_records a \
+                   LEFT JOIN payroll_deductions d ON d.attendance_record_id = a.id \
+                                                 AND d.source = 'absence' \
+                  WHERE a.employee_id = $1 AND a.business_date = $2",
+            )
+            .bind(who)
+            .bind(today)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        outcome(f.a).await,
+        (
+            "absent".into(),
+            Some(20_000),
+            Some("absent_half_unpaid_leave".into())
+        ),
+        "unpaid half-day leave, no show: the worked half and the unpaid half"
+    );
+    assert_eq!(
+        outcome(f.b).await,
+        (
+            "absent".into(),
+            Some(10_000),
+            Some("absent_no_punch".into())
+        ),
+        "paid half-day leave, no show: the worked half only"
+    );
+    assert_eq!(
+        outcome(full).await,
+        ("on_leave".into(), None, None),
+        "a paid full-day leave costs nothing"
+    );
+}
