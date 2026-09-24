@@ -43,9 +43,31 @@ use crate::models::UserRole;
 /// The audience only `/staff/*` accepts.
 pub const STAFF_AUDIENCE: &str = "dawam-staff";
 const STAFF_TYP: &str = "dawam_staff";
-/// A staff token's life. The device refreshes it (RO-3); revoking the device
-/// is what ends a session.
-pub const STAFF_TOKEN_MINUTES: i64 = 60;
+/// A staff token's life: 60 minutes. The device refreshes it (RO-3); revoking
+/// the device is what ends a session.
+///
+/// A DEBUG build may shorten it with `MADAR_STAFF_TOKEN_MINUTES` (clamped to
+/// 1–60), so an E2E rig can see a refresh without waiting an hour. A release
+/// build ignores the variable whatever the environment says — the same gate
+/// as `MADAR_FAST_TEST_POOLS` in `db.rs`.
+pub fn staff_token_minutes() -> i64 {
+    token_minutes_for(
+        cfg!(debug_assertions),
+        std::env::var("MADAR_STAFF_TOKEN_MINUTES").ok().as_deref(),
+    )
+}
+
+/// [`staff_token_minutes`] with the build flag and the variable passed in, so
+/// the release path can be tested from a debug build.
+#[doc(hidden)]
+pub fn token_minutes_for(debug_build: bool, env: Option<&str>) -> i64 {
+    const LIFE: i64 = 60;
+    if !debug_build {
+        return LIFE;
+    }
+    env.and_then(|v| v.trim().parse::<i64>().ok())
+        .map_or(LIFE, |m| m.clamp(1, LIFE))
+}
 
 /// The header the staff app sends its device token in (RO-3).
 pub const DEVICE_HEADER: &str = "x-staff-device";
@@ -101,7 +123,7 @@ pub fn mint(
     device: Uuid,
 ) -> Result<(String, DateTime<Utc>), AppError> {
     let now = Utc::now();
-    let exp = now + Duration::minutes(STAFF_TOKEN_MINUTES);
+    let exp = now + Duration::minutes(staff_token_minutes());
     let claims = StaffClaims {
         sub: employee.to_string(),
         org: org.to_string(),
@@ -467,6 +489,26 @@ mod tests {
         JwtSecret("unit".into())
     }
 
+    /// Speed plan R1.1: a debug build may shorten the staff token for a rig
+    /// (clamped to 1–60); a release build never reads the variable.
+    #[test]
+    fn only_a_debug_build_shortens_the_staff_token() {
+        for env in [None, Some("5"), Some("0"), Some("999"), Some("x")] {
+            assert_eq!(token_minutes_for(false, env), 60, "release ignores {env:?}");
+        }
+        assert_eq!(token_minutes_for(true, None), 60);
+        assert_eq!(token_minutes_for(true, Some("5")), 5);
+        assert_eq!(token_minutes_for(true, Some(" 2 ")), 2);
+        assert_eq!(token_minutes_for(true, Some("0")), 1, "at least a minute");
+        assert_eq!(token_minutes_for(true, Some("-3")), 1);
+        assert_eq!(token_minutes_for(true, Some("999")), 60, "never longer");
+        assert_eq!(
+            token_minutes_for(true, Some("x")),
+            60,
+            "garbage is the default"
+        );
+    }
+
     #[test]
     fn a_staff_token_is_never_a_user_session_and_back() {
         let (e, o, u, d) = (
@@ -476,7 +518,7 @@ mod tests {
             Uuid::new_v4(),
         );
         let (staff, exp) = mint(&secret(), e, o, Some(u), d).unwrap();
-        assert!(exp <= Utc::now() + Duration::minutes(STAFF_TOKEN_MINUTES));
+        assert!(exp <= Utc::now() + Duration::minutes(staff_token_minutes()));
         // The dashboard / POS verifier refuses it.
         assert!(verify_token(&secret(), &staff).is_err());
         // The staff verifier reads it back.
