@@ -503,6 +503,13 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
            AND r.business_date <= (now() AT TIME ZONE r.tz)::date
            -- The shift must be over before its absence is a fact.
            AND now() > r.end_at
+           -- Nobody can clock in before the business saves its rules (RU-1),
+           -- so nobody is marked absent either (AT-2, E2E B-SETUP-5).
+           AND EXISTS (
+               SELECT 1 FROM attendance_settings s
+                WHERE s.org_id = r.org_id AND s.branch_id IS NULL
+                  AND s.rules_saved_at IS NOT NULL
+           )
            -- A confirmed public holiday marks nobody absent (RU-10).
            AND NOT EXISTS (
                SELECT 1 FROM staff_holidays h
@@ -570,13 +577,16 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), AppError> {
 
     // Closed days (or absences) from the last week that carry no deduction row
     // yet. A day whose penalty was already written and then waived is excluded by
-    // the EXISTS, so it is never revisited.
+    // the EXISTS, so it is never revisited. Nothing is priced before the
+    // business saves its rules (RU-1, E2E B-SETUP-5).
     let rows: Vec<Pending> = sqlx::query_as(&format!(
         "SELECT a.id, a.org_id, a.branch_id \
            FROM attendance_records a \
            JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
            JOIN employees e ON e.id = a.employee_id AND e.employment_status = 'active' \
            JOIN branches b ON b.id = a.branch_id \
+           JOIN attendance_settings rs ON rs.org_id = a.org_id AND rs.branch_id IS NULL \
+                                      AND rs.rules_saved_at IS NOT NULL \
           WHERE a.business_date >= (now() AT TIME ZONE \
                     COALESCE(b.timezone::text, o.timezone::text, 'Africa/Cairo'))::date - 7 \
             AND (a.check_out_at IS NOT NULL OR a.status IN ('absent', 'on_leave')) \
