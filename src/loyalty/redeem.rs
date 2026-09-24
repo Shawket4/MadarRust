@@ -126,37 +126,88 @@ pub async fn plan(
     })
 }
 
+/// The sale's lines as madar-shared's planner reads them. A bundle has no
+/// menu item. The staff-drink pairing is not the planner's to judge here: the
+/// order path refuses it live, with its own message.
+fn plan_lines(items: &[OrderItemInput]) -> Vec<madar_loyalty::Line> {
+    items
+        .iter()
+        .map(|i| madar_loyalty::Line {
+            menu_item_id: i.menu_item_id.map(|id| id.to_string()),
+            quantity: i64::from(i.quantity),
+            is_staff_drink: false,
+        })
+        .collect()
+}
+
+fn plan_asks(redemptions: &[LoyaltyRedemptionInput]) -> Vec<madar_loyalty::Ask> {
+    redemptions
+        .iter()
+        .map(|r| madar_loyalty::Ask {
+            line: r.item_index,
+            units: r.units.map(i64::from),
+        })
+        .collect()
+}
+
+fn planned(p: madar_loyalty::Planned, currency: &str) -> PlannedRedemption {
+    PlannedRedemption {
+        item_index: p.line,
+        menu_item_id: Uuid::parse_str(&p.menu_item_id).unwrap_or_default(),
+        units: i32::try_from(p.units).unwrap_or(i32::MAX),
+        currency: currency.into(),
+        cost: i32::try_from(p.cost).unwrap_or(i32::MAX),
+    }
+}
+
 /// The lines a replayed sale covered, with no points attached: what the till
-/// took off the bill, as far as it can be priced at all.
+/// took off the bill, as far as it can be priced at all (madar-shared's
+/// `madar_loyalty::replay_lines`).
 fn structural_lines(
     redemptions: &[LoyaltyRedemptionInput],
     items: &[OrderItemInput],
 ) -> Vec<PlannedRedemption> {
-    let mut lines: Vec<PlannedRedemption> = Vec::new();
-    for r in redemptions {
-        let Some(index) = r.item_index else { continue };
-        let Some(item) = items.get(index) else {
-            continue;
-        };
-        let Some(menu_item_id) = item.menu_item_id else {
-            continue;
-        };
-        if lines.iter().any(|l| l.item_index == index) {
-            continue;
+    madar_loyalty::replay_lines(&plan_lines(items), &plan_asks(redemptions))
+        .into_iter()
+        .map(|p| planned(p, ""))
+        .collect()
+}
+
+/// A strict plan's refusal, as this server has always said it.
+fn refused(r: madar_loyalty::Refusal, member_name: &str) -> AppError {
+    use madar_loyalty::Refusal as R;
+    match r {
+        R::NoLineNamed => AppError::BadRequest("Name the line to reward".into()),
+        R::NoSuchLine { line } => AppError::BadRequest(format!("No line {line} to reward")),
+        // One redemption per line: the ledger's uniqueness is (order, line), so
+        // two rows for one line could not both be recorded, and a silently
+        // dropped one is a free item nobody was charged for.
+        R::TwiceOnOneLine => {
+            AppError::BadRequest("One reward per line — raise the units instead".into())
         }
-        let units = r.units.unwrap_or(1).clamp(0, item.quantity.max(0));
-        if units < 1 {
-            continue;
+        R::BelowOneUnit => AppError::BadRequest("A reward must cover at least one unit".into()),
+        R::MoreUnitsThanLine { have, asked } => AppError::BadRequest(format!(
+            "That line has {have} of them; a reward cannot cover {asked}"
+        )),
+        // A bundle is priced as a whole and its components are resolved
+        // server-side; covering "one unit" of it has no single honest meaning,
+        // so it is refused rather than guessed at.
+        R::Bundle => AppError::BadRequest("A bundle cannot be taken as a reward".into()),
+        R::NotOnOffer => AppError::BadRequest("That item is not a reward at this branch".into()),
+        // A reward priced at nothing is a free item bounded by nothing but the
+        // cap. Refused rather than honoured, whatever the catalogue row says.
+        R::NoPrice => AppError::Conflict(
+            "That reward has no price set — ask a manager to fix the catalogue".into(),
+        ),
+        R::OverCap { max, claimed } => AppError::Conflict(if max == 1 {
+            "Only one reward per order here — take the rest next time".into()
+        } else {
+            format!("Only {max} rewards per order here; this order claims {claimed}")
+        }),
+        R::BalanceShort { balance, spent } => {
+            AppError::Conflict(format!("{member_name} has {balance}; those rewards cost {spent}"))
         }
-        lines.push(PlannedRedemption {
-            item_index: index,
-            menu_item_id,
-            units,
-            currency: String::new(),
-            cost: 0,
-        });
     }
-    lines
 }
 
 async fn plan_strict(
@@ -184,112 +235,48 @@ async fn plan_strict(
     let mode = settings.mode();
     let (catalogue, _) = load_effective_rewards(pool, org_id, branch_id).await?;
 
-    let mut lines: Vec<PlannedRedemption> = Vec::new();
-    let mut spent = 0i32;
-    for r in redemptions {
-        // By this point the index is resolved: the cart path sends it, and the
-        // ticket-settle path has had `ticket_line_id` translated into it.
-        let index = r
-            .item_index
-            .ok_or_else(|| AppError::BadRequest("Name the line to reward".into()))?;
-        let item = items
-            .get(index)
-            .ok_or_else(|| AppError::BadRequest(format!("No line {index} to reward")))?;
-        // One redemption per line: the ledger's uniqueness is (order, line), so
-        // two rows for one line could not both be recorded, and a silently
-        // dropped one is a free item nobody was charged for.
-        if lines.iter().any(|l| l.item_index == index) {
-            return Err(AppError::BadRequest(
-                "One reward per line — raise the units instead".into(),
-            ));
-        }
-        let units = r.units.unwrap_or(1);
-        if units < 1 {
-            return Err(AppError::BadRequest(
-                "A reward must cover at least one unit".into(),
-            ));
-        }
-        if units > item.quantity {
-            return Err(AppError::BadRequest(format!(
-                "That line has {} of them; a reward cannot cover {units}",
-                item.quantity
-            )));
-        }
-        // A bundle is priced as a whole and its components are resolved
-        // server-side; covering "one unit" of it has no single honest meaning,
-        // so it is refused rather than guessed at.
-        let menu_item_id = item
-            .menu_item_id
-            .ok_or_else(|| AppError::BadRequest("A bundle cannot be taken as a reward".into()))?;
-
-        // Priced in this branch's currency by the loader, so the item id is the
-        // whole question.
-        let listed = catalogue.iter().find(|c| c.menu_item_id == menu_item_id);
-        let unit_cost = match listed {
-            Some(reward) => reward.cost_amount,
-            // "Collect five, get anything." The catalogue stops being a list of
-            // what may be claimed and the scope's default cost applies to
-            // everything — per-item pricing is what the catalogue is FOR, so
-            // the two are alternatives rather than layers.
-            None if settings.reward_any_item => settings.default_reward_cost,
-            None => {
-                return Err(AppError::BadRequest(
-                    "That item is not a reward at this branch".into(),
-                ));
-            }
-        };
-
-        // A reward priced at nothing is a free item bounded by nothing but the
-        // cap. Refused rather than honoured, whatever the catalogue row says.
-        if unit_cost <= 0 {
-            return Err(AppError::Conflict(
-                "That reward has no price set — ask a manager to fix the catalogue".into(),
-            ));
-        }
-        let cost = unit_cost.saturating_mul(units);
-        spent = spent.saturating_add(cost);
-        lines.push(PlannedRedemption {
-            item_index: index,
-            menu_item_id,
-            units,
-            currency: mode.as_str().into(),
-            cost,
-        });
-    }
-
-    // The shop's ceiling on how much one visit may claim.
+    // Which of the asked rewards the sale takes: madar-shared's planner, in
+    // its strict (server) mode — the till trims with the same rules, so a sale
+    // it sends is one this does not refuse. By this point every index is
+    // resolved: the cart path sends it, and the ticket-settle path has had
+    // `ticket_line_id` translated into it. Priced in this branch's currency
+    // by the loader, so the item id is the whole question.
     //
-    // Counted in ITEMS, not lines. A line carries `units`, so "one reward per
-    // line" — already enforced above — does not bound the giveaway at all: a
-    // single line with six units is six free coffees. The setting a shop means
-    // when it asks for this is "one free thing per visit", and that is what
-    // this counts.
-    //
-    // Refused rather than trimmed, unlike the earning cap. The customer has not
-    // paid yet and the teller has not promised anything; handing over four of
-    // the six they asked for, silently, is worse at the counter than saying
-    // what the limit is.
-    if let Some(max) = settings.max_rewards_per_order {
-        let claimed: i32 = lines.iter().map(|l| l.units).sum();
-        if claimed > max {
-            return Err(AppError::Conflict(if max == 1 {
-                "Only one reward per order here — take the rest next time".into()
-            } else {
-                format!("Only {max} rewards per order here; this order claims {claimed}")
-            }));
-        }
-    }
-
-    // One check against the whole basket, not one per line: a balance that
-    // covers the first reward but not the second must fail the sale, not hand
-    // over half of what the teller told the customer they were getting.
-    let balance = member.balance_in(mode);
-    if spent > balance {
-        return Err(AppError::Conflict(format!(
-            "{} has {balance}; those rewards cost {spent}",
-            member.name
-        )));
-    }
+    // The shop's ceiling is counted in ITEMS, not lines (a single line with
+    // six units is six free coffees), and refused rather than trimmed: the
+    // customer has not paid yet and the teller has not promised anything. The
+    // balance is checked against the whole basket, not one line at a time: a
+    // balance that covers the first reward but not the second must fail the
+    // sale, not hand over half of what the teller told the customer.
+    let programme = madar_loyalty::Programme {
+        rewards: catalogue
+            .iter()
+            .map(|c| madar_loyalty::Reward {
+                menu_item_id: c.menu_item_id.to_string(),
+                cost: i64::from(c.cost_amount),
+            })
+            .collect(),
+        // "Collect five, get anything." The catalogue stops being a list of
+        // what may be claimed and the scope's default cost applies to
+        // everything — per-item pricing is what the catalogue is FOR, so the
+        // two are alternatives rather than layers.
+        any_item: settings.reward_any_item,
+        any_item_cost: i64::from(settings.default_reward_cost),
+        max_per_order: settings.max_rewards_per_order.map(i64::from),
+        balance: i64::from(member.balance_in(mode)),
+    };
+    let plan = madar_loyalty::plan(
+        &plan_lines(items),
+        &programme,
+        &plan_asks(redemptions),
+        madar_loyalty::Mode::Server,
+    )
+    .map_err(|r| refused(r, &member.name))?;
+    let lines = plan
+        .lines
+        .into_iter()
+        .map(|p| planned(p, mode.as_str()))
+        .collect();
 
     Ok(RedemptionPlan {
         member: Some(member),
