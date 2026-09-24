@@ -1518,6 +1518,11 @@ pub(crate) async fn compute_payslips(
         shifts: Vec<serde_json::Value>,
     }
     let mut totals: HashMap<Uuid, Totals> = HashMap::new();
+    // A date counts once, by its best block (SC-11, E2E B-ROTA-6): a split day
+    // with one block worked is one worked day, not a worked day AND an absent
+    // one; missing the other block costs its share through its own deduction
+    // line. Rank: worked (present/late) > half day > leave > absent.
+    let mut day_rank: HashMap<(Uuid, NaiveDate), u8> = HashMap::new();
     for r in &recs {
         let t = totals.entry(r.employee_id).or_default();
         let hist = history
@@ -1578,15 +1583,17 @@ pub(crate) async fn compute_payslips(
         };
         let price = pricing::price_shift(&facts, &shift_rules);
         if !r.is_cover {
-            match status {
-                crate::staff::rules::AttendanceStatus::Present
-                | crate::staff::rules::AttendanceStatus::Late => t.worked_days += Decimal::ONE,
-                crate::staff::rules::AttendanceStatus::HalfDay => {
-                    t.worked_days += Decimal::new(5, 1)
-                }
-                crate::staff::rules::AttendanceStatus::Absent => t.absent_days += Decimal::ONE,
-                crate::staff::rules::AttendanceStatus::OnLeave => t.leave_days += Decimal::ONE,
-            }
+            use crate::staff::rules::AttendanceStatus as S;
+            let rank = match status {
+                S::Present | S::Late => 3,
+                S::HalfDay => 2,
+                S::OnLeave => 1,
+                S::Absent => 0,
+            };
+            day_rank
+                .entry((r.employee_id, r.business_date))
+                .and_modify(|best| *best = (*best).max(rank))
+                .or_insert(rank);
             t.late_minutes += i64::from(r.late_minutes);
         }
         t.overtime_minutes += price.overtime_minutes;
@@ -1604,6 +1611,15 @@ pub(crate) async fn compute_payslips(
                 "scheduled_minutes": facts.scheduled_minutes,
                 "salary_piastres": salary,
             }));
+        }
+    }
+    for ((employee_id, _), rank) in day_rank {
+        let t = totals.entry(employee_id).or_default();
+        match rank {
+            3 => t.worked_days += Decimal::ONE,
+            2 => t.worked_days += Decimal::new(5, 1),
+            1 => t.leave_days += Decimal::ONE,
+            _ => t.absent_days += Decimal::ONE,
         }
     }
 

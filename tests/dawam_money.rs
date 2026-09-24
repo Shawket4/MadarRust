@@ -2723,3 +2723,56 @@ async fn one_day_is_priced_identically_by_every_path(pool: PgPool) {
     );
     assert_eq!(deduction_lines(&frozen), deduction_lines(&est["slip"]));
 }
+
+/// E2E B-ROTA-6 (SC-11): a split day with one block missed is ONE worked day
+/// on the payslip, not a worked day and an absent day; missing the block
+/// still costs its share. A date whose every block is missed is one absent
+/// day, and a date with two worked blocks is one worked day.
+#[sqlx::test]
+async fn a_split_day_with_one_block_missed_counts_one_worked_day(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let morning = shift(&pool, f.org, f.a, "Morning", "09:00", "13:00").await;
+    let evening = shift(&pool, f.org, f.a, "Evening", "17:00", "21:00").await;
+    roster(&pool, &f, f.amal, &[morning, evening]).await;
+    let d1 = f.start;
+    let d2 = f.start + Duration::days(1);
+    let d3 = f.start + Duration::days(2);
+    // Day 1: the morning worked, the evening missed.
+    rostered_day(&pool, &f, f.amal, f.a, morning, d1, "present", 9, 240, 0, 0).await;
+    let pm = rostered_day(&pool, &f, f.amal, f.a, evening, d1, "absent", 17, 240, 0, 0).await;
+    // Day 2: both blocks worked (one late).
+    rostered_day(&pool, &f, f.amal, f.a, morning, d2, "late", 9, 240, 5, 0).await;
+    rostered_day(
+        &pool, &f, f.amal, f.a, evening, d2, "present", 17, 240, 0, 0,
+    )
+    .await;
+    // Day 3: both blocks missed.
+    rostered_day(&pool, &f, f.amal, f.a, morning, d3, "absent", 9, 240, 0, 0).await;
+    rostered_day(&pool, &f, f.amal, f.a, evening, d3, "absent", 17, 240, 0, 0).await;
+    // The sweep's absence line for the missed evening: half the day.
+    sqlx::query(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, source, status, attendance_record_id) \
+         VALUES ($1, $2, 11538, 'Absent', $3, 'absence', 'approved', $4)",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(d1)
+    .bind(pm)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(slip["worked_days"].as_f64(), Some(2.0), "{slip}");
+    assert_eq!(slip["absent_days"].as_f64(), Some(1.0), "{slip}");
+    assert_eq!(
+        slip["late_minutes"], 5,
+        "late minutes still add up per block"
+    );
+    assert!(
+        deduction_lines(&slip).contains(&("absence".to_string(), 11_538)),
+        "the missed block still costs its share: {slip}"
+    );
+}
