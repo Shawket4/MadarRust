@@ -1982,3 +1982,43 @@ async fn punch_refusals_carry_a_code_and_their_figures(pool: PgPool) {
         "{body}"
     );
 }
+
+/// E2E app B3: the owner sees every branch, and a branch with no time zone
+/// (old orgs have some) made their context a 500 ("unexpected null"), so the
+/// owner could never get past the privacy notice. A missing zone reads as
+/// Africa/Cairo, like every other staff query (AT-1).
+#[sqlx::test]
+async fn an_owner_sees_a_branch_with_no_time_zone(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO branches (org_id, name, timezone) VALUES ($1, 'Old branch', NULL) RETURNING id",
+    )
+    .bind(f.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    // The owner, with the app.
+    let me = common::employees::employee(
+        &pool,
+        f.org,
+        "Owner",
+        Some(f.owner),
+        Some("+201069999999"),
+        true,
+        &[f.branch],
+        0,
+    )
+    .await;
+    let resp = call!(app, get, "/staff/me/context", phone_token(&pool, me).await);
+    assert_eq!(resp.status(), 200);
+    let ctx = json_of(resp).await;
+    let branch = ctx["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == json!(old))
+        .unwrap_or_else(|| panic!("{ctx}"))
+        .clone();
+    assert_eq!(branch["timezone"], "Africa/Cairo");
+}

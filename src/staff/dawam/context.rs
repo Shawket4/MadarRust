@@ -160,7 +160,7 @@ pub async fn my_context(
         }
     }
     let branches: Vec<ContextBranch> = sqlx::query_as(
-        "SELECT id, name, geo_radius_meters, latitude, longitude, timezone::text AS timezone FROM branches \
+        "SELECT id, name, geo_radius_meters, latitude, longitude, COALESCE(timezone::text, 'Africa/Cairo') AS timezone FROM branches \
           WHERE org_id = $1 AND deleted_at IS NULL AND ($2 OR id = ANY($3)) ORDER BY name",
     )
     .bind(org_id)

@@ -610,6 +610,25 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     .await;
     assert_eq!(st, 200, "rejecting changes nothing that was paid");
 
+    // The record says its month is closed (E2E), so clients don't offer
+    // what the server would refuse.
+    let (_, list) = send!(
+        app,
+        "GET",
+        format!(
+            "/staff/attendance?from=2026-08-10&to=2026-08-10&employee_id={}",
+            f.e
+        ),
+        f.owner_token()
+    );
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == json!(rec))
+        .unwrap_or_else(|| panic!("{list}"))
+        .clone();
+    assert_eq!(row["month_closed"], json!(true), "{row}");
     // AT-7: manual attendance edits wait for next month too.
     let (st, _) = send!(
         app,

@@ -100,6 +100,12 @@ pub struct AttendanceRecord {
     #[sqlx(default)]
     #[serde(default)]
     pub status_overridden: bool,
+    /// Its day is in an approved or paid month (period_lock): an overtime or
+    /// cover approval, a correction or a deduction on it is refused with
+    /// PERIOD_CLOSED, so clients don't offer them.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub month_closed: bool,
 }
 
 /// Every attendance column plus the two denormalised names, in `AttendanceRecord`
@@ -115,7 +121,11 @@ const RECORD_COLS: &str = r#"
     a.late_minutes, a.early_leave_minutes, a.overtime_minutes, a.worked_minutes,
     a.is_manual, a.notes, a.edit_reason, a.created_by, a.edited_by,
     a.created_at, a.updated_at, a.covered_employee_id, a.cover_status,
-    a.overtime_status, a.tracking_off, a.punch_reason, a.status_overridden
+    a.overtime_status, a.tracking_off, a.punch_reason, a.status_overridden,
+    EXISTS (SELECT 1 FROM payroll_periods pp
+             WHERE pp.org_id = a.org_id AND pp.status IN ('generated', 'paid', 'closed')
+               AND pp.start_date <= a.business_date AND pp.end_date >= a.business_date)
+        AS month_closed
 "#;
 
 const RECORD_JOINS: &str = "FROM attendance_records a \

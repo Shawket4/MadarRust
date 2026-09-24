@@ -63994,6 +63994,10 @@
             "type": "integer",
             "format": "int32"
           },
+          "month_closed": {
+            "type": "boolean",
+            "description": "Its day is in an approved or paid month (period_lock): an overtime or\ncover approval, a correction or a deduction on it is refused with\nPERIOD_CLOSED, so clients don't offer them."
+          },
           "notes": {
             "type": [
               "string",
