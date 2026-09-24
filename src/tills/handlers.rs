@@ -565,7 +565,7 @@ where
 /// The device key is `COALESCE(.., false)`: for a device-less row `device_id =
 /// $2` is NULL, and Postgres sorts NULL FIRST in a DESC key — an older
 /// device-less close used to beat this device's own (madar-shared T2).
-async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
+pub async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     exec: E,
     branch_id: Uuid,
     device_id: Option<Uuid>,
