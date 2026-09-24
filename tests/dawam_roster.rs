@@ -3149,3 +3149,43 @@ async fn publishing_announces_each_open_shift_date(pool: PgPool) {
     dates.sort();
     assert_eq!(dates, [d1.to_string(), d2.to_string()], "one per date");
 }
+
+/// E2E B-ROTA-4 (SC-9, SC-5): an open shift can't be posted on a
+/// switched-off block — nobody could ever claim it. 400 SHIFT_INACTIVE, like
+/// a day edit; nothing posted and nobody told.
+#[sqlx::test]
+async fn posting_an_open_shift_on_a_switched_off_block_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let night = block(&pool, &f, Some(f.br_a), "Night", t(22, 0), t(23, 0)).await;
+    sqlx::query("UPDATE work_shifts SET is_active = false WHERE id = $1")
+        .bind(night)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    refused!(
+        call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.owner(),
+            json!({ "branch_id": f.br_a, "work_shift_id": night, "on_date": d })
+        ),
+        400,
+        "SHIFT_INACTIVE"
+    );
+    let (posted, told): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM staff_open_shifts), \
+                (SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((posted, told), (0, 0));
+}

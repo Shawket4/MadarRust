@@ -704,6 +704,15 @@ pub async fn post_open_shift(
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, body.branch_id).await?;
     let info = days::block_info(&mut *pool.acquire().await?, org_id, body.work_shift_id).await?;
+    // A switched-off block can't be claimed, so it can't be posted (E2E
+    // B-ROTA-4): refused like a day edit on it.
+    if !info.is_active {
+        return Err(AppError::Coded {
+            status: 400,
+            code: "SHIFT_INACTIVE",
+            reason: format!("{} is switched off.", info.name),
+        });
+    }
     if info.branch_id.is_some_and(|b| b != body.branch_id) {
         return Err(AppError::Coded {
             status: 400,
