@@ -68391,6 +68391,14 @@
           "rules_saved": {
             "type": "boolean",
             "description": "The business saved its rules; nobody clocks in before (RU-1, DSH-6)."
+          },
+          "rules_saved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the rules were first saved; null until then. The sweep never\nmarks absent (or charges) a shift that started before it (B-SETUP-5),\nso neither does the app (B-ONB-1)."
           }
         }
       },
@@ -89788,6 +89796,7 @@
           "modules",
           "role",
           "caps",
+          "caps_everywhere",
           "branches",
           "people",
           "work_shifts",
@@ -89822,6 +89831,13 @@
               "type": "string"
             },
             "description": "The HR capabilities I hold (`hr.*` keys) — through my Madar account;\nempty for an employee with none. The app gates tabs on these (PM-4)."
+          },
+          "caps_everywhere": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The capabilities I hold at EVERY branch: the list `GET /authz/me`\nputs in `everywhere`, for the business-wide acts (the rules, payroll,\npublic holidays: `hr.rules.edit`, D3). Empty without a Madar account."
           },
           "deduction_limit_piastres": {
             "type": [
