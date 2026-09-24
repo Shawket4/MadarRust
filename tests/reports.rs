@@ -4039,3 +4039,56 @@ async fn till_sessions_report_is_scoped_to_the_caller(pool: PgPool) {
             .is_empty()
     );
 }
+
+/// E2E B-PAY-5 (AT-13): the Legal attendance-corrections audit gives each
+/// reason the server wrote itself a code, so the dashboard words it in
+/// Arabic; a manager's own typed reason keeps only its label.
+#[sqlx::test]
+async fn attendance_correction_reasons_carry_codes(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org_id).await;
+    let admin = seed_user(&pool, org_id, "org_admin").await;
+    let staff_user = seed_user(&pool, org_id, "teller").await;
+    let staff: Uuid = sqlx::query_scalar(
+        "INSERT INTO employees (org_id, user_id, name) VALUES ($1, $2, 'Staff') RETURNING id",
+    )
+    .bind(org_id)
+    .bind(staff_user)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for (days, reason) in [
+        (1, Some("Approved punch correction request")),
+        (2, None),
+        (3, Some("Auto-closed: no checkout recorded")),
+        (4, Some("forgot to check out")),
+    ] {
+        sqlx::query(
+            "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, edited_by, edit_reason)
+             VALUES ($1, $2, $3, CURRENT_DATE - $4::int, $5, $6)",
+        )
+        .bind(org_id).bind(staff).bind(branch).bind(days)
+        .bind(admin).bind(reason)
+        .execute(&pool).await.unwrap();
+    }
+    let r = get_json(
+        &app,
+        &format!("/reports/orgs/{org_id}/attendance-corrections-audit"),
+        &generate_org_admin_token(admin, org_id),
+    )
+    .await;
+    let code_of = |label: &str| {
+        r["by_reason"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["label"] == label)
+            .map(|e| e["code"].clone())
+            .unwrap_or_else(|| panic!("no {label} in {r}"))
+    };
+    assert_eq!(code_of("Approved punch correction request"), "correction_request");
+    assert_eq!(code_of("unspecified"), "unspecified");
+    assert_eq!(code_of("Auto-closed: no checkout recorded"), "auto_closed");
+    assert!(code_of("forgot to check out").is_null(), "typed by a person");
+}

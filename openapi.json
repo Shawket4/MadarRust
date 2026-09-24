@@ -64354,6 +64354,13 @@
             "type": "integer",
             "format": "int64"
           },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable code for a label the SERVER wrote (`unspecified`,\n`correction_request`, `auto_closed`, a void reason), so a client\nwords it in its own language (AT-13, E2E B-PAY-5). Absent for a\nperson's own words (a typed reason, a name): `label` is the text."
+          },
           "count": {
             "type": "integer",
             "format": "int64"

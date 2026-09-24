@@ -27,6 +27,13 @@ pub struct AuditBreakdownEntry {
     pub label: String,
     pub count: i64,
     pub amount_minor: i64,
+    /// A stable code for a label the SERVER wrote (`unspecified`,
+    /// `correction_request`, `auto_closed`, a void reason), so a client
+    /// words it in its own language (AT-13, E2E B-PAY-5). Absent for a
+    /// person's own words (a typed reason, a name): `label` is the text.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Serialize, serde::Deserialize, ToSchema)]
@@ -218,7 +225,8 @@ pub async fn voids_audit(
     let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT COALESCE(o.void_reason::text, 'unspecified') AS label,
-               COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
+               COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor,
+               COALESCE(o.void_reason::text, 'unspecified') AS code
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.status = 'voided'
@@ -309,7 +317,10 @@ pub async fn discounts_audit(
     let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT COALESCE(d.name, o.discount_type::text, 'unspecified') AS label,
-               COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
+               COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor,
+               -- A named discount is its own words; a bare type or nothing is a code.
+               MIN(CASE WHEN d.name IS NULL
+                        THEN COALESCE(o.discount_type::text, 'unspecified') END) AS code
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         LEFT JOIN discounts d ON d.id = o.discount_id
@@ -904,7 +915,13 @@ pub async fn attendance_corrections_audit(
 
     let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         "SELECT COALESCE(a.edit_reason, 'unspecified') AS label, COUNT(*)::bigint AS count,
-                0::bigint AS amount_minor
+                0::bigint AS amount_minor,
+                CASE WHEN a.edit_reason IS NULL THEN 'unspecified'
+                     WHEN a.edit_reason = 'Approved punch correction request' THEN 'correction_request'
+                     WHEN a.edit_reason = 'Written by an approved punch correction' THEN 'correction_request'
+                     WHEN a.edit_reason = 'Auto-closed: no checkout recorded' THEN 'auto_closed'
+                     WHEN a.edit_reason = 'Marked automatically: no check-in' THEN 'marked_absent'
+                END AS code
          FROM attendance_records a WHERE {filter}
          GROUP BY a.edit_reason ORDER BY count DESC LIMIT 10"
     ))
