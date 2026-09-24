@@ -3414,47 +3414,123 @@ async fn patch_without_branch_keeps_the_branch(pool: PgPool) {
     assert_eq!(branch_of().await, None, "null: the whole business");
 }
 
-/// Mac E2E R-B3 (RU-10: "a one-tap setup for the MANAGER"): a public holiday
-/// is national and the business's, so anyone who may publish a roster at
-/// ANY branch decides it; who and when are recorded. Someone with no roster
-/// right at any branch is refused.
+/// Owner decision D3 (24 Sep 2026, supersedes Mac E2E R-B3): a public holiday
+/// is the business's, every branch at once, so only the owner (whoever holds
+/// the rules right at every branch) decides or dismisses it. A branch
+/// manager is refused with OWNER_ONLY and still reads the holidays; the
+/// owner's decision records who and when.
 #[sqlx::test]
-async fn a_branch_manager_sets_up_a_holiday(pool: PgPool) {
+async fn only_the_owner_decides_a_holiday(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
     let d = chrono::NaiveDate::from_ymd_opt(2026, 10, 6).unwrap(); // Armed Forces Day
-    refused_status(
-        call!(
-            app,
-            "PUT",
-            format!("/staff/holidays/{d}"),
-            f.teller(),
-            json!({ "decision": "holiday" })
-        ),
-        403,
-    )
+    for (who, token) in [("manager", f.manager()), ("teller", f.teller())] {
+        for decision in ["holiday", "dismissed"] {
+            let (s, body) = done(call!(
+                app,
+                "PUT",
+                format!("/staff/holidays/{d}"),
+                token.clone(),
+                json!({ "decision": decision })
+            ))
+            .await;
+            assert_eq!(s, 403, "{who} {decision}: {body}");
+            assert_eq!(body["code"], "OWNER_ONLY", "{who}: {body}");
+            assert!(body.get("vars").is_none(), "{body}");
+        }
+    }
+    // Managers still read them.
+    let (s, body) = done(call!(
+        app,
+        "GET",
+        format!("/staff/roster?branch_id={}&from={d}&to={d}", f.br_a),
+        f.manager()
+    ))
     .await;
+    assert_eq!(s, 200, "{body}");
+    assert!(
+        body["holidays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["on_date"] == json!(d)),
+        "{body}"
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM staff_holidays WHERE org_id = $1")
+        .bind(f.org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0, "nothing was decided");
     let (s, body) = done(call!(
         app,
         "PUT",
         format!("/staff/holidays/{d}"),
-        f.manager(),
+        f.owner(),
         json!({ "decision": "holiday" })
     ))
     .await;
     assert_eq!(s, 200, "{body}");
     assert_eq!(body["decision"], "holiday");
-    let (by, at): (Option<Uuid>, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
-        "SELECT decided_by, decided_at FROM staff_holidays WHERE org_id = $1 AND on_date = $2",
+    assert_eq!(body["decided_by"], json!(f.owner), "{body}");
+    assert!(body["decided_at"].is_string(), "{body}");
+
+    // The staff app never calls /authz/me: its context says who may decide
+    // (`caps_everywhere` holds `hr.rules.edit` for the owner only).
+    sqlx::query("UPDATE employees SET phone = '+201060000009', app_access = true WHERE id = $1")
+        .bind(f.owner_emp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let karim = employee(
+        &pool,
+        f.org,
+        "Karim",
+        Some(f.manager),
+        Some("+201060000008"),
+        true,
+        &[f.br_a],
+        600_000,
     )
-    .bind(f.org)
-    .bind(d)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(by, Some(f.manager), "decided by the manager");
-    assert!(at.is_some(), "and when");
-    assert_eq!(body["decided_by"], json!(f.manager), "{body}");
+    .await;
+    let everywhere = |ctx: &Value| -> Vec<String> {
+        ctx["caps_everywhere"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{ctx}"))
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, ctx) = done(call!(
+        app,
+        "GET",
+        "/staff/me/context",
+        phone_token(&pool, f.owner_emp).await
+    ))
+    .await;
+    assert!(
+        everywhere(&ctx).contains(&"hr.rules.edit".to_string()),
+        "{ctx}"
+    );
+    let (_, ctx) = done(call!(
+        app,
+        "GET",
+        "/staff/me/context",
+        phone_token(&pool, karim).await
+    ))
+    .await;
+    assert!(
+        !everywhere(&ctx).contains(&"hr.rules.edit".to_string()),
+        "{ctx}"
+    );
+    let (_, ctx) = done(call!(
+        app,
+        "GET",
+        "/staff/me/context",
+        phone_token(&pool, f.b).await
+    ))
+    .await;
+    assert!(everywhere(&ctx).is_empty(), "no Madar account: {ctx}");
 }
 
 async fn refused_status(resp: actix_web::dev::ServiceResponse, status: u16) {

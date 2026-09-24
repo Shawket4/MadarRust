@@ -2074,18 +2074,18 @@ async fn deciding_a_holiday_takes_back_the_sweeps_absence_and_dismissing_restore
     )
     .await;
 
-    // Refusals first (AT-11): someone with no roster right at any branch
-    // can't decide it (a branch manager can: RU-10, R-B3); an unknown date is
-    // not a holiday; a bad decision is refused.
-    let nobody = user(&pool, f.org, "teller").await;
-    let (st, _) = send!(
+    // Refusals first (AT-11): only the owner decides it (D3), so a branch
+    // manager is refused; an unknown date is not a holiday; a bad decision
+    // is refused.
+    let (st, b) = send!(
         app,
         "PUT",
         format!("/staff/holidays/{d}"),
-        user_token(nobody, f.org, UserRole::Teller),
+        f.mgr_token(),
         json!({ "decision": "holiday" })
     );
-    assert_eq!(st, 403, "no roster right anywhere");
+    assert_eq!(st, 403, "a branch manager");
+    assert_eq!(b["code"], "OWNER_ONLY");
     let (st, _) = send!(
         app,
         "PUT",

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::branches_of;
 use crate::auth::jwt::Claims;
-use crate::authz::{CAPS, Cap, EffectiveSet, LimitKey};
+use crate::authz::{CAPS, Cap, EffectiveSet, LimitKey, Tier};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::staff::access;
 use crate::staff::attendance::load_settings;
@@ -84,6 +84,10 @@ pub struct StaffContext {
     /// The HR capabilities I hold (`hr.*` keys) — through my Madar account;
     /// empty for an employee with none. The app gates tabs on these (PM-4).
     pub caps: Vec<String>,
+    /// The capabilities I hold at EVERY branch: the list `GET /authz/me`
+    /// puts in `everywhere`, for the business-wide acts (the rules, payroll,
+    /// public holidays: `hr.rules.edit`, D3). Empty without a Madar account.
+    pub caps_everywhere: Vec<String>,
     /// My ceiling on a bonus before it waits for the owner; null = none.
     pub adjustment_limit_piastres: Option<i64>,
     /// My ceiling on a deduction (AD-5: separate from the bonus limit).
@@ -226,6 +230,15 @@ pub async fn my_context(
         .filter(|m| m.group == "hr" && eff.can(m.cap))
         .map(|m| m.key.to_string())
         .collect();
+    let caps_everywhere = match &claims {
+        Some(c) => access::caps_everywhere(pool, c, org_id)
+            .await?
+            .iter()
+            .filter(|c| c.meta().tier != Tier::Legacy)
+            .map(|c| c.key().to_string())
+            .collect(),
+        None => Vec::new(),
+    };
     Ok(HttpResponse::Ok().json(StaffContext {
         employee_id: me.employee_id,
         user_id: me.user_id,
@@ -235,6 +248,7 @@ pub async fn my_context(
         org_name,
         role: role.into(),
         caps,
+        caps_everywhere,
         adjustment_limit_piastres: eff
             .limits_of(Cap::HrAdjustmentsCreate)
             .get(LimitKey::MaxAmount),

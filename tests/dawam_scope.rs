@@ -632,8 +632,15 @@ fn org_wide(f: &F) -> Vec<(&'static str, String, Value)> {
             "/staff/attendance/settings".into(),
             json!({ "advance_cap_percent": 80 }),
         ),
-        // A public holiday is a manager's one-tap setup (RU-10, R-B3): not
-        // an every-branch act any more.
+        // A public holiday is the owner's (D3, supersedes R-B3).
+        (
+            "PUT",
+            format!(
+                "/staff/holidays/{}",
+                chrono::NaiveDate::from_ymd_opt(2026, 10, 6).unwrap()
+            ),
+            json!({ "decision": "holiday" }),
+        ),
         (
             "GET",
             format!("/staff/roster/fairness?month={today}"),
