@@ -1513,7 +1513,11 @@ pub(crate) async fn check_geofence(
         return Ok(None);
     };
     if !madar_dawam::geofence::in_range(lat, lng) {
-        return Err(AppError::BadRequest("Coordinates are out of range".into()));
+        return Err(AppError::Coded {
+            status: 400,
+            code: "COORDINATES_OUT_OF_RANGE",
+            reason: "Coordinates are out of range".into(),
+        });
     }
 
     let distance = haversine_meters(
@@ -1917,7 +1921,11 @@ pub async fn check_out(
         .fetch_optional(pool.get_ref())
         .await?;
     }
-    let open = open.ok_or_else(|| AppError::NotFound("You are not checked in".into()))?;
+    let open = open.ok_or_else(|| AppError::Coded {
+        status: 404,
+        code: "NOT_CLOCKED_IN",
+        reason: "You are not checked in".into(),
+    })?;
     // Nothing is written into an approved or paid month (BC-3).
     crate::staff::period_lock::assert_open(
         pool.get_ref(),

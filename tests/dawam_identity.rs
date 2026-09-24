@@ -1277,3 +1277,107 @@ async fn the_rules_are_changed_for_every_branch_by_the_owner_only(pool: PgPool) 
     );
     assert_eq!(resp.status(), 200);
 }
+
+/// Mac E2E BC-2 (AT-13): the sign-in refusals carry codes the app words
+/// (the core has words for them) and no "Not found:" / "Conflict:" / "Bad
+/// request:" prefix in the text.
+#[sqlx::test]
+async fn sign_in_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let o = seed(&pool).await;
+    employee(
+        &pool,
+        o.org,
+        "Coded",
+        None,
+        Some("01020000777"),
+        true,
+        &[o.a],
+        100,
+    )
+    .await;
+    async fn post<S>(app: &S, uri: &str, b: Value) -> (u16, Value)
+    where
+        S: actix_web::dev::Service<
+                actix_http::Request,
+                Response = actix_web::dev::ServiceResponse,
+                Error = actix_web::Error,
+            >,
+    {
+        let req = test::TestRequest::post().uri(uri).set_json(b).to_request();
+        let resp = test::call_service(app, req).await;
+        (resp.status().as_u16(), body(resp).await)
+    }
+    fn no_prefix(v: &Value) {
+        let t = v["error"].as_str().unwrap();
+        for p in ["Not found:", "Conflict:", "Bad request:"] {
+            assert!(!t.starts_with(p), "{v}");
+        }
+    }
+    let (s, b) = post(
+        &app,
+        "/auth/staff/otp/request",
+        json!({ "phone": "01029999999" }),
+    )
+    .await;
+    assert_eq!(
+        (s, b["code"].clone()),
+        (404, json!("PHONE_NOT_REGISTERED")),
+        "{b}"
+    );
+    no_prefix(&b);
+    let (s, _) = post(
+        &app,
+        "/auth/staff/otp/request",
+        json!({ "phone": "01020000777" }),
+    )
+    .await;
+    assert_eq!(s, 200);
+    let (s, b) = post(
+        &app,
+        "/auth/staff/otp/request",
+        json!({ "phone": "01020000777" }),
+    )
+    .await;
+    assert_eq!(
+        (s, b["code"].clone()),
+        (409, json!("OTP_RECENTLY_SENT")),
+        "{b}"
+    );
+    no_prefix(&b);
+    let (s, b) = post(
+        &app,
+        "/auth/staff/otp/verify",
+        json!({ "phone": "01020000777", "code": "000000", "model": "T" }),
+    )
+    .await;
+    let (s, b) = if s == 200 {
+        // The one-in-a-million chance the real code was 000000.
+        post(
+            &app,
+            "/auth/staff/otp/verify",
+            json!({ "phone": "01020000777", "code": "999999", "model": "T" }),
+        )
+        .await
+    } else {
+        (s, b)
+    };
+    assert_eq!((s, b["code"].clone()), (400, json!("OTP_WRONG")), "{b}");
+    assert!(b["vars"]["attempts_left"].as_i64().is_some(), "{b}");
+    no_prefix(&b);
+    sqlx::query("DELETE FROM staff_otp")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (s, b) = post(
+        &app,
+        "/auth/staff/otp/verify",
+        json!({ "phone": "01020000777", "code": "123456", "model": "T" }),
+    )
+    .await;
+    assert_eq!(
+        (s, b["code"].clone()),
+        (400, json!("OTP_NONE_ACTIVE")),
+        "{b}"
+    );
+}

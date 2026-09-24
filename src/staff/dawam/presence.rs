@@ -338,7 +338,10 @@ pub async fn ping(
     .fetch_optional(pool)
     .await?;
     let Some((record_id, branch_id, business_date, scheduled_start)) = open else {
-        return Err(AppError::Conflict("You are not clocked in.".into()));
+        return Err(AppError::Refused {
+            code: "NOT_CLOCKED_IN",
+            reason: "You are not clocked in.".into(),
+        });
     };
     // Nothing is written into an approved or paid month — not a ping, not
     // its flags (owner decision BC-3).
@@ -1056,7 +1059,10 @@ pub async fn open_cover(
         .await?
         .into_iter()
         .find(|c| c.employee_id == body.employee_id && c.work_shift_id == body.work_shift_id)
-        .ok_or_else(|| AppError::Conflict("That shift can't be covered now.".into()))?;
+        .ok_or_else(|| AppError::Refused {
+            code: "SHIFT_NOT_COVERABLE",
+            reason: "That shift can't be covered now.".into(),
+        })?;
     // Nothing is written into an approved or paid month (BC-3).
     crate::staff::period_lock::assert_open(pool, org_id, shift.business_date, "a cover").await?;
     // The same fence as a clock-in, always (CL-2).

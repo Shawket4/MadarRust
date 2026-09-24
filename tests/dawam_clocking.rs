@@ -2713,3 +2713,56 @@ async fn a_punch_without_a_reason_field_asks_for_one(pool: PgPool) {
         assert!(!text.contains("deserialize"), "{body}: {err}");
     }
 }
+
+/// Mac E2E BC-2 (AT-13): the clocking refusals the phone shows carry codes
+/// and no English prefix.
+#[sqlx::test]
+async fn clocking_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    let s = session(&pool, f.a).await;
+    async fn coded(resp: actix_web::dev::ServiceResponse, status: u16, code: &str) {
+        assert_eq!(resp.status(), status, "{code}");
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], code, "{body}");
+        let t = body["error"].as_str().unwrap();
+        for p in ["Not found:", "Conflict:", "Bad request:", "Forbidden:"] {
+            assert!(!t.starts_with(p), "{body}");
+        }
+    }
+    coded(
+        call!(app, post, "/staff/me/pings", phone(&s), here()),
+        409,
+        "NOT_CLOCKED_IN",
+    )
+    .await;
+    coded(
+        call!(app, post, "/staff/me/check-out", phone(&s), here()),
+        404,
+        "NOT_CLOCKED_IN",
+    )
+    .await;
+    coded(
+        call!(
+            app,
+            post,
+            "/staff/me/cover",
+            phone(&s),
+            with(
+                here(),
+                json!({ "employee_id": f.b, "work_shift_id": Uuid::new_v4() })
+            )
+        ),
+        409,
+        "SHIFT_NOT_COVERABLE",
+    )
+    .await;
+    shift_around_now(&pool, &f, f.a, 10, 240).await;
+    coded(
+        call!(app, post, "/staff/me/check-in", phone(&s),
+            json!({ "branch_id": f.branch, "latitude": 95.0, "longitude": LNG, "accuracy_meters": 5.0 })),
+        400,
+        "COORDINATES_OUT_OF_RANGE",
+    )
+    .await;
+}

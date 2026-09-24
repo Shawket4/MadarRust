@@ -132,9 +132,12 @@ pub async fn otp_request(
     let phone = crate::phone::normalize_phone(&body.phone)?;
     if accounts_for(pool.get_ref(), &phone).await?.is_empty() {
         // RO-1: no self-registration.
-        return Err(AppError::NotFound(
-            "This number isn't registered with any business. Ask your manager to add you.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 404,
+            code: "PHONE_NOT_REGISTERED",
+            reason: "This number isn't registered with any business. Ask your manager to add you."
+                .into(),
+        });
     }
     let recent: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM staff_otp WHERE phone = $1 \
@@ -144,9 +147,12 @@ pub async fn otp_request(
     .fetch_one(pool.get_ref())
     .await?;
     if recent {
-        return Err(AppError::Conflict(
-            "A code was just sent. Please wait a minute.".into(),
-        ));
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "OTP_RECENTLY_SENT",
+            reason: "A code was just sent. Please wait a minute.".into(),
+            vars: serde_json::json!({ "wait_seconds": 60 }),
+        });
     }
     let code = six_digits();
     sqlx::query("DELETE FROM staff_otp WHERE phone = $1")
@@ -204,17 +210,28 @@ pub async fn otp_verify(
     .fetch_optional(pool)
     .await?;
     let Some((otp_id, expected, used)) = claimed else {
-        return Err(AppError::BadRequest(
-            "No active code — request a new one.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 400,
+            code: "OTP_NONE_ACTIVE",
+            reason: "No active code — request a new one.".into(),
+        });
     };
     if !crate::secrets::constant_time_eq(body.code.as_bytes(), expected.as_bytes()) {
         let left = OTP_MAX_ATTEMPTS - used;
-        return Err(AppError::BadRequest(if left > 0 {
-            format!("Incorrect code. {left} tries left.")
+        return Err(if left > 0 {
+            AppError::CodedVars {
+                status: 400,
+                code: "OTP_WRONG",
+                reason: format!("Incorrect code. {left} tries left."),
+                vars: serde_json::json!({ "attempts_left": left }),
+            }
         } else {
-            "Too many tries — request a new code.".into()
-        }));
+            AppError::Coded {
+                status: 400,
+                code: "OTP_TOO_MANY_TRIES",
+                reason: "Too many tries — request a new code.".into(),
+            }
+        });
     }
 
     let accounts = accounts_for(pool, &phone).await?;
