@@ -7,7 +7,7 @@
 //! AD-10): fixes go into the next open month as new lines.
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -31,20 +31,11 @@ use crate::staff::principal::{Me, caller};
 
 /// The pay window holding `day`: from `start_day` of one month to the day
 /// before it in the next. `start_day` 1 is the calendar month.
+///
+/// The rule is madar-shared's (`madar_dawam::pay::period_window`), the staff
+/// app's too.
 pub fn period_window(day: NaiveDate, start_day: u32) -> (NaiveDate, NaiveDate) {
-    let start_day = start_day.clamp(1, 28);
-    let this = NaiveDate::from_ymd_opt(day.year(), day.month(), start_day).expect("day <= 28");
-    let start = if day >= this {
-        this
-    } else {
-        this.checked_sub_months(chrono::Months::new(1))
-            .expect("in range")
-    };
-    let end = start
-        .checked_add_months(chrono::Months::new(1))
-        .expect("in range")
-        - Duration::days(1);
-    (start, end)
+    madar_dawam::pay::period_window(day, i64::from(start_day))
 }
 
 /// The org's "today": its first branch's zone (the business's own clock).

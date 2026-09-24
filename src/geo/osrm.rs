@@ -135,14 +135,11 @@ pub async fn road_eta_seconds(from: LatLng, to: LatLng) -> Result<f64, OsrmError
 /// fallback used when OSRM is unset or unreachable, so a delivery quote can
 /// still be produced from the configured zone rings. Underestimates real road
 /// distance, which is acceptable for a degraded fallback.
+///
+/// The formula is madar-shared's (`madar_dawam::geofence::haversine_m`), the
+/// one the staff app's fence uses too.
 pub fn haversine_meters(from: LatLng, to: LatLng) -> f64 {
-    const R: f64 = 6_371_000.0; // mean Earth radius, metres
-    let lat1 = from.lat.to_radians();
-    let lat2 = to.lat.to_radians();
-    let dlat = (to.lat - from.lat).to_radians();
-    let dlng = (to.lng - from.lng).to_radians();
-    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlng / 2.0).sin().powi(2);
-    R * 2.0 * a.sqrt().atan2((1.0 - a).sqrt())
+    madar_dawam::geofence::haversine_m((from.lat, from.lng), (to.lat, to.lng))
 }
 
 #[cfg(test)]

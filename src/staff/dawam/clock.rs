@@ -33,8 +33,10 @@ use crate::auth::jwt::JwtSecret;
 use crate::errors::AppError;
 
 /// The response header every staff-app response carries (see the module doc).
-pub const ANCHOR_HEADER: &str = "x-dawam-time";
-const ANCHOR_VERSION: &str = "v1";
+/// The anchor's format is madar-shared's (`madar_dawam::stamp`), the staff
+/// app's too; the HMAC is this server's alone.
+pub use madar_dawam::stamp::ANCHOR_HEADER;
+use madar_dawam::stamp::ANCHOR_VERSION;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -82,26 +84,14 @@ fn mac(secret: &JwtSecret, device: Uuid, ms: i64) -> HmacSha256 {
 pub fn sign_anchor(secret: &JwtSecret, device: Uuid, at: DateTime<Utc>) -> String {
     let ms = at.timestamp_millis();
     let tag = mac(secret, device, ms).finalize().into_bytes();
-    let hex: String = tag.iter().map(|b| format!("{b:02x}")).collect();
-    format!("{ANCHOR_VERSION}.{ms}.{hex}")
+    madar_dawam::stamp::format_anchor(ms, &tag)
 }
 
 /// The server time an anchor carries, if it was signed for `device`.
 pub fn verify_anchor(secret: &JwtSecret, device: Uuid, anchor: &str) -> Option<DateTime<Utc>> {
-    let mut parts = anchor.trim().splitn(3, '.');
-    if parts.next()? != ANCHOR_VERSION {
-        return None;
-    }
-    let ms: i64 = parts.next()?.parse().ok()?;
-    let hex = parts.next()?;
-    if hex.len() != 64 {
-        return None;
-    }
-    let bytes: Vec<u8> = (0..32)
-        .map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok())
-        .collect::<Option<_>>()?;
+    let madar_dawam::stamp::Anchor { ms, tag } = madar_dawam::stamp::parse_anchor(anchor)?;
     // `verify_slice` compares in constant time.
-    mac(secret, device, ms).verify_slice(&bytes).ok()?;
+    mac(secret, device, ms).verify_slice(&tag).ok()?;
     Utc.timestamp_millis_opt(ms).single()
 }
 
@@ -177,6 +167,44 @@ mod tests {
 
     fn key() -> JwtSecret {
         JwtSecret("unit".into())
+    }
+
+    /// madar-shared's stamps (what the staff app sends) decode as this
+    /// server's `OfflineStamp`, field for field with the shared type, and the
+    /// shared anchor shapes read as this server reads them.
+    #[test]
+    fn the_shared_stamps_and_anchors_read_as_here() {
+        let v: serde_json::Value = serde_json::from_str(madar_dawam::vectors::DAWAM).unwrap();
+        for s in v["stamps"].as_array().unwrap() {
+            let ours: OfflineStamp = serde_json::from_value(s.clone()).unwrap();
+            let shared: madar_dawam::stamp::OfflineStamp =
+                serde_json::from_value(s.clone()).unwrap();
+            assert_eq!(
+                (
+                    ours.server_time,
+                    ours.elapsed_ms,
+                    ours.rebooted,
+                    ours.gps_time,
+                    ours.anchor
+                ),
+                (
+                    shared.server_time,
+                    shared.elapsed_ms,
+                    shared.rebooted,
+                    shared.gps_time,
+                    shared.anchor
+                ),
+            );
+        }
+        // A well-formed anchor that is not ours still dates nothing.
+        for a in v["anchors"].as_array().unwrap() {
+            let anchor = a["anchor"].as_str().unwrap();
+            assert_eq!(
+                verify_anchor(&key(), Uuid::new_v4(), anchor),
+                None,
+                "{anchor:?}"
+            );
+        }
     }
 
     #[test]
