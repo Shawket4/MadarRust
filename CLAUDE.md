@@ -212,13 +212,19 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   `tills_migration_tests::every_projection_source_table_has_emitter` fails
   otherwise. A projection change for a type is enough when the table already
   re-emits that type.
-- **A report formula change regenerates the shared vectors.** Changing
-  `compute_system_cash`, `report_figures` or the close-method figures means
-  `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run --test tills_report_vectors_tests`,
-  which writes `till_report_vectors.json` / `till_edge_vectors.json` into the
-  madar-shared checkout beside this one (`crates/madar-till/vectors/`); the fold
-  there (`madar_till::report`, the POS core's too) must agree, and the change
-  ships with a madar-shared tag.
+- **The till's money is madar-shared's fold.** `compute_system_cash`,
+  `report_figures` and the close-method figures are `madar_till::report` over
+  the rows `tills::rows` loads (the POS core runs the same fold offline), and
+  the drawer carryover is `madar_till::carryover`'s pick over its two
+  candidates. A formula change is a change in madar-shared, released with a
+  tag; `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run --test
+  tills_report_vectors_tests` rewrites `till_report_vectors.json` /
+  `till_edge_vectors.json` in the madar-shared checkout beside this one.
+- **The bill is madar-shared's too.** `create_order_inner` hands its lines to
+  `madar_money::bill::price_bill_on` (staff comp, reward, discount, tax), a
+  sale's rewards are planned by `madar_loyalty::plan` (strict here, trimming on
+  the till) and a staff line's comp input is `madar_catalog::staff::comp_input`
+  over the order's loaded catalogue.
 - Additive fields only on payloads the POS mirrors (old tablets decode them).
 - **Catalogue pricing is madar-shared's `madar-catalog`** (the size price, swaps
   over the recipe's own choice, add-ons, optional fields). The order path loads
