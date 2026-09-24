@@ -777,7 +777,7 @@ pub async fn decide_adjustment(
 
 #[derive(Deserialize, ToSchema, Default)]
 pub struct StopAdjustment {
-    /// Why it stops (AD-9).
+    /// Why it stops (AD-9). Required: blank or missing is a 400.
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -809,6 +809,14 @@ pub async fn stop_adjustment(
     }
     let subject = access::subject(pool, org_id, line.employee_id).await?;
     access::require_for(pool, &claims, cap, &subject).await?;
+    // Who, when and WHY (AD-9), like a waiver or a reopen (E2E B-PAY-2).
+    // Checked after the rights, so a stranger still hears 403 (AT-11).
+    let reason = body
+        .as_ref()
+        .and_then(|b| b.reason.as_deref())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| AppError::BadRequest("Stopping a monthly line needs a reason".into()))?;
     let period = ensure_current_period(pool, org_id).await?;
     // The current month is approved already? Then it keeps the line and the
     // stop takes effect after it.
@@ -817,11 +825,6 @@ pub async fn stop_adjustment(
     } else {
         period.start_date - Duration::days(1)
     };
-    let reason = body
-        .as_ref()
-        .and_then(|b| b.reason.as_deref())
-        .map(str::trim)
-        .filter(|r| !r.is_empty());
     let mut tx = pool.begin().await?;
     let n = sqlx::query(&format!(
         "UPDATE {table} SET ends_on = $3, stopped_by = $4, stopped_at = now(), stop_reason = $5, \
@@ -850,7 +853,7 @@ pub async fn stop_adjustment(
         Some(id),
         Some(line.employee_id),
         None,
-        reason,
+        Some(reason),
         json!({ "ends_on": ends_on }),
     )
     .await?;

@@ -1994,6 +1994,76 @@ async fn stopping_a_recurring_line_records_who_and_why_and_ends_it_from_next_mon
     );
 }
 
+/// E2E B-PAY-2: stopping a monthly line records why (AD-9), like waive,
+/// override, unwaive and reopen — no reason, nothing stops.
+#[sqlx::test]
+async fn stopping_a_monthly_line_needs_a_reason(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let line = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 30_000, "reason": "Meals",
+                "recurring": true, "effective_date": f.start })
+    ))
+    .await;
+    let id = line["id"].as_str().unwrap();
+    let uri = format!("/staff/adjustments/bonus/{id}/stop");
+    for body in [
+        json!({}),
+        json!({ "reason": "   " }),
+        json!({ "reason": null }),
+    ] {
+        let resp = call!(app, post, uri, owner, body);
+        assert_eq!(resp.status(), 400, "{body}");
+        assert!(
+            text_of(resp)
+                .await
+                .contains("Stopping a monthly line needs a reason"),
+            "{body}"
+        );
+    }
+    let resp = test::call_service(
+        &app,
+        authed(test::TestRequest::post().uri(&uri), &owner).to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 400, "no body at all");
+    let (ends_on, stopped_at): (Option<NaiveDate>, Option<chrono::DateTime<Utc>>) =
+        sqlx::query_as("SELECT ends_on, stopped_at FROM payroll_bonuses WHERE id = $1::uuid")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((ends_on, stopped_at), (None, None), "still running");
+    assert!(
+        !audit_actions(&pool, f.org)
+            .await
+            .contains(&"adjustment.stop".to_string())
+    );
+
+    let resp = call!(
+        app,
+        post,
+        uri,
+        owner,
+        json!({ "reason": " Canteen opened " })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(json_of(resp).await["stop_reason"], "Canteen opened");
+    let reason: Option<String> = sqlx::query_scalar(
+        "SELECT reason FROM payroll_audit_log WHERE org_id = $1 AND action = 'adjustment.stop'",
+    )
+    .bind(f.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reason.as_deref(), Some("Canteen opened"));
+}
+
 // ── carry-over (PAY-12) ────────────────────────────────────────────────────
 
 #[sqlx::test]

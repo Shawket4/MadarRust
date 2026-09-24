@@ -706,7 +706,7 @@ async fn a_managers_pay_line_over_the_limit_waits_for_the_owner(pool: PgPool) {
         post,
         format!("/staff/adjustments/deduction/{id}/stop"),
         owner,
-        json!({})
+        json!({ "reason": "Paid back" })
     );
     assert_eq!(resp.status(), 200);
     assert!(json_of(resp).await["ends_on"].is_string());
