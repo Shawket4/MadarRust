@@ -1643,6 +1643,17 @@ async fn record_for_shift(
     .into_iter()
     .find(|s| s.work_shift_id == shift_id)
     .ok_or_else(|| AppError::Conflict("That shift is no longer on the roster".into()))?;
+    // A correction that clocks the owner in on a shift a colleague is
+    // covering would pay it twice (D1).
+    if request.from_time.is_some() {
+        crate::staff::attendance::refuse_if_covered(
+            pool,
+            request.employee_id,
+            request.on_date,
+            Some(shift_id),
+        )
+        .await?;
+    }
     sqlx::query(
         "INSERT INTO attendance_records \
              (org_id, employee_id, branch_id, work_shift_id, business_date, status, \

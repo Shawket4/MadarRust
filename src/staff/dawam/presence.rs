@@ -1536,6 +1536,14 @@ pub(crate) async fn punch(
                     .await?;
             crate::staff::attendance::check_window(shift.as_ref(), at)?;
             crate::staff::period_lock::assert_open(pool, org_id, business_date, "a punch").await?;
+            // A colleague is covering it: never paid twice (D1).
+            crate::staff::attendance::refuse_if_covered(
+                pool,
+                employee_id,
+                business_date,
+                shift.as_ref().map(|s| s.work_shift_id),
+            )
+            .await?;
             let id = sqlx::query_scalar(
                 "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                     business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, \

@@ -1727,6 +1727,14 @@ pub async fn check_in(
     // (owner decision BC-3): 409 PERIOD_CLOSED, final for the outbox.
     crate::staff::period_lock::assert_open(pool.get_ref(), org_id, business_date, "a check-in")
         .await?;
+    // A colleague is covering it: never paid twice (D1).
+    refuse_if_covered(
+        pool.get_ref(),
+        employee_id,
+        business_date,
+        shift.as_ref().map(|s| s.work_shift_id),
+    )
+    .await?;
 
     let adjustments =
         adjustments_for(pool.get_ref(), &settings, employee_id, business_date, &tz).await?;
@@ -1816,6 +1824,45 @@ pub async fn check_in(
     .await?;
     let record = load_record(pool.get_ref(), org_id, id).await?;
     Ok(HttpResponse::Created().json(record))
+}
+
+/// A shift a colleague is covering can't be punched for its owner (owner
+/// decision D1, 24 Sep 2026): otherwise the shift is paid twice. A pending or
+/// confirmed cover blocks every way of punching in — the app, the till, a
+/// manager's punch, a manual record, a correction; a rejected one doesn't.
+/// If the owner turns up mid-cover, the manager ends or rejects the cover
+/// first. 409 `SHIFT_COVERED` `{coverer_name}`.
+pub(crate) async fn refuse_if_covered(
+    pool: &PgPool,
+    employee_id: Uuid,
+    business_date: NaiveDate,
+    work_shift_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(shift) = work_shift_id else {
+        return Ok(());
+    };
+    let coverer: Option<String> = sqlx::query_scalar(
+        "SELECT e.name FROM attendance_records a JOIN employees e ON e.id = a.employee_id \
+          WHERE a.covered_employee_id = $1 AND a.business_date = $2 AND a.work_shift_id = $3 \
+            AND a.employee_id <> $1 AND a.cover_status IN ('pending', 'confirmed') \
+          ORDER BY a.created_at LIMIT 1",
+    )
+    .bind(employee_id)
+    .bind(business_date)
+    .bind(shift)
+    .fetch_optional(pool)
+    .await?;
+    match coverer {
+        None => Ok(()),
+        Some(name) => Err(AppError::CodedVars {
+            status: 409,
+            code: "SHIFT_COVERED",
+            reason: format!(
+                "{name} is covering this shift. A manager ends or rejects the cover first."
+            ),
+            vars: serde_json::json!({ "coverer_name": name }),
+        }),
+    }
 }
 
 /// A check-in before the shift's window opens, or after it ended, is refused
@@ -2664,6 +2711,16 @@ pub async fn create_manual_record(
             "That branch belongs to a different organization".into(),
         ));
     }
+    // A worked day on a shift a colleague is covering is paid twice (D1).
+    if body.check_in_at.is_some() {
+        refuse_if_covered(
+            pool.get_ref(),
+            body.employee_id,
+            body.business_date,
+            body.work_shift_id,
+        )
+        .await?;
+    }
 
     let tz = branch_timezone(pool.get_ref(), body.branch_id).await?;
     let shift = load_shift_snapshot(
@@ -2908,6 +2965,21 @@ async fn rederive(
     method: Option<&str>,
 ) -> Result<(), AppError> {
     let existing = load_record(pool, org_id, record_id).await?;
+    // A check-in written by hand or by an approved correction onto the
+    // owner's day of a shift a colleague is covering (D1).
+    if human.is_some()
+        && check_in_at.is_some()
+        && existing.check_in_at.is_none()
+        && existing.covered_employee_id.is_none()
+    {
+        refuse_if_covered(
+            pool,
+            existing.employee_id,
+            existing.business_date,
+            existing.work_shift_id,
+        )
+        .await?;
+    }
     let check_in_at = check_in_at.or(existing.check_in_at);
     let check_out_at = check_out_at.or(existing.check_out_at);
     if let (Some(in_at), Some(out_at)) = (check_in_at, check_out_at)
