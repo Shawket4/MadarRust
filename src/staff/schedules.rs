@@ -931,13 +931,16 @@ pub async fn update_work_shift(
         .fetch_one(&mut *tx)
         .await?;
         if stuck > 0 {
-            return Err(AppError::Refused {
+            // With its figures (AT-13, E2E B-ROTA-3).
+            return Err(AppError::CodedVars {
+                status: 409,
                 code: "SHIFT_DAYS_IN_USE",
                 reason: format!(
                     "{stuck} roster entr{} still put {} on the days you took away — move them first.",
                     if stuck == 1 { "y" } else { "ies" },
                     before.name
                 ),
+                vars: serde_json::json!({ "n": stuck, "name": before.name, "days": dropped }),
             });
         }
     }

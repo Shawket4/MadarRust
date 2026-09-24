@@ -354,12 +354,17 @@ pub(crate) async fn check_overlaps(
     )
     .await?;
     if let Some((a, b)) = first_overlap(&rows, from, to) {
-        return Err(AppError::Refused {
+        // The two blocks and their dates, for the client's own wording
+        // (AT-13, E2E B-ROTA-3): `date` is the first one's.
+        return Err(AppError::CodedVars {
+            status: 409,
             code: "SHIFTS_OVERLAP",
             reason: format!(
                 "{} on {} and {} on {} overlap.",
                 a.name, a.on_date, b.name, b.on_date
             ),
+            vars: json!({ "a": a.name, "b": b.name, "date": a.on_date,
+                          "a_date": a.on_date, "b_date": b.on_date }),
         });
     }
     Ok(())

@@ -3327,3 +3327,50 @@ async fn deleting_a_block_in_use_is_coded(pool: PgPool) {
     assert_eq!(body["vars"]["name"], "Morning", "{body}");
     assert!(!body["error"].as_str().unwrap().starts_with("Bad request:"));
 }
+
+/// E2E B-ROTA-3 (AT-13): SHIFTS_OVERLAP names the two blocks and their
+/// dates, and SHIFT_DAYS_IN_USE the count and the block, so the client can
+/// say which ones — not a generic "a night shift runs into the morning".
+#[sqlx::test]
+async fn roster_conflicts_carry_their_figures(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let d = today() + Duration::days(3);
+    let a = block(&pool, &f, Some(f.br_a), "Day", t(9, 0), t(15, 0)).await;
+    let b = block(&pool, &f, Some(f.br_a), "Afternoon", t(14, 0), t(18, 0)).await;
+    let (s, body) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d,
+                "shifts": [{ "work_shift_id": a }, { "work_shift_id": b }] })
+    ))
+    .await;
+    assert_eq!(s, 409, "{body}");
+    assert_eq!(body["code"], "SHIFTS_OVERLAP", "{body}");
+    let names = [body["vars"]["a"].clone(), body["vars"]["b"].clone()];
+    assert!(
+        names.contains(&json!("Day")) && names.contains(&json!("Afternoon")),
+        "{body}"
+    );
+    assert_eq!(body["vars"]["date"], json!(d), "{body}");
+
+    // Taking a weekday away from a block someone's weekday row names.
+    let wed = next_on(1, 3);
+    let brunch = block(&pool, &f, Some(f.br_a), "Brunch", t(10, 0), t(14, 0)).await;
+    pattern(&pool, &f, f.b, brunch, Some(dow(wed))).await;
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/work-shifts/{brunch}"),
+        f.owner(),
+        json!({ "branch_id": f.br_a, "name": "Brunch", "start_time": "10:00:00",
+                "end_time": "14:00:00", "valid_days": [6, 0, 1, 2, 4, 5] })
+    ))
+    .await;
+    assert_eq!(s, 409, "{body}");
+    assert_eq!(body["code"], "SHIFT_DAYS_IN_USE", "{body}");
+    assert_eq!(body["vars"]["n"], 1, "{body}");
+    assert_eq!(body["vars"]["name"], "Brunch", "{body}");
+}
