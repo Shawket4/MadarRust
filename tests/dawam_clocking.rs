@@ -2694,3 +2694,22 @@ async fn a_managers_punch_out_keeps_the_punch_in_reason(pool: PgPool) {
         )
     );
 }
+
+/// Mac E2E BC-4: a manager's punch with no `reason` field is told a reason
+/// is required, like a blank one — not a JSON deserialize error.
+#[sqlx::test]
+async fn a_punch_without_a_reason_field_asks_for_one(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    for body in [
+        json!({ "employee_id": f.b }),
+        json!({ "employee_id": f.b, "reason": "  " }),
+    ] {
+        let resp = call!(app, post, "/staff/attendance/punch", owner_t(&f), body);
+        assert_eq!(resp.status(), 400, "{body}");
+        let err: Value = test::read_body_json(resp).await;
+        let text = err["error"].as_str().unwrap();
+        assert!(text.contains("A reason is required."), "{body}: {err}");
+        assert!(!text.contains("deserialize"), "{body}: {err}");
+    }
+}

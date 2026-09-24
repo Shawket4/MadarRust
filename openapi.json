@@ -84845,8 +84845,7 @@
       "PunchFor": {
         "type": "object",
         "required": [
-          "employee_id",
-          "reason"
+          "employee_id"
         ],
         "properties": {
           "employee_id": {
@@ -84866,7 +84865,7 @@
           },
           "reason": {
             "type": "string",
-            "description": "Required (CL-13): a dead phone, a forgotten one."
+            "description": "Required (CL-13): a dead phone, a forgotten one. Missing reads as\nblank, so the answer is \"A reason is required.\" (Mac E2E BC-4)."
           }
         }
       },

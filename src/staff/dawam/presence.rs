@@ -1351,7 +1351,9 @@ pub async fn decide_overtime(
 #[derive(Deserialize, ToSchema)]
 pub struct PunchFor {
     pub employee_id: Uuid,
-    /// Required (CL-13): a dead phone, a forgotten one.
+    /// Required (CL-13): a dead phone, a forgotten one. Missing reads as
+    /// blank, so the answer is "A reason is required." (Mac E2E BC-4).
+    #[serde(default)]
     pub reason: String,
     /// Set when the manager's phone queued the punch offline: it is dated at
     /// its own time, not when the phone got a signal back (audit 03 bug 6).
