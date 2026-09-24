@@ -63960,6 +63960,13 @@
               "null"
             ]
           },
+          "check_out_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why someone else punched this person OUT; the in-reason stays in\n`punch_reason` (AT-10, Mac E2E BC-1)."
+          },
           "cover_status": {
             "type": [
               "string",
@@ -64054,7 +64061,7 @@
               "string",
               "null"
             ],
-            "description": "Why someone else punched for this person."
+            "description": "Why someone else punched this person IN (or the only punch they made)."
           },
           "scheduled_end_at": {
             "type": [

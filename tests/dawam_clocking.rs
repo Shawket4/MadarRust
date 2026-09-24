@@ -2644,3 +2644,53 @@ async fn nothing_is_written_into_a_closed_month(pool: PgPool) {
     .unwrap();
     assert_eq!(absences, 0, "no absence in a closed month");
 }
+
+/// Mac E2E BC-1 (AT-10): a manager's punch-out keeps the punch-in's reason;
+/// the out-reason is recorded beside it, and the record shows both.
+#[sqlx::test]
+async fn a_managers_punch_out_keeps_the_punch_in_reason(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    shift_around_now(&pool, &f, f.b, 30, 240).await;
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance/punch",
+        owner_t(&f),
+        json!({ "employee_id": f.b, "reason": "Phone died at the door" })
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance/punch",
+        owner_t(&f),
+        json!({ "employee_id": f.b, "reason": "Left early, phone still dead" })
+    );
+    assert_eq!(resp.status(), 200);
+    let rec = json_of(resp).await;
+    let rec = if rec["record"].is_object() {
+        rec["record"].clone()
+    } else {
+        rec
+    };
+    assert_eq!(rec["punch_reason"], "Phone died at the door", "{rec}");
+    assert_eq!(
+        rec["check_out_reason"], "Left early, phone still dead",
+        "{rec}"
+    );
+    let (inr, outr): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT punch_reason, check_out_reason FROM attendance_records WHERE employee_id = $1",
+    )
+    .bind(f.b)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (inr.as_deref(), outr.as_deref()),
+        (
+            Some("Phone died at the door"),
+            Some("Left early, phone still dead")
+        )
+    );
+}

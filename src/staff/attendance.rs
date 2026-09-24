@@ -93,9 +93,14 @@ pub struct AttendanceRecord {
     pub overtime_status: Option<String>,
     #[sqlx(default)]
     pub tracking_off: bool,
-    /// Why someone else punched for this person.
+    /// Why someone else punched this person IN (or the only punch they made).
     #[sqlx(default)]
     pub punch_reason: Option<String>,
+    /// Why someone else punched this person OUT; the in-reason stays in
+    /// `punch_reason` (AT-10, Mac E2E BC-1).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub check_out_reason: Option<String>,
     /// A manager set this day's status by hand; automation keeps it (AT-7).
     #[sqlx(default)]
     #[serde(default)]
@@ -122,6 +127,7 @@ const RECORD_COLS: &str = r#"
     a.is_manual, a.notes, a.edit_reason, a.created_by, a.edited_by,
     a.created_at, a.updated_at, a.covered_employee_id, a.cover_status,
     a.overtime_status, a.tracking_off, a.punch_reason, a.status_overridden,
+    a.check_out_reason,
     EXISTS (SELECT 1 FROM payroll_periods pp
              WHERE pp.org_id = a.org_id AND pp.status IN ('generated', 'paid', 'closed')
                AND pp.start_date <= a.business_date AND pp.end_date >= a.business_date)

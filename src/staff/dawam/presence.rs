@@ -1506,9 +1506,10 @@ pub(crate) async fn punch(
         Some((id, record_branch, _, day)) => {
             // Nothing is written into an approved or paid month (BC-3).
             crate::staff::period_lock::assert_open(pool, org_id, day, "a punch").await?;
+            // The out-reason beside the in-reason, never over it (BC-1).
             sqlx::query(
                 "UPDATE attendance_records SET check_out_at = $5, check_out_method = $4, \
-                        punch_reason = $2, edited_by = $3 WHERE id = $1",
+                        check_out_reason = $2, edited_by = $3 WHERE id = $1",
             )
             .bind(id)
             .bind(reason)
