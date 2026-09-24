@@ -2592,3 +2592,51 @@ async fn a_request_names_who_decided_and_who_cancelled_it(pool: PgPool) {
         .unwrap();
     assert_eq!(mine().await["cancelled_by_name"], json!(owner_name));
 }
+
+/// Mac E2E (RQ follow-up): an approved late arrival shortens the time the
+/// person OWES, as an early departure does, so a day worked inside both
+/// agreed times is present — not a half day. 14:00–18:00, arrive by 16:40
+/// and leave from 17:30 approved; in 16:15, out 17:40.
+#[sqlx::test]
+async fn an_approved_late_arrival_is_not_owed_time(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let aft = shift(&pool, f.org, f.a, "Afternoon", "14:00", "18:00").await;
+    roster(&pool, &f, f.e, &[aft]).await;
+    let d = "2026-09-10";
+    for body in [
+        json!({ "kind": "late_arrival", "on_date": d, "to_time": "16:40:00" }),
+        json!({ "kind": "early_departure", "on_date": d, "from_time": "17:30:00" }),
+    ] {
+        let row = file(&app, &f, f.e, body).await;
+        let (st, b) = decide(
+            &app,
+            &f.owner_token(),
+            &row["id"],
+            json!({ "status": "approved", "is_paid": true }),
+        )
+        .await;
+        assert_eq!(st, 200, "{b}");
+    }
+    let rec = record(
+        &pool,
+        &f,
+        f.e,
+        aft,
+        d,
+        (at(d, "14:00"), at(d, "18:00")),
+        Some((at(d, "16:15"), at(d, "17:40"))),
+        "present",
+    )
+    .await;
+    let (st, b) = send!(
+        app,
+        "PATCH",
+        format!("/staff/attendance/{rec}"),
+        f.owner_token(),
+        json!({ "check_out_at": at(d, "17:40"), "reason": "re-derive" })
+    );
+    assert_eq!(st, 200, "{b}");
+    assert_eq!(b["status"], "present", "{b}");
+    assert_eq!(b["late_minutes"], 0, "{b}");
+}

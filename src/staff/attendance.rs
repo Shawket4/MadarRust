@@ -715,20 +715,20 @@ pub fn derive(
             AttendanceStatus::Present
         }
     } else {
-        // An approved early departure (or half a day on leave) shortens the
-        // time the employee OWED, so the half-day threshold shrinks with it —
-        // otherwise permission to leave at noon would still be recorded as
-        // half a day.
+        // An approved early departure or late arrival (or half a day on
+        // leave) shortens the time the employee OWED, so the half-day
+        // threshold shrinks with it — otherwise permission to leave at noon,
+        // or to come in at four, would still be recorded as half a day.
         let span = shift.map(|s| s.span_minutes()).unwrap_or(0);
         let excused_tail = match (adjustments.excused_from, scheduled_end_at) {
             (Some(from), Some(end)) => (end - from).num_minutes().max(0),
             _ => 0,
         };
+        // The head is excused by a first-half leave or by an approved late
+        // arrival alike (the agreed arrival time; Mac E2E): `excused_until`
+        // carries whichever is later.
         let excused_head = match (adjustments.excused_until, scheduled_start_at) {
-            (Some(until), Some(start)) if adjustments.leave_minutes > 0 => (until - start)
-                .num_minutes()
-                .max(0)
-                .min(adjustments.leave_minutes),
+            (Some(until), Some(start)) => (until - start).num_minutes().max(0),
             _ => 0,
         };
         let owed = (span - excused_tail - excused_head).max(0);
