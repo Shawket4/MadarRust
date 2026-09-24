@@ -490,6 +490,68 @@ async fn labour_warnings(
     Ok(out)
 }
 
+/// One of my claims on an open shift, and how it ended (SC-9, S-162): a
+/// request like any other, so it stays in my Requests once decided.
+#[derive(Serialize, ToSchema, sqlx::FromRow, Clone)]
+pub struct MyClaim {
+    pub id: Uuid,
+    pub open_shift_id: Uuid,
+    pub branch_id: Uuid,
+    pub on_date: NaiveDate,
+    pub work_shift_id: Uuid,
+    pub shift_name: String,
+    /// `pending` · `approved` · `declined` · `withdrawn`. A shift the
+    /// manager took back while the claim waited is `declined`.
+    pub status: String,
+    pub claimed_at: DateTime<Utc>,
+    /// When it was decided or withdrawn; null while pending, and on a claim
+    /// decided before the server kept this history.
+    pub decided_at: Option<DateTime<Utc>>,
+}
+
+/// My claims on dates in `from..=to`, and every pending one wherever it falls.
+async fn my_claims_in(
+    pool: &PgPool,
+    employee_id: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<MyClaim>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT c.id, c.open_shift_id, o.branch_id, o.on_date, o.work_shift_id, \
+                ws.name AS shift_name, c.status, c.created_at AS claimed_at, c.decided_at \
+           FROM staff_open_shift_claims c \
+           JOIN staff_open_shifts o ON o.id = c.open_shift_id \
+           JOIN work_shifts ws ON ws.id = o.work_shift_id \
+          WHERE c.employee_id = $1 AND (o.on_date BETWEEN $2 AND $3 OR c.status = 'pending') \
+          ORDER BY o.on_date, c.created_at",
+    )
+    .bind(employee_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Close an open shift's pending claim (the log beside `staff_open_shifts`,
+/// which keeps only the live claimer).
+async fn close_claim(
+    conn: &mut sqlx::PgConnection,
+    open_shift_id: Uuid,
+    status: &str,
+    by: Option<Uuid>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE staff_open_shift_claims SET status = $2, decided_at = now(), decided_by = $3 \
+          WHERE open_shift_id = $1 AND status = 'pending'",
+    )
+    .bind(open_shift_id)
+    .bind(status)
+    .bind(by)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct MyRosterView {
     pub from: NaiveDate,
@@ -500,6 +562,9 @@ pub struct MyRosterView {
     pub unpublished_weeks: Vec<NaiveDate>,
     /// Open shifts at my branches, in published weeks (SC-9).
     pub open_shifts: Vec<OpenShift>,
+    /// My claims on open shifts, decided ones included: those on dates in
+    /// range, and every pending one wherever it falls (SC-9, S-162).
+    pub my_claims: Vec<MyClaim>,
     pub swaps: Vec<Swap>,
     /// Colleagues' published shifts at my branches — what a swap can be with.
     pub team: Vec<RosterShift>,
@@ -582,6 +647,7 @@ pub async fn my_roster(
         shifts,
         unpublished_weeks: unpublished,
         open_shifts,
+        my_claims: my_claims_in(pool, employee_id, query.from, query.to).await?,
         swaps: swaps_of(pool, org_id, Some(employee_id), None, None).await?,
         team,
         pref_time,
@@ -826,6 +892,7 @@ pub async fn claim_open_shift(
         days::check_overlaps(&mut tx, employee_id, on_date, on_date).await?;
         tx.rollback().await?;
     }
+    let mut tx = pool.begin().await?;
     let claimed: Option<Uuid> = sqlx::query_scalar(
         "UPDATE staff_open_shifts SET status = 'claimed', claimed_by = $2, claimed_at = now() \
           WHERE id = $1 AND org_id = $3 AND status = 'open' RETURNING id",
@@ -833,7 +900,7 @@ pub async fn claim_open_shift(
     .bind(*id)
     .bind(employee_id)
     .bind(org_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     if claimed.is_none() {
         // Lost the race to a colleague's claim.
@@ -842,6 +909,17 @@ pub async fn claim_open_shift(
             reason: "Someone already claimed that shift.".into(),
         });
     }
+    // Logged with the same now() as claimed_at (one transaction).
+    sqlx::query(
+        "INSERT INTO staff_open_shift_claims (org_id, open_shift_id, employee_id, status) \
+         VALUES ($1, $2, $3, 'pending')",
+    )
+    .bind(org_id)
+    .bind(*id)
+    .bind(employee_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     let name = employee_name(pool, employee_id).await;
     notify_managers(
         pool,
@@ -918,6 +996,7 @@ pub async fn decide_claim(
         if won.is_none() {
             return Err(AppError::Conflict("That claim was already decided.".into()));
         }
+        close_claim(&mut tx, *id, "approved", Some(by)).await?;
         let block = Block {
             work_shift_id: shift_id,
             times: None,
@@ -957,6 +1036,8 @@ pub async fn decide_claim(
         if won.is_none() {
             return Err(AppError::Conflict("That claim was already decided.".into()));
         }
+        // The shift reopens, but the claimer's declined claim stays theirs.
+        close_claim(&mut tx, *id, "declined", Some(by)).await?;
         tx.commit().await?;
         notify(
             pool,
@@ -997,20 +1078,25 @@ pub async fn cancel_open_shift(
         return Err(AppError::NotFound("No open shift here.".into()));
     };
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
+    let by = claims.user_id_safe().ok();
+    let mut tx = pool.begin().await?;
     let gone: Option<Option<Uuid>> = sqlx::query_scalar(
         "UPDATE staff_open_shifts SET status = 'cancelled', decided_by = $2 \
           WHERE id = $1 AND status IN ('open', 'claimed') \
           RETURNING claimed_by",
     )
     .bind(*id)
-    .bind(claims.user_id_safe().ok())
-    .fetch_optional(pool)
+    .bind(by)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some(claimer) = gone else {
         return Err(AppError::Conflict(
             "That shift was already filled or cancelled.".into(),
         ));
     };
+    // A claim waiting on it ends declined, and stays in the claimer's Requests.
+    close_claim(&mut tx, *id, "declined", by).await?;
+    tx.commit().await?;
     if let Some(c) = claimer {
         notify(
             pool,
