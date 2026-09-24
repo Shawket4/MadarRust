@@ -3148,3 +3148,69 @@ async fn money_refusals_carry_codes(pool: PgPool) {
     )
     .await;
 }
+
+/// E2E B-PAY-4 (AT-13): the Bonuses & deductions list carries a rule-made
+/// line's reason code and figures, as the payslip breakdown does, so it is
+/// worded in Arabic too; a bonus or a manual line has none.
+#[sqlx::test]
+async fn adjustments_carry_the_rule_lines_reason_code(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let d = f.start;
+    // An absence and a 24-minute late arrival, priced by the sweep's function.
+    let absent = day(&pool, &f, f.amal, f.a, d, "absent", 9, 480, 0, 0).await;
+    let late = day(
+        &pool,
+        &f,
+        f.amal,
+        f.a,
+        d + Duration::days(1),
+        "late",
+        9,
+        480,
+        24,
+        0,
+    )
+    .await;
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, Some(f.a))
+        .await
+        .unwrap();
+    for r in [absent, late] {
+        madar_rust::staff::penalties::recompute_record(&pool, r, &settings)
+            .await
+            .unwrap();
+    }
+    let bonus = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        f.owner(),
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 1_000, "reason": "Tips" })
+    );
+    assert_eq!(bonus.status(), 201);
+    let rows = json_of(call!(
+        app,
+        get,
+        format!("/staff/adjustments?employee_id={}", f.amal),
+        f.owner()
+    ))
+    .await;
+    let by = |source: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["source"] == source)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {source} in {rows}"))
+    };
+    let a = by("absence");
+    assert_eq!(a["reason_code"], "absent_no_punch", "{a}");
+    let l = by("late_penalty");
+    assert_eq!(l["reason_code"], "late", "{l}");
+    assert_eq!(l["reason_vars"]["minutes"], 24, "{l}");
+    let b = by("manual");
+    assert!(
+        b["reason_code"].is_null() && b["reason_vars"].is_null(),
+        "{b}"
+    );
+}

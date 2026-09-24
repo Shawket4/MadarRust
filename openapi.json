@@ -63052,6 +63052,19 @@
           "reason": {
             "type": "string"
           },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A rule-made line's reason as a code and its figures (`late`\n`{minutes}`, `absent_no_punch`, …), the payslip breakdown's own, so a\nclient words it in its language (AT-13, E2E B-PAY-4). Null for a\nbonus and for a manual line (its `reason` is what was typed)."
+          },
+          "reason_vars": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
           "recurring": {
             "type": "boolean"
           },

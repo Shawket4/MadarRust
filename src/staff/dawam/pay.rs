@@ -417,6 +417,15 @@ pub struct Adjustment {
     pub stopped_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
     pub stop_reason: Option<String>,
+    /// A rule-made line's reason as a code and its figures (`late`
+    /// `{minutes}`, `absent_no_punch`, …), the payslip breakdown's own, so a
+    /// client words it in its language (AT-13, E2E B-PAY-4). Null for a
+    /// bonus and for a manual line (its `reason` is what was typed).
+    #[sqlx(default)]
+    pub reason_code: Option<String>,
+    #[sqlx(default)]
+    #[schema(value_type = Option<Object>)]
+    pub reason_vars: Option<serde_json::Value>,
 }
 
 const ADJ_SELECT: &str = "SELECT * FROM ( \
@@ -426,13 +435,15 @@ const ADJ_SELECT: &str = "SELECT * FROM ( \
            a.reason, a.effective_date, a.source, a.status, a.recurring, \
            a.ends_on, a.created_by, a.created_at, \
            NULL::timestamptz AS waived_at, NULL::timestamptz AS overridden_at, \
-           NULL::bigint AS original_amount_piastres, a.stopped_at, a.stop_reason \
+           NULL::bigint AS original_amount_piastres, a.stopped_at, a.stop_reason, \
+           NULL::text AS reason_code, NULL::jsonb AS reason_vars \
       FROM payroll_bonuses a JOIN employees e ON e.id = a.employee_id \
     UNION ALL \
     SELECT a.id, 'deduction', a.org_id, a.employee_id, e.name, a.amount_piastres, a.percent_of_base, \
            COALESCE(a.amount_piastres, round(e.base_salary_piastres::numeric * COALESCE(a.percent_of_base, 0) / 100))::bigint, \
            a.reason, a.effective_date, a.source, a.status, a.recurring, a.ends_on, a.created_by, \
-           a.created_at, a.waived_at, a.overridden_at, a.original_amount_piastres, a.stopped_at, a.stop_reason \
+           a.created_at, a.waived_at, a.overridden_at, a.original_amount_piastres, a.stopped_at, a.stop_reason, \
+           a.reason_code, a.reason_vars \
       FROM payroll_deductions a JOIN employees e ON e.id = a.employee_id \
     ) x";
 
