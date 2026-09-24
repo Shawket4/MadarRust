@@ -105,12 +105,20 @@ pub struct SalaryAdvance {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// The owner's cap on what this person may owe in advances, in piastres
-    /// (AV-5) — the server's figure, so no client recomputes it.
+    /// (AV-5) — the server's figure, so no client recomputes it. Null for a
+    /// caller who may not read this person's salary: the cap is half the
+    /// salary, so it would give it away (owner decision D7). The person
+    /// always sees their own.
     #[sqlx(default)]
-    pub cap_piastres: i64,
+    pub cap_piastres: Option<i64>,
     /// What the person owes across their live advances (pending ones count).
     #[sqlx(default)]
     pub outstanding_piastres: i64,
+    /// What is owed (pending ones counted) is within the cap: what a manager
+    /// sees instead of the cap (D7). False = over it: only the owner can
+    /// approve more.
+    #[sqlx(default)]
+    pub within_cap: bool,
 }
 
 const ADVANCE_SELECT: &str = r#"
@@ -119,12 +127,62 @@ const ADVANCE_SELECT: &str = r#"
            a.reason, a.status, a.decided_by, a.decided_at, a.decision_note,
            a.created_at, a.updated_at,
            dawam_advance_cap(a.org_id, e.base_salary_piastres) AS cap_piastres,
-           COALESCE((SELECT SUM(o.remaining_piastres) FROM salary_advances o
-                      WHERE o.employee_id = a.employee_id AND o.status IN ('pending', 'approved')), 0)::bigint
-               AS outstanding_piastres
+           owed.outstanding AS outstanding_piastres,
+           owed.outstanding <= dawam_advance_cap(a.org_id, e.base_salary_piastres) AS within_cap
       FROM salary_advances a
       JOIN employees e ON e.id = a.employee_id
+      CROSS JOIN LATERAL (
+          SELECT COALESCE(SUM(o.remaining_piastres), 0)::bigint AS outstanding
+            FROM salary_advances o
+           WHERE o.employee_id = a.employee_id AND o.status IN ('pending', 'approved')
+      ) owed
 "#;
+
+/// The employees whose salary the caller may read (`None` = everyone's,
+/// `Some([])` = nobody's): `hr.payroll.read` at one of their branches.
+pub(crate) async fn pay_readable(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+    employees: &[Uuid],
+) -> Result<Option<Vec<Uuid>>, AppError> {
+    let at = match access::scope(pool, claims, org_id, Cap::HrPayrollRead).await {
+        Ok(None) => return Ok(None),
+        Ok(Some(at)) => at,
+        Err(AppError::Forbidden(_)) => return Ok(Some(Vec::new())),
+        Err(e) => return Err(e),
+    };
+    Ok(Some(
+        sqlx::query_scalar(
+            "SELECT DISTINCT employee_id FROM employee_branches \
+              WHERE employee_id = ANY($1) AND branch_id = ANY($2)",
+        )
+        .bind(employees)
+        .bind(&at)
+        .fetch_all(pool)
+        .await?,
+    ))
+}
+
+/// Hide the cap from a caller who may not read the person's salary (D7):
+/// they keep `within_cap` and `outstanding_piastres`.
+pub(crate) async fn hide_caps(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+    rows: &mut [SalaryAdvance],
+) -> Result<(), AppError> {
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.employee_id).collect();
+    if let Some(readable) = pay_readable(pool, claims, org_id, &ids).await? {
+        for r in rows
+            .iter_mut()
+            .filter(|r| !readable.contains(&r.employee_id))
+        {
+            r.cap_piastres = None;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
 pub struct PayrollPeriod {
@@ -879,7 +937,7 @@ pub async fn list_advances(
     // Payroll readers, and whoever decides advances, for their branches (B15).
     let scope = money_scope(pool.get_ref(), &claims, org_id, &[Cap::HrAdvancesDecide]).await?;
 
-    let rows = sqlx::query_as::<_, SalaryAdvance>(&format!(
+    let mut rows = sqlx::query_as::<_, SalaryAdvance>(&format!(
         "{ADVANCE_SELECT} WHERE a.org_id = $1 AND ($2::uuid IS NULL OR a.employee_id = $2) \
             AND {} ORDER BY a.created_at DESC",
         access::in_scope("a.employee_id", 3)
@@ -889,6 +947,7 @@ pub async fn list_advances(
     .bind(scope.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
+    hide_caps(pool.get_ref(), &claims, org_id, &mut rows).await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -969,7 +1028,14 @@ pub async fn create_advance_admin(
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrAdvancesDecide, &subject).await?;
 
-    let row = insert_advance(pool.get_ref(), org_id, employee_id, &body).await?;
+    let mut row = insert_advance(pool.get_ref(), org_id, employee_id, &body).await?;
+    hide_caps(
+        pool.get_ref(),
+        &claims,
+        org_id,
+        std::slice::from_mut(&mut row),
+    )
+    .await?;
     Ok(HttpResponse::Created().json(row))
 }
 

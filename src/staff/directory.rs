@@ -103,6 +103,10 @@ pub struct Employee {
     /// Hidden with the salary.
     #[sqlx(default)]
     pub advance_cap_piastres: Option<i64>,
+    /// What they owe in salary advances (pending ones counted) is within the
+    /// cap. Never hidden: what a manager sees instead of the cap (D7).
+    #[sqlx(default)]
+    pub advance_within_cap: bool,
     /// `morning` · `evening` · null
     pub pref_time: Option<String>,
     /// Days they can't work: 0 = Sunday … 6 = Saturday.
@@ -499,6 +503,9 @@ const EMPLOYEE_SELECT: &str = r#"
            e.notes, e.gender, e.pay_method, e.pay_account, e.pref_time, e.cant_work_days,
            e.on_payroll,
            dawam_advance_cap(e.org_id, e.base_salary_piastres) AS advance_cap_piastres,
+           COALESCE((SELECT SUM(sa.remaining_piastres) FROM salary_advances sa
+                      WHERE sa.employee_id = e.id AND sa.status IN ('pending', 'approved')), 0)
+               <= dawam_advance_cap(e.org_id, e.base_salary_piastres) AS advance_within_cap,
            COALESCE(ARRAY(SELECT eb.branch_id FROM employee_branches eb
                            WHERE eb.employee_id = e.id ORDER BY eb.assigned_at, eb.branch_id),
                     '{}') AS branch_ids,

@@ -853,10 +853,10 @@ async fn advances_over_the_cap_wait_for_the_owner_and_record_is_atomic(pool: PgP
     );
     assert_eq!(resp.status(), 200, "within the cap and within 50%");
     let row = json_of(resp).await;
-    assert_eq!(
-        row["cap_piastres"], 300_000,
-        "the server's cap figure rides on the row"
-    );
+    // The cap is half the salary: the manager sees only that it is within
+    // it (D7); the owner sees the figure.
+    assert!(row["cap_piastres"].is_null(), "{row}");
+    assert_eq!(row["within_cap"], true);
     assert_eq!(row["outstanding_piastres"], 200_000);
     assert_eq!(
         row["monthly_installment_piastres"], 66_667,
@@ -3145,7 +3145,8 @@ async fn money_refusals_carry_codes(pool: PgPool) {
         "ADVANCE_OVER_CAP",
     )
     .await;
-    assert_eq!(body["vars"]["more_piastres"], 300_000, "{body}");
+    // A manager never learns the room left (D7).
+    assert_eq!(body["vars"], json!({ "over_cap": true }), "{body}");
     // Your own advance.
     let mine = json_of(call!(
         app,
@@ -3258,9 +3259,10 @@ async fn adjustments_carry_the_rule_lines_reason_code(pool: PgPool) {
 }
 
 /// Mac E2E BB2: recording an advance over the cap is the same coded refusal
-/// as approving one — ADVANCE_OVER_CAP with {more_piastres, more_egp}, no
-/// "Conflict:" or code in the text. (Amal: 600,000, cap 50% = 300,000,
-/// 160,000 outstanding: 140,000 more at most.)
+/// as approving one — ADVANCE_OVER_CAP, no "Conflict:" or code in the text.
+/// A manager who may not read the salary hears only {over_cap: true}, never
+/// the room left (owner decision D7); the text names no amount. (Amal:
+/// 600,000, cap 50% = 300,000, 160,000 outstanding: 140,000 more at most.)
 #[sqlx::test]
 async fn recording_an_advance_over_the_cap_is_coded(pool: PgPool) {
     let app = app!(pool);
@@ -3276,12 +3278,15 @@ async fn recording_an_advance_over_the_cap_is_coded(pool: PgPool) {
     assert_eq!(resp.status(), 409);
     let body = json_of(resp).await;
     assert_eq!(body["code"], "ADVANCE_OVER_CAP", "{body}");
-    assert_eq!(body["vars"]["more_piastres"], 140_000, "{body}");
-    assert_eq!(body["vars"]["more_egp"], 1_400, "{body}");
+    assert_eq!(body["vars"], json!({ "over_cap": true }), "{body}");
     let text = body["error"].as_str().unwrap();
     assert!(
         !text.starts_with("Conflict:") && !text.contains("ADVANCE_OVER_CAP"),
         "{body}"
+    );
+    assert!(
+        !text.contains("EGP") && !text.chars().any(|c| c.is_ascii_digit()),
+        "no amount in the text: {text}"
     );
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM salary_advances WHERE employee_id = $1")
         .bind(f.amal)
@@ -3466,4 +3471,102 @@ async fn a_cover_is_paid_by_the_cover_pay_mode_of_its_branch(pool: PgPool) {
         json!({ "branch_id": f.a, "cover_pay_mode": "full_block" })
     );
     assert_eq!(resp.status(), 403);
+}
+
+/// Owner decision D7 (24 Sep 2026): the advance cap is half the salary, so a
+/// manager who may not read salaries sees only "within cap" or "over cap"
+/// on every advance summary, never the figure; the owner and the person
+/// themselves see it.
+#[sqlx::test]
+async fn a_manager_sees_within_cap_never_the_cap(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Cap: 50% of 600,000 = 300,000; 200,000 owed.
+    approved_advance(&pool, &f, f.amal, 200_000, 4).await;
+    let list = |token: String| {
+        let app = &app;
+        async move {
+            json_of(call!(
+                app,
+                get,
+                format!("/staff/payroll/advances?employee_id={}", f.amal),
+                token
+            ))
+            .await
+        }
+    };
+    let rows = list(f.mgr()).await;
+    let row = &rows[0];
+    assert!(row["cap_piastres"].is_null(), "{row}");
+    assert_eq!(row["within_cap"], true);
+    assert_eq!(row["outstanding_piastres"], 200_000);
+    let rows = list(f.owner()).await;
+    assert_eq!(rows[0]["cap_piastres"], 300_000);
+    assert_eq!(rows[0]["within_cap"], true);
+    let mine = json_of(call!(
+        app,
+        get,
+        "/staff/me/advances",
+        phone_token(&pool, f.amal).await
+    ))
+    .await;
+    assert_eq!(mine[0]["cap_piastres"], 300_000, "her own cap");
+    // The profile: the cap hidden with the salary, within_cap shown.
+    let emp = json_of(call!(
+        app,
+        get,
+        format!("/staff/employees/{}", f.amal),
+        f.mgr()
+    ))
+    .await;
+    assert!(emp["advance_cap_piastres"].is_null(), "{emp}");
+    assert_eq!(emp["advance_within_cap"], true, "{emp}");
+
+    // Over the cap once the owner approves more: every summary says so.
+    approved_advance(&pool, &f, f.amal, 150_000, 1).await;
+    let rows = list(f.mgr()).await;
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["within_cap"] == false && r["cap_piastres"].is_null()),
+        "{rows}"
+    );
+    let emp = json_of(call!(
+        app,
+        get,
+        format!("/staff/employees/{}", f.amal),
+        f.mgr()
+    ))
+    .await;
+    assert_eq!(emp["advance_within_cap"], false, "{emp}");
+    // A new ask, reviewed by the manager: refused with no amount.
+    let ask = json_of(call!(
+        app,
+        post,
+        "/staff/me/advances",
+        phone_token(&pool, f.amal).await,
+        json!({ "amount_piastres": 10_000, "installments": 1 })
+    ))
+    .await;
+    assert!(
+        ask["cap_piastres"].is_number(),
+        "the asker sees her cap: {ask}"
+    );
+    assert_eq!(ask["within_cap"], false);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/advances/{}/review", ask["id"].as_str().unwrap()),
+        f.mgr(),
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 409);
+    let body = json_of(resp).await;
+    assert_eq!(body["code"], "ADVANCE_OVER_CAP");
+    assert_eq!(body["vars"], json!({ "over_cap": true }), "{body}");
+    assert_eq!(
+        body["error"],
+        "That's over the advance cap. Only the owner can approve it."
+    );
 }

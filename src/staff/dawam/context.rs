@@ -46,6 +46,9 @@ pub struct ContextPerson {
     /// Their salary-advance cap, decided by the server (AV-5, AT-3); shown
     /// under the same visibility as the salary.
     pub advance_cap_piastres: Option<i64>,
+    /// What they owe in salary advances is within the cap; never hidden, so
+    /// a manager sees "within cap" / "over cap" without the figure (D7).
+    pub advance_within_cap: bool,
     pub pay_method: String,
     pub pay_account: Option<String>,
     pub pref_time: Option<String>,
@@ -205,6 +208,9 @@ pub async fn my_context(
                          SELECT 1 FROM employee_branches pb WHERE pb.employee_id = e.id \
                             AND pb.branch_id = ANY($6)))) \
                      THEN dawam_advance_cap(e.org_id, e.base_salary_piastres) END AS advance_cap_piastres, \
+                COALESCE((SELECT SUM(sa.remaining_piastres) FROM salary_advances sa \
+                           WHERE sa.employee_id = e.id AND sa.status IN ('pending', 'approved')), 0) \
+                    <= dawam_advance_cap(e.org_id, e.base_salary_piastres) AS advance_within_cap, \
                 e.pay_method, \
                 CASE WHEN e.id = $4 OR $3 THEN e.pay_account END AS pay_account, \
                 e.pref_time, e.cant_work_days, d.model AS device_model, d.first_seen_at AS device_since \

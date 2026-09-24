@@ -22,7 +22,7 @@ use crate::staff::access;
 use crate::staff::attendance::{load_settings, today_in};
 use crate::staff::payroll::{
     ComputedPayslip, PAYSLIP_SELECT, PERIOD_COLS, PayrollPeriod, PayrollTotals, Payslip,
-    SalaryAdvance, audit, compute_payslips, create_cap, installment_of, load_advance,
+    SalaryAdvance, audit, compute_payslips, create_cap, hide_caps, installment_of, load_advance,
     settle_period_if_all_paid,
 };
 use crate::staff::period_lock;
@@ -912,7 +912,19 @@ async fn approve_advance_checks(
     if after > cap {
         let owner = access::can_everywhere(pool, claims, org_id, Cap::HrPayrollRun).await?;
         if !owner {
-            // 409 with the room left, for the client's own wording (B-TEAM-2).
+            // The cap is half the salary: someone who may not read the salary
+            // hears only that it is over (owner decision D7, 24 Sep 2026),
+            // never the room left. Someone who may read it gets the figures
+            // for their own wording (B-TEAM-2).
+            let sees_pay = access::can_for(pool, claims, Cap::HrPayrollRead, subject).await?;
+            if !sees_pay {
+                return Err(AppError::CodedVars {
+                    status: 409,
+                    code: "ADVANCE_OVER_CAP",
+                    reason: "That's over the advance cap. Only the owner can approve it.".into(),
+                    vars: json!({ "over_cap": true }),
+                });
+            }
             let more = (cap - outstanding + already_counted).max(0);
             return Err(AppError::CodedVars {
                 status: 409,
@@ -921,7 +933,7 @@ async fn approve_advance_checks(
                     "That's over the advance cap — at most {} EGP more; the owner can approve it.",
                     more / 100
                 ),
-                vars: json!({ "more_piastres": more, "more_egp": more / 100 }),
+                vars: json!({ "over_cap": true, "more_piastres": more, "more_egp": more / 100 }),
             });
         }
     }
@@ -1041,7 +1053,9 @@ pub async fn review_advance(
         json!({ "amount": amount }),
     )
     .await;
-    Ok(HttpResponse::Ok().json(load_advance(pool, *id).await?))
+    let mut row = load_advance(pool, *id).await?;
+    hide_caps(pool, &claims, org_id, std::slice::from_mut(&mut row)).await?;
+    Ok(HttpResponse::Ok().json(row))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -1131,7 +1145,9 @@ pub async fn record_advance(
         json!({ "amount": body.amount_piastres }),
     )
     .await;
-    Ok(HttpResponse::Created().json(load_advance(pool, id).await?))
+    let mut row = load_advance(pool, id).await?;
+    hide_caps(pool, &claims, org_id, std::slice::from_mut(&mut row)).await?;
+    Ok(HttpResponse::Created().json(row))
 }
 
 // ── expense advances: a log, never deducted (AV-7, AV-8) ────────────────────
