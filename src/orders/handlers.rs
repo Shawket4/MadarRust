@@ -1063,6 +1063,24 @@ pub(crate) enum ClientPrices {
     AsCharged,
 }
 
+/// Every menu item and add-on the lines name — bundle components the till
+/// configured included — so one [`Catalog`] load serves a whole order.
+///
+/// [`Catalog`]: crate::orders::catalog_view::Catalog
+pub(crate) fn catalog_ids_of(items: &[OrderItemInput]) -> (Vec<Uuid>, Vec<Uuid>) {
+    let mut menu = Vec::new();
+    let mut options = Vec::new();
+    for it in items {
+        menu.extend(it.menu_item_id);
+        options.extend(it.addons.iter().map(|a| a.addon_item_id));
+        for c in &it.bundle_components {
+            menu.push(c.item_id);
+            options.extend(c.addons.iter().map(|a| a.addon_item_id));
+        }
+    }
+    (menu, options)
+}
+
 /// Resolve one cart line against the catalog at `branch_id` and price it.
 ///
 /// `unit_price` and the addon prices come back from the CATALOGUE, with the
@@ -1074,8 +1092,11 @@ pub(crate) enum ClientPrices {
 ///
 /// `order_time` is when the sale happened (a bundle's availability window is
 /// judged against it) — the order's `created_at`, or now for a fire.
-pub(crate) async fn resolve_order_line(
+/// `catalog` is shared by every line of an order: loaded in batches, and
+/// whatever a line needs that is not loaded yet is loaded here.
+pub(crate) async fn resolve_order_line_in(
     pool: &PgPool,
+    catalog: &mut crate::orders::catalog_view::Catalog,
     org_id: Uuid,
     branch_id: Uuid,
     order_time: chrono::DateTime<Utc>,
@@ -1205,7 +1226,7 @@ pub(crate) async fn resolve_order_line(
         }
 
         // Resolve components (client snapshot or catalog defaults)
-        let catalog: Vec<(Uuid, i32, String, serde_json::Value)> = sqlx::query_as(
+        let components: Vec<(Uuid, i32, String, serde_json::Value)> = sqlx::query_as(
             "SELECT bc.item_id, bc.quantity, mi.name, mi.name_translations \
              FROM bundle_components bc \
              JOIN menu_items mi ON mi.id = bc.item_id \
@@ -1216,7 +1237,7 @@ pub(crate) async fn resolve_order_line(
         .fetch_all(pool)
         .await?;
 
-        if catalog.is_empty() {
+        if components.is_empty() {
             return Err(AppError::BadRequest(format!(
                 "Bundle {} has no components",
                 bundle.1
@@ -1224,14 +1245,14 @@ pub(crate) async fn resolve_order_line(
         }
 
         let catalog_map: std::collections::HashMap<Uuid, (i32, String, serde_json::Value)> =
-            catalog
+            components
                 .iter()
                 .map(|(id, qty, name, tr)| (*id, (*qty, name.clone(), tr.clone())))
                 .collect();
 
         let component_inputs: Vec<crate::orders::component_resolve::BundleComponentInput> =
             if item_input.bundle_components.is_empty() {
-                catalog
+                components
                     .iter()
                     .map(
                         |(id, qty, _, _)| crate::orders::component_resolve::BundleComponentInput {
@@ -1247,6 +1268,14 @@ pub(crate) async fn resolve_order_line(
                 item_input.bundle_components.clone()
             };
 
+        {
+            let comp_items: Vec<Uuid> = component_inputs.iter().map(|c| c.item_id).collect();
+            let comp_options: Vec<Uuid> = component_inputs
+                .iter()
+                .flat_map(|c| c.addons.iter().map(|a| a.addon_item_id))
+                .collect();
+            catalog.ensure_on(pool, &comp_items, &comp_options).await?;
+        }
         for comp_in in component_inputs {
             let Some((catalog_qty, item_name, name_translations)) =
                 catalog_map.get(&comp_in.item_id)
@@ -1264,16 +1293,14 @@ pub(crate) async fn resolve_order_line(
             }
 
             let line_qty = comp_in.quantity * item_input.quantity;
-            let config = crate::orders::component_resolve::resolve_menu_item_configuration(
-                pool,
+            let config = crate::orders::component_resolve::resolve_loaded(
+                catalog,
                 comp_in.item_id,
                 comp_in.size_label.clone(),
                 line_qty,
                 &comp_in.addons,
                 &comp_in.optional_field_ids,
-                branch_id,
-            )
-            .await?;
+            )?;
 
             // Per component unit, per bundle: madar-shared's rule (M3), the till's too.
             component_surcharge += madar_money::line::component_surcharge(
@@ -1354,24 +1381,23 @@ pub(crate) async fn resolve_order_line(
         // replace the price (price_override, piastres) and/or disable the item at
         // this branch. A disabled item is flagged (price_flagged) but NOT rejected
         // — an offline/stale POS may legitimately still be selling it.
+        let addon_ids: Vec<Uuid> = item_input.addons.iter().map(|a| a.addon_item_id).collect();
+        catalog.ensure_on(pool, &[m_item_id], &addon_ids).await?;
         let (item_name, name_translations, unit_price, branch_disabled) =
-            catalog_unit_price(pool, m_item_id, item_input.size_label.as_deref(), branch_id)
-                .await?;
+            catalog_unit_price_loaded(catalog, m_item_id, item_input.size_label.as_deref())?;
 
         // Resolve recipe + addons (incl. milk/coffee swaps) + optionals via the
         // SHARED resolver that bundle components also use, so the deduction +
         // swap rules live in exactly one place. Map its output into the
         // order-line structs (which additionally carry cost fields).
-        let config = crate::orders::component_resolve::resolve_menu_item_configuration(
-            pool,
+        let config = crate::orders::component_resolve::resolve_loaded(
+            catalog,
             m_item_id,
             item_input.size_label.clone(),
             item_input.quantity,
             &item_input.addons,
             &item_input.optional_field_ids,
-            branch_id,
-        )
-        .await?;
+        )?;
         for d in config.deductions {
             deductions.push(InventoryDeduction {
                 org_ingredient_id: d.org_ingredient_id,
@@ -1521,71 +1547,35 @@ pub async fn catalog_unit_price(
     size_label: Option<&str>,
     branch_id: Uuid,
 ) -> Result<(String, serde_json::Value, i32, bool), AppError> {
-    let (item_name, name_translations, lowest_size_price, branch_price_override, branch_disabled): (
-        String,
-        serde_json::Value,
-        Option<i32>,
-        Option<i32>,
-        bool,
-    ) = sqlx::query_as(
-        "SELECT mi.name, mi.name_translations,
-                (SELECT min(z.price) FROM menu_item_sizes z
-                  WHERE z.menu_item_id = mi.id AND z.is_active),
-                bmo.price_override,
-                COALESCE(bmo.is_available, true) = false AS branch_disabled
-         FROM menu_items mi
-         LEFT JOIN branch_menu_overrides bmo
-                ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
-         WHERE mi.id = $1 AND mi.deleted_at IS NULL",
-    )
-    .bind(m_item_id)
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("Menu item {} not found", m_item_id)))?;
+    let mut catalog = crate::orders::catalog_view::Catalog::new(Some(branch_id));
+    catalog.ensure_on(pool, &[m_item_id], &[]).await?;
+    catalog_unit_price_loaded(&catalog, m_item_id, size_label)
+}
 
-    // A live item without a single size row is impossible after the schema
-    // change; treat it as a catalog fault rather than silently charging zero.
-    let lowest_size_price = lowest_size_price.ok_or_else(|| {
-        AppError::BadRequest(format!("Menu item {} has no priced size", m_item_id))
-    })?;
-
-    // Branch-effective fallback: a branch override replaces the item's "from" price.
-    let fallback = branch_price_override.unwrap_or(lowest_size_price);
-
-    let unit_price: i32 = match size_label {
-        Some(size) => {
-            // A per-(branch, item, size) override wins for that size; otherwise the
-            // catalog size price; otherwise the branch-effective fallback. (A branch
-            // base override never silently changes an explicitly-priced size.)
-            let branch_size: Option<i32> = sqlx::query_scalar(
-                "SELECT price_override FROM branch_menu_size_overrides \
-                 WHERE branch_id = $1 AND menu_item_id = $2 AND size_label = $3",
-            )
-            .bind(branch_id)
-            .bind(m_item_id)
-            .bind(size)
-            .fetch_optional(pool)
-            .await?;
-
-            match branch_size {
-                Some(bs) => bs,
-                None => {
-                    let p: Option<i32> = sqlx::query_scalar(
-                        "SELECT price FROM menu_item_sizes \
-                         WHERE menu_item_id = $1 AND label = $2 AND is_active = true",
-                    )
-                    .bind(m_item_id)
-                    .bind(size)
-                    .fetch_optional(pool)
-                    .await?;
-                    p.unwrap_or(fallback)
-                }
-            }
-        }
-        None => fallback,
-    };
-    Ok((item_name, name_translations, unit_price, branch_disabled))
+/// [`catalog_unit_price`] over an already loaded catalogue. The rule is
+/// madar-catalog's `unit_price`: a size's branch price, else its catalogue
+/// price while it is active, else the fallback — the branch's item price,
+/// else the lowest active size price. An item with no active priced size is a
+/// catalogue fault, not a free sale.
+pub(crate) fn catalog_unit_price_loaded(
+    catalog: &crate::orders::catalog_view::Catalog,
+    m_item_id: Uuid,
+    size_label: Option<&str>,
+) -> Result<(String, serde_json::Value, i32, bool), AppError> {
+    let item = catalog.item(m_item_id);
+    let row = item
+        .and_then(|i| i.row.as_ref())
+        .ok_or_else(|| AppError::NotFound(format!("Menu item {} not found", m_item_id)))?;
+    let unit_price = item
+        .map(|i| madar_catalog::unit_price(&i.view, size_label))
+        .unwrap_or(Err(madar_catalog::PriceError::NoPricedSize))
+        .map_err(|_| AppError::BadRequest(format!("Menu item {} has no priced size", m_item_id)))?;
+    Ok((
+        row.name.clone(),
+        row.name_translations.clone(),
+        unit_price as i32,
+        row.branch_disabled,
+    ))
 }
 
 /// Ingredients a dine-in sale does not deduct: every ingredient whose category is
@@ -2145,9 +2135,19 @@ pub(crate) async fn create_order_inner(
     } else {
         None
     };
+    // Every item and add-on of the order in one batched load; each line is
+    // then priced and deducted from it (madar-catalog's rule).
+    let mut catalog = crate::orders::catalog_view::Catalog::new(Some(body.branch_id));
+    {
+        let (menu_ids, option_ids) = catalog_ids_of(&body.items);
+        catalog
+            .ensure_on(pool.get_ref(), &menu_ids, &option_ids)
+            .await?;
+    }
     for (line_index, item_input) in body.items.iter().enumerate() {
-        let mut resolved = resolve_order_line(
+        let mut resolved = resolve_order_line_in(
             pool.get_ref(),
+            &mut catalog,
             org_id,
             body.branch_id,
             order_time,

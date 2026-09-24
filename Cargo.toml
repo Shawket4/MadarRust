@@ -8,27 +8,30 @@ default-run = "madar-rust"
 # The shared permission library, from madar-shared (the POS core pins the same
 # tag). The registry is generated there, from authz/spec/capabilities.toml.
 # Bump the tag in both repos together; see madar-shared's README.
-madar-authz        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-authz        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # Money rules the till runs too (tax engine, refund split, staff pool/comp,
 # reward cover, POS-metrics average): one copy, in madar-shared, same tag.
-madar-money        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-money        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # Business-day rules the till runs too (week start, business date, YYMMDD,
 # day bounds with the DST-gap rule), same tag.
-madar-time         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-time         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # /sync/pull contract pieces the till runs too (type lists, ledger
 # classification, the R-checksum, kitchen UUIDv5 ids), same tag.
-madar-sync         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-sync         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # A till's drawer / Z report fold, the carryover picker and close
 # reconciliation the till runs too (the SQL here is pinned to them), same tag.
-madar-till         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-till         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # Inventory units and conversion (the till converts a waste with them), same tag.
-madar-units        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-units        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # The canonical phone, order-ref formats and the member card token the till
 # reads and writes too, same tag.
-madar-ids          = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-ids          = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # Dawam rules the staff app runs too (the geofence, the pay period, the
 # offline stamp's shape; the HMAC stays here), same tag.
-madar-dawam        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+madar-dawam        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
+# How a sale line is priced from the catalogue (size, swaps, add-ons, optional
+# fields): the rule this server defined and the till now runs too, same tag.
+madar-catalog      = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"

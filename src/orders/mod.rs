@@ -1,3 +1,4 @@
+pub mod catalog_view;
 pub mod component_resolve;
 pub mod cost_math;
 pub mod discount_authz;

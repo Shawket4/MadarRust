@@ -1393,10 +1393,11 @@ pub(crate) async fn group_usage(
     .bind(gid)
     .fetch_one(pool)
     .await?;
-    let swap_slug = crate::orders::component_resolve::swap_target(
+    let cat_id = cat_id.map(|c| c.to_string());
+    let swap_slug = madar_catalog::swap_target(
         legacy_type.as_deref(),
         Some(effect.as_str()),
-        cat_id,
+        cat_id.as_deref(),
         cat_slug.as_deref(),
     )
     .map(|t| t.slug);
