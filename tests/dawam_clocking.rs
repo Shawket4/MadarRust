@@ -2986,3 +2986,74 @@ async fn a_covered_shift_refuses_every_punch_for_its_owner(pool: PgPool) {
     let rec = json_of(resp).await;
     assert_eq!(rec["status"], "late", "{rec}");
 }
+
+/// B-CV-1: a colleague's cover OF my shift reaches my app, so it stops
+/// offering "Clock in" on the covered block (D1 refuses it anyway). The row
+/// is the coverer's, names me in `covered_employee_id`, carries its
+/// `cover_status` whatever it is, and never shows the coverer's location.
+#[sqlx::test]
+async fn my_attendance_includes_a_cover_of_my_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    // Amal's shift began an hour ago; Bassem covers it.
+    let shift_id = shift_around_now(&pool, &f, f.a, 60, 240).await;
+    let bassem = session(&pool, f.b).await;
+    let cover = json_of(call!(
+        app,
+        post,
+        "/staff/me/cover",
+        phone(&bassem),
+        with(
+            here(),
+            json!({ "employee_id": f.a, "work_shift_id": shift_id })
+        )
+    ))
+    .await;
+    let cover_id = cover["id"].clone();
+    let amal = session(&pool, f.a).await;
+    let day = local(&pool, Utc::now(), &f.tz).await.date();
+    for status in ["pending", "confirmed", "rejected"] {
+        sqlx::query("UPDATE attendance_records SET cover_status = $2 WHERE id = $1::uuid")
+            .bind(cover_id.as_str().unwrap())
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows = json_of(call!(
+            app,
+            get,
+            format!("/staff/me/attendance?from={day}&to={day}"),
+            phone(&amal)
+        ))
+        .await;
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == cover_id)
+            .unwrap_or_else(|| panic!("{status}: {rows}"));
+        assert_eq!(row["employee_id"], json!(f.b), "the coverer's row");
+        assert_eq!(row["covered_employee_id"], json!(f.a));
+        assert_eq!(row["cover_status"], status);
+        assert_eq!(row["work_shift_id"], json!(shift_id));
+        assert!(
+            row["check_in_latitude"].is_null() && row["check_in_longitude"].is_null(),
+            "never the coverer's location: {row}"
+        );
+    }
+    // The coverer still sees their own row, location and all.
+    let rows = json_of(call!(
+        app,
+        get,
+        format!("/staff/me/attendance?from={day}&to={day}"),
+        phone(&bassem)
+    ))
+    .await;
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == cover_id)
+        .unwrap();
+    assert!(row["check_in_latitude"].is_number(), "{row}");
+}

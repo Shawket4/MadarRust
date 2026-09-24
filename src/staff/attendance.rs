@@ -2441,9 +2441,15 @@ pub async fn my_attendance(
 ) -> Result<HttpResponse, AppError> {
     validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
 
-    let rows = sqlx::query_as::<_, AttendanceRecord>(&format!(
+    // My own days, and a colleague's cover OF my shift (B-CV-1): the app
+    // must know the block is covered (D1 refuses my punch on it), so it
+    // stops offering "Clock in". The row stays the coverer's
+    // (`employee_id`), with `covered_employee_id` = me and its
+    // `cover_status`; their location is never shown to me.
+    let mut rows = sqlx::query_as::<_, AttendanceRecord>(&format!(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
-          WHERE a.employee_id = $1 AND a.business_date BETWEEN $2 AND $3 \
+          WHERE (a.employee_id = $1 OR a.covered_employee_id = $1) \
+            AND a.business_date BETWEEN $2 AND $3 \
           ORDER BY a.business_date DESC, a.check_in_at DESC NULLS LAST"
     ))
     .bind(me.employee_id)
@@ -2451,6 +2457,12 @@ pub async fn my_attendance(
     .bind(query.to)
     .fetch_all(pool.get_ref())
     .await?;
+    for r in rows.iter_mut().filter(|r| r.employee_id != me.employee_id) {
+        r.check_in_latitude = None;
+        r.check_in_longitude = None;
+        r.check_out_latitude = None;
+        r.check_out_longitude = None;
+    }
     Ok(HttpResponse::Ok().json(rows))
 }
 
