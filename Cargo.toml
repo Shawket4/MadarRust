@@ -27,8 +27,8 @@ madar-units        = { git = "https://github.com/Shawket4/madar-shared", tag = "
 # reads and writes too, same tag.
 madar-ids          = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
 # Dawam rules the staff app runs too (the geofence, the pay period, the
-# offline stamp's shape; the HMAC stays here), same tag.
-madar-dawam        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }
+# offline stamp's shape and its OpenAPI schema; the HMAC stays here), same tag.
+madar-dawam        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0", features = ["utoipa"] }
 # How a sale line is priced from the catalogue (size, swaps, add-ons, optional
 # fields): the rule this server defined and the till now runs too, same tag.
 madar-catalog      = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.3.0" }

@@ -24,9 +24,7 @@
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::jwt::JwtSecret;
@@ -40,24 +38,10 @@ use madar_dawam::stamp::ANCHOR_VERSION;
 
 type HmacSha256 = Hmac<Sha256>;
 
-#[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
-pub struct OfflineStamp {
-    /// The last server time the phone saw. Only a guide: a valid `anchor`
-    /// replaces it, and without one the punch is marked unverified.
-    pub server_time: DateTime<Utc>,
-    /// Time-since-boot elapsed from `server_time` to the event, in ms.
-    pub elapsed_ms: i64,
-    /// The phone restarted after `server_time`, so `elapsed_ms` means nothing.
-    #[serde(default)]
-    pub rebooted: bool,
-    /// The GPS fix's own satellite time, when the platform gives one (Android's
-    /// GNSS provider; iOS gives none).
-    #[serde(default)]
-    pub gps_time: Option<DateTime<Utc>>,
-    /// The `X-Dawam-Time` value of the last response the phone saw (signed).
-    #[serde(default)]
-    pub anchor: Option<String>,
-}
+/// The offline stamp, as the staff app sends it: madar-shared's type (the
+/// phone's core builds the same one), with its OpenAPI schema from the crate's
+/// `utoipa` feature.
+pub use madar_dawam::stamp::OfflineStamp;
 
 /// GPS and the rebuilt clock may disagree by this much before it is doubted.
 const GPS_TOLERANCE_MIN: i64 = 5;
@@ -169,32 +153,15 @@ mod tests {
         JwtSecret("unit".into())
     }
 
-    /// madar-shared's stamps (what the staff app sends) decode as this
-    /// server's `OfflineStamp`, field for field with the shared type, and the
-    /// shared anchor shapes read as this server reads them.
+    /// madar-shared's stamps (what the staff app sends) decode as the
+    /// offline stamp this server reads, and the shared anchor shapes read as
+    /// this server reads them.
     #[test]
     fn the_shared_stamps_and_anchors_read_as_here() {
         let v: serde_json::Value = serde_json::from_str(madar_dawam::vectors::DAWAM).unwrap();
         for s in v["stamps"].as_array().unwrap() {
-            let ours: OfflineStamp = serde_json::from_value(s.clone()).unwrap();
-            let shared: madar_dawam::stamp::OfflineStamp =
-                serde_json::from_value(s.clone()).unwrap();
-            assert_eq!(
-                (
-                    ours.server_time,
-                    ours.elapsed_ms,
-                    ours.rebooted,
-                    ours.gps_time,
-                    ours.anchor
-                ),
-                (
-                    shared.server_time,
-                    shared.elapsed_ms,
-                    shared.rebooted,
-                    shared.gps_time,
-                    shared.anchor
-                ),
-            );
+            let stamp: OfflineStamp = serde_json::from_value(s.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&stamp).unwrap()["elapsed_ms"], s["elapsed_ms"]);
         }
         // A well-formed anchor that is not ours still dates nothing.
         for a in v["anchors"].as_array().unwrap() {

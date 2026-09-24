@@ -78446,6 +78446,7 @@
       },
       "OfflineStamp": {
         "type": "object",
+        "description": "What a punch or ping recorded offline carries, so the server can date it\nwithout trusting the phone's wall clock.",
         "required": [
           "server_time",
           "elapsed_ms"
