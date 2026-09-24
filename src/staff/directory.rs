@@ -242,14 +242,25 @@ pub struct PutEmployeeRequest {
     pub emergency_contact_phone: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
-    /// `m` · `f`; omitted keeps what is there.
-    #[serde(default)]
-    pub gender: Option<String>,
-    /// `cash` · `bank` · `wallet`; omitted keeps what is there.
+    /// `m` · `f`; `null` or empty = not set; omitted keeps what is there.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(nullable, value_type = Option<String>)]
+    pub gender: Option<Option<String>>,
+    /// `cash` · `bank` · `wallet`; omitted keeps what is there. Cash clears
+    /// the account.
     #[serde(default)]
     pub pay_method: Option<String>,
-    #[serde(default)]
-    pub pay_account: Option<String>,
+    /// The IBAN or wallet number; `null` or empty clears it; omitted keeps
+    /// it. Always cleared when the method is (or stays) `cash`.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(nullable, value_type = Option<String>)]
+    pub pay_account: Option<Option<String>>,
     /// Paid through Dawam. Like the salary, ignored unless the caller has
     /// `hr.payroll.edit` for every branch.
     #[serde(default)]
@@ -1032,9 +1043,13 @@ pub async fn put_employee(
             emergency_contact_name  = $16,
             emergency_contact_phone = $17,
             notes                   = $18,
-            gender                  = COALESCE($19, gender),
+            -- Sent (even null) replaces; omitted keeps (E2E B-SETUP-2).
+            gender                  = CASE WHEN $23 THEN $19 ELSE gender END,
             pay_method              = COALESCE($20, pay_method),
-            pay_account             = COALESCE($21, pay_account),
+            -- A cash payee has no account: a stale IBAN or wallet would
+            -- feed the bank and wallet lists (PAY-7, PAY-8).
+            pay_account             = CASE WHEN COALESCE($20, pay_method) = 'cash' THEN NULL
+                                           WHEN $24 THEN $21 ELSE pay_account END,
             on_payroll              = COALESCE($22, on_payroll),
             updated_at              = now()
         WHERE id = $1 AND org_id = $2
@@ -1058,10 +1073,12 @@ pub async fn put_employee(
     .bind(blank_to_none(body.emergency_contact_name.clone()))
     .bind(blank_to_none(body.emergency_contact_phone.clone()))
     .bind(blank_to_none(body.notes.clone()))
-    .bind(blank_to_none(body.gender.clone()))
+    .bind(blank_to_none(body.gender.clone().flatten()))
     .bind(blank_to_none(body.pay_method.clone()))
-    .bind(blank_to_none(body.pay_account.clone()))
+    .bind(blank_to_none(body.pay_account.clone().flatten()))
     .bind(on_payroll)
+    .bind(body.gender.is_some())
+    .bind(body.pay_account.is_some())
     .execute(&mut *tx)
     .await?;
     if let Some(wanted) = &body.branch_ids {

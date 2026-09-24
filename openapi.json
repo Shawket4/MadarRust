@@ -85362,7 +85362,7 @@
               "string",
               "null"
             ],
-            "description": "`m` · `f`; omitted keeps what is there."
+            "description": "`m` · `f`; `null` or empty = not set; omitted keeps what is there."
           },
           "hire_date": {
             "type": [
@@ -85406,14 +85406,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "The IBAN or wallet number; `null` or empty clears it; omitted keeps\nit. Always cleared when the method is (or stays) `cash`."
           },
           "pay_method": {
             "type": [
               "string",
               "null"
             ],
-            "description": "`cash` · `bank` · `wallet`; omitted keeps what is there."
+            "description": "`cash` · `bank` · `wallet`; omitted keeps what is there. Cash clears\nthe account."
           },
           "phone": {
             "type": [

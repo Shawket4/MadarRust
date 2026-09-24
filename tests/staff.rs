@@ -2592,3 +2592,66 @@ async fn settings_refuse_impossible_rates_and_caps(pool: PgPool) {
     );
     assert_eq!(resp.status(), 200);
 }
+
+/// E2E B-SETUP-2 (D-046, D-047, PAY-7): switching an employee to cash drops
+/// the old bank account or wallet, `pay_account: null` clears it, and
+/// `gender: null` is "Not set". An omitted field still keeps what is there.
+#[sqlx::test]
+async fn cash_clears_the_pay_account_and_gender_can_be_unset(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "UTC").await;
+    let admin = token_for(f.admin, f.org, UserRole::OrgAdmin);
+    let uri = format!("/staff/employees/{}", f.employee);
+    let iban = "EG380019000500000000263180002";
+    macro_rules! put {
+        ($body:expr) => {{
+            let resp = auth_send!(app, put, uri, admin, $body);
+            assert_eq!(resp.status(), 200, "{}", $body);
+        }};
+    }
+    let facts = || {
+        let pool = pool.clone();
+        let id = f.employee;
+        async move {
+            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                "SELECT pay_method, pay_account, gender FROM employees WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    put!(json!({ "pay_method": "bank", "pay_account": iban, "gender": "m" }));
+    assert_eq!(
+        facts().await,
+        ("bank".into(), Some(iban.into()), Some("m".into()))
+    );
+    // Omitted: kept.
+    put!(json!({ "job_title": "Barista" }));
+    assert_eq!(
+        facts().await,
+        ("bank".into(), Some(iban.into()), Some("m".into()))
+    );
+    // Cash, as the dashboard sends it.
+    put!(json!({ "pay_method": "cash", "pay_account": null }));
+    assert_eq!(facts().await.1, None, "cash drops the account");
+    // Cash with the account omitted, or even sent: still none.
+    put!(json!({ "pay_method": "wallet", "pay_account": "01012345678" }));
+    put!(json!({ "pay_method": "cash" }));
+    assert_eq!(facts().await.1, None);
+    put!(json!({ "pay_method": "cash", "pay_account": "stale" }));
+    assert_eq!(facts().await.1, None);
+    // An explicit null or empty account clears it on bank too.
+    put!(json!({ "pay_method": "bank", "pay_account": iban }));
+    put!(json!({ "pay_account": "" }));
+    assert_eq!(facts().await.1, None);
+    // Gender "Not set".
+    put!(json!({ "gender": null }));
+    assert_eq!(facts().await.2, None, "gender can be unset");
+    put!(json!({ "gender": "f" }));
+    put!(json!({ "notes": "x" }));
+    assert_eq!(facts().await.2, Some("f".into()), "omitted keeps it");
+    put!(json!({ "gender": "" }));
+    assert_eq!(facts().await.2, None);
+}
