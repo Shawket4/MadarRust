@@ -36,6 +36,11 @@ pub struct HolidayView {
     pub name_ar: String,
     /// null = not decided yet: a normal day unless set up (RU-10).
     pub decision: Option<String>,
+    /// Who decided it and when (AT-10); null while undecided.
+    #[sqlx(default)]
+    pub decided_by: Option<Uuid>,
+    #[sqlx(default)]
+    pub decided_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 // ── The calendar ────────────────────────────────────────────────────────────
@@ -152,7 +157,7 @@ pub async fn holidays_in(
     to: NaiveDate,
 ) -> Result<Vec<HolidayView>, AppError> {
     let stored: Vec<HolidayView> = sqlx::query_as(
-        "SELECT on_date, name_en, name_ar, decision FROM staff_holidays \
+        "SELECT on_date, name_en, name_ar, decision, decided_by, decided_at FROM staff_holidays \
           WHERE org_id = $1 AND on_date BETWEEN $2 AND $3 ORDER BY on_date",
     )
     .bind(org_id)
@@ -174,6 +179,8 @@ fn merge(
             name_en: en.into(),
             name_ar: ar.into(),
             decision: None,
+            decided_by: None,
+            decided_at: None,
         })
         .collect();
     // A decision is the DAY's (one row per date): it covers every holiday
@@ -182,6 +189,8 @@ fn merge(
         let mut found = false;
         for h in out.iter_mut().filter(|h| h.on_date == row.on_date) {
             h.decision = row.decision.clone();
+            h.decided_by = row.decided_by;
+            h.decided_at = row.decided_at;
             found = true;
         }
         if !found {
@@ -221,8 +230,10 @@ pub async fn decide_holiday(
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
     let date = *date;
-    // A public holiday is the business's, every branch at once (audit B-3).
-    access::require_everywhere(pool, &claims, org_id, Cap::HrSchedulePublish).await?;
+    // A public holiday is national and the business's, every branch at once;
+    // RU-10 gives its one-tap setup to the MANAGER, so publishing a roster at
+    // ANY branch is enough to decide it (Mac E2E R-B3, orchestrator decision).
+    access::gate(pool, &claims, org_id, Cap::HrSchedulePublish).await?;
     if body.decision != "holiday" && body.decision != "dismissed" {
         return Err(AppError::BadRequest(
             "decision is holiday or dismissed".into(),
@@ -237,11 +248,13 @@ pub async fn decide_holiday(
     crate::staff::period_lock::assert_open(pool, org_id, date, "a public holiday").await?;
 
     let row: HolidayView = sqlx::query_as(
-        "INSERT INTO staff_holidays (org_id, on_date, name_en, name_ar, decision, decided_by) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
+        "INSERT INTO staff_holidays (org_id, on_date, name_en, name_ar, decision, decided_by, \
+             decided_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, now()) \
          ON CONFLICT (org_id, on_date) DO UPDATE \
-            SET decision = EXCLUDED.decision, decided_by = EXCLUDED.decided_by \
-         RETURNING on_date, name_en, name_ar, decision",
+            SET decision = EXCLUDED.decision, decided_by = EXCLUDED.decided_by, \
+                decided_at = now() \
+         RETURNING on_date, name_en, name_ar, decision, decided_by, decided_at",
     )
     .bind(org_id)
     .bind(date)
@@ -425,12 +438,16 @@ mod tests {
                     name_en: "Labour Day".into(),
                     name_ar: "عيد العمال".into(),
                     decision: Some("holiday".into()),
+                    decided_by: None,
+                    decided_at: None,
                 },
                 HolidayView {
                     on_date: d(2026, 5, 2),
                     name_en: "Old".into(),
                     name_ar: "قديم".into(),
                     decision: Some("dismissed".into()),
+                    decided_by: None,
+                    decided_at: None,
                 },
             ],
         );

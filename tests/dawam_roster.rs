@@ -3413,3 +3413,51 @@ async fn patch_without_branch_keeps_the_branch(pool: PgPool) {
     assert_eq!(s, 200, "{body}");
     assert_eq!(branch_of().await, None, "null: the whole business");
 }
+
+/// Mac E2E R-B3 (RU-10: "a one-tap setup for the MANAGER"): a public holiday
+/// is national and the business's, so anyone who may publish a roster at
+/// ANY branch decides it; who and when are recorded. Someone with no roster
+/// right at any branch is refused.
+#[sqlx::test]
+async fn a_branch_manager_sets_up_a_holiday(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let d = chrono::NaiveDate::from_ymd_opt(2026, 10, 6).unwrap(); // Armed Forces Day
+    refused_status(
+        call!(
+            app,
+            "PUT",
+            format!("/staff/holidays/{d}"),
+            f.teller(),
+            json!({ "decision": "holiday" })
+        ),
+        403,
+    )
+    .await;
+    let (s, body) = done(call!(
+        app,
+        "PUT",
+        format!("/staff/holidays/{d}"),
+        f.manager(),
+        json!({ "decision": "holiday" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["decision"], "holiday");
+    let (by, at): (Option<Uuid>, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
+        "SELECT decided_by, decided_at FROM staff_holidays WHERE org_id = $1 AND on_date = $2",
+    )
+    .bind(f.org)
+    .bind(d)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(by, Some(f.manager), "decided by the manager");
+    assert!(at.is_some(), "and when");
+    assert_eq!(body["decided_by"], json!(f.manager), "{body}");
+}
+
+async fn refused_status(resp: actix_web::dev::ServiceResponse, status: u16) {
+    let (s, body) = done(resp).await;
+    assert_eq!(s, status, "{body}");
+}

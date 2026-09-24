@@ -74975,6 +74975,21 @@
           "name_ar"
         ],
         "properties": {
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "decided_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who decided it and when (AT-10); null while undecided."
+          },
           "decision": {
             "type": [
               "string",
