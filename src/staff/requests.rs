@@ -1317,18 +1317,24 @@ const EXISTING_COLS: &str = "employee_id, kind, on_date, end_date, status, from_
      attendance_record_id, work_shift_id";
 
 fn check_transition(existing: &str, decision: &str) -> Result<(), AppError> {
+    // 409 REQUEST_ALREADY_DECIDED with {status} (the request's own), for the
+    // client's wording (AT-13, Mac E2E S-235).
+    let decided = |reason: String| AppError::CodedVars {
+        status: 409,
+        code: "REQUEST_ALREADY_DECIDED",
+        reason,
+        vars: serde_json::json!({ "status": existing }),
+    };
     if existing == decision {
-        return Err(AppError::Conflict(format!(
-            "This request is already {decision}"
-        )));
+        return Err(decided(format!("This request is already {decision}")));
     }
     if existing == "rejected" || existing == "cancelled" {
-        return Err(AppError::Conflict(format!(
+        return Err(decided(format!(
             "This request was already {existing} and cannot be changed"
         )));
     }
     if existing == "approved" && decision == "rejected" {
-        return Err(AppError::Conflict(
+        return Err(decided(
             "An approved request cannot be rejected — cancel it instead".into(),
         ));
     }

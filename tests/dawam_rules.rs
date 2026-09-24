@@ -2640,3 +2640,89 @@ async fn an_approved_late_arrival_is_not_owed_time(pool: PgPool) {
     assert_eq!(b["status"], "present", "{b}");
     assert_eq!(b["late_minutes"], 0, "{b}");
 }
+
+/// Mac E2E S-235 / RQ-11 (AT-13): deciding a request that is already decided
+/// is 409 REQUEST_ALREADY_DECIDED with {status}; filing an overlapping one
+/// (for yourself or for someone) is 409 OVERLAPPING_REQUEST. English stays
+/// in `error`, without a prefix.
+#[sqlx::test]
+async fn already_decided_and_overlap_refusals_are_coded(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let row = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "late_arrival", "on_date": "2026-09-10", "to_time": "10:00:00" }),
+    )
+    .await;
+    let (st, _) = decide(
+        &app,
+        &f.owner_token(),
+        &row["id"],
+        json!({ "status": "approved" }),
+    )
+    .await;
+    assert_eq!(st, 200);
+    for (again, status) in [
+        (json!({ "status": "approved" }), "approved"),
+        (json!({ "status": "rejected" }), "approved"),
+    ] {
+        let (st, b) = decide(&app, &f.owner_token(), &row["id"], again).await;
+        assert_eq!(
+            (st, b["code"].clone()),
+            (409, json!("REQUEST_ALREADY_DECIDED")),
+            "{b}"
+        );
+        assert_eq!(b["vars"]["status"], status, "{b}");
+        assert!(
+            !b["error"].as_str().unwrap().starts_with("Conflict:"),
+            "{b}"
+        );
+    }
+    let (st, _) = decide(
+        &app,
+        &f.owner_token(),
+        &row["id"],
+        json!({ "status": "cancelled", "note": "x" }),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (st, b) = decide(
+        &app,
+        &f.owner_token(),
+        &row["id"],
+        json!({ "status": "approved" }),
+    )
+    .await;
+    assert_eq!(
+        (st, b["code"].clone()),
+        (409, json!("REQUEST_ALREADY_DECIDED")),
+        "{b}"
+    );
+    assert_eq!(b["vars"]["status"], "cancelled", "{b}");
+
+    // The phone's own filing of an overlapping request.
+    let s = session(&pool, f.e).await;
+    let phone = format!("{}|{}", s.token, s.device);
+    let excuse = json!({ "kind": "excuse", "on_date": "2026-09-12",
+                         "from_time": "12:00:00", "to_time": "13:00:00" });
+    let (st, b) = send!(
+        app,
+        "POST",
+        "/staff/me/requests".to_string(),
+        phone.clone(),
+        excuse.clone()
+    );
+    assert_eq!(st, 201, "{b}");
+    let (st, b) = send!(app, "POST", "/staff/me/requests".to_string(), phone, excuse);
+    assert_eq!(
+        (st, b["code"].clone()),
+        (409, json!("OVERLAPPING_REQUEST")),
+        "{b}"
+    );
+    assert!(
+        !b["error"].as_str().unwrap().starts_with("Conflict:"),
+        "{b}"
+    );
+}
