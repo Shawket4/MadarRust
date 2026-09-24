@@ -170,13 +170,18 @@ fn price_bill_under(
     // rounds put on. It cannot be booked, and `clamp(0, subtotal)` below would
     // PANIC on it (`min > max`) rather than say so — floor it, and the settle's
     // own guard refuses the sale with a message the cashier can act on.
-    let subtotal = subtotal.max(0);
-    let discount_amount =
-        crate::discounts::handlers::calc_discount(dtype, dvalue, subtotal).clamp(0, subtotal);
-    let b = crate::tax::compute(subtotal as i64, discount_amount as i64, policy);
+    //
+    // The preview is madar-shared's `bill::price_open_bill` (the till re-runs
+    // it after a void or a discount): floor, discount rule, then the engine.
+    let discount = match dtype {
+        Some("percentage") => crate::tax::Discount::Percentage(dvalue),
+        Some("fixed") => crate::tax::Discount::Fixed(dvalue),
+        _ => crate::tax::Discount::None,
+    };
+    let b = madar_money::bill::price_open_bill(i64::from(subtotal), discount, policy);
     TicketBill {
-        subtotal,
-        discount_amount,
+        subtotal: b.subtotal as i32,
+        discount_amount: b.discount as i32,
         service_charge_amount: b.service_charge as i32,
         tax_amount: b.tax as i32,
         tax_inclusive: policy.tax_inclusive,

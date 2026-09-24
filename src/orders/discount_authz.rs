@@ -12,76 +12,22 @@
 //! approval covers it.
 
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use uuid::Uuid;
 
-use crate::authz::{Cap, Decision, EffectiveSet, Request, decide};
 use crate::errors::AppError;
 use crate::orders::handlers::CreateOrderRequest;
 
-pub const KIND_PRESET: &str = "preset";
-pub const KIND_MANUAL_AMOUNT: &str = "manual_amount";
-pub const KIND_MANUAL_PERCENT: &str = "manual_percent";
-
-/// The discount act a sale asks for: which capability, and its figures.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscountAsk {
-    pub cap: Cap,
-    pub kind: &'static str,
-    /// Minor units taken off, when known.
-    pub amount_minor: Option<i64>,
-    /// Basis points, when the discount is a percentage.
-    pub percent_bps: Option<i64>,
-}
-
-impl DiscountAsk {
-    pub fn request(&self) -> Request {
-        let mut r = Request::of(self.cap);
-        r.amount = self.amount_minor;
-        r.percent = self.percent_bps;
-        r
-    }
-
-    pub fn decide(&self, eff: &EffectiveSet) -> Decision {
-        decide(eff, &self.request())
-    }
-}
-
-/// A stored or sent percentage → basis points. Accepts both spellings: a
-/// fraction (`0.125`) and the legacy 0-100 integer (`12`).
-pub fn percent_bps_of(value: Decimal) -> i64 {
-    let frac = if value > Decimal::ONE {
-        value / Decimal::ONE_HUNDRED
-    } else {
-        value
-    };
-    (frac * Decimal::from(10_000))
-        .round()
-        .to_i64()
-        .unwrap_or(0)
-        .clamp(0, 10_000)
-}
-
-/// The discount figures of ANY sale-shaped request: a counter sale
-/// (`CreateOrderRequest`) or a table bill's settle (`SettleOpenTicketRequest`).
-///
-/// A bill is a sale. Once the discount act is expressed in one vocabulary, the
-/// counter gate and the floor gate are literally the same code, and they cannot
-/// drift into two different answers for the same discount.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DiscountFields<'a> {
-    pub discount_id: Option<Uuid>,
-    pub discount_type: Option<&'a str>,
-    pub discount_value: Option<Decimal>,
-    pub discount_amount: Option<i32>,
-    pub discount_kind: Option<&'a str>,
-    pub discount_percent_bps: Option<i32>,
-}
+// The rule is madar-shared's (`madar_money::discount`), the one copy the till
+// asks the same question with. Pinned by its `discount_vectors.json`.
+pub use madar_money::discount::{
+    DiscountAsk, DiscountFields, KIND_MANUAL_AMOUNT, KIND_MANUAL_PERCENT, KIND_PRESET, ask_from,
+    percent_bps_of,
+};
 
 impl CreateOrderRequest {
     pub fn discount_fields(&self) -> DiscountFields<'_> {
         DiscountFields {
-            discount_id: self.discount_id,
+            has_preset: self.discount_id.is_some(),
             discount_type: self.discount_type.as_deref(),
             discount_value: self.discount_value,
             discount_amount: self.discount_amount,
@@ -101,9 +47,10 @@ impl CreateOrderRequest {
 pub async fn discount_ask(
     pool: &sqlx::PgPool,
     org_id: Uuid,
+    discount_id: Option<Uuid>,
     fields: &DiscountFields<'_>,
 ) -> Result<Option<DiscountAsk>, AppError> {
-    let preset: Option<(String, Decimal)> = match fields.discount_id {
+    let preset: Option<(String, Decimal)> = match discount_id {
         Some(id) => {
             sqlx::query_as("SELECT type::text, value FROM discounts WHERE id = $1 AND org_id = $2")
                 .bind(id)
@@ -113,134 +60,8 @@ pub async fn discount_ask(
         }
         None => None,
     };
-    Ok(ask_from(fields, preset))
-}
-
-/// The pure half of [`discount_ask`].
-pub fn ask_from(
-    body: &DiscountFields<'_>,
-    preset: Option<(String, Decimal)>,
-) -> Option<DiscountAsk> {
-    let (dtype, value) = match &preset {
-        Some((t, v)) => (Some(t.as_str()), *v),
-        None => (
-            body.discount_type,
-            body.discount_value.unwrap_or(Decimal::ZERO),
-        ),
-    };
-    let amount = body.discount_amount.filter(|a| *a > 0).map(i64::from);
-    let is_percent = dtype == Some("percentage");
-    let is_fixed = dtype == Some("fixed");
-    let has_discount = body.discount_id.is_some()
-        || amount.is_some()
-        || ((is_percent || is_fixed) && value > Decimal::ZERO);
-    if !has_discount {
-        return None;
-    }
-    let percent_bps = body
-        .discount_percent_bps
-        .map(i64::from)
-        .or_else(|| is_percent.then(|| percent_bps_of(value)));
-    let fixed_amount = || {
-        amount.or_else(|| {
-            is_fixed
-                .then(|| value.round().to_i64())
-                .flatten()
-                .filter(|v| *v > 0)
-        })
-    };
-    // An explicit kind wins; otherwise a preset id says preset, and an ad-hoc
-    // discount is manual of its type (what an older client's ad-hoc one was).
-    let kind = match body.discount_kind {
-        Some(KIND_PRESET) => KIND_PRESET,
-        Some(KIND_MANUAL_AMOUNT) => KIND_MANUAL_AMOUNT,
-        Some(KIND_MANUAL_PERCENT) => KIND_MANUAL_PERCENT,
-        _ if body.discount_id.is_some() => KIND_PRESET,
-        _ if is_percent => KIND_MANUAL_PERCENT,
-        _ => KIND_MANUAL_AMOUNT,
-    };
-    Some(match kind {
-        KIND_PRESET => DiscountAsk {
-            cap: Cap::OrdersDiscountPreset,
-            kind,
-            amount_minor: if is_percent { amount } else { fixed_amount() },
-            percent_bps: if is_percent { percent_bps } else { None },
-        },
-        KIND_MANUAL_PERCENT => DiscountAsk {
-            cap: Cap::OrdersDiscountManualPercent,
-            kind,
-            amount_minor: None,
-            percent_bps: percent_bps.or(Some(0)),
-        },
-        _ => DiscountAsk {
-            cap: Cap::OrdersDiscountManualAmount,
-            kind,
-            amount_minor: fixed_amount().or(Some(0)),
-            percent_bps: None,
-        },
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::authz::{CapSet, Limits};
-    use rust_decimal_macros::dec;
-
-    fn body() -> DiscountFields<'static> {
-        DiscountFields::default()
-    }
-
-    #[test]
-    fn no_discount_is_no_ask() {
-        assert_eq!(ask_from(&body(), None), None);
-    }
-
-    #[test]
-    fn a_preset_percentage_asks_for_its_percent_and_amount() {
-        let mut b = body();
-        b.discount_id = Some(Uuid::nil());
-        b.discount_amount = Some(150);
-        let a = ask_from(&b, Some(("percentage".into(), dec!(0.15)))).unwrap();
-        assert_eq!(a.cap, Cap::OrdersDiscountPreset);
-        assert_eq!(a.percent_bps, Some(1500));
-        assert_eq!(a.amount_minor, Some(150));
-    }
-
-    #[test]
-    fn an_ad_hoc_discount_is_manual_of_its_type_in_either_spelling() {
-        let mut b = body();
-        b.discount_type = Some("percentage");
-        b.discount_value = Some(dec!(12));
-        let a = ask_from(&b, None).unwrap();
-        assert_eq!((a.cap, a.percent_bps), (Cap::OrdersDiscountManualPercent, Some(1200)));
-
-        let mut b = body();
-        b.discount_type = Some("fixed");
-        b.discount_value = Some(dec!(500));
-        let a = ask_from(&b, None).unwrap();
-        assert_eq!((a.cap, a.amount_minor), (Cap::OrdersDiscountManualAmount, Some(500)));
-    }
-
-    #[test]
-    fn over_the_cap_needs_a_manager() {
-        let mut eff = EffectiveSet {
-            caps: CapSet::from_keys(["orders.discount.manual_amount"]),
-            ..Default::default()
-        };
-        eff.limits.insert(
-            Cap::OrdersDiscountManualAmount.id(),
-            Limits { max_amount: Some(1000), ..Default::default() },
-        );
-        let mut b = body();
-        b.discount_kind = Some("manual_amount");
-        b.discount_type = Some("fixed");
-        b.discount_amount = Some(1000);
-        assert_eq!(ask_from(&b, None).unwrap().decide(&eff), Decision::Allow);
-        b.discount_amount = Some(1001);
-        assert!(matches!(
-            ask_from(&b, None).unwrap().decide(&eff),
-            Decision::NeedsApproval(_)
-        ));
-    }
+    Ok(ask_from(
+        fields,
+        preset.as_ref().map(|(t, v)| (t.as_str(), *v)),
+    ))
 }
