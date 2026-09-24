@@ -1897,6 +1897,10 @@ pub async fn create_delivery_order(
         order.branch_id,
         BranchEvent::new(Topic::Delivery, "delivery.created", &order),
     );
+    // The same moment, for the tills NOT on the live stream: an FCM push to
+    // the POS devices that may accept it (spawned; never fails the order).
+    // Once per order: the idempotent replays above return before this.
+    crate::push::pos::new_online_order(pool.get_ref(), hub.get_ref(), &order);
     Ok(HttpResponse::Created().json(order))
 }
 

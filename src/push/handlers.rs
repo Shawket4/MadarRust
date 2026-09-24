@@ -63,6 +63,9 @@ pub async fn set_push_token(
         _ => "ar",
     };
     let platform = body.platform.as_deref().unwrap_or("");
+    // The install, when the app names one: the POS push fallback matches it
+    // to a live realtime stream (see `push::pos`).
+    let device_id = crate::devices::DeviceHeader::from_request_headers(&req);
     register(
         pool.get_ref(),
         org_id,
@@ -71,6 +74,7 @@ pub async fn set_push_token(
         token,
         locale,
         platform,
+        device_id,
     )
     .await?;
     Ok(HttpResponse::NoContent().finish())

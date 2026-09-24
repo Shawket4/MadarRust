@@ -131,7 +131,7 @@ pub async fn set_push_token(
     if token.is_empty() {
         crate::push::revoke_all(pool, who, PUSH_APP).await?;
     } else {
-        crate::push::register(pool, me.org_id, who, PUSH_APP, token, locale, "").await?;
+        crate::push::register(pool, me.org_id, who, PUSH_APP, token, locale, "", None).await?;
     }
     Ok(HttpResponse::NoContent().finish())
 }

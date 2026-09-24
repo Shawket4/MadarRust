@@ -8,7 +8,10 @@
 //! JSON; callers work without it (the inbox/notification row is still
 //! written, just nothing is pushed to a phone).
 
+#[doc(hidden)]
+pub mod fake;
 pub mod handlers;
+pub mod pos;
 pub mod routes;
 pub mod words;
 
@@ -41,6 +44,12 @@ impl Recipient {
 
 /// Register or rebind a device's push token (PUT /push/token and the Dawam
 /// alias PUT /staff/me/push-token both call this).
+///
+/// `device_id` is the install that sent it (`X-Madar-Device`), when the app
+/// sends one. One install holds one live token per app: registering a new
+/// token from the same install revokes the old one, so a refreshed FCM token
+/// never makes a till ring twice for one order.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn register(
     pool: &PgPool,
     org_id: Uuid,
@@ -49,15 +58,29 @@ pub(crate) async fn register(
     token: &str,
     locale: &str,
     platform: &str,
+    device_id: Option<Uuid>,
 ) -> Result<(), AppError> {
     let (user_id, employee_id) = who.cols();
+    let mut tx = pool.begin().await?;
+    if let Some(device) = device_id {
+        sqlx::query(
+            "UPDATE push_devices SET revoked_at = now() \
+              WHERE device_id = $1 AND app = $2 AND token <> $3 AND revoked_at IS NULL",
+        )
+        .bind(device)
+        .bind(app)
+        .bind(token)
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query(
-        "INSERT INTO push_devices (org_id, user_id, employee_id, app, token, locale, platform) \
-          VALUES ($1, $2, $3, $4, $5, $6, $7) \
+        "INSERT INTO push_devices (org_id, user_id, employee_id, app, token, locale, platform, device_id) \
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
           ON CONFLICT (token) WHERE revoked_at IS NULL DO UPDATE SET \
             org_id = EXCLUDED.org_id, user_id = EXCLUDED.user_id, \
             employee_id = EXCLUDED.employee_id, app = EXCLUDED.app, \
-            locale = EXCLUDED.locale, platform = EXCLUDED.platform, last_seen_at = now()",
+            locale = EXCLUDED.locale, platform = EXCLUDED.platform, \
+            device_id = EXCLUDED.device_id, last_seen_at = now()",
     )
     .bind(org_id)
     .bind(user_id)
@@ -66,8 +89,10 @@ pub(crate) async fn register(
     .bind(token)
     .bind(locale)
     .bind(platform)
-    .execute(pool)
+    .bind(device_id)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -111,9 +136,12 @@ pub(crate) async fn revoke_all(pool: &PgPool, who: Recipient, app: &str) -> Resu
     Ok(())
 }
 
+/// A word from the table the phones share (`words`, generated from the POS
+/// core's i18n) or the server's own POS push words (`pos::WORDS`).
 fn word(key: &str, ar: bool) -> Option<&'static str> {
     words::WORDS
         .iter()
+        .chain(pos::WORDS)
         .find(|(k, ..)| *k == key)
         .map(|(_, en, a)| if ar { *a } else { *en })
 }
@@ -232,13 +260,139 @@ fn fcm_send_url(project: &str) -> String {
     format!("https://fcm.googleapis.com/v1/projects/{project}/messages:send")
 }
 
+/// Where messages go: Google, or (debug builds, tests only) the in-memory
+/// [`fake`] sink.
+#[derive(Clone, Copy)]
+enum Transport {
+    Fcm(&'static Fcm),
+    #[cfg(debug_assertions)]
+    Fake,
+}
+
+fn transport() -> Option<Transport> {
+    #[cfg(debug_assertions)]
+    if fake::installed() {
+        return Some(Transport::Fake);
+    }
+    fcm().map(Transport::Fcm)
+}
+
+/// FCM's answer to one send: the HTTP status and the error body (`Null` on
+/// success or when the body is not JSON).
+type Reply = (u16, Value);
+
 /// One outbound send, split out so retry can call it more than once.
-async fn post_one(http: &reqwest::Client, url: &str, bearer: &str, msg: &Value) -> Option<u16> {
+async fn post_one(http: &reqwest::Client, url: &str, bearer: &str, msg: &Value) -> Option<Reply> {
     match http.post(url).bearer_auth(bearer).json(msg).send().await {
-        Ok(r) => Some(r.status().as_u16()),
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let body = if status >= 300 {
+                r.json().await.unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            Some((status, body))
+        }
         Err(e) => {
             tracing::warn!(error = %e, "push not sent");
             None
+        }
+    }
+}
+
+/// Does FCM's answer say the TOKEN is dead (so the registration is dropped)?
+///
+/// Only when FCM names the token: 404 / `UNREGISTERED` (the app was
+/// uninstalled or the token rotated), or a 400 `INVALID_ARGUMENT` whose field
+/// violation is `message.token`. Any other 400 is about the MESSAGE — a bad
+/// payload would otherwise unregister every device it was sent to.
+pub fn token_is_dead(status: u16, body: &Value) -> bool {
+    let details = body["error"]["details"].as_array();
+    let named = |pred: &dyn Fn(&Value) -> bool| details.is_some_and(|d| d.iter().any(pred));
+    if status == 404 || named(&|d| d["errorCode"] == "UNREGISTERED") {
+        return true;
+    }
+    status == 400
+        && named(&|d| {
+            d["fieldViolations"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|f| f["field"] == "message.token"))
+        })
+}
+
+/// An authenticated sender for one batch.
+enum Sender {
+    Fcm {
+        http: reqwest::Client,
+        url: String,
+        bearer: String,
+    },
+    #[cfg(debug_assertions)]
+    Fake,
+}
+
+impl Sender {
+    async fn open(t: Transport) -> Option<Sender> {
+        match t {
+            Transport::Fcm(f) => {
+                let http = reqwest::Client::new();
+                let Some(bearer) = access_token(f, &http).await else {
+                    tracing::warn!("FCM auth failed; push dropped");
+                    return None;
+                };
+                Some(Sender::Fcm {
+                    url: fcm_send_url(&f.project),
+                    http,
+                    bearer,
+                })
+            }
+            #[cfg(debug_assertions)]
+            Transport::Fake => Some(Sender::Fake),
+        }
+    }
+
+    async fn post(&self, msg: &Value) -> Option<Reply> {
+        match self {
+            Sender::Fcm { http, url, bearer } => post_one(http, url, bearer, msg).await,
+            #[cfg(debug_assertions)]
+            Sender::Fake => fake::post(msg),
+        }
+    }
+}
+
+/// Send each `(token, message)` once, retrying a transient failure (429/5xx)
+/// one time, and revoke a token FCM reports as dead ([`token_is_dead`]).
+/// Never fails: a push is best-effort, and every error is logged.
+async fn deliver(pool: &PgPool, t: Transport, batch: Vec<(String, Value)>) {
+    if batch.is_empty() {
+        return;
+    }
+    let Some(sender) = Sender::open(t).await else {
+        return;
+    };
+    for (token, msg) in batch {
+        let mut reply = sender.post(&msg).await;
+        if matches!(reply, Some((s, _)) if s == 429 || s >= 500) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            reply = sender.post(&msg).await;
+        }
+        match reply {
+            Some((s, body)) if token_is_dead(s, &body) => {
+                if let Err(e) = sqlx::query(
+                    "UPDATE push_devices SET revoked_at = now() \
+                      WHERE token = $1 AND revoked_at IS NULL",
+                )
+                .bind(&token)
+                .execute(pool)
+                .await
+                {
+                    tracing::warn!(error = %e, "could not drop an unregistered push token");
+                }
+            }
+            Some((s, body)) if s >= 300 => {
+                tracing::warn!(status = s, error = %body["error"]["status"], "push refused")
+            }
+            _ => {}
         }
     }
 }
@@ -256,7 +410,7 @@ pub fn send(
     key: &str,
     args: &Value,
 ) {
-    let Some(f) = fcm() else { return };
+    let Some(t) = transport() else { return };
     let (pool, title_key, key, args) = (
         pool.clone(),
         title_key.to_string(),
@@ -276,50 +430,65 @@ pub fn send(
         .fetch_all(&pool)
         .await
         .unwrap_or_default();
-        if rows.is_empty() {
-            return;
-        }
-        let http = reqwest::Client::new();
-        let Some(bearer) = access_token(f, &http).await else {
-            tracing::warn!("FCM auth failed; push dropped");
-            return;
-        };
-        let url = fcm_send_url(&f.project);
-        for (token, locale) in rows {
-            let ar = locale != "en";
-            let Some(body) = render(&key, &args, ar) else {
-                continue;
-            };
-            let msg = json!({ "message": {
-                "token": token,
-                "notification": { "title": word(&title_key, ar), "body": body },
-                "data": { "key": key, "args": args.to_string() },
-                "android": { "priority": "high" },
-            }});
-            // One retry on a transient failure (429/5xx); anything else is final.
-            let mut status = post_one(&http, &url, &bearer, &msg).await;
-            if matches!(status, Some(s) if s == 429 || s >= 500) {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                status = post_one(&http, &url, &bearer, &msg).await;
-            }
-            match status {
-                Some(400) | Some(404) => {
-                    let _ =
-                        sqlx::query("UPDATE push_devices SET revoked_at = now() WHERE token = $1")
-                            .bind(&token)
-                            .execute(&pool)
-                            .await;
-                }
-                Some(s) if s >= 300 => tracing::warn!(status = s, "push refused"),
-                _ => {}
-            }
-        }
+        let batch = rows
+            .into_iter()
+            .filter_map(|(token, locale)| {
+                let ar = locale != "en";
+                let body = render(&key, &args, ar)?;
+                let msg = json!({ "message": {
+                    "token": token,
+                    "notification": { "title": word(&title_key, ar), "body": body },
+                    "data": { "key": key, "args": args.to_string() },
+                    "android": { "priority": "high" },
+                }});
+                Some((token, msg))
+            })
+            .collect();
+        deliver(&pool, t, batch).await;
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_answer_about_the_token_drops_it() {
+        // 404 / UNREGISTERED: the app is gone.
+        let unregistered = json!({"error": {"code": 404, "status": "NOT_FOUND",
+            "details": [{"@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                         "errorCode": "UNREGISTERED"}]}});
+        assert!(token_is_dead(404, &unregistered));
+        assert!(
+            token_is_dead(404, &Value::Null),
+            "a bare 404 is still a dead token"
+        );
+        // A 400 naming the token.
+        let bad_token = json!({"error": {"code": 400, "status": "INVALID_ARGUMENT",
+            "details": [
+                {"@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                 "errorCode": "INVALID_ARGUMENT"},
+                {"@type": "type.googleapis.com/google.rpc.BadRequest",
+                 "fieldViolations": [{"field": "message.token",
+                                      "description": "Invalid registration token"}]}]}});
+        assert!(token_is_dead(400, &bad_token));
+        // A 400 about the MESSAGE must never unregister the device.
+        let bad_payload = json!({"error": {"code": 400, "status": "INVALID_ARGUMENT",
+            "details": [
+                {"@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError",
+                 "errorCode": "INVALID_ARGUMENT"},
+                {"@type": "type.googleapis.com/google.rpc.BadRequest",
+                 "fieldViolations": [{"field": "message.android.notification.channel_id"}]}]}});
+        assert!(!token_is_dead(400, &bad_payload));
+        assert!(
+            !token_is_dead(400, &Value::Null),
+            "an unexplained 400 keeps the token"
+        );
+        // Everything else keeps it too.
+        for s in [200, 401, 403, 429, 500, 503] {
+            assert!(!token_is_dead(s, &Value::Null), "{s}");
+        }
+    }
 
     #[test]
     fn a_push_reads_in_the_phones_language() {
