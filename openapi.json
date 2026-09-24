@@ -62692,6 +62692,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "pricing": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "How a sale line charges this option: madar-catalog's `OptionView`\n(branch-effective price, its group's effect and swap category, the\ningredient it replaces, its lines per size). The till prices lines with\nit exactly as the order path does. Additive; older tills ignore it."
+          },
           "primary_ingredient_id": {
             "type": [
               "string",
@@ -77595,6 +77602,13 @@
                 "items": {
                   "$ref": "#/components/schemas/OptionalField"
                 }
+              },
+              "pricing": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "How a sale line of this item is priced at the requested branch:\nmadar-catalog's `ItemView` (sizes with their branch prices, the\nbranch's item price, the recipe's swap bases and their candidates, the\noptional fields). The till prices with it exactly as the order path\ndoes. Present on `?full=true` lists; additive, older tills ignore it."
               },
               "recipe_steps": {
                 "type": "array",
