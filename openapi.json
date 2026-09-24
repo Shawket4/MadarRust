@@ -89745,7 +89745,8 @@
               "integer",
               "null"
             ],
-            "format": "int64"
+            "format": "int64",
+            "description": "My ceiling on an advance, as whole percent of the person's salary owed\nafter it (the grant stores basis points); null = none."
           },
           "branches": {
             "type": "array",
@@ -91218,7 +91219,7 @@
               "string",
               "null"
             ],
-            "description": "Why it stops (AD-9)."
+            "description": "Why it stops (AD-9). Required: blank or missing is a 400."
           }
         }
       },
