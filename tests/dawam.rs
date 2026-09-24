@@ -2022,3 +2022,70 @@ async fn an_owner_sees_a_branch_with_no_time_zone(pool: PgPool) {
         .clone();
     assert_eq!(branch["timezone"], "Africa/Cairo");
 }
+
+/// POS E2E B-POS-2: a till pay-out logged as an expense advance while Dawam
+/// is off is 403 MODULE_OFF, not a misleading "Employee not found"; with
+/// Dawam on, an inactive employee is 403 EMPLOYEE_INACTIVE and an unknown
+/// one still 404. Nothing is written.
+#[sqlx::test]
+async fn a_till_expense_advance_says_why_it_is_refused(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .configure(madar_rust::tills::routes::configure)
+            .configure(madar_rust::staff::routes::configure),
+    )
+    .await;
+    let f = seed(&pool).await;
+    let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/branches/{}/open", f.branch),
+        owner,
+        json!({ "id": Uuid::new_v4(), "opening_cash": 100000 })
+    );
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let till = json_of(resp).await["id"].as_str().unwrap().to_string();
+    let pay_out = |to: Uuid| {
+        json!({ "amount": -1000, "kind": "pay_out", "note": "Milk", "expense_advance_to": to })
+    };
+    // Dawam off.
+    sqlx::query("UPDATE organizations SET modules = '{pos}' WHERE id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = call!(app, post, format!("/tills/{till}/cash-movements"), owner, pay_out(f.a));
+    assert_eq!(resp.status(), 403);
+    assert_eq!(json_of(resp).await["code"], "MODULE_OFF");
+    // Dawam on: someone not active.
+    sqlx::query("UPDATE organizations SET modules = '{pos,dawam}' WHERE id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE employees SET employment_status = 'suspended' WHERE id = $1")
+        .bind(f.a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = call!(app, post, format!("/tills/{till}/cash-movements"), owner, pay_out(f.a));
+    assert_eq!(resp.status(), 403);
+    assert_eq!(json_of(resp).await["code"], "EMPLOYEE_INACTIVE");
+    // Someone unknown.
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/{till}/cash-movements"),
+        owner,
+        pay_out(Uuid::new_v4())
+    );
+    assert_eq!(resp.status(), 404);
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM expense_advances")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 0, "nothing written");
+}

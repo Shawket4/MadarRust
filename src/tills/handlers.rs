@@ -1454,18 +1454,40 @@ pub(crate) async fn add_cash_movement_inner(
             ));
         }
         // The till's pay-out names an active employee of this business, and
-        // only with Dawam on (audit B19).
-        let ok: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM employees e JOIN organizations o ON o.id = e.org_id \
-              WHERE e.id = $1 AND e.org_id = $2 AND e.employment_status = 'active' \
-                AND 'dawam' = ANY(o.modules))",
+        // only with Dawam on (audit B19). Each refusal says which (B-POS-2):
+        // Dawam off is MODULE_OFF, not a misleading "Employee not found".
+        let dawam_on: bool = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT 'dawam' = ANY(modules) FROM organizations WHERE id = $1), false)",
         )
-        .bind(to)
         .bind(actor.org_id)
         .fetch_one(pool)
         .await?;
-        if !ok {
-            return Err(AppError::NotFound("Employee not found".into()));
+        if !dawam_on {
+            return Err(AppError::CodedVars {
+                status: 403,
+                code: "MODULE_OFF",
+                reason: "Expense advances need Dawam switched on.".into(),
+                vars: serde_json::json!({ "module": "dawam" }),
+            });
+        }
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT employment_status FROM employees WHERE id = $1 AND org_id = $2",
+        )
+        .bind(to)
+        .bind(actor.org_id)
+        .fetch_optional(pool)
+        .await?;
+        match status.as_deref() {
+            None => return Err(AppError::NotFound("Employee not found".into())),
+            Some("active") => {}
+            Some(other) => {
+                return Err(AppError::CodedVars {
+                    status: 403,
+                    code: "EMPLOYEE_INACTIVE",
+                    reason: "That person isn't an active employee.".into(),
+                    vars: serde_json::json!({ "status": other }),
+                });
+            }
         }
     }
     if let Some(cref) = body.client_ref
