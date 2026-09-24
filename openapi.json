@@ -90322,6 +90322,27 @@
             "type": "boolean",
             "description": "The caller may approve or reject it now: it is pending, not their own,\nat one of their branches, and — a manager's request — they outrank\nthe requester (RQ-5). The same checks the decision makes."
           },
+          "cancel_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancelled_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "cancelled_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who cancelled it (the person themselves or a manager), when and why."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -90338,7 +90359,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Who approved or rejected it, when and why. A later cancellation keeps\nthese (the approval stays on record) and fills `cancelled_*`."
           },
           "decision_note": {
             "type": [

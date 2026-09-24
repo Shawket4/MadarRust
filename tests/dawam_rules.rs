@@ -2388,3 +2388,79 @@ async fn every_request_says_whether_the_caller_may_decide_it(pool: PgPool) {
         "{mine}"
     );
 }
+
+/// E2E B-TEAM-3 / RQ-F6 (AT-7, AT-10): cancelling an APPROVED request keeps
+/// who approved it and why, records who cancelled it and why beside that,
+/// and tells the person. Their own pending request cancelled by themselves
+/// needs no notice.
+#[sqlx::test]
+async fn cancelling_an_approved_request_keeps_the_approver_and_tells_the_person(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let row = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "late_arrival", "on_date": "2026-09-10", "to_time": "10:00:00" }),
+    )
+    .await;
+    let (st, b) = decide(
+        &app,
+        &f.owner_token(),
+        &row["id"],
+        json!({ "status": "approved", "note": "Doctor's note seen" }),
+    )
+    .await;
+    assert_eq!(st, 200, "{b}");
+    let (st, b) = decide(
+        &app,
+        &f.mgr_token(),
+        &row["id"],
+        json!({ "status": "cancelled", "note": "Shift was moved" }),
+    )
+    .await;
+    assert_eq!(st, 200, "{b}");
+    assert_eq!(b["status"], "cancelled");
+    assert_eq!(b["decided_by"], json!(f.owner), "the approver stays: {b}");
+    assert_eq!(b["decision_note"], "Doctor's note seen");
+    assert!(b["decided_at"].is_string());
+    assert_eq!(b["cancelled_by"], json!(f.mgr), "{b}");
+    assert_eq!(b["cancel_note"], "Shift was moved");
+    assert!(b["cancelled_at"].is_string());
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE employee_id = $1 AND key = 'staff.n_request_cancelled'",
+    )
+    .bind(f.e)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(told.len(), 1, "the person is told once");
+    assert_eq!(told[0]["note"], "Shift was moved", "{:?}", told[0]);
+
+    // Their own pending request, cancelled by themselves: no notice.
+    let mine = file(
+        &app,
+        &f,
+        f.e_mgr,
+        json!({ "kind": "late_arrival", "on_date": "2026-09-11", "to_time": "10:00:00" }),
+    )
+    .await;
+    let (st, b) = decide(
+        &app,
+        &f.mgr_token(),
+        &mine["id"],
+        json!({ "status": "cancelled" }),
+    )
+    .await;
+    assert_eq!(st, 200, "{b}");
+    assert!(b["decided_by"].is_null(), "nobody decided it: {b}");
+    assert_eq!(b["cancelled_by"], json!(f.mgr));
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 AND key = 'staff.n_request_cancelled'",
+    )
+    .bind(f.e_mgr)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 0);
+}

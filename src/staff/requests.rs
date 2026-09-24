@@ -107,9 +107,21 @@ pub struct StaffRequest {
     pub status: String,
     /// Whether the excused time is paid. `None` until decided.
     pub is_paid: Option<bool>,
+    /// Who approved or rejected it, when and why. A later cancellation keeps
+    /// these (the approval stays on record) and fills `cancelled_*`.
     pub decided_by: Option<Uuid>,
     pub decided_at: Option<DateTime<Utc>>,
     pub decision_note: Option<String>,
+    /// Who cancelled it (the person themselves or a manager), when and why.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub cancelled_by: Option<Uuid>,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub cancelled_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub cancel_note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// A manager's own request waiting for someone above them (RQ-5): the
@@ -153,7 +165,8 @@ const REQUEST_SELECT: &str = r#"
            t.name AS leave_type_name, r.is_half_day, r.leave_half, r.work_shift_id,
            r.title, r.location,
            r.attendance_record_id, r.reason, r.status, r.is_paid, r.decided_by, r.decided_at,
-           r.decision_note, r.created_at, r.updated_at,
+           r.decision_note, r.cancelled_by, r.cancelled_at, r.cancel_note,
+           r.created_at, r.updated_at,
            ar.check_in_at AS record_check_in_at, ar.check_out_at AS record_check_out_at
       FROM staff_requests r
       JOIN employees e ON e.id = r.employee_id
@@ -1425,21 +1438,28 @@ pub async fn decide_request(
     }
     check_transition(&existing.status, decision)?;
 
+    let note_for_notice = note.clone().unwrap_or_default();
     apply_decision(pool, org_id, *id, decision, actor, note, body.is_paid).await?;
 
-    if !is_own && decision != "cancelled" {
-        crate::staff::dawam::notify(
-            pool,
-            org_id,
-            existing.employee_id,
-            if decision == "approved" {
-                "staff.n_request_approved"
-            } else {
-                "staff.n_request_rejected"
-            },
-            serde_json::json!({ "kind": existing.kind, "date": existing.on_date }),
-        )
-        .await;
+    if !is_own {
+        // Someone else decided it — or cancelled it, approved or not: the
+        // person hears either way, with the reason a cancel always carries.
+        let (key, args) = match decision {
+            "approved" => (
+                "staff.n_request_approved",
+                serde_json::json!({ "kind": existing.kind, "date": existing.on_date }),
+            ),
+            "cancelled" => (
+                "staff.n_request_cancelled",
+                serde_json::json!({ "kind": existing.kind, "date": existing.on_date,
+                                    "note": note_for_notice }),
+            ),
+            _ => (
+                "staff.n_request_rejected",
+                serde_json::json!({ "kind": existing.kind, "date": existing.on_date }),
+            ),
+        };
+        crate::staff::dawam::notify(pool, org_id, existing.employee_id, key, args).await;
     }
     let mut rows = [load_request(pool, *id).await?];
     let my_employee = me.as_ref().map(|m| m.employee_id);
@@ -1500,10 +1520,17 @@ async fn apply_decision(
     check_transition(&locked.status, decision)?;
     let before = locked.status.clone();
 
+    // A cancellation has its own who / when / why: the decision's columns
+    // keep the approval it undoes (AT-10, E2E B-TEAM-3).
     sqlx::query(
-        "UPDATE staff_requests SET status = $2, decided_by = $3, \
-             decided_at = CASE WHEN $2 = 'cancelled' THEN COALESCE(decided_at, now()) ELSE now() END, \
-             decision_note = $4, is_paid = COALESCE($5, is_paid), updated_at = now() \
+        "UPDATE staff_requests SET status = $2, \
+             decided_by = CASE WHEN $2 = 'cancelled' THEN decided_by ELSE $3 END, \
+             decided_at = CASE WHEN $2 = 'cancelled' THEN decided_at ELSE now() END, \
+             decision_note = CASE WHEN $2 = 'cancelled' THEN decision_note ELSE $4 END, \
+             cancelled_by = CASE WHEN $2 = 'cancelled' THEN $3 ELSE cancelled_by END, \
+             cancelled_at = CASE WHEN $2 = 'cancelled' THEN now() ELSE cancelled_at END, \
+             cancel_note = CASE WHEN $2 = 'cancelled' THEN $4 ELSE cancel_note END, \
+             is_paid = COALESCE($5, is_paid), updated_at = now() \
           WHERE id = $1",
     )
     .bind(id)

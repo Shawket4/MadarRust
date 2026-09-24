@@ -200,6 +200,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "طلب {kind} بتاعك ليوم {date} اتوافق عليه",
     ),
     (
+        "staff.n_request_cancelled",
+        "Your {kind} request for {date} was cancelled: {note}",
+        "طلب {kind} بتاعك ليوم {date} اتلغى: {note}",
+    ),
+    (
         "staff.n_request_rejected",
         "Your {kind} request for {date} was declined",
         "طلب {kind} بتاعك ليوم {date} اترفض",
