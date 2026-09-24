@@ -8,39 +8,15 @@
 
 use crate::errors::AppError;
 
-/// (family, factor-to-canonical). Canonical per family: grams for mass,
-/// millilitres for volume, pcs for count.
-fn unit_spec(unit: &str) -> Option<(&'static str, f64)> {
-    match unit.trim().to_ascii_lowercase().as_str() {
-        "g" => Some(("mass", 1.0)),
-        "kg" => Some(("mass", 1000.0)),
-        "ml" => Some(("volume", 1.0)),
-        "l" => Some(("volume", 1000.0)),
-        "pcs" => Some(("count", 1.0)),
-        _ => None,
-    }
-}
-
-/// True iff `unit` is a recognized inventory unit.
-pub fn is_valid_unit(unit: &str) -> bool {
-    unit_spec(unit).is_some()
-}
+// The unit rules are madar-shared's (`madar_units`), the one copy the POS core
+// converts a waste with too. The messages are this server's, word for word.
+pub use madar_units::{is_valid_unit, unit_spec};
 
 /// Convert `qty` from `from_unit` into `to_unit`. Cross-family conversions
 /// (e.g. g → pcs) are a `BadRequest`. Result is rounded to 3 decimals to match
 /// `numeric(12,3)` storage.
 pub fn convert(qty: f64, from_unit: &str, to_unit: &str) -> Result<f64, AppError> {
-    let (ff, fk) = unit_spec(from_unit)
-        .ok_or_else(|| AppError::BadRequest(format!("Unknown unit '{from_unit}'")))?;
-    let (tf, tk) = unit_spec(to_unit)
-        .ok_or_else(|| AppError::BadRequest(format!("Unknown unit '{to_unit}'")))?;
-    if ff != tf {
-        return Err(AppError::BadRequest(format!(
-            "Cannot convert '{from_unit}' to '{to_unit}': incompatible unit families ({ff} vs {tf})"
-        )));
-    }
-    let converted = qty * fk / tk;
-    Ok((converted * 1000.0).round() / 1000.0)
+    madar_units::convert(qty, from_unit, to_unit).map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
 /// Like [`convert`], but a mass↔volume conversion is allowed when a `density`
@@ -51,35 +27,8 @@ pub fn convert_with_density(
     to_unit: &str,
     density_g_per_ml: Option<f64>,
 ) -> Result<f64, AppError> {
-    let (ff, fk) = unit_spec(from_unit)
-        .ok_or_else(|| AppError::BadRequest(format!("Unknown unit '{from_unit}'")))?;
-    let (tf, tk) = unit_spec(to_unit)
-        .ok_or_else(|| AppError::BadRequest(format!("Unknown unit '{to_unit}'")))?;
-    if ff == tf {
-        let converted = qty * fk / tk;
-        return Ok((converted * 1000.0).round() / 1000.0);
-    }
-    // Cross-family: only mass↔volume, only with a positive density.
-    let density = match density_g_per_ml {
-        Some(d) if d > 0.0 => d,
-        _ => {
-            return Err(AppError::BadRequest(format!(
-                "Cannot convert '{from_unit}' to '{to_unit}': set a density (g/ml) on the ingredient to convert between weight and volume."
-            )));
-        }
-    };
-    let from_canonical = qty * fk; // grams if mass, millilitres if volume
-    let to_canonical = match (ff, tf) {
-        ("mass", "volume") => from_canonical / density, // g → ml
-        ("volume", "mass") => from_canonical * density, // ml → g
-        _ => {
-            return Err(AppError::BadRequest(format!(
-                "Cannot convert '{from_unit}' to '{to_unit}': only weight↔volume is bridged by density."
-            )));
-        }
-    };
-    let converted = to_canonical / tk;
-    Ok((converted * 1000.0).round() / 1000.0)
+    madar_units::convert_with_density(qty, from_unit, to_unit, density_g_per_ml)
+        .map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
 /// Validate + normalize a recipe entry to the ingredient's base unit.

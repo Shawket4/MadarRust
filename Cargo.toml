@@ -21,6 +21,8 @@ madar-sync         = { git = "https://github.com/Shawket4/madar-shared", tag = "
 # A till's drawer / Z report fold, the carryover picker and close
 # reconciliation the till runs too (the SQL here is pinned to them), same tag.
 madar-till         = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
+# Inventory units and conversion (the till converts a waste with them), same tag.
+madar-units        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.1.0" }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"
