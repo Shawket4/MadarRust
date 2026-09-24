@@ -1147,8 +1147,8 @@ async fn decide_cover_record(
 ) -> Result<(), AppError> {
     // The two people involved, and their accounts (if any).
     #[allow(clippy::type_complexity)]
-    let row: Option<(Uuid, Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT a.employee_id, a.branch_id, a.covered_employee_id, c.user_id, o.user_id \
+    let row: Option<(Uuid, Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, NaiveDate)> = sqlx::query_as(
+        "SELECT a.employee_id, a.branch_id, a.covered_employee_id, c.user_id, o.user_id, a.business_date \
            FROM attendance_records a \
            JOIN employees c ON c.id = a.employee_id \
            LEFT JOIN employees o ON o.id = a.covered_employee_id \
@@ -1158,9 +1158,14 @@ async fn decide_cover_record(
     .bind(org_id)
     .fetch_optional(pool)
     .await?;
-    let Some((coverer, branch_id, _owner, coverer_user, owner_user)) = row else {
+    let Some((coverer, branch_id, _owner, coverer_user, owner_user, day)) = row else {
         return Err(AppError::NotFound("No cover waiting here.".into()));
     };
+    // Confirming pays the cover: never into an approved or paid month
+    // (AD-10). Rejecting pays nothing, so it may still be recorded.
+    if approve {
+        crate::staff::period_lock::assert_open(pool, org_id, day, "this cover").await?;
+    }
     access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
     if Some(by) == coverer_user || Some(by) == owner_user {
         return Err(AppError::Forbidden(

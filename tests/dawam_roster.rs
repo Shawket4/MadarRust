@@ -2855,6 +2855,54 @@ async fn confirming_a_cover_flag_confirms_the_cover_and_deciding_a_cover_resolve
         (Some("rejected".into()), Some("rejected".into()))
     );
 
+    // A cover dated in a PAID month: confirming would pay into it (AD-10) —
+    // refused from the flag and from the list; rejecting pays nothing, so it
+    // still goes through.
+    sqlx::query(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+         VALUES ($1, 'Closed', $2, $3, 'paid')",
+    )
+    .bind(f.org)
+    .bind(today() - Duration::days(9))
+    .bind(today() - Duration::days(6))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (rec4, flag4) = cover(7).await;
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/flags/{flag4}"),
+        f.owner(),
+        json!({ "action": "confirm" })
+    ))
+    .await;
+    assert_eq!(
+        (s, body["code"].clone()),
+        (409, json!("PERIOD_CLOSED")),
+        "{body}"
+    );
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/attendance/{rec4}/cover"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 409);
+    assert_eq!(status_of(rec4).await.0.as_deref(), Some("pending"));
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/attendance/{rec4}/cover"),
+        f.owner(),
+        json!({ "approve": false })
+    ))
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(status_of(rec4).await.0.as_deref(), Some("rejected"));
+
     // "Ignore" on a cover flag decides nothing: the cover still waits.
     let (rec3, flag3) = cover(3).await;
     let (s, _) = done(call!(
