@@ -95239,7 +95239,8 @@
               "string",
               "null"
             ],
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The block's branch; null = the whole business. On an update, omitted\nkeeps the block's branch (E2E B-ROTA-8); on a create, omitted = the\nwhole business."
           },
           "break_minutes": {
             "type": [

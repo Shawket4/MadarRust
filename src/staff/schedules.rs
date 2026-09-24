@@ -203,8 +203,12 @@ impl ResolvedShift {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertWorkShiftRequest {
-    #[serde(default)]
-    pub branch_id: Option<Uuid>,
+    /// The block's branch; null = the whole business. On an update, omitted
+    /// keeps the block's branch (E2E B-ROTA-8); on a create, omitted = the
+    /// whole business.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<Uuid>, nullable)]
+    pub branch_id: Option<Option<Uuid>>,
     pub name: String,
     pub start_time: NaiveTime,
     pub end_time: NaiveTime,
@@ -797,7 +801,7 @@ pub async fn create_work_shift(
         &claims,
         org_id,
         Cap::HrScheduleCreate,
-        body.branch_id,
+        body.branch_id.flatten(),
     )
     .await?;
     let name = validate_work_shift(&body)?;
@@ -821,7 +825,7 @@ pub async fn create_work_shift(
         "#,
     )
     .bind(org_id)
-    .bind(body.branch_id)
+    .bind(body.branch_id.flatten())
     .bind(&name)
     .bind(body.start_time)
     .bind(body.end_time)
@@ -890,15 +894,11 @@ pub async fn update_work_shift(
         current,
     )
     .await?;
-    if body.branch_id != current {
-        require_shift_scope(
-            pool.get_ref(),
-            &claims,
-            org_id,
-            Cap::HrScheduleEdit,
-            body.branch_id,
-        )
-        .await?;
+    // Omitted keeps the branch; only an explicit null moves the block to the
+    // whole business (E2E B-ROTA-8).
+    let branch = body.branch_id.unwrap_or(current);
+    if branch != current {
+        require_shift_scope(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit, branch).await?;
     }
     let name = validate_work_shift(&body)?;
     let before = load_work_shift(pool.get_ref(), org_id, *id).await?;
@@ -977,7 +977,7 @@ pub async fn update_work_shift(
     )
     .bind(*id)
     .bind(org_id)
-    .bind(body.branch_id)
+    .bind(branch)
     .bind(&name)
     .bind(body.start_time)
     .bind(body.end_time)

@@ -3374,3 +3374,42 @@ async fn roster_conflicts_carry_their_figures(pool: PgPool) {
     assert_eq!(body["vars"]["n"], 1, "{body}");
     assert_eq!(body["vars"]["name"], "Brunch", "{body}");
 }
+
+/// E2E B-ROTA-8: a PATCH of a block that leaves out branch_id keeps its
+/// branch; only an explicit null makes it the whole business's.
+#[sqlx::test]
+async fn patch_without_branch_keeps_the_branch(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let branch_of = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Uuid>>("SELECT branch_id FROM work_shifts WHERE id = $1")
+                .bind(m)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/work-shifts/{m}"),
+        f.owner(),
+        json!({ "name": "Morning", "start_time": "08:00:00", "end_time": "12:30:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(branch_of().await, Some(f.br_a), "omitted: kept");
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/work-shifts/{m}"),
+        f.owner(),
+        json!({ "branch_id": null, "name": "Morning", "start_time": "08:00:00", "end_time": "12:30:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(branch_of().await, None, "null: the whole business");
+}
