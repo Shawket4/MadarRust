@@ -634,13 +634,15 @@ pub async fn publish(
     .await?
     .rows_affected();
     if fresh > 0 {
-        let open: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM staff_open_shifts WHERE branch_id = $1 AND status = 'open' \
-                AND on_date BETWEEN $2 AND $2 + 6",
+        // Each open shift is announced by its OWN date, one notice per date
+        // (SC-9, N-031, Mac E2E R-B2) — as posting into a published week does.
+        let open_dates: Vec<NaiveDate> = sqlx::query_scalar(
+            "SELECT DISTINCT on_date FROM staff_open_shifts WHERE branch_id = $1 AND status = 'open' \
+                AND on_date BETWEEN $2 AND $2 + 6 ORDER BY on_date",
         )
         .bind(body.branch_id)
         .bind(ws)
-        .fetch_one(pool)
+        .fetch_all(pool)
         .await?;
         for p in staff_at(pool, body.branch_id).await? {
             notify(
@@ -651,13 +653,13 @@ pub async fn publish(
                 json!({ "date": ws }),
             )
             .await;
-            if open > 0 {
+            for d in &open_dates {
                 notify(
                     pool,
                     org_id,
                     p.employee_id,
                     "staff.n_open_shift",
-                    json!({ "date": ws }),
+                    json!({ "date": d }),
                 )
                 .await;
             }

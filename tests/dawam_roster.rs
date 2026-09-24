@@ -3110,3 +3110,42 @@ async fn claiming_a_taken_open_shift_is_already_claimed(pool: PgPool) {
         "ALREADY_CLAIMED"
     );
 }
+
+/// Mac E2E R-B2 (SC-9, N-031): publishing a week tells each person of every
+/// open shift in it by its OWN date — one notice per date, not one dated at
+/// the week's start.
+#[sqlx::test]
+async fn publishing_announces_each_open_shift_date(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(17, 0), t(21, 0)).await;
+    let ws = madar_rust::staff::dawam::week_start(today() + Duration::days(7));
+    let (d1, d2) = (ws + Duration::days(1), ws + Duration::days(4));
+    for (shift, on) in [(l, d1), (e, d2), (l, d2)] {
+        let (s, body) = done(call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.owner(),
+            json!({ "branch_id": f.br_a, "work_shift_id": shift, "on_date": on })
+        ))
+        .await;
+        assert_eq!(s, 201, "{body}");
+    }
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    publish(&app, &f, f.br_a, ws).await;
+    let mut dates: Vec<String> = sqlx::query_scalar(
+        "SELECT args->>'date' FROM staff_notifications \
+          WHERE employee_id = $1 AND key = 'staff.n_open_shift'",
+    )
+    .bind(f.a)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    dates.sort();
+    assert_eq!(dates, [d1.to_string(), d2.to_string()], "one per date");
+}
