@@ -1728,6 +1728,16 @@ pub async fn till_punch(
     };
     // Deliberately NOT cleared on a right PIN: someone guessing a colleague's
     // PIN could otherwise reset the count with their own between guesses.
+    // The PIN verified: upgrade a legacy hash and stamp the fingerprint, as
+    // sign-in does, so this holder leaves the wrong-PIN scan (B-POS-3).
+    crate::auth::handlers::upgrade_verified_pin(
+        pool,
+        org_id,
+        holder.id,
+        body.pin.trim(),
+        holder.pin_hash.as_deref(),
+    )
+    .await;
     // The PIN names a till user; the punch is for the employee linked to them.
     let employee: Option<Uuid> =
         sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")

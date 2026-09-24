@@ -2767,7 +2767,7 @@ async fn clocking_refusals_carry_codes(pool: PgPool) {
     .await;
 }
 
-/// POS E2E B-POS-1 (P-010, PS-7): a till punch in a business without Dawam
+/// POS E2E B-TILL-1 (P-010, PS-7): a till punch in a business without Dawam
 /// (or without POS) is 403 MODULE_OFF with the sentence the spec wants, so
 /// the till says it rather than "you don't have permission".
 #[sqlx::test]
@@ -2799,4 +2799,54 @@ async fn a_till_punch_with_a_module_off_is_module_off(pool: PgPool) {
             "{modules}"
         );
     }
+}
+
+/// POS E2E B-TILL-3: a wrong PIN scans every holder who has no keyed
+/// fingerprint yet, at whatever cost each old hash was born with (Rue: 23
+/// holders at bcrypt cost 12, ~4 s release, ~20 s debug). The till punch
+/// now upgrades the holder it matches — fingerprint stamped, hash re-made at
+/// the current cost — as PIN sign-in already did, so people who only ever
+/// punch at the till leave the slow scan too.
+#[sqlx::test]
+async fn a_till_punch_upgrades_a_legacy_pin(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    sqlx::query("UPDATE users SET pin_hash = $2, pin_fingerprint = NULL WHERE id = $1")
+        .bind(f.a_user)
+        .bind(bcrypt::hash("4321", 12).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let till = open_till(&pool, f.org, f.branch, f.owner).await;
+    let body = json_of(call!(
+        app,
+        post,
+        "/staff/attendance/till-punch",
+        at_till(&owner_t(&f), till),
+        json!({ "branch_id": f.branch, "pin": "4321" })
+    ))
+    .await;
+    assert_eq!(body["punched"], "in", "{body}");
+    let (hash, fp): (String, Option<Vec<u8>>) =
+        sqlx::query_as("SELECT pin_hash, pin_fingerprint FROM users WHERE id = $1")
+            .bind(f.a_user)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(fp.is_some(), "the fingerprint is stamped");
+    assert!(
+        hash.starts_with(&format!("$2b${:02}$", madar_rust::secrets::BCRYPT_COST)),
+        "re-made at the current cost: {hash}"
+    );
+    assert!(bcrypt::verify("4321", &hash).unwrap(), "the same PIN");
+    // Nobody is left to scan: a wrong PIN is one indexed miss.
+    let unstamped: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE org_id = $1 AND pin_hash IS NOT NULL \
+            AND pin_fingerprint IS NULL",
+    )
+    .bind(f.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unstamped, 0);
 }
