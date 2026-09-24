@@ -234,12 +234,18 @@ async fn run() -> std::io::Result<()> {
         // Build the App. All `.wrap()` calls happen first so the App's
         // generic type is stable when we conditionally add Swagger UI.
         let mut app = App::new()
-            .wrap(cors)
-            .wrap(Compress::default())
-            // Whole-dataset reads, and only those — see `rate_limit::throttle_exports`.
+            // The general limiter (and whole-dataset exports) — see
+            // `rate_limit::throttle_exports`. INSIDE CORS, so its 429 carries
+            // the CORS headers: outside it, the browser hid the 429 and the
+            // dashboard said "Network error" (E2E B-TEAM-8). This order is
+            // pinned by
+            // `rate_limit::tests::a_rate_limited_answer_carries_cors_headers`;
+            // keep the two in step.
             .wrap(actix_web::middleware::from_fn(
                 madar_rust::rate_limit::throttle_exports,
             ))
+            .wrap(cors)
+            .wrap(Compress::default())
             // Client version telemetry + legacy path hits (LEGACY_REMOVAL.md
             // Phase T). App-level so it sees every route; it reads the org the
             // scope's JwtMiddleware resolved after the handler ran.

@@ -262,12 +262,14 @@ pub async fn throttle_exports(
             // minute is a far tighter leash than two hundred ordinary ones,
             // which is the point.
             if !allow_export(&key) {
-                return Err(crate::errors::AppError::TooManyRequests(format!(
-                    "That is {} exports in a minute. Give it a moment and try again — \
-                     each one reads the whole filtered dataset.",
-                    export_max()
-                ))
-                .into());
+                return Ok(too_many(
+                    req,
+                    format!(
+                        "That is {} exports in a minute. Give it a moment and try again — \
+                         each one reads the whole filtered dataset.",
+                        export_max()
+                    ),
+                ));
             }
         } else if !take_token(&key)
             || (key != address_of(&req)
@@ -276,13 +278,26 @@ pub async fn throttle_exports(
                     per_address_per_minute(),
                 ))
         {
-            return Err(crate::errors::AppError::TooManyRequests(
+            return Ok(too_many(
+                req,
                 "Too many requests just now. This will clear in a moment.".into(),
-            )
-            .into());
+            ));
         }
     }
-    next.call(req).await
+    next.call(req).await.map(|r| r.map_into_left_body())
+}
+
+/// The 429, as a RESPONSE rather than an error: an `Err` from a middleware
+/// passes actix-cors without its headers, so the browser hid it and the
+/// dashboard said "Network error" (E2E B-TEAM-8). Same body and code as
+/// `AppError::TooManyRequests` everywhere else.
+fn too_many<B>(
+    req: actix_web::dev::ServiceRequest,
+    why: String,
+) -> actix_web::dev::ServiceResponse<actix_web::body::EitherBody<B>> {
+    use actix_web::ResponseError;
+    req.into_response(crate::errors::AppError::TooManyRequests(why).error_response())
+        .map_into_right_body()
 }
 
 #[cfg(test)]
@@ -377,7 +392,11 @@ mod tests {
                     .to_request();
                 match test::try_call_service(&app, req).await {
                     Ok(r) if r.status().is_success() => ok += 1,
-                    Ok(r) => assert_eq!(r.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS),
+                    // The 429 is a response (B-TEAM-8), so it can carry CORS.
+                    Ok(r) => {
+                        assert_eq!(r.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+                        paced += 1;
+                    }
                     Err(e) => {
                         assert_eq!(
                             e.error_response().status(),
@@ -516,5 +535,95 @@ mod tests {
             allow_export("alice"),
             "a minute later, alice may export again"
         );
+    }
+
+    /// E2E B-TEAM-8: a 429 reaches the browser WITH its CORS headers, so the
+    /// dashboard can say "slow down" instead of "Network error" — from the
+    /// general limiter and from a route's own governor alike. This is main's
+    /// stack: the limiter inside CORS.
+    #[actix_web::test]
+    async fn a_rate_limited_answer_carries_cors_headers() {
+        use actix_governor::{Governor, GovernorConfigBuilder};
+        use actix_web::{App, HttpResponse, http::StatusCode, test, web};
+        let gov = GovernorConfigBuilder::default()
+            .key_extractor(PeerIpOrLocalhost)
+            .seconds_per_request(60)
+            .burst_size(1)
+            .finish()
+            .unwrap();
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .wrap(
+                    actix_cors::Cors::default()
+                        .allow_any_origin()
+                        .allow_any_method()
+                        .allow_any_header(),
+                )
+                .route("/public/ping", web::get().to(HttpResponse::Ok))
+                .service(
+                    web::resource("/login")
+                        .wrap(Governor::new(&gov))
+                        .route(web::post().to(HttpResponse::Ok)),
+                ),
+        )
+        .await;
+        let origin = "https://dash.example";
+        let req = |m: actix_web::http::Method, uri: &str, addr: &str| {
+            test::TestRequest::default()
+                .method(m)
+                .uri(uri)
+                .insert_header(("Origin", origin))
+                .peer_addr(addr.parse().unwrap())
+                .to_request()
+        };
+        fn allow<B>(r: &actix_web::dev::ServiceResponse<B>) -> Option<String> {
+            r.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        }
+        // The general limiter.
+        for _ in 0..global_per_minute() as usize {
+            let r = test::call_service(
+                &app,
+                req(
+                    actix_web::http::Method::GET,
+                    "/public/ping",
+                    "10.9.8.1:4000",
+                ),
+            )
+            .await;
+            assert!(r.status().is_success());
+        }
+        let r = test::call_service(
+            &app,
+            req(
+                actix_web::http::Method::GET,
+                "/public/ping",
+                "10.9.8.1:4000",
+            ),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            allow(&r).as_deref(),
+            Some(origin),
+            "the general limiter's 429"
+        );
+        // A route's own governor.
+        let r = test::call_service(
+            &app,
+            req(actix_web::http::Method::POST, "/login", "10.9.8.2:4000"),
+        )
+        .await;
+        assert!(r.status().is_success());
+        let r = test::call_service(
+            &app,
+            req(actix_web::http::Method::POST, "/login", "10.9.8.2:4000"),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(allow(&r).as_deref(), Some(origin), "a route governor's 429");
     }
 }
