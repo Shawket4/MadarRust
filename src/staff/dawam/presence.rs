@@ -1161,16 +1161,17 @@ async fn decide_cover_record(
     let Some((coverer, branch_id, _owner, coverer_user, owner_user, day)) = row else {
         return Err(AppError::NotFound("No cover waiting here.".into()));
     };
-    // Confirming pays the cover: never into an approved or paid month
-    // (AD-10). Rejecting pays nothing, so it may still be recorded.
-    if approve {
-        crate::staff::period_lock::assert_open(pool, org_id, day, "this cover").await?;
-    }
     access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
     if Some(by) == coverer_user || Some(by) == owner_user {
         return Err(AppError::Forbidden(
             "You can't confirm a cover you're part of.".into(),
         ));
+    }
+    // Confirming pays the cover: never into an approved or paid month
+    // (AD-10). Rejecting pays nothing, so it may still be recorded. After the
+    // rights checks (AT-11: someone at another branch hears 403, not 409).
+    if approve {
+        crate::staff::period_lock::assert_open(pool, org_id, day, "this cover").await?;
     }
     let status = if approve { "confirmed" } else { "rejected" };
     // One decision only: a second confirm (or a race) finds nothing pending.
