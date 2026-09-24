@@ -2531,6 +2531,8 @@ pub async fn create_manual_record(
     };
 
     crate::staff::penalties::recompute_record(pool.get_ref(), id, &settings).await?;
+    // Its overtime waits for a manager like a phone's (RU-7, E2E B-TEAM-6).
+    crate::staff::dawam::presence::after_check_out(pool.get_ref(), org_id, id, &settings).await?;
 
     let record = load_record(pool.get_ref(), org_id, id).await?;
     Ok(HttpResponse::Created().json(record))
@@ -2772,6 +2774,10 @@ async fn rederive(
     // A correction changes what is owed. Recompute — but `penalties` leaves any
     // deduction a human has already waived or overridden exactly as it is.
     crate::staff::penalties::recompute_record(pool, record_id, &settings).await?;
+    // Overtime a correction, a manager's punch or a repricing produced goes
+    // off / paid / to approval like a phone's check-out (RU-7, E2E B-TEAM-6).
+    // A decided overtime keeps its decision.
+    crate::staff::dawam::presence::after_check_out(pool, org_id, record_id, &settings).await?;
     Ok(())
 }
 

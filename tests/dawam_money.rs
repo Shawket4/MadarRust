@@ -2886,3 +2886,86 @@ async fn an_advance_percent_limit_is_in_basis_points(pool: PgPool) {
     let b25 = ask!(f.bassem, 125_000);
     assert_eq!(review!(b25).status(), 200, "25% is within 30%");
 }
+
+/// E2E B-TEAM-6 (RU-7): overtime from a hand-entered record, a correction or
+/// a manager's punch goes to approval in approval mode like a phone's
+/// check-out — it used to stay with no status, never listed and never paid.
+#[sqlx::test]
+async fn overtime_from_every_path_waits_for_approval(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    sqlx::query("UPDATE attendance_settings SET overtime_mode = 'approval' WHERE org_id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let day_shift = shift(&pool, f.org, f.a, "Day", "09:00", "17:00").await;
+    roster(&pool, &f, f.amal, &[day_shift]).await;
+    let d = f.start;
+    let at = |h: u32, m: u32| d.and_hms_opt(h, m, 0).unwrap().and_utc();
+    let status = |id: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (i32, Option<String>)>(
+                "SELECT overtime_minutes, overtime_status FROM attendance_records WHERE id = $1::uuid",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // 1. Entered by hand, 45 minutes past the end.
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance",
+        owner,
+        json!({ "employee_id": f.amal, "branch_id": f.a, "business_date": d,
+                "work_shift_id": day_shift, "check_in_at": at(9, 0),
+                "check_out_at": at(17, 45), "reason": "Phone was dead" })
+    );
+    assert_eq!(resp.status(), 201);
+    let manual = json_of(resp).await["id"].as_str().unwrap().to_string();
+    let (ot, st) = status(manual.clone()).await;
+    assert!(ot > 0, "{ot}");
+    assert_eq!(st.as_deref(), Some("pending"), "a hand-entered record");
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{manual}/overtime"),
+        owner,
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 200, "it can be approved");
+
+    // 2. A correction that adds overtime to a day that had none.
+    let d2 = f.start + Duration::days(1);
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance",
+        owner,
+        json!({ "employee_id": f.amal, "branch_id": f.a, "business_date": d2,
+                "work_shift_id": day_shift,
+                "check_in_at": d2.and_hms_opt(9, 0, 0).unwrap().and_utc(),
+                "check_out_at": d2.and_hms_opt(17, 0, 0).unwrap().and_utc(),
+                "reason": "Phone was dead" })
+    );
+    assert_eq!(resp.status(), 201);
+    let fixed = json_of(resp).await["id"].as_str().unwrap().to_string();
+    assert_eq!(status(fixed.clone()).await, (0, None));
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{fixed}"),
+        owner,
+        json!({ "check_out_at": d2.and_hms_opt(18, 0, 0).unwrap().and_utc(),
+                "reason": "Stayed for the delivery" })
+    );
+    assert_eq!(resp.status(), 200);
+    let (ot, st) = status(fixed).await;
+    assert!(ot > 0, "{ot}");
+    assert_eq!(st.as_deref(), Some("pending"), "a correction");
+}
