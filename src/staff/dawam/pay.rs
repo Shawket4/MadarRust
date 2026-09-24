@@ -426,6 +426,14 @@ pub struct Adjustment {
     #[sqlx(default)]
     #[schema(value_type = Option<Object>)]
     pub reason_vars: Option<serde_json::Value>,
+    /// Who decided a line that waited for the owner, when, and why (a
+    /// rejection always says why, D8).
+    #[sqlx(default)]
+    pub decided_by: Option<Uuid>,
+    #[sqlx(default)]
+    pub decided_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub decision_note: Option<String>,
 }
 
 const ADJ_SELECT: &str = "SELECT * FROM ( \
@@ -436,14 +444,15 @@ const ADJ_SELECT: &str = "SELECT * FROM ( \
            a.ends_on, a.created_by, a.created_at, \
            NULL::timestamptz AS waived_at, NULL::timestamptz AS overridden_at, \
            NULL::bigint AS original_amount_piastres, a.stopped_at, a.stop_reason, \
-           NULL::text AS reason_code, NULL::jsonb AS reason_vars \
+           NULL::text AS reason_code, NULL::jsonb AS reason_vars, \
+           a.decided_by, a.decided_at, a.decision_note \
       FROM payroll_bonuses a JOIN employees e ON e.id = a.employee_id \
     UNION ALL \
     SELECT a.id, 'deduction', a.org_id, a.employee_id, e.name, a.amount_piastres, a.percent_of_base, \
            COALESCE(a.amount_piastres, round(e.base_salary_piastres::numeric * COALESCE(a.percent_of_base, 0) / 100))::bigint, \
            a.reason, a.effective_date, a.source, a.status, a.recurring, a.ends_on, a.created_by, \
            a.created_at, a.waived_at, a.overridden_at, a.original_amount_piastres, a.stopped_at, a.stop_reason, \
-           a.reason_code, a.reason_vars \
+           a.reason_code, a.reason_vars, a.decided_by, a.decided_at, a.decision_note \
       FROM payroll_deductions a JOIN employees e ON e.id = a.employee_id \
     ) x";
 
@@ -602,6 +611,22 @@ pub async fn create_adjustment(
     .bind(body.recurring)
     .fetch_one(pool)
     .await?;
+    // Every money act records who, when and why (AD-9, AT-10, D8).
+    audit(
+        pool,
+        org_id,
+        Some(by),
+        "adjustment.create",
+        table,
+        Some(id),
+        Some(body.employee_id),
+        None,
+        Some(reason),
+        json!({ "kind": body.kind, "amount_piastres": body.percent_of_base.is_none().then_some(amount),
+                "percent_of_base": body.percent_of_base, "value_piastres": amount,
+                "effective_date": effective_date, "recurring": body.recurring, "status": status }),
+    )
+    .await?;
     let who = subject.name.clone();
     if status == "pending" {
         let by = user_name(pool, by).await;
@@ -695,6 +720,26 @@ pub async fn my_adjustments(me: Me, pool: crate::db::Db) -> Result<HttpResponse,
 #[derive(Deserialize, ToSchema)]
 pub struct DecidePay {
     pub approve: bool,
+    /// Why. Required to reject (400 `REASON_REQUIRED`, D8); optional to
+    /// approve.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// A rejection says why (owner decision D8, AD-9): 400 `REASON_REQUIRED`.
+pub(crate) fn reject_reason(
+    approve: bool,
+    reason: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let reason = reason.map(str::trim).filter(|r| !r.is_empty());
+    if !approve && reason.is_none() {
+        return Err(AppError::Coded {
+            status: 400,
+            code: "REASON_REQUIRED",
+            reason: "Say why you're rejecting it.".into(),
+        });
+    }
+    Ok(reason.map(str::to_string))
 }
 
 /// The owner (or anyone whose limit covers it) decides a pending line. A
@@ -738,16 +783,46 @@ pub async fn decide_adjustment(
         why: crate::authz::Why::NotHeld,
     };
     crate::authz::require::settle(pool, by, &pending, branch).await?;
-    sqlx::query(&format!(
-        "UPDATE {table} SET status = $3, decided_by = $4, decided_at = now(), updated_at = now() \
+    // After the rights (AT-11): a stranger hears 403, never the field.
+    let note = reject_reason(body.approve, body.reason.as_deref())?;
+    let mut tx = pool.begin().await?;
+    let decided = sqlx::query(&format!(
+        "UPDATE {table} SET status = $3, decided_by = $4, decided_at = now(), \
+                decision_note = $5, updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND status = 'pending'"
     ))
     .bind(id)
     .bind(org_id)
     .bind(if body.approve { "approved" } else { "rejected" })
     .bind(by)
-    .execute(pool)
+    .bind(note.as_deref())
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if decided == 0 {
+        return Err(AppError::Conflict(
+            "This line has already been decided".into(),
+        ));
+    }
+    audit(
+        &mut *tx,
+        org_id,
+        Some(by),
+        if body.approve {
+            "adjustment.approve"
+        } else {
+            "adjustment.reject"
+        },
+        table,
+        Some(id),
+        Some(a.employee_id),
+        None,
+        note.as_deref(),
+        json!({ "kind": kind, "value_piastres": a.value_piastres,
+                "effective_date": a.effective_date, "created_by": a.created_by }),
+    )
     .await?;
+    tx.commit().await?;
     if body.approve {
         notify(
             pool,
@@ -889,8 +964,12 @@ pub struct ReviewAdvance {
     pub amount_piastres: Option<i64>,
     #[serde(default)]
     pub installments: Option<i32>,
+    /// Why (kept as the decision note). Required to reject: `note` or
+    /// `reason`, `reason` wins (400 `REASON_REQUIRED`, D8).
     #[serde(default)]
     pub note: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// The cap and limit rules for approving `amount` for `employee_id`
@@ -1001,15 +1080,18 @@ pub async fn review_advance(
     let amount = body.amount_piastres.unwrap_or(asked);
     let installments = body.installments.unwrap_or(inst);
     let monthly = installment_of(amount, installments)?;
+    let note = reject_reason(
+        body.approve,
+        body.reason
+            .as_deref()
+            .filter(|r| !r.trim().is_empty())
+            .or(body.note.as_deref()),
+    )?;
+    let note = note.as_deref();
     if body.approve {
         // The pending one is already counted as outstanding at its asked amount.
         approve_advance_checks(pool, &claims, org_id, &subject, amount, asked).await?;
     }
-    let note = body
-        .note
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty());
     let mut tx = pool.begin().await?;
     sqlx::query(
         "UPDATE salary_advances SET status = $3, amount_piastres = $4, remaining_piastres = $4, \
@@ -1249,6 +1331,20 @@ pub async fn log_expense_advance(
     .bind(claims.user_id_safe().ok())
     .bind(given_on)
     .fetch_one(pool)
+    .await?;
+    audit(
+        pool,
+        org_id,
+        claims.user_id_safe().ok(),
+        "expense_advance.log",
+        "expense_advances",
+        Some(id),
+        Some(body.employee_id),
+        None,
+        Some(purpose),
+        json!({ "amount_piastres": body.amount_piastres, "via": body.via,
+                "given_on": given_on, "branch_id": branch }),
+    )
     .await?;
     let row = sqlx::query_as::<_, ExpenseAdvance>(&format!("{EXP_SELECT} WHERE e.id = $1"))
         .bind(id)

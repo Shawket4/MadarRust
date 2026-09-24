@@ -971,6 +971,7 @@ pub(crate) async fn insert_advance(
     org_id: Uuid,
     employee_id: Uuid,
     body: &CreateAdvanceRequest,
+    actor: Option<Uuid>,
 ) -> Result<SalaryAdvance, AppError> {
     let installments = body.installments.unwrap_or(1);
     let monthly = installment_of(body.amount_piastres, installments)?;
@@ -992,6 +993,24 @@ pub(crate) async fn insert_advance(
             .filter(|r| !r.is_empty()),
     )
     .fetch_one(pool)
+    .await?;
+    // Who asked (the person, or a manager on their behalf), when, for what
+    // (AD-9, AT-10, D8).
+    audit(
+        pool,
+        org_id,
+        actor,
+        "advance.request",
+        "salary_advances",
+        Some(id),
+        Some(employee_id),
+        None,
+        body.reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty()),
+        json!({ "amount_piastres": body.amount_piastres, "installments": installments }),
+    )
     .await?;
 
     load_advance(pool, id).await
@@ -1028,7 +1047,14 @@ pub async fn create_advance_admin(
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrAdvancesDecide, &subject).await?;
 
-    let mut row = insert_advance(pool.get_ref(), org_id, employee_id, &body).await?;
+    let mut row = insert_advance(
+        pool.get_ref(),
+        org_id,
+        employee_id,
+        &body,
+        claims.user_id_safe().ok(),
+    )
+    .await?;
     hide_caps(
         pool.get_ref(),
         &claims,
@@ -1049,7 +1075,7 @@ pub async fn create_my_advance(
     pool: crate::db::Db,
     body: web::Json<CreateAdvanceRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let row = insert_advance(pool.get_ref(), me.org_id, me.employee_id, &body).await?;
+    let row = insert_advance(pool.get_ref(), me.org_id, me.employee_id, &body, me.user_id).await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -1141,6 +1167,19 @@ pub async fn create_period(
     .bind(body.start_date)
     .bind(body.end_date)
     .fetch_one(pool.get_ref())
+    .await?;
+    audit(
+        pool.get_ref(),
+        org_id,
+        claims.user_id_safe().ok(),
+        "period.create",
+        "payroll_periods",
+        Some(row.id),
+        None,
+        Some(row.id),
+        None,
+        json!({ "name": row.name, "start_date": row.start_date, "end_date": row.end_date }),
+    )
     .await?;
     Ok(HttpResponse::Created().json(row))
 }

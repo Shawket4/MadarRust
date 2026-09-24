@@ -868,6 +868,20 @@ pub async fn resolve_flag(
             .fetch_one(pool)
             .await?,
         );
+        crate::staff::payroll::audit(
+            pool,
+            org_id,
+            Some(by),
+            "adjustment.create",
+            "payroll_deductions",
+            deduction_id,
+            Some(employee_id),
+            None,
+            Some(reason),
+            json!({ "kind": "deduction", "value_piastres": amount, "source": source,
+                    "flag_id": *id, "status": status, "effective_date": date }),
+        )
+        .await?;
         if status == "approved" {
             notify(
                 pool,
@@ -1218,6 +1232,20 @@ async fn decide_cover_record(
     if decided == 0 {
         return Err(AppError::Conflict("That cover was already decided.".into()));
     }
+    // A money act: who, when (AT-10, D8).
+    crate::staff::payroll::audit(
+        pool,
+        org_id,
+        Some(by),
+        "cover.decide",
+        "attendance_records",
+        Some(id),
+        Some(coverer),
+        None,
+        None,
+        json!({ "approve": approve, "date": day }),
+    )
+    .await?;
     // The flag says what was decided (CV-3).
     sqlx::query(
         "UPDATE attendance_flags SET resolution = $3, resolved_by = $2, resolved_at = now() \
@@ -1336,6 +1364,20 @@ pub async fn decide_overtime(
         .bind(by)
         .execute(pool)
         .await?;
+    // A money act: who, when (AT-10, D8).
+    crate::staff::payroll::audit(
+        pool,
+        org_id,
+        Some(by),
+        "overtime.decide",
+        "attendance_records",
+        Some(*id),
+        Some(employee_id),
+        None,
+        None,
+        json!({ "approve": body.approve, "minutes": minutes, "date": on_date }),
+    )
+    .await?;
     notify(
         pool,
         org_id,
