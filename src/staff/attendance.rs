@@ -1163,35 +1163,10 @@ pub async fn put_attendance_settings(
     if let Some(tiers) = body.late_deduction_tiers.as_deref() {
         rules::validate_tiers(tiers)?;
     }
-    if let Some(mode) = body.gender_mode.as_deref() {
-        if !matches!(mode, "off" | "soft" | "hard") {
-            return Err(AppError::BadRequest(
-                "gender_mode is off, soft or hard".into(),
-            ));
-        }
+    check_setting_ranges(&body)?;
+    if body.gender_mode.is_some() {
         // Roster settings are the owner's (hr.roster.settings).
         access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrRosterSettings).await?;
-    }
-    if body
-        .working_days_per_month
-        .is_some_and(|d| d <= Decimal::ZERO)
-    {
-        return Err(AppError::BadRequest(
-            "working_days_per_month must be positive".into(),
-        ));
-    }
-    if body
-        .default_overtime_multiplier
-        .is_some_and(|m| m <= Decimal::ZERO)
-    {
-        return Err(AppError::BadRequest(
-            "default_overtime_multiplier must be positive".into(),
-        ));
-    }
-    if body.auto_checkout_buffer_minutes.is_some_and(|m| m < 0) {
-        return Err(AppError::BadRequest(
-            "auto_checkout_buffer_minutes cannot be negative".into(),
-        ));
     }
     let inherit: Vec<String> = body.inherit.clone().unwrap_or_default();
     let branch_fields = branch_rule_fields();
@@ -1286,6 +1261,196 @@ pub async fn put_attendance_settings(
     let mut row = load_settings(pool.get_ref(), org_id, body.branch_id).await?;
     row.suggested_tiers = suggested_tiers();
     Ok(HttpResponse::Ok().json(row))
+}
+
+/// Every number and choice of the rules within what makes sense — checked
+/// here, so an impossible value is never stored and never surfaces as a raw
+/// "Database error" (E2E B-SETUP-1, RU-8, AV-5, RU-13, AT-11). The refusal is
+/// 400 `SETTING_OUT_OF_RANGE` with `{field, min, max}` (or `{field, allowed}`)
+/// for the client's own wording (AT-13).
+fn check_setting_ranges(body: &PutAttendanceSettingsRequest) -> Result<(), AppError> {
+    fn out(field: &str, why: String, vars: serde_json::Value) -> AppError {
+        let mut vars = vars;
+        vars["field"] = serde_json::json!(field);
+        AppError::CodedVars {
+            status: 400,
+            code: "SETTING_OUT_OF_RANGE",
+            reason: why,
+            vars,
+        }
+    }
+    // (field, value, min, min inclusive, max, max inclusive)
+    let d = |v: i64| Decimal::from(v);
+    let ranges: [(&str, Option<Decimal>, Decimal, bool, Decimal, bool); 13] = [
+        (
+            "overtime_day_multiplier",
+            body.overtime_day_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "overtime_night_multiplier",
+            body.overtime_night_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "holiday_multiplier",
+            body.holiday_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "default_overtime_multiplier",
+            body.default_overtime_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "advance_cap_percent",
+            body.advance_cap_percent,
+            d(0),
+            true,
+            d(100),
+            true,
+        ),
+        (
+            "absence_deduction_days",
+            body.absence_deduction_days,
+            d(0),
+            true,
+            d(31),
+            true,
+        ),
+        (
+            "working_days_per_month",
+            body.working_days_per_month,
+            d(0),
+            false,
+            d(31),
+            true,
+        ),
+        (
+            "limit_day_hours",
+            body.limit_day_hours,
+            d(0),
+            false,
+            d(168),
+            true,
+        ),
+        (
+            "limit_week_hours",
+            body.limit_week_hours,
+            d(0),
+            false,
+            d(168),
+            true,
+        ),
+        (
+            "limit_presence_hours",
+            body.limit_presence_hours,
+            d(0),
+            false,
+            d(168),
+            true,
+        ),
+        (
+            "limit_rest_hours",
+            body.limit_rest_hours,
+            d(0),
+            true,
+            d(168),
+            true,
+        ),
+        (
+            "limit_overtime_day_hours",
+            body.limit_overtime_day_hours,
+            d(0),
+            true,
+            d(168),
+            true,
+        ),
+        (
+            "auto_checkout_buffer_minutes",
+            body.auto_checkout_buffer_minutes.map(Decimal::from),
+            d(0),
+            true,
+            d(24 * 60),
+            true,
+        ),
+    ];
+    for (field, value, min, min_in, max, max_in) in ranges {
+        let Some(v) = value else { continue };
+        let low = if min_in { v < min } else { v <= min };
+        let high = if max_in { v > max } else { v >= max };
+        if low || high {
+            let (lo, hi) = (
+                if min_in { "from" } else { "above" },
+                if max_in { "up to" } else { "below" },
+            );
+            return Err(out(
+                field,
+                format!("{field} must be {lo} {min} and {hi} {max}"),
+                serde_json::json!({ "min": min, "max": max,
+                                    "min_inclusive": min_in, "max_inclusive": max_in }),
+            ));
+        }
+    }
+    if let Some(n) = body.orders_per_staff
+        && !(1..=1000).contains(&n)
+    {
+        return Err(out(
+            "orders_per_staff",
+            "orders_per_staff must be from 1 and up to 1000".into(),
+            serde_json::json!({ "min": 1, "max": 1000 }),
+        ));
+    }
+    if let Some(n) = body.period_start_day
+        && !(1..=28).contains(&n)
+    {
+        return Err(out(
+            "period_start_day",
+            "period_start_day must be from 1 and up to 28".into(),
+            serde_json::json!({ "min": 1, "max": 28 }),
+        ));
+    }
+    let choices: [(&str, Option<&str>, &[&str]); 3] = [
+        (
+            "overtime_mode",
+            body.overtime_mode.as_deref(),
+            &["off", "automatic", "approval"],
+        ),
+        (
+            "half_day_leave_counts",
+            body.half_day_leave_counts.as_deref(),
+            &["half_shift", "whole_day"],
+        ),
+        (
+            "gender_mode",
+            body.gender_mode.as_deref(),
+            &["off", "soft", "hard"],
+        ),
+    ];
+    for (field, value, allowed) in choices {
+        if let Some(v) = value
+            && !allowed.contains(&v)
+        {
+            return Err(out(
+                field,
+                format!("{field} is one of {}", allowed.join(", ")),
+                serde_json::json!({ "allowed": allowed }),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ── Geofence ──────────────────────────────────────────────────

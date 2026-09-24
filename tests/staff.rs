@@ -2522,3 +2522,73 @@ async fn discipline_report_is_scoped_to_the_callers_branches(pool: PgPool) {
     let resp = auth_get!(app, uri, teller);
     assert_eq!(resp.status(), 403, "a teller holds no hr.attendance.read");
 }
+
+/// E2E B-SETUP-1 (RU-8, AV-5, RU-13, AT-11): impossible rates, caps and limits
+/// are refused at the door with a plain message and a code — never stored,
+/// and never a raw "Database error" — and the row is unchanged.
+#[sqlx::test]
+async fn settings_refuse_impossible_rates_and_caps(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "UTC").await;
+    let admin = token_for(f.admin, f.org, UserRole::OrgAdmin);
+    let snapshot = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT to_jsonb(s) - 'updated_at' FROM attendance_settings s \
+                  WHERE org_id = $1 AND branch_id IS NULL",
+            )
+            .bind(f.org)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = snapshot().await;
+    for body in [
+        json!({ "overtime_day_multiplier": 0 }),
+        json!({ "overtime_day_multiplier": -1 }),
+        json!({ "overtime_day_multiplier": 100 }),
+        json!({ "overtime_night_multiplier": 0.5 }),
+        json!({ "holiday_multiplier": 0 }),
+        json!({ "default_overtime_multiplier": 100 }),
+        json!({ "advance_cap_percent": 101 }),
+        json!({ "advance_cap_percent": -1 }),
+        json!({ "absence_deduction_days": -1 }),
+        json!({ "absence_deduction_days": 32 }),
+        json!({ "working_days_per_month": 40 }),
+        json!({ "limit_day_hours": 200 }),
+        json!({ "limit_day_hours": 0 }),
+        json!({ "limit_week_hours": 169 }),
+        json!({ "limit_presence_hours": -2 }),
+        json!({ "limit_rest_hours": -1 }),
+        json!({ "limit_overtime_day_hours": 169 }),
+        json!({ "orders_per_staff": -3 }),
+        json!({ "orders_per_staff": 0 }),
+        json!({ "overtime_mode": "bogus" }),
+        json!({ "half_day_leave_counts": "x" }),
+        json!({ "period_start_day": 29 }),
+    ] {
+        let resp = auth_send!(app, put, "/staff/attendance/settings", admin, body);
+        assert_eq!(resp.status(), 400, "{body}");
+        let err: serde_json::Value = test::read_body_json(resp).await;
+        let text = err["error"].as_str().unwrap_or_default();
+        assert!(!text.contains("Database error"), "{body}: {err}");
+        assert_eq!(err["code"], "SETTING_OUT_OF_RANGE", "{body}: {err}");
+        let field = body.as_object().unwrap().keys().next().unwrap();
+        assert_eq!(err["vars"]["field"], json!(field), "{body}: {err}");
+    }
+    assert_eq!(snapshot().await, before, "nothing was stored");
+    // The edges themselves are fine.
+    let resp = auth_send!(
+        app,
+        put,
+        "/staff/attendance/settings",
+        admin,
+        json!({ "overtime_day_multiplier": 1, "holiday_multiplier": 99.99,
+                "advance_cap_percent": 0, "limit_day_hours": 168, "limit_rest_hours": 0,
+                "orders_per_staff": 1, "overtime_mode": "approval",
+                "half_day_leave_counts": "whole_day" })
+    );
+    assert_eq!(resp.status(), 200);
+}
