@@ -1953,8 +1953,9 @@ async fn stopping_a_recurring_line_records_who_and_why_and_ends_it_from_next_mon
     let slip = slip_of(&app, &f, f.amal).await;
     assert_eq!(slip["bonuses_piastres"], 50_000);
 
-    // Stopping while this month is open ends BOTH from this month on — the
-    // one that started this month included (audit AD-3).
+    // Owner decision D6 (24 Sep 2026): Stop = from next month. Stopping
+    // while this month is open ends BOTH at the end of this month: the open
+    // month keeps them (the screen says "Stopped from next month").
     for id in [
         meal["id"].as_str().unwrap(),
         transport["id"].as_str().unwrap(),
@@ -1968,12 +1969,53 @@ async fn stopping_a_recurring_line_records_who_and_why_and_ends_it_from_next_mon
         );
         assert_eq!(resp.status(), 200);
         let row = json_of(resp).await;
-        assert_eq!(row["ends_on"], json!(last_month));
+        assert_eq!(row["ends_on"], json!(f.end));
         assert_eq!(row["stop_reason"], "Canteen opened");
         assert!(row["stopped_at"].is_string());
     }
     let slip = slip_of(&app, &f, f.amal).await;
-    assert_eq!(slip["bonuses_piastres"], 0);
+    assert_eq!(slip["bonuses_piastres"], 50_000, "this month keeps them");
+    // Next month doesn't: price the month after through the same engine.
+    let next_start = f.end + Duration::days(1);
+    let next_end = madar_rust::staff::dawam::pay::period_window(next_start, 1).1;
+    let next_period: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date) \
+         VALUES ($1, 'Next month', $2, $3) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(next_start)
+    .bind(next_end)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let preview = json_of(call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{next_period}/preview"),
+        owner
+    ))
+    .await;
+    let amal_next = preview
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["employee_id"] == json!(f.amal))
+        .unwrap();
+    assert_eq!(
+        amal_next["bonuses_piastres"], 1,
+        "only the future line runs on"
+    );
+    let details: Vec<Value> = sqlx::query_scalar(
+        "SELECT details FROM payroll_audit_log WHERE org_id = $1 AND action = 'adjustment.stop'",
+    )
+    .bind(f.org)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for d in &details {
+        assert_eq!(d["ends_on"], json!(f.end), "{d}");
+        assert_eq!(d["rule"], "end_of_open_period", "{d}");
+    }
     let (by, reason): (Option<Uuid>, Option<String>) =
         sqlx::query_as("SELECT stopped_by, stop_reason FROM payroll_bonuses WHERE id = $1::uuid")
             .bind(meal["id"].as_str().unwrap())

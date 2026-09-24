@@ -7,7 +7,7 @@
 //! AD-10): fixes go into the next open month as new lines.
 
 use actix_web::{HttpRequest, HttpResponse, web};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -795,7 +795,8 @@ pub struct StopAdjustment {
     pub reason: Option<String>,
 }
 
-/// Stop a monthly line from the next period on; past payslips keep it (AD-3).
+/// Stop a monthly line from the next period on: the open month and past
+/// payslips keep it (AD-3, owner decision D6).
 #[utoipa::path(
     post, path = "/staff/adjustments/{kind}/{id}/stop", tag = "staff",
     params(("kind" = String, Path), ("id" = Uuid, Path)),
@@ -830,13 +831,16 @@ pub async fn stop_adjustment(
         .map(str::trim)
         .filter(|r| !r.is_empty())
         .ok_or_else(|| AppError::BadRequest("Stopping a monthly line needs a reason".into()))?;
+    // Stop = from next month (owner decision D6, 24 Sep 2026): the month
+    // open now keeps the line, and it ends with that month, as the screen
+    // says ("Stopped from next month"). Before, it also left the open month.
+    // With no open month (this one is approved already), the same: the line
+    // ends after the approved month (today's rule).
     let period = ensure_current_period(pool, org_id).await?;
-    // The current month is approved already? Then it keeps the line and the
-    // stop takes effect after it.
-    let ends_on = if crate::staff::payroll::is_closed_status(&period.status) {
-        period.end_date
+    let (ends_on, rule) = if crate::staff::payroll::is_closed_status(&period.status) {
+        (period.end_date, "end_of_approved_period")
     } else {
-        period.start_date - Duration::days(1)
+        (period.end_date, "end_of_open_period")
     };
     let mut tx = pool.begin().await?;
     let n = sqlx::query(&format!(
@@ -867,7 +871,8 @@ pub async fn stop_adjustment(
         Some(line.employee_id),
         None,
         Some(reason),
-        json!({ "ends_on": ends_on }),
+        json!({ "ends_on": ends_on, "rule": rule, "period_id": period.id,
+                "note": "stops from next month; the open month keeps the line" }),
     )
     .await?;
     tx.commit().await?;
