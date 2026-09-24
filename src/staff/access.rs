@@ -19,7 +19,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::jwt::Claims;
-use crate::authz::{Cap, Scope, resolve};
+use crate::authz::{Cap, CapSet, Scope, resolve};
 use crate::errors::AppError;
 use crate::models::UserRole;
 
@@ -135,6 +135,56 @@ async fn held_at(
         }
     }
     Ok((at.len() == branches.len(), at))
+}
+
+/// Every capability the caller holds at EVERY live branch of `org_id`: the
+/// test [`require_everywhere`] makes, for all of them at once, so the UI can
+/// hide an org-wide act the server would refuse (E2E B-SETUP-3, AT-11). The
+/// owner and a super admin hold them all.
+pub async fn caps_everywhere(
+    pool: &PgPool,
+    claims: &Claims,
+    org_id: Uuid,
+) -> Result<CapSet, AppError> {
+    if claims.role == UserRole::SuperAdmin {
+        return Ok(CapSet::all());
+    }
+    if claims.org_id() != Some(org_id) {
+        return Ok(CapSet::EMPTY);
+    }
+    let branches = live_branches(pool, org_id).await?;
+    let mut conn = pool.acquire().await?;
+    let Some(loaded) = crate::authz::load::load(&mut conn, claims.user_id_safe()?).await? else {
+        return Ok(CapSet::EMPTY);
+    };
+    drop(conn);
+    let now = chrono::Utc::now().timestamp();
+    let p = &loaded.principal;
+    if branches.is_empty() {
+        // As `held_at`: with no branch yet, only an org-wide holder counts.
+        let eff = resolve(p, Scope::Anywhere, now, &loaded.policy);
+        let mut out = CapSet::EMPTY;
+        for c in eff.caps.iter() {
+            if eff.owner
+                || p.assignments
+                    .iter()
+                    .any(|a| a.all_branches && a.role.grants.contains(c))
+            {
+                out.insert(c);
+            }
+        }
+        return Ok(out);
+    }
+    let mut all: Option<CapSet> = None;
+    for b in &branches {
+        let s = b.to_string();
+        let caps = resolve(p, Scope::Branch(&s), now, &loaded.policy).caps;
+        all = Some(match all {
+            None => caps,
+            Some(a) => a.intersect(&caps),
+        });
+    }
+    Ok(all.unwrap_or(CapSet::EMPTY))
 }
 
 /// 403 unless the caller holds `cap` at `branch`, a live branch of `org_id`.

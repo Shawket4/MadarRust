@@ -78162,6 +78162,16 @@
             "type": "integer",
             "format": "int64"
           },
+          "everywhere": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The capabilities held at EVERY branch of the business — what an\norg-wide act (a department, a shift block, a public holiday, the\nrules) needs. `/authz/me` only; absent elsewhere. (E2E B-SETUP-3)"
+          },
           "limits": {
             "type": "object",
             "description": "Limits on held capabilities, by key; absent = unlimited.",

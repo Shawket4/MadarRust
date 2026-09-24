@@ -1121,3 +1121,72 @@ async fn a_reason_is_never_required_on_an_override(pool: PgPool) {
     .unwrap();
     assert!(nulls >= 2, "reason-less overrides are stored, got {nulls}");
 }
+
+fn everywhere(v: &Value) -> Vec<String> {
+    v["everywhere"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no everywhere list: {v}"))
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// E2E B-SETUP-3 (AT-11, PM-4): `/authz/me` says which capabilities the
+/// caller holds at EVERY branch of the business — the test the org-wide acts
+/// use (a new department, a new shift block, public holidays) — so the UI
+/// hides what the server would refuse. The owner holds them all; a manager
+/// of one branch holds `hr.staff.create` there but not everywhere.
+#[sqlx::test]
+async fn authz_me_lists_every_branch_caps(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b1 = branch(&pool, o).await;
+    let _b2 = branch(&pool, o).await;
+    let owner = user(&pool, o, "org_admin", "Owner", None).await;
+    let karim = user(&pool, o, "branch_manager", "Karim", None).await;
+    let ot = token(owner, o, UserRole::OrgAdmin);
+    let (_, roles) = call(&app, test::TestRequest::get().uri("/authz/roles"), &ot).await;
+    let bm = roles
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "branch_manager")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (s, body) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/authz/users/{karim}/assignments"))
+            .set_json(json!({"assignments": [
+                {"role_id": bm, "all_branches": false, "branch_ids": [b1]},
+            ]})),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let (s, me) = call(&app, test::TestRequest::get().uri("/authz/me"), &ot).await;
+    assert_eq!(s, StatusCode::OK);
+    let all = everywhere(&me);
+    for cap in [
+        "hr.staff.create",
+        "hr.schedule.create",
+        "hr.schedule.publish",
+    ] {
+        assert!(all.contains(&cap.to_string()), "owner: {cap}");
+    }
+
+    let kt = token(karim, o, UserRole::BranchManager);
+    for uri in ["/authz/me".to_string(), format!("/authz/me?branch_id={b1}")] {
+        let (s, me) = call(&app, test::TestRequest::get().uri(&uri), &kt).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(has(&me, "hr.staff.create"), "{uri}: held at A");
+        assert!(
+            !everywhere(&me).contains(&"hr.staff.create".to_string()),
+            "{uri}: not at every branch"
+        );
+    }
+}

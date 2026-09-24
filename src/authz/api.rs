@@ -93,6 +93,11 @@ pub struct MyAuthz {
     pub ask_manager: Vec<String>,
     /// Limits on held capabilities, by key; absent = unlimited.
     pub limits: BTreeMap<String, LimitsView>,
+    /// The capabilities held at EVERY branch of the business — what an
+    /// org-wide act (a department, a shift block, a public holiday, the
+    /// rules) needs. `/authz/me` only; absent elsewhere. (E2E B-SETUP-3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub everywhere: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -408,13 +413,24 @@ pub async fn get_my_authz(
     let eff = actor_eff(pool.get_ref(), &claims, branch).await?;
     let mut conn = pool.acquire().await?;
     let epoch = super::load::epoch_of(&mut conn, claims.user_id()).await?;
-    Ok(HttpResponse::Ok().json(my_authz(
+    drop(conn);
+    let mut mine = my_authz(
         claims.user_id(),
         branch,
         epoch,
         &eff,
         claims.role == UserRole::SuperAdmin,
-    )))
+    );
+    if let Some(org) = claims.org_id() {
+        let all = crate::staff::access::caps_everywhere(pool.get_ref(), &claims, org).await?;
+        mine.everywhere = Some(
+            all.iter()
+                .filter(|c| c.meta().tier != Tier::Legacy)
+                .map(|c| c.key().to_string())
+                .collect(),
+        );
+    }
+    Ok(HttpResponse::Ok().json(mine))
 }
 
 pub fn my_authz(
@@ -449,6 +465,7 @@ pub fn my_authz(
             .iter()
             .filter_map(|(id, l)| Cap::from_id(*id).map(|c| (c.key().to_string(), (*l).into())))
             .collect(),
+        everywhere: None,
     }
 }
 
