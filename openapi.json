@@ -70649,7 +70649,7 @@
               "boolean",
               "null"
             ],
-            "description": "Only when the request is approved as it is filed (the filer holds\n`hr.requests.self_approve`): leave paid or unpaid, an excuse's pay.\nOmitted: leave is paid, an excuse follows the rule."
+            "description": "Only when the request is approved as it is filed (the filer holds\n`hr.requests.self_approve`): leave paid or unpaid — REQUIRED for such a\nleave (400 `LEAVE_PAY_REQUIRED`, RQ-2) — and an excuse's pay (omitted:\nthe rule decides)."
           },
           "kind": {
             "type": "string",

@@ -230,8 +230,9 @@ pub struct CreateStaffRequest {
     #[serde(default)]
     pub reason: Option<String>,
     /// Only when the request is approved as it is filed (the filer holds
-    /// `hr.requests.self_approve`): leave paid or unpaid, an excuse's pay.
-    /// Omitted: leave is paid, an excuse follows the rule.
+    /// `hr.requests.self_approve`): leave paid or unpaid — REQUIRED for such a
+    /// leave (400 `LEAVE_PAY_REQUIRED`, RQ-2) — and an excuse's pay (omitted:
+    /// the rule decides).
     #[serde(default)]
     pub is_paid: Option<bool>,
 }
@@ -1037,6 +1038,46 @@ pub(crate) async fn load_request(pool: &PgPool, id: Uuid) -> Result<StaffRequest
     Ok(row)
 }
 
+/// Will this filing be approved as it is filed? Only the filer's OWN request,
+/// when they hold `hr.requests.self_approve` (RQ-5).
+async fn self_approves(
+    pool: &PgPool,
+    claims: Option<&Claims>,
+    subject: &access::Subject,
+) -> Result<bool, AppError> {
+    match claims {
+        Some(c) if subject.is(c) => {
+            access::can_for(pool, c, Cap::HrRequestsSelfApprove, subject).await
+        }
+        _ => Ok(false),
+    }
+}
+
+/// A leave that self-approves at filing has no approver to choose paid or
+/// unpaid, so it must carry the choice (RQ-2: every leave is approved as paid
+/// or unpaid). Checked BEFORE the request is stored, so a refusal leaves
+/// nothing behind.
+async fn require_leave_pay_choice(
+    pool: &PgPool,
+    claims: Option<&Claims>,
+    subject: &access::Subject,
+    body: &CreateStaffRequest,
+) -> Result<(), AppError> {
+    if body.kind == "leave"
+        && body.is_paid.is_none()
+        && self_approves(pool, claims, subject).await?
+    {
+        return Err(AppError::CodedVars {
+            status: 400,
+            code: "LEAVE_PAY_REQUIRED",
+            reason: "Say whether this leave is paid or unpaid: it is approved as it is filed."
+                .into(),
+            vars: serde_json::json!({}),
+        });
+    }
+    Ok(())
+}
+
 /// After filing: approve it at once when the filer approves their own
 /// requests (RQ-5), otherwise tell whoever decides it. Returns the row as it
 /// now stands, so the app says what the server did.
@@ -1048,12 +1089,12 @@ async fn after_filing(
     row: StaffRequest,
     is_paid: Option<bool>,
 ) -> Result<StaffRequest, AppError> {
-    let own = claims.is_some_and(|c| subject.is(c));
-    if let Some(c) = claims.filter(|_| own)
-        && access::can_for(pool, c, Cap::HrRequestsSelfApprove, subject).await?
+    if let Some(c) = claims
+        && self_approves(pool, claims, subject).await?
     {
         let paid = match row.kind.as_str() {
-            "leave" => Some(is_paid.unwrap_or(true)),
+            // Required at filing (require_leave_pay_choice); never guessed.
+            "leave" => is_paid,
             "excuse" | "early_departure" => is_paid,
             _ => None,
         };
@@ -1166,6 +1207,7 @@ pub async fn create_request_admin(
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrLeaveCreate, &subject).await?;
 
+    require_leave_pay_choice(pool.get_ref(), Some(&claims), &subject, &body).await?;
     let row = insert_request(pool.get_ref(), org_id, employee_id, &body).await?;
     let row = after_filing(
         pool.get_ref(),
@@ -1199,9 +1241,10 @@ pub async fn create_my_request(
     let pool = pool.get_ref();
     let subject = access::subject(pool, org_id, employee_id).await?;
 
-    let row = insert_request(pool, org_id, employee_id, &body).await?;
     // A linked, active manager acts through their account (`caller`).
     let claims: Option<Claims> = req.extensions().get::<Claims>().cloned();
+    require_leave_pay_choice(pool, claims.as_ref(), &subject, &body).await?;
+    let row = insert_request(pool, org_id, employee_id, &body).await?;
     let row = after_filing(pool, org_id, claims.as_ref(), &subject, row, body.is_paid).await?;
     let mut rows = [row];
     mark_for_caller(pool, org_id, None, Some(employee_id), &mut rows).await?;

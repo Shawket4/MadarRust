@@ -701,6 +701,82 @@ async fn the_owners_own_request_is_approved_as_it_is_filed(pool: PgPool) {
     assert_eq!(row["decided_by"], json!(f.owner));
 }
 
+/// Owner decision (QUESTIONS #19, 2026-09-24): a leave approved as it is filed
+/// has no approver to choose paid or unpaid, so the filer must (RQ-2). Without
+/// the choice it is refused BEFORE anything is stored; with it, approved as
+/// chosen. A filer who doesn't self-approve may still leave it to the approver.
+#[sqlx::test]
+async fn a_self_approved_leave_must_say_paid_or_unpaid(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let s = session(&pool, f.e_owner).await;
+    let phone = format!("{}|{}", s.token, s.device);
+    let count = async || -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM staff_requests WHERE employee_id = $1 AND kind = 'leave'",
+        )
+        .bind(f.e_owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let before = count().await;
+    let (st, body) = send!(
+        app,
+        "POST",
+        "/staff/me/requests".to_string(),
+        phone.clone(),
+        json!({ "kind": "leave", "on_date": "2026-09-14" })
+    );
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (400, Some("LEAVE_PAY_REQUIRED")),
+        "{body}"
+    );
+    assert_eq!(count().await, before, "nothing stored");
+    // The dashboard's "file" for the owner themselves: the same rule.
+    let (st, body) = send!(
+        app,
+        "POST",
+        "/staff/requests".to_string(),
+        f.owner_token(),
+        json!({ "employee_id": f.e_owner, "kind": "leave", "on_date": "2026-09-14" })
+    );
+    assert_eq!(
+        (st, body["code"].as_str()),
+        (400, Some("LEAVE_PAY_REQUIRED")),
+        "{body}"
+    );
+    // With the choice: approved as filed, unpaid kept unpaid.
+    let (st, row) = send!(
+        app,
+        "POST",
+        "/staff/me/requests".to_string(),
+        phone,
+        json!({ "kind": "leave", "on_date": "2026-09-14", "is_paid": false })
+    );
+    assert_eq!(st, 201, "{row}");
+    assert_eq!(
+        (row["status"].clone(), row["is_paid"].clone()),
+        (json!("approved"), json!(false)),
+        "{row}"
+    );
+    // Someone who doesn't self-approve files without it: the approver decides.
+    let e = session(&pool, f.e).await;
+    let (st, row) = send!(
+        app,
+        "POST",
+        "/staff/me/requests".to_string(),
+        format!("{}|{}", e.token, e.device),
+        json!({ "kind": "leave", "on_date": "2026-09-15" })
+    );
+    assert_eq!(
+        (st, row["status"].clone()),
+        (201, json!("pending")),
+        "{row}"
+    );
+}
+
 #[sqlx::test]
 async fn a_managers_own_request_goes_to_the_owner_not_to_a_peer(pool: PgPool) {
     let app = app!(pool);
