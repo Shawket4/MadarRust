@@ -3057,3 +3057,36 @@ async fn my_attendance_includes_a_cover_of_my_shift(pool: PgPool) {
         .unwrap();
     assert!(row["check_in_latitude"].is_number(), "{row}");
 }
+
+/// B-ONB-1: the staff context says when the rules were first saved, so the
+/// app never marks absent a shift that started before it (the sweep never
+/// does, B-SETUP-5). Null until the first save.
+#[sqlx::test]
+async fn the_context_says_when_the_rules_were_first_saved(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    let s = session(&pool, f.a).await;
+    let saved: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT rules_saved_at FROM attendance_settings WHERE org_id = $1 AND branch_id IS NULL",
+    )
+    .bind(f.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let ctx = json_of(call!(app, get, "/staff/me/context", phone(&s))).await;
+    assert_eq!(ctx["settings"]["rules_saved"], true, "{ctx}");
+    let at: DateTime<Utc> = ctx["settings"]["rules_saved_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{ctx}"))
+        .parse()
+        .unwrap();
+    assert_eq!(at, saved);
+    sqlx::query("UPDATE attendance_settings SET rules_saved_at = NULL WHERE org_id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx = json_of(call!(app, get, "/staff/me/context", phone(&s))).await;
+    assert_eq!(ctx["settings"]["rules_saved"], false, "{ctx}");
+    assert!(ctx["settings"]["rules_saved_at"].is_null(), "{ctx}");
+}

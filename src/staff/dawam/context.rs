@@ -66,6 +66,10 @@ pub struct ContextSettings {
     pub late_deduction_tiers: serde_json::Value,
     /// The business saved its rules; nobody clocks in before (RU-1, DSH-6).
     pub rules_saved: bool,
+    /// When the rules were first saved; null until then. The sweep never
+    /// marks absent (or charges) a shift that started before it (B-SETUP-5),
+    /// so neither does the app (B-ONB-1).
+    pub rules_saved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -274,6 +278,7 @@ pub async fn my_context(
             absence_deduction_days: s.absence_deduction_days,
             late_deduction_tiers: s.late_deduction_tiers,
             rules_saved: rules_saved(pool, org_id).await?,
+            rules_saved_at: s.rules_saved_at,
         },
     }))
 }
