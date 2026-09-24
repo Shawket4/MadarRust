@@ -163,7 +163,7 @@ async fn seed_with_zone(pool: &PgPool, tz: &str) -> F {
     sqlx::query(
         "INSERT INTO attendance_settings (org_id, rules_saved_at, working_days_per_month, \
              overtime_mode, period_start_day, late_deduction_tiers, absence_deduction_days) \
-         VALUES ($1, now(), 26, 'automatic', 1, $2::jsonb, 1)",
+         VALUES ($1, now() - INTERVAL '60 days', 26, 'automatic', 1, $2::jsonb, 1)",
     )
     .bind(org)
     .bind(LADDER)

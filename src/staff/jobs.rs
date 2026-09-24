@@ -504,11 +504,13 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
            -- The shift must be over before its absence is a fact.
            AND now() > r.end_at
            -- Nobody can clock in before the business saves its rules (RU-1),
-           -- so nobody is marked absent either (AT-2, E2E B-SETUP-5).
+           -- so a shift that STARTS before that save is never an absence
+           -- (AT-2, E2E B-SETUP-5). `rules_saved_at` is set once, at the
+           -- first save.
            AND EXISTS (
                SELECT 1 FROM attendance_settings s
                 WHERE s.org_id = r.org_id AND s.branch_id IS NULL
-                  AND s.rules_saved_at IS NOT NULL
+                  AND s.rules_saved_at IS NOT NULL AND s.rules_saved_at <= r.start_at
            )
            -- A confirmed public holiday marks nobody absent (RU-10).
            AND NOT EXISTS (
@@ -578,7 +580,8 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), AppError> {
     // Closed days (or absences) from the last week that carry no deduction row
     // yet. A day whose penalty was already written and then waived is excluded by
     // the EXISTS, so it is never revisited. Nothing is priced before the
-    // business saves its rules (RU-1, E2E B-SETUP-5).
+    // business saves its rules, and never a shift that started before that
+    // save: nobody could clock it (RU-1, E2E B-SETUP-5).
     let rows: Vec<Pending> = sqlx::query_as(&format!(
         "SELECT a.id, a.org_id, a.branch_id \
            FROM attendance_records a \
@@ -591,6 +594,7 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), AppError> {
                     COALESCE(b.timezone::text, o.timezone::text, 'Africa/Cairo'))::date - 7 \
             AND (a.check_out_at IS NOT NULL OR a.status IN ('absent', 'on_leave')) \
             AND (a.late_minutes > 0 OR a.status IN ('absent', 'on_leave')) \
+            AND NOT COALESCE(COALESCE(a.scheduled_start_at, a.check_in_at) < rs.rules_saved_at, false) \
             AND NOT EXISTS ( \
                 SELECT 1 FROM payroll_deductions d \
                  WHERE d.attendance_record_id = a.id AND d.source <> 'manual' \

@@ -154,7 +154,7 @@ async fn seed(pool: &PgPool, tz: &str) -> F {
     .fetch_one(pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO attendance_settings (org_id, rules_saved_at) VALUES ($1, now())")
+    sqlx::query("INSERT INTO attendance_settings (org_id, rules_saved_at) VALUES ($1, now() - INTERVAL '60 days')")
         .bind(org)
         .execute(pool)
         .await
@@ -2221,9 +2221,10 @@ async fn an_approved_leave_today_shows_on_leave_at_once(pool: PgPool) {
 }
 
 /// E2E B-SETUP-5 (RU-1, AT-2): nobody can clock in until the business saves
-/// its rules, so nobody is charged either: before the save the sweep writes
-/// no absence and no deduction. After it, the next tick marks and prices the
-/// missed shifts of its usual window (yesterday and today).
+/// its rules, so nobody is charged for a shift that STARTED before the save.
+/// Before any save the sweep writes no absence and no deduction; after it, a
+/// missed shift that started one minute before the save is never charged and
+/// one that started one minute after is marked and priced at the next tick.
 #[sqlx::test]
 async fn the_sweep_charges_nothing_before_the_rules_are_saved(pool: PgPool) {
     let f = seed(&pool, &tz_at(12)).await;
@@ -2232,18 +2233,15 @@ async fn the_sweep_charges_nothing_before_the_rules_are_saved(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let dawn = shift(
-        &pool,
-        &f,
-        "Dawn",
-        NaiveTime::from_hms_opt(1, 0, 0).unwrap(),
-        NaiveTime::from_hms_opt(2, 0, 0).unwrap(),
-    )
-    .await;
-    every_day(&pool, &f, f.b, dawn).await;
-    let counts = || {
+    let at = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+    // Amal's shift starts at 08:00, Bassem's at 08:02 (branch clock, it is
+    // past noon there); both every day, both missed.
+    let early = shift(&pool, &f, "Early", at(8, 0), at(9, 0)).await;
+    let late = shift(&pool, &f, "Late", at(8, 2), at(9, 0)).await;
+    every_day(&pool, &f, f.a, early).await;
+    every_day(&pool, &f, f.b, late).await;
+    let counts = |who: Uuid| {
         let pool = pool.clone();
-        let who = f.b;
         async move {
             sqlx::query_as::<_, (i64, i64)>(
                 "SELECT (SELECT COUNT(*) FROM attendance_records \
@@ -2259,20 +2257,38 @@ async fn the_sweep_charges_nothing_before_the_rules_are_saved(pool: PgPool) {
     };
     madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
     madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
-    assert_eq!(counts().await, (0, 0), "rules never saved: nothing");
+    assert_eq!(counts(f.a).await, (0, 0), "rules never saved: nothing");
+    assert_eq!(counts(f.b).await, (0, 0), "rules never saved: nothing");
 
+    // Saved today at 08:01 on the branch's clock.
+    let today = local(&pool, Utc::now(), &f.tz).await.date();
     sqlx::query(
-        "UPDATE attendance_settings SET rules_saved_at = now() \
+        "UPDATE attendance_settings SET rules_saved_at = ($2::date + TIME '08:01') AT TIME ZONE $3 \
           WHERE org_id = $1 AND branch_id IS NULL",
     )
     .bind(f.org)
+    .bind(today)
+    .bind(&f.tz)
     .execute(&pool)
     .await
     .unwrap();
     madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
     assert_eq!(
-        counts().await,
-        (2, 2),
-        "yesterday and today, marked and priced"
+        counts(f.a).await,
+        (0, 0),
+        "started a minute before the save (and yesterday's): never charged"
     );
+    assert_eq!(
+        counts(f.b).await,
+        (1, 1),
+        "started a minute after the save: marked and priced (yesterday's is not)"
+    );
+    let day: NaiveDate = sqlx::query_scalar(
+        "SELECT business_date FROM attendance_records WHERE employee_id = $1 AND status = 'absent'",
+    )
+    .bind(f.b)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(day, today);
 }

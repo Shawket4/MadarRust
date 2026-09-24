@@ -147,7 +147,7 @@ async fn seed(pool: &PgPool) -> F {
     sqlx::query(
         "INSERT INTO attendance_settings (org_id, rules_saved_at, late_deduction_tiers, \
              absence_deduction_days, excused_time_paid_default) \
-         VALUES ($1, now(), $2, 1, false)",
+         VALUES ($1, now() - INTERVAL '60 days', $2, 1, false)",
     )
     .bind(org)
     .bind(json!([

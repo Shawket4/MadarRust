@@ -156,7 +156,7 @@ async fn seed(pool: &PgPool) -> F {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO attendance_settings (org_id, rules_saved_at) VALUES ($1, now())")
+    sqlx::query("INSERT INTO attendance_settings (org_id, rules_saved_at) VALUES ($1, now() - INTERVAL '60 days')")
         .bind(org)
         .execute(pool)
         .await

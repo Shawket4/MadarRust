@@ -98,7 +98,7 @@ async fn seed(pool: &PgPool, timezone: &str) -> Fixture {
         .unwrap();
 
     // The owner saved the rules at set-up (RU-1): people may clock in.
-    sqlx::query("INSERT INTO attendance_settings (org_id, rules_saved_at) VALUES ($1, now())")
+    sqlx::query("INSERT INTO attendance_settings (org_id, rules_saved_at) VALUES ($1, now() - INTERVAL '60 days')")
         .bind(org)
         .execute(pool)
         .await
