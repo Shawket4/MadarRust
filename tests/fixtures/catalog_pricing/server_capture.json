@@ -1,0 +1,2413 @@
+{
+  "bills": {
+    "bundle_with_component_options": {
+      "items": [
+        {
+          "addons": [],
+          "bundle_components": [],
+          "line_total": 13800,
+          "price_flagged": null,
+          "quantity": 2,
+          "unit_price": 5000
+        }
+      ],
+      "price_flagged": false,
+      "subtotal": 13800,
+      "tax_amount": 1932,
+      "total_amount": 15732
+    },
+    "drift_lines": {
+      "items": [
+        {
+          "addons": [
+            {
+              "id": "c0de0000-0000-4000-8000-000000000051",
+              "line_total": 0,
+              "quantity": 1,
+              "unit_price": 0
+            }
+          ],
+          "bundle_components": [],
+          "line_total": 3000,
+          "price_flagged": null,
+          "quantity": 1,
+          "unit_price": 3000
+        },
+        {
+          "addons": [
+            {
+              "id": "c0de0000-0000-4000-8000-000000000060",
+              "line_total": 50,
+              "quantity": 1,
+              "unit_price": 50
+            }
+          ],
+          "bundle_components": [],
+          "line_total": 3500,
+          "price_flagged": null,
+          "quantity": 1,
+          "unit_price": 3500
+        },
+        {
+          "addons": [],
+          "bundle_components": [],
+          "line_total": 4000,
+          "price_flagged": null,
+          "quantity": 1,
+          "unit_price": 4000
+        }
+      ],
+      "price_flagged": false,
+      "subtotal": 10700,
+      "tax_amount": 1498,
+      "total_amount": 12198
+    },
+    "swaps_and_sizes": {
+      "items": [
+        {
+          "addons": [
+            {
+              "id": "c0de0000-0000-4000-8000-000000000052",
+              "line_total": 1600,
+              "quantity": 1,
+              "unit_price": 800
+            },
+            {
+              "id": "c0de0000-0000-4000-8000-000000000061",
+              "line_total": 300,
+              "quantity": 1,
+              "unit_price": 150
+            }
+          ],
+          "bundle_components": [],
+          "line_total": 6000,
+          "price_flagged": null,
+          "quantity": 2,
+          "unit_price": 3000
+        },
+        {
+          "addons": [
+            {
+              "id": "c0de0000-0000-4000-8000-00000000005d",
+              "line_total": 400,
+              "quantity": 1,
+              "unit_price": 400
+            }
+          ],
+          "bundle_components": [],
+          "line_total": 1500,
+          "price_flagged": null,
+          "quantity": 1,
+          "unit_price": 1500
+        },
+        {
+          "addons": [
+            {
+              "id": "c0de0000-0000-4000-8000-00000000005a",
+              "line_total": 300,
+              "quantity": 1,
+              "unit_price": 300
+            }
+          ],
+          "bundle_components": [],
+          "line_total": 3500,
+          "price_flagged": null,
+          "quantity": 1,
+          "unit_price": 3500
+        }
+      ],
+      "price_flagged": false,
+      "subtotal": 13600,
+      "tax_amount": 1904,
+      "total_amount": 15504
+    }
+  },
+  "cases": {
+    "americano_oat_no_milk_to_swap": {
+      "addon_line": 800,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 800
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002d",
+          "name": "Water",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 2000,
+      "warnings": [
+        {
+          "message": "\"Oat milk\" swaps the drink's milk but the recipe has no milk line: nothing is swapped",
+          "rule": "swap_failed"
+        }
+      ]
+    },
+    "cappuccino_large": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3300,
+      "warnings": []
+    },
+    "cappuccino_no_size_is_the_lowest_size": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 240.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 2800,
+      "warnings": []
+    },
+    "component_croissant": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002e",
+          "name": "Butter",
+          "note": null,
+          "optional": null,
+          "quantity": 20.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": null,
+      "warnings": []
+    },
+    "component_latte_no_size_barista": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000051",
+          "is_swap": true,
+          "name": "Barista whole",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": null,
+      "warnings": []
+    },
+    "component_latte_small_oat_shot": {
+      "addon_line": 950,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 800
+        },
+        {
+          "has_ingredients": true,
+          "id": "c0de0000-0000-4000-8000-000000000061",
+          "is_swap": false,
+          "name": "Extra shot",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 150
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000021",
+          "name": "Oat milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Oat milk",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": "c0de0000-0000-4000-8000-000000000061",
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 18.0,
+          "source": "addon",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": null,
+      "warnings": []
+    },
+    "component_retired_is_still_resolved": {
+      "addon_line": 150,
+      "addons": [
+        {
+          "has_ingredients": true,
+          "id": "c0de0000-0000-4000-8000-000000000061",
+          "is_swap": false,
+          "name": "Extra shot",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 150
+        }
+      ],
+      "deductions": [
+        {
+          "addon": "c0de0000-0000-4000-8000-000000000061",
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 18.0,
+          "source": "addon",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": null,
+      "warnings": []
+    },
+    "croissant_one_size": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002e",
+          "name": "Butter",
+          "note": null,
+          "optional": null,
+          "quantity": 20.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 2500,
+      "warnings": []
+    },
+    "latte_almond_switched_off_at_the_branch": {
+      "addon_line": 650,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000053",
+          "is_swap": true,
+          "name": "Almond milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 650
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000022",
+          "name": "Almond milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Almond milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_barista_whole_shares_the_recipe_milk": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000051",
+          "is_swap": true,
+          "name": "Barista whole",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_bulk_bean_in_kg": {
+      "addon_line": 50,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000063",
+          "is_swap": true,
+          "name": "Bulk bean",
+          "quantity": 1,
+          "swap_over": "Colombian espresso",
+          "unit_price": 50
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000030",
+          "name": "Bulk bean",
+          "note": "swapped from Espresso bean",
+          "optional": null,
+          "quantity": 0.036,
+          "source": "addon_swap:Bulk bean",
+          "undeducted": false,
+          "unit": "kg"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_caramel_no_syrup_line": {
+      "addon_line": 250,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000060",
+          "is_swap": true,
+          "name": "Caramel",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 250
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": [
+        {
+          "message": "\"Caramel\" swaps the drink's syrup but the recipe has no syrup line: nothing is swapped",
+          "rule": "swap_failed"
+        }
+      ]
+    },
+    "latte_colombian_shares_the_recipe_bean": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005b",
+          "is_swap": true,
+          "name": "Colombian espresso",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_decaf_over_its_own_groups_bean": {
+      "addon_line": 300,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005a",
+          "is_swap": true,
+          "name": "Decaf",
+          "quantity": 1,
+          "swap_over": "Colombian espresso",
+          "unit_price": 300
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000027",
+          "name": "Decaf bean",
+          "note": "swapped from Espresso bean",
+          "optional": null,
+          "quantity": 36.0,
+          "source": "addon_swap:Decaf",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_everything": {
+      "addon_line": 1700,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 800
+        },
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005a",
+          "is_swap": true,
+          "name": "Decaf",
+          "quantity": 1,
+          "swap_over": "Colombian espresso",
+          "unit_price": 300
+        },
+        {
+          "has_ingredients": true,
+          "id": "c0de0000-0000-4000-8000-000000000061",
+          "is_swap": false,
+          "name": "Extra shot",
+          "quantity": 2,
+          "swap_over": null,
+          "unit_price": 150
+        },
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000062",
+          "is_swap": false,
+          "name": "Sprinkles",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 50
+        },
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000060",
+          "is_swap": true,
+          "name": "Caramel",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 250
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000027",
+          "name": "Decaf bean",
+          "note": "swapped from Espresso bean",
+          "optional": null,
+          "quantity": 36.0,
+          "source": "addon_swap:Decaf",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000023",
+          "name": "Oat barista",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Oat milk",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": "c0de0000-0000-4000-8000-000000000061",
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000027",
+          "name": "Decaf bean",
+          "note": "follows the chosen Decaf bean",
+          "optional": null,
+          "quantity": 36.0,
+          "source": "addon",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002f",
+          "name": "Cream",
+          "note": null,
+          "optional": "c0de0000-0000-4000-8000-000000000081",
+          "quantity": 40.0,
+          "source": "optional",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 150,
+      "optionals": [
+        {
+          "id": "c0de0000-0000-4000-8000-000000000080",
+          "price": 0
+        },
+        {
+          "id": "c0de0000-0000-4000-8000-000000000081",
+          "price": 150
+        }
+      ],
+      "unit_price": 4000,
+      "warnings": [
+        {
+          "message": "\"Caramel\" swaps the drink's syrup but the recipe has no syrup line: nothing is swapped",
+          "rule": "swap_failed"
+        }
+      ]
+    },
+    "latte_extra_hot": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [
+        {
+          "id": "c0de0000-0000-4000-8000-000000000080",
+          "price": 0
+        }
+      ],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_extra_hot_twice": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [
+        {
+          "id": "c0de0000-0000-4000-8000-000000000080",
+          "price": 0
+        },
+        {
+          "id": "c0de0000-0000-4000-8000-000000000080",
+          "price": 0
+        }
+      ],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_green_tea_no_tea_line": {
+      "addon_line": 700,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005d",
+          "is_swap": true,
+          "name": "Green tea",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 700
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": [
+        {
+          "message": "\"Green tea\" swaps the drink's tea but the recipe has no tea line: nothing is swapped",
+          "rule": "swap_failed"
+        }
+      ]
+    },
+    "latte_house_espresso_is_the_recipe": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000059",
+          "is_swap": true,
+          "name": "House espresso",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_inactive_size_falls_back_to_the_branch_item_price": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3500,
+      "warnings": []
+    },
+    "latte_large_branch_size_price": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 4000,
+      "warnings": []
+    },
+    "latte_large_cream": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002f",
+          "name": "Cream",
+          "note": null,
+          "optional": "c0de0000-0000-4000-8000-000000000081",
+          "quantity": 40.0,
+          "source": "optional",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 150,
+      "optionals": [
+        {
+          "id": "c0de0000-0000-4000-8000-000000000081",
+          "price": 150
+        }
+      ],
+      "unit_price": 4000,
+      "warnings": []
+    },
+    "latte_large_oat_per_size_line": {
+      "addon_line": 800,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 800
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000023",
+          "name": "Oat barista",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Oat milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 4000,
+      "warnings": []
+    },
+    "latte_mystery_milk_has_no_lines": {
+      "addon_line": 400,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000055",
+          "is_swap": false,
+          "name": "Mystery milk",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 400
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_no_size_is_the_branch_item_price": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3500,
+      "warnings": []
+    },
+    "latte_oat_at_the_branch_price": {
+      "addon_line": 800,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 800
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000021",
+          "name": "Oat milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Oat milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_oat_no_size": {
+      "addon_line": 800,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 800
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000021",
+          "name": "Oat milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Oat milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3500,
+      "warnings": []
+    },
+    "latte_oat_then_almond_keeps_almond": {
+      "addon_line": 650,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000053",
+          "is_swap": true,
+          "name": "Almond milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 650
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000022",
+          "name": "Almond milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Almond milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_oat_twice_beside_a_shot": {
+      "addon_line": 950,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 1,
+          "swap_over": "Whole milk",
+          "unit_price": 800
+        },
+        {
+          "has_ingredients": true,
+          "id": "c0de0000-0000-4000-8000-000000000061",
+          "is_swap": false,
+          "name": "Extra shot",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 150
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000021",
+          "name": "Oat milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Oat milk",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": "c0de0000-0000-4000-8000-000000000061",
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 18.0,
+          "source": "addon",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_old_milk_inactive": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000054",
+          "is_swap": true,
+          "name": "Old milk",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_one_oat_twice": {
+      "addon_line": 1600,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000052",
+          "is_swap": true,
+          "name": "Oat milk",
+          "quantity": 2,
+          "swap_over": "Whole milk",
+          "unit_price": 800
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000021",
+          "name": "Oat milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Oat milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_retired_topping": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": [
+        {
+          "message": "Optional field c0de0000-0000-4000-8000-000000000082 is not an active option of this item: not charged nor deducted",
+          "rule": "optional_not_found"
+        }
+      ]
+    },
+    "latte_shot_follows_decaf": {
+      "addon_line": 450,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005a",
+          "is_swap": true,
+          "name": "Decaf",
+          "quantity": 1,
+          "swap_over": "Colombian espresso",
+          "unit_price": 300
+        },
+        {
+          "has_ingredients": true,
+          "id": "c0de0000-0000-4000-8000-000000000061",
+          "is_swap": false,
+          "name": "Extra shot",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 150
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000027",
+          "name": "Decaf bean",
+          "note": "swapped from Espresso bean",
+          "optional": null,
+          "quantity": 36.0,
+          "source": "addon_swap:Decaf",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": "c0de0000-0000-4000-8000-000000000061",
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000027",
+          "name": "Decaf bean",
+          "note": "follows the chosen Decaf bean",
+          "optional": null,
+          "quantity": 18.0,
+          "source": "addon",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_size_only_the_branch_prices": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 4500,
+      "warnings": []
+    },
+    "latte_skim_no_group": {
+      "addon_line": 200,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000056",
+          "is_swap": true,
+          "name": "Skim milk",
+          "quantity": 1,
+          "swap_over": "Whole (alt)",
+          "unit_price": 200
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000024",
+          "name": "Skim milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Skim milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_small": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_small_cream_is_large_only": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": [
+        {
+          "message": "\"Whipped cream\" is only offered on size Large: skipped",
+          "rule": "optional_size_mismatch"
+        }
+      ]
+    },
+    "latte_soy_over_its_own_groups_whole": {
+      "addon_line": 450,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000058",
+          "is_swap": true,
+          "name": "Soy milk",
+          "quantity": 1,
+          "swap_over": "Whole (alt)",
+          "unit_price": 450
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000025",
+          "name": "Soy milk",
+          "note": "swapped from Whole milk",
+          "optional": null,
+          "quantity": 400.0,
+          "source": "addon_swap:Soy milk",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_sprinkles_no_lines": {
+      "addon_line": 50,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000062",
+          "is_swap": false,
+          "name": "Sprinkles",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 50
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_two_shots": {
+      "addon_line": 300,
+      "addons": [
+        {
+          "has_ingredients": true,
+          "id": "c0de0000-0000-4000-8000-000000000061",
+          "is_swap": false,
+          "name": "Extra shot",
+          "quantity": 2,
+          "swap_over": null,
+          "unit_price": 150
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": "c0de0000-0000-4000-8000-000000000061",
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "addon",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_unknown_option": {
+      "error": "Not found: Addon c0de0000-0000-4000-8000-00000000dead not found"
+    },
+    "latte_unknown_size": {
+      "addon_line": 0,
+      "addons": [],
+      "deductions": [],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3500,
+      "warnings": []
+    },
+    "latte_whole_alt_is_the_recipe": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000057",
+          "is_swap": true,
+          "name": "Whole (alt)",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_whole_is_the_recipe": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000050",
+          "is_swap": true,
+          "name": "Whole milk",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "latte_zero_quantity_counts_one": {
+      "addon_line": 150,
+      "addons": [
+        {
+          "has_ingredients": true,
+          "id": "c0de0000-0000-4000-8000-000000000061",
+          "is_swap": false,
+          "name": "Extra shot",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 150
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": "c0de0000-0000-4000-8000-000000000061",
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 18.0,
+          "source": "addon",
+          "undeducted": false,
+          "unit": "g"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3000,
+      "warnings": []
+    },
+    "retired_has_no_priced_size": {
+      "error": "Bad request: Menu item c0de0000-0000-4000-8000-000000000076 has no priced size"
+    },
+    "tea_cup_black_is_the_recipe": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005c",
+          "is_swap": true,
+          "name": "Black tea",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "tea",
+          "ingredient": "c0de0000-0000-4000-8000-000000000028",
+          "name": "Black tea",
+          "note": null,
+          "optional": null,
+          "quantity": 6.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002d",
+          "name": "Water",
+          "note": null,
+          "optional": null,
+          "quantity": 500.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 1500,
+      "warnings": []
+    },
+    "tea_cup_green": {
+      "addon_line": 400,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005d",
+          "is_swap": true,
+          "name": "Green tea",
+          "quantity": 1,
+          "swap_over": "Black tea",
+          "unit_price": 400
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "tea",
+          "ingredient": "c0de0000-0000-4000-8000-000000000029",
+          "name": "Green tea",
+          "note": "swapped from Black tea",
+          "optional": null,
+          "quantity": 6.0,
+          "source": "addon_swap:Green tea",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002d",
+          "name": "Water",
+          "note": null,
+          "optional": null,
+          "quantity": 500.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 1500,
+      "warnings": []
+    },
+    "tea_green_then_black_keeps_black": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005c",
+          "is_swap": true,
+          "name": "Black tea",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "tea",
+          "ingredient": "c0de0000-0000-4000-8000-000000000028",
+          "name": "Black tea",
+          "note": null,
+          "optional": null,
+          "quantity": 6.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002d",
+          "name": "Water",
+          "note": null,
+          "optional": null,
+          "quantity": 500.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 1500,
+      "warnings": []
+    },
+    "tea_no_size_green_reads_the_first_size": {
+      "addon_line": 400,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005d",
+          "is_swap": true,
+          "name": "Green tea",
+          "quantity": 1,
+          "swap_over": "Black tea",
+          "unit_price": 400
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "tea",
+          "ingredient": "c0de0000-0000-4000-8000-000000000029",
+          "name": "Green tea",
+          "note": "swapped from Black tea",
+          "optional": null,
+          "quantity": 6.0,
+          "source": "addon_swap:Green tea",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002d",
+          "name": "Water",
+          "note": null,
+          "optional": null,
+          "quantity": 500.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 1500,
+      "warnings": []
+    },
+    "tea_pot_white_named_replacement": {
+      "addon_line": 250,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005e",
+          "is_swap": true,
+          "name": "White tea",
+          "quantity": 1,
+          "swap_over": "Black tea",
+          "unit_price": 250
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "tea",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002a",
+          "name": "White tea",
+          "note": "swapped from Black tea",
+          "optional": null,
+          "quantity": 6.0,
+          "source": "addon_swap:White tea",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "general",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002d",
+          "name": "Water",
+          "note": null,
+          "optional": null,
+          "quantity": 500.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 2500,
+      "warnings": []
+    },
+    "vlatte_caramel": {
+      "addon_line": 50,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000060",
+          "is_swap": true,
+          "name": "Caramel",
+          "quantity": 1,
+          "swap_over": "Vanilla",
+          "unit_price": 50
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "syrup",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002c",
+          "name": "Caramel syrup",
+          "note": "swapped from Vanilla syrup",
+          "optional": null,
+          "quantity": 30.0,
+          "source": "addon_swap:Caramel",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3500,
+      "warnings": []
+    },
+    "vlatte_two_vanilla_and_a_caramel": {
+      "addon_line": 50,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-000000000060",
+          "is_swap": true,
+          "name": "Caramel",
+          "quantity": 1,
+          "swap_over": "Vanilla",
+          "unit_price": 50
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "syrup",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002c",
+          "name": "Caramel syrup",
+          "note": "swapped from Vanilla syrup",
+          "optional": null,
+          "quantity": 30.0,
+          "source": "addon_swap:Caramel",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3500,
+      "warnings": []
+    },
+    "vlatte_vanilla_is_the_recipe": {
+      "addon_line": 0,
+      "addons": [
+        {
+          "has_ingredients": false,
+          "id": "c0de0000-0000-4000-8000-00000000005f",
+          "is_swap": true,
+          "name": "Vanilla",
+          "quantity": 1,
+          "swap_over": null,
+          "unit_price": 0
+        }
+      ],
+      "deductions": [
+        {
+          "addon": null,
+          "category": "coffee_bean",
+          "ingredient": "c0de0000-0000-4000-8000-000000000026",
+          "name": "Espresso bean",
+          "note": null,
+          "optional": null,
+          "quantity": 36.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "g"
+        },
+        {
+          "addon": null,
+          "category": "syrup",
+          "ingredient": "c0de0000-0000-4000-8000-00000000002b",
+          "name": "Vanilla syrup",
+          "note": null,
+          "optional": null,
+          "quantity": 30.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        },
+        {
+          "addon": null,
+          "category": "milk",
+          "ingredient": "c0de0000-0000-4000-8000-000000000020",
+          "name": "Whole milk",
+          "note": null,
+          "optional": null,
+          "quantity": 400.0,
+          "source": "drink_recipe",
+          "undeducted": false,
+          "unit": "ml"
+        }
+      ],
+      "optional_line": 0,
+      "optionals": [],
+      "unit_price": 3500,
+      "warnings": []
+    }
+  }
+}
