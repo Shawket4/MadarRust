@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::errors::AppError;
 use crate::kitchen::{EmitKitchen, KitchenLine, KitchenSource, emit_kitchen_ticket};
-use crate::orders::handlers::{OrderItemInput, resolve_order_line};
+use crate::orders::handlers::{OrderItemInput, resolve_order_line_in};
 use crate::realtime::event::{BranchEvent, Topic};
 use crate::realtime::hub::BranchEventHub;
 
@@ -554,7 +554,7 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
 /// Resolve and price the client's items for the bill and the kitchen.
 ///
 /// The SAME per-line resolution the till's checkout uses
-/// (`orders::handlers::resolve_order_line`), so a line on the bill is priced
+/// (`orders::handlers::resolve_order_line_in`), so a line on the bill is priced
 /// with its optionals and bundle surcharges exactly as the settle will charge
 /// it. Pricing stays client-authoritative — a `unit_price` the client sent is
 /// kept — and the resolved prices are written back into the stored input so
@@ -570,6 +570,12 @@ pub(crate) async fn resolve_ticket_lines(
 ) -> Result<Vec<StoredTicketLine>, AppError> {
     let fired_at = Utc::now();
     let mut out = Vec::with_capacity(items.len());
+    // The round's items and add-ons in one batched load (madar-catalog's view).
+    let mut catalog = crate::orders::catalog_view::Catalog::new(Some(branch_id));
+    {
+        let (menu_ids, option_ids) = crate::orders::handlers::catalog_ids_of(items);
+        catalog.ensure_on(pool, &menu_ids, &option_ids).await?;
+    }
     for it in items {
         // A STAFF DRINK IS A COUNTER SALE. A table's bill is priced when each
         // round is fired and settled hours later, under a frozen policy; the
@@ -584,7 +590,9 @@ pub(crate) async fn resolve_ticket_lines(
                 reason: "A staff drink is rung at the till, not on a table's bill".into(),
             });
         }
-        let resolved = resolve_order_line(pool, org_id, branch_id, fired_at, it, prices).await?;
+        let resolved =
+            resolve_order_line_in(pool, &mut catalog, org_id, branch_id, fired_at, it, prices)
+                .await?;
 
         let mut frozen = it.clone();
         if frozen.staff_drink.take().is_some() {

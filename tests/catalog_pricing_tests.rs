@@ -262,15 +262,18 @@ async fn item(pool: &PgPool, id: Uuid, name: &str, sizes: &[(&str, i32, i32, boo
     let mut ordered: Vec<_> = sizes.to_vec();
     ordered.sort_by_key(|s| !s.3);
     for (label, price, sort, active) in ordered {
+        // A fixed id per size, so the feed rows the vectors carry are stable.
+        let size_id = Uuid::from_u128(id.as_u128() + 0x1_0000 * (sort as u128 + 1));
         sqlx::query(
-            "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active) \
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort, is_active) \
+             VALUES ($6, $1, $2, $3, $4, $5)",
         )
         .bind(id)
         .bind(label)
         .bind(price)
         .bind(sort)
         .bind(active)
+        .bind(size_id)
         .execute(&mut *tx)
         .await
         .unwrap();
@@ -397,10 +400,12 @@ pub async fn seed(pool: &PgPool) {
         (C_SYRUP, "syrup"),
         (C_GENERAL, "general"),
     ] {
+        // The org may already hold the slug (seeded with the org): give it the
+        // fixed id, so the feed rows the vectors carry are stable.
         sqlx::query(
             "INSERT INTO ingredient_categories (id, org_id, slug, name, sort_order) \
              VALUES ($1, $2, $3, $3, 10) \
-             ON CONFLICT (org_id, slug) DO NOTHING",
+             ON CONFLICT (org_id, slug) DO UPDATE SET id = EXCLUDED.id",
         )
         .bind(cid)
         .bind(ORG)
@@ -1475,4 +1480,548 @@ async fn the_server_prices_the_fixture_as_pinned(pool: PgPool) {
         assert_eq!(&now["bills"][name], want, "bill {name}");
     }
     assert_eq!(now, pinned);
+}
+
+// ── madar-catalog: the rule, the feed and the vectors ────────────────────────
+
+const VECTORS: &str = "../madar-shared/crates/madar-catalog/vectors/catalog_vectors.json";
+
+/// Every item of the fixture, by the key the vectors name it.
+fn fixture_items() -> Vec<(&'static str, Uuid)> {
+    vec![
+        ("latte", M_LATTE),
+        ("vanilla_latte", M_VLATTE),
+        ("tea", M_TEA),
+        ("americano", M_AMERICANO),
+        ("croissant", M_CROISSANT),
+        ("cappuccino", M_CAPPUCCINO),
+        ("retired", M_RETIRED),
+    ]
+}
+
+fn fixture_options() -> Vec<Uuid> {
+    vec![
+        A_WHOLE,
+        A_BARISTA_WHOLE,
+        A_OAT,
+        A_ALMOND,
+        A_OLD_MILK,
+        A_MYSTERY_MILK,
+        A_SKIM,
+        A_WHOLE_ALT,
+        A_SOY_ALT,
+        A_ESPRESSO,
+        A_DECAF,
+        A_COLOMBIAN,
+        A_BLACK,
+        A_GREEN,
+        A_WHITE,
+        A_VANILLA,
+        A_CARAMEL,
+        A_SHOT,
+        A_SPRINKLES,
+        A_KG_BEAN,
+    ]
+}
+
+fn key_of(item: Uuid) -> &'static str {
+    fixture_items()
+        .into_iter()
+        .find(|(_, id)| *id == item)
+        .map(|(k, _)| k)
+        .unwrap()
+}
+
+/// Drop what changes from one run to the next (timestamps), recursively.
+fn stable(mut v: Value) -> Value {
+    fn walk(v: &mut Value) {
+        match v {
+            Value::Object(m) => {
+                m.remove("created_at");
+                m.remove("updated_at");
+                m.values_mut().for_each(walk);
+            }
+            Value::Array(a) => a.iter_mut().for_each(walk),
+            _ => {}
+        }
+    }
+    walk(&mut v);
+    v
+}
+
+/// What a till receives for the fixture: the `/menu-items?full=true` rows of
+/// the branch and the `addon_item` feed rows.
+async fn feed_rows(pool: &PgPool) -> (Vec<Value>, Vec<Value>) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .configure(madar_rust::menu::routes::configure),
+    )
+    .await;
+    let token = madar_rust::auth::jwt::create_token(
+        &secret(),
+        USER,
+        Some(ORG),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!(
+                "/menu-items?org_id={ORG}&branch_id={BRANCH}&full=true"
+            ))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let menu: Vec<Value> = test::read_body_json(resp).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let projected = madar_rust::sync::pull::projection::project(
+        &mut conn,
+        ORG,
+        BRANCH,
+        "addon_item",
+        &fixture_options(),
+    )
+    .await
+    .unwrap();
+    let mut addons: Vec<(Uuid, Value)> = projected.into_iter().collect();
+    addons.sort_by_key(|(id, _)| *id);
+    (
+        menu.into_iter().map(stable).collect(),
+        addons.into_iter().map(|(_, v)| stable(v)).collect(),
+    )
+}
+
+fn selection_of(c: &Case) -> madar_catalog::Selection {
+    madar_catalog::Selection {
+        size_label: c.size.map(str::to_string),
+        options: c
+            .options
+            .iter()
+            .map(|(id, q)| madar_catalog::Pick {
+                id: id.to_string(),
+                quantity: i64::from(*q),
+            })
+            .collect(),
+        optionals: c.optionals.iter().map(Uuid::to_string).collect(),
+    }
+}
+
+/// The rule's answer in the pinned capture's terms (the fields both carry).
+fn as_captured(c: &Case, out: &madar_catalog::vectors::Expected) -> Value {
+    use madar_catalog::vectors::Expected;
+    let options = |p: &madar_catalog::PricedOptions| {
+        (
+            p.options
+                .iter()
+                .map(|o| {
+                    json!({
+                        "id": o.id, "unit_price": o.unit_price, "quantity": o.quantity,
+                        "is_swap": o.is_swap, "has_ingredients": o.has_ingredients,
+                        "swap_over": o.over.as_ref().map(|b| b.name.clone()),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            p.optionals
+                .iter()
+                .map(|o| json!({"id": o.id, "price": o.price}))
+                .collect::<Vec<_>>(),
+            p.option_total,
+            p.optional_total,
+        )
+    };
+    match out {
+        Expected::Line(l) => {
+            let (a, o, at, ot) = options(&l.options);
+            json!({"unit_price": l.unit_price, "addons": a, "optionals": o, "addon_line": at, "optional_line": ot})
+        }
+        Expected::Component(p) => {
+            let (a, o, at, ot) = options(p);
+            json!({"unit_price": null, "addons": a, "optionals": o, "addon_line": at, "optional_line": ot})
+        }
+        Expected::Error(madar_catalog::PriceError::UnknownOption { id }) => {
+            json!({"error": format!("Not found: Addon {id} not found")})
+        }
+        Expected::Error(madar_catalog::PriceError::NoPricedSize) => {
+            json!({"error": format!("Bad request: Menu item {} has no priced size", c.item)})
+        }
+    }
+}
+
+/// The capture reduced to the fields the rule answers.
+fn captured_price(v: &Value) -> Value {
+    if v.get("error").is_some() {
+        return json!({"error": v["error"]});
+    }
+    json!({
+        "unit_price": v["unit_price"],
+        "addons": v["addons"].as_array().unwrap().iter().map(|a| json!({
+            "id": a["id"], "unit_price": a["unit_price"], "quantity": a["quantity"],
+            "is_swap": a["is_swap"], "has_ingredients": a["has_ingredients"],
+            "swap_over": a["swap_over"],
+        })).collect::<Vec<_>>(),
+        "optionals": v["optionals"],
+        "addon_line": v["addon_line"],
+        "optional_line": v["optional_line"],
+    })
+}
+
+/// madar-catalog over the loader's view prices every case as the server did
+/// before the move (the capture); the feed rows a till receives rebuild the
+/// loader's view exactly (the parity the till's prices rest on); and the
+/// vectors the crate is pinned by are what this server writes today
+/// (`MADAR_WRITE_CATALOG_VECTORS=1` writes them into madar-shared).
+#[sqlx::test]
+async fn the_rule_the_feed_and_the_vectors_agree_with_the_server(pool: PgPool) {
+    use madar_catalog::vectors::{Case as VCase, ItemFixture, Vectors};
+    seed(&pool).await;
+    let pinned: Value = serde_json::from_str(&std::fs::read_to_string(CAPTURE).unwrap()).unwrap();
+
+    let mut catalog = madar_rust::orders::catalog_view::Catalog::new(Some(BRANCH));
+    let items: Vec<Uuid> = fixture_items().iter().map(|(_, id)| *id).collect();
+    catalog
+        .ensure_on(&pool, &items, &fixture_options())
+        .await
+        .unwrap();
+    let (menu_rows, addon_rows) = feed_rows(&pool).await;
+
+    let mut fixtures = Vec::new();
+    let options = catalog.view(M_LATTE).options;
+    for (key, id) in fixture_items() {
+        let view = catalog.view(id);
+        let menu_item = menu_rows
+            .iter()
+            .find(|r| r["id"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("{key} is not on the branch's menu"));
+        // The feed rebuilds the view the order path prices with.
+        let from_feed = madar_catalog::feed::view_of(&menu_item, &addon_rows)
+            .unwrap_or_else(|| panic!("{key}: no pricing on the feed row"));
+        assert_eq!(from_feed.item, view.item, "{key}: item view from the feed");
+        assert_eq!(
+            from_feed.options, view.options,
+            "{key}: option views from the feed"
+        );
+        fixtures.push(ItemFixture {
+            key: key.to_string(),
+            view: view.item,
+            menu_item,
+        });
+    }
+    let view_of = |key: &str| madar_catalog::CatalogView {
+        item: fixtures.iter().find(|f| f.key == key).unwrap().view.clone(),
+        options: options.clone(),
+    };
+
+    let mut vcases = Vec::new();
+    for c in cases() {
+        let vcase = VCase {
+            name: c.name.to_string(),
+            item: key_of(c.item).to_string(),
+            part: c.part.to_string(),
+            selection: selection_of(&c),
+            expected: madar_catalog::vectors::Expected::Error(
+                madar_catalog::PriceError::NoPricedSize,
+            ),
+        };
+        let expected = madar_catalog::vectors::run(&view_of(key_of(c.item)), &vcase);
+        // The server's answer before the move is the reference.
+        assert_eq!(
+            as_captured(&c, &expected),
+            captured_price(&pinned["cases"][c.name]),
+            "{}: madar-catalog disagrees with the server's capture",
+            c.name
+        );
+        vcases.push(VCase { expected, ..vcase });
+    }
+
+    let vectors = Vectors {
+        about: "madar-catalog: how a sale line is priced. Generated by MadarRust \
+                tests/catalog_pricing_tests.rs from the server's behaviour (every case \
+                checked against the order path's answer before the rule moved here); \
+                `feed` is what a till receives for the same catalogue."
+            .to_string(),
+        options,
+        addon_items: addon_rows,
+        items: fixtures,
+        cases: vcases,
+    };
+    let written = pretty(&serde_json::to_value(&vectors).unwrap());
+    if std::env::var("MADAR_WRITE_CATALOG_VECTORS").is_ok() {
+        std::fs::write(VECTORS, &written).unwrap();
+        return;
+    }
+    if let Ok(dump) = std::env::var("MADAR_DUMP_CATALOG_VECTORS") {
+        std::fs::write(dump, &written).unwrap();
+    }
+    let shipped: Value = serde_json::from_str(madar_catalog::vectors::CATALOG).unwrap();
+    assert_eq!(
+        serde_json::to_value(&vectors).unwrap(),
+        shipped,
+        "madar-catalog's vectors are not what this server writes: regenerate them \
+         (MADAR_WRITE_CATALOG_VECTORS=1) and release madar-shared"
+    );
+}
+
+/// A till still on the old rule (its own swap families) rings a line the
+/// server prices differently: the sale is TAKEN, at the till's figures, and
+/// flagged — never refused. This is how every tablet not yet updated to the
+/// shared rule keeps selling (discovery M4: green tea at 700 over a black-tea
+/// recipe, where the server charges the 400 difference).
+#[sqlx::test]
+async fn an_old_till_pricing_the_old_way_is_flagged_not_refused(pool: PgPool) {
+    seed(&pool).await;
+    let items = json!([{
+        "menu_item_id": M_TEA, "size_label": "Cup", "quantity": 1,
+        "addons": [{"addon_item_id": A_GREEN, "quantity": 1}],
+    }]);
+    // The old till: 1500 + 700, 14% on top.
+    let (status, body) = ring(
+        &pool,
+        &items,
+        json!({"subtotal": 2200, "total_amount": 2508}),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["subtotal"], 2200);
+    assert_eq!(body["total_amount"], 2508);
+    assert_eq!(body["price_flagged"], true);
+    // What the server expected: 1500 + 400, 14% on top.
+    let expected: Option<i32> =
+        sqlx::query_scalar("SELECT price_expected_total FROM orders WHERE id = $1")
+            .bind(body["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(expected, Some(2166));
+
+    // The same line from an updated till agrees with the server: not flagged.
+    let (status, body) = ring(
+        &pool,
+        &items,
+        json!({"subtotal": 1900, "total_amount": 2166}),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["price_flagged"], false);
+}
+
+/// The feed's THIRD encoding of a swap base, `default_milk_addon_id` on every
+/// `/menu-items` row (discovery M4). Tills up to this release charge a milk as
+/// the difference over it; the shared rule no longer reads it. It is kept as
+/// it was — changing it would move old tablets' prices — and pinned here: the
+/// first `milk_type` add-on carrying any of the recipe's ingredients, in its
+/// group's display order, an inactive one included. On the fixture that is
+/// "Old milk" (inactive, sort 0), where the order path charges over "Whole
+/// milk" (active first).
+#[sqlx::test]
+async fn the_legacy_default_milk_is_pinned_as_it_was(pool: PgPool) {
+    seed(&pool).await;
+    let (menu, _) = feed_rows(&pool).await;
+    let milk = |item: Uuid| {
+        menu.iter()
+            .find(|r| r["id"] == json!(item))
+            .map(|r| r["default_milk_addon_id"].clone())
+            .unwrap()
+    };
+    assert_eq!(milk(M_LATTE), json!(A_OLD_MILK.to_string()));
+    assert_eq!(milk(M_VLATTE), json!(A_OLD_MILK.to_string()));
+    assert_eq!(milk(M_TEA), Value::Null);
+    assert_eq!(milk(M_CROISSANT), Value::Null);
+}
+
+/// M6: the lines madar-catalog prices, through madar-money's bill assembly
+/// (the staff comp off the line first, then tax on the rest), are the bill the
+/// server books — a staff drink with swaps, a swap line and a bundle whose
+/// components carry options, on one order. The comp itself is the server's
+/// (`madar_money::staff_comp`, pinned by its own vectors); what this checks is
+/// that the prices it is taken from, and the bill around it, are the shared
+/// rule's.
+#[sqlx::test]
+async fn the_shared_prices_make_the_servers_bill(pool: PgPool) {
+    use madar_money::bill::{BillDiscount, BillLine, price_bill};
+    use madar_money::line::{charged_subtotal, component_surcharge};
+    seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO staff_pool_settings (org_id, branch_id, enabled, daily_allowance, eligible_item_ids) \
+         VALUES ($1, NULL, true, 5, $2)",
+    )
+    .bind(ORG)
+    .bind(vec![M_LATTE])
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason) \
+         VALUES ($1, $2, 223, 'allow', 'test')",
+    )
+    .bind(ORG)
+    .bind(USER)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let latte = case(
+        "staff_latte",
+        M_LATTE,
+        Some("Large"),
+        &[(A_OAT, 1), (A_DECAF, 1), (A_SHOT, 2)],
+        &[O_CREAM],
+    );
+    let tea = case("tea", M_TEA, Some("Cup"), &[(A_GREEN, 1)], &[]);
+    let comp_latte = case(
+        "c_latte",
+        M_LATTE,
+        Some("Small"),
+        &[(A_BARISTA_WHOLE, 1), (A_SHOT, 1)],
+        &[],
+    );
+    let comp_croissant = case("c_croissant", M_CROISSANT, None, &[], &[]);
+    let wire = |c: &Case| {
+        c.options
+            .iter()
+            .map(|(a, q)| json!({"addon_item_id": a, "quantity": q}))
+            .collect::<Vec<_>>()
+    };
+    let items = json!([
+        {"menu_item_id": M_LATTE, "size_label": "Large", "quantity": 1, "addons": wire(&latte),
+         "optional_field_ids": latte.optionals,
+         "staff_drink": {"id": id(0xa1), "note": "Mona, on shift"}},
+        {"menu_item_id": M_TEA, "size_label": "Cup", "quantity": 3, "addons": wire(&tea)},
+        {"bundle_id": B_BREAKFAST, "quantity": 2, "bundle_components": [
+            {"item_id": M_LATTE, "quantity": 2, "size_label": "Small", "addons": wire(&comp_latte), "optional_field_ids": []},
+            {"item_id": M_CROISSANT, "quantity": 1, "addons": [], "optional_field_ids": []}
+        ]},
+    ]);
+    let (status, order) = ring(&pool, &items, json!({})).await;
+    assert_eq!(status, 201, "{order}");
+
+    let mut catalog = madar_rust::orders::catalog_view::Catalog::new(Some(BRANCH));
+    catalog
+        .ensure_on(&pool, &[M_LATTE, M_TEA, M_CROISSANT], &fixture_options())
+        .await
+        .unwrap();
+    let price =
+        |c: &Case| madar_catalog::price_line(&catalog.view(c.item), &selection_of(c)).unwrap();
+    let extras = |c: &Case| {
+        let p = madar_catalog::price_options(&catalog.view(c.item), &selection_of(c)).unwrap();
+        p.option_total + p.optional_total
+    };
+    let booked = order["items"].as_array().unwrap();
+    let comp_of = |i: usize| i64::from(booked[i]["staff_comp_minor"].as_i64().unwrap() as i32);
+    assert!(comp_of(0) > 0, "the latte is a staff drink: {}", booked[0]);
+
+    let lines = [
+        BillLine {
+            charged: charged_subtotal(price(&latte).per_unit(), 1, 0),
+            per_unit: price(&latte).per_unit(),
+            reward_units: 0,
+            staff_comp: comp_of(0),
+        },
+        BillLine {
+            charged: charged_subtotal(price(&tea).per_unit(), 3, 0),
+            per_unit: price(&tea).per_unit(),
+            reward_units: 0,
+            staff_comp: 0,
+        },
+        BillLine {
+            charged: charged_subtotal(
+                5000,
+                2,
+                component_surcharge(extras(&comp_latte), 2, 2)
+                    + component_surcharge(extras(&comp_croissant), 1, 2),
+            ),
+            per_unit: 5000,
+            reward_units: 0,
+            staff_comp: 0,
+        },
+    ];
+    // The rows the server stored carry the shared rule's prices.
+    for (i, c) in [(0, &latte), (1, &tea)] {
+        let p = price(c);
+        assert_eq!(booked[i]["unit_price"], json!(p.unit_price), "line {i}");
+        let stored: Vec<(Value, Value, Value)> = booked[i]["addons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["addon_item_id"].clone(),
+                    a["unit_price"].clone(),
+                    a["quantity"].clone(),
+                )
+            })
+            .collect();
+        let rule: Vec<(Value, Value, Value)> = p
+            .options
+            .options
+            .iter()
+            .map(|o| (json!(o.id), json!(o.unit_price), json!(o.quantity)))
+            .collect();
+        assert_eq!(stored, rule, "line {i}");
+    }
+    let policy = madar_money::tax::TaxPolicy {
+        tax_rate: rust_decimal::Decimal::new(14, 2),
+        tax_inclusive: false,
+        service_charge_rate: rust_decimal::Decimal::ZERO,
+        service_charge_taxable: true,
+    };
+    let bill = price_bill(&lines, BillDiscount::Stated(0), &policy);
+    assert_eq!(order["subtotal"], json!(bill.breakdown.subtotal));
+    assert_eq!(order["tax_amount"], json!(bill.breakdown.tax));
+    assert_eq!(order["total_amount"], json!(bill.breakdown.total));
+    assert_eq!(order["price_flagged"], false);
+}
+
+/// An add-on's feed row carries its group's effect and swap category (its
+/// `pricing`), so the row moves when they do — for a group of any kind, not
+/// only a legacy-typed one (migration 20261002000000).
+#[sqlx::test]
+async fn a_groups_effect_change_moves_its_options_feed_rows(pool: PgPool) {
+    seed(&pool).await;
+    let custom = id(0x47);
+    let option_id = id(0x64);
+    group(&pool, custom, "Custom", None, "adds", None).await;
+    option(
+        &pool,
+        option_id,
+        "Jasmine",
+        "extra",
+        450,
+        Some((custom, 1)),
+        true,
+        None,
+    )
+    .await;
+    let seq = || async {
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT max(seq) FROM sync_changes WHERE type = 'addon_item' AND entity_id = $1",
+        )
+        .bind(option_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let before = seq().await;
+    let tea: Uuid = sqlx::query_scalar(
+        "SELECT id FROM ingredient_categories WHERE org_id = $1 AND slug = 'tea'",
+    )
+    .bind(ORG)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE modifier_groups SET effect = 'swaps', swap_category_id = $2 WHERE id = $1")
+        .bind(custom)
+        .bind(tea)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let after = seq().await;
+    assert!(after > before, "{before:?} -> {after:?}");
 }

@@ -177,6 +177,14 @@ pub struct AddonItem {
     #[serde(default)]
     #[sqlx(skip)]
     pub ingredients: Vec<AddonItemIngredient>,
+    /// How a sale line charges this option: madar-catalog's `OptionView`
+    /// (branch-effective price, its group's effect and swap category, the
+    /// ingredient it replaces, its lines per size). The till prices lines with
+    /// it exactly as the order path does. Additive; older tills ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[sqlx(skip)]
+    #[schema(value_type = Option<Object>)]
+    pub pricing: Option<madar_catalog::OptionView>,
 }
 
 // ── Addon Slot models ─────────────────────────────────────────
@@ -272,6 +280,14 @@ pub struct MenuItemFull {
     pub recipe_steps: Vec<crate::recipes::steps::RecipeStep>,
     /// Explicit per-item addon allowlist. Empty = no restriction (use org catalog).
     pub allowed_addon_ids: Vec<Uuid>,
+    /// How a sale line of this item is priced at the requested branch:
+    /// madar-catalog's `ItemView` (sizes with their branch prices, the
+    /// branch's item price, the recipe's swap bases and their candidates, the
+    /// optional fields). The till prices with it exactly as the order path
+    /// does. Present on `?full=true` lists; additive, older tills ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub pricing: Option<madar_catalog::ItemView>,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -921,6 +937,10 @@ pub async fn list_menu_items(
             crate::recipes::steps::fetch_org_steps(pool.get_ref(), query.org_id).await?;
         let mut result: Vec<MenuItemFull> = vec![];
         attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
+        // Every item's pricing view in one batched load (the order path's).
+        let mut pricing = crate::orders::catalog_view::Catalog::new(query.branch_id);
+        let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+        pricing.ensure_on(pool.get_ref(), &ids, &[]).await?;
         for item in items {
             let mut sizes = fetch_sizes(pool.get_ref(), item.id).await?;
             let mut all_sizes = fetch_all_sizes(pool.get_ref(), item.id).await?;
@@ -936,6 +956,7 @@ pub async fn list_menu_items(
             let recipes = fetch_item_recipes(pool.get_ref(), item.id).await?;
             let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
             let recipe_steps = steps_by_item.remove(&item.id).unwrap_or_default();
+            let item_pricing = pricing.item(item.id).map(|i| i.view.clone());
             result.push(MenuItemFull {
                 item,
                 sizes,
@@ -945,6 +966,7 @@ pub async fn list_menu_items(
                 recipes,
                 recipe_steps,
                 allowed_addon_ids,
+                pricing: item_pricing,
             });
         }
         let body = web::Bytes::from(serde_json::to_vec(&result).map_err(|_| AppError::Internal)?);
@@ -1147,6 +1169,7 @@ pub async fn get_menu_item(
         recipes,
         recipe_steps,
         allowed_addon_ids,
+        pricing: None,
     }))
 }
 
@@ -1250,6 +1273,7 @@ pub async fn create_menu_item(
         recipes: vec![],
         recipe_steps: vec![],
         allowed_addon_ids: vec![],
+        pricing: None,
     }))
 }
 
@@ -1671,6 +1695,15 @@ pub async fn list_addon_items(
 
     for addon in &mut rows {
         addon.ingredients = fetch_addon_ingredients(pool.get_ref(), addon.id).await?;
+    }
+    // Each option's pricing view, branch-effective, in one batched load.
+    {
+        let mut pricing = crate::orders::catalog_view::Catalog::new(query.branch_id);
+        let ids: Vec<Uuid> = rows.iter().map(|a| a.id).collect();
+        pricing.ensure_on(pool.get_ref(), &[], &ids).await?;
+        for addon in &mut rows {
+            addon.pricing = pricing.option(addon.id).map(|o| o.view.clone());
+        }
     }
 
     if !paginated {
@@ -3396,9 +3429,12 @@ pub(crate) async fn addon_items_by_ids(
                 category_slug,
             });
     }
+    let mut pricing = crate::orders::catalog_view::Catalog::new(Some(branch_id));
+    pricing.ensure(&mut *conn, &[], ids).await?;
     let mut out = std::collections::HashMap::new();
     for mut a in rows.drain(..) {
         a.ingredients = ingredients.remove(&a.id).unwrap_or_default();
+        a.pricing = pricing.option(a.id).map(|o| o.view.clone());
         let id = a.id;
         let mut v = serde_json::to_value(&a).unwrap_or(serde_json::Value::Null);
         if let serde_json::Value::Object(m) = &mut v {

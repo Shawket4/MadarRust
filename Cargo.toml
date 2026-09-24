@@ -29,6 +29,9 @@ madar-ids          = { git = "https://github.com/Shawket4/madar-shared", tag = "
 # Dawam rules the staff app runs too (the geofence, the pay period, the
 # offline stamp's shape; the HMAC stays here), same tag.
 madar-dawam        = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
+# How a sale line is priced from the catalogue (size, swaps, add-ons, optional
+# fields): the rule this server defined and the till now runs too, same tag.
+madar-catalog      = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.2.0" }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"
