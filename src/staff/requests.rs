@@ -122,6 +122,16 @@ pub struct StaffRequest {
     #[sqlx(default)]
     #[serde(default)]
     pub cancel_note: Option<String>,
+    /// Who decided it, by name — their employee's name when linked, else
+    /// their account's — so a phone that can't look up the owner's account
+    /// still names them (RQ-F6).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub decided_by_name: Option<String>,
+    /// Who cancelled it, by name, the same way.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub cancelled_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// A manager's own request waiting for someone above them (RQ-5): the
@@ -166,10 +176,16 @@ const REQUEST_SELECT: &str = r#"
            r.title, r.location,
            r.attendance_record_id, r.reason, r.status, r.is_paid, r.decided_by, r.decided_at,
            r.decision_note, r.cancelled_by, r.cancelled_at, r.cancel_note,
+           COALESCE(de.name, du.name) AS decided_by_name,
+           COALESCE(ce.name, cu.name) AS cancelled_by_name,
            r.created_at, r.updated_at,
            ar.check_in_at AS record_check_in_at, ar.check_out_at AS record_check_out_at
       FROM staff_requests r
       JOIN employees e ON e.id = r.employee_id
+      LEFT JOIN users du ON du.id = r.decided_by
+      LEFT JOIN employees de ON de.user_id = r.decided_by
+      LEFT JOIN users cu ON cu.id = r.cancelled_by
+      LEFT JOIN employees ce ON ce.user_id = r.cancelled_by
       LEFT JOIN leave_types t ON t.id = r.leave_type_id
       LEFT JOIN attendance_records ar ON ar.id = r.attendance_record_id
 "#;

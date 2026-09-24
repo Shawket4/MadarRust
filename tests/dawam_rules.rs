@@ -2514,3 +2514,81 @@ async fn request_refusals_carry_codes(pool: PgPool) {
         "{b}"
     );
 }
+
+/// RQ-F6 follow-up: a request names who decided and who cancelled it, so the
+/// employee's phone (which can't look up the owner's account) shows the
+/// name, not "a manager". The linked employee's name, else the account's.
+#[sqlx::test]
+async fn a_request_names_who_decided_and_who_cancelled_it(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let row = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "late_arrival", "on_date": "2026-09-10", "to_time": "10:00:00" }),
+    )
+    .await;
+    let (st, _) = decide(
+        &app,
+        &f.mgr_token(),
+        &row["id"],
+        json!({ "status": "approved", "note": "ok" }),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (st, _) = decide(
+        &app,
+        &f.owner_token(),
+        &row["id"],
+        json!({ "status": "cancelled", "note": "moved" }),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let s = session(&pool, f.e).await;
+    let phone = format!("{}|{}", s.token, s.device);
+    let mine = || {
+        let phone = phone.clone();
+        let id = row["id"].clone();
+        let app = &app;
+        async move {
+            let (st, list) = send!(*app, "GET", "/staff/me/requests".to_string(), phone);
+            assert_eq!(st, 200, "{list}");
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .cloned()
+                .unwrap()
+        }
+    };
+    let r = mine().await;
+    assert_eq!(r["decided_by_name"], "Mona", "{r}");
+    assert_eq!(r["cancelled_by_name"], "Omar", "{r}");
+    // The dashboard's list names them too.
+    let (st, list) = send!(app, "GET", "/staff/requests".to_string(), f.owner_token());
+    assert_eq!(st, 200, "{list}");
+    let r = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == row["id"])
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (r["decided_by_name"].clone(), r["cancelled_by_name"].clone()),
+        (json!("Mona"), json!("Omar"))
+    );
+    // No linked employee: the account's own name.
+    sqlx::query("UPDATE employees SET user_id = NULL WHERE id = $1")
+        .bind(f.e_owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let owner_name: String = sqlx::query_scalar("SELECT name FROM users WHERE id = $1")
+        .bind(f.owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(mine().await["cancelled_by_name"], json!(owner_name));
+}

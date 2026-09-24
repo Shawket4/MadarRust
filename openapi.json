@@ -90364,6 +90364,13 @@
             "format": "uuid",
             "description": "Who cancelled it (the person themselves or a manager), when and why."
           },
+          "cancelled_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who cancelled it, by name, the same way."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -90382,6 +90389,13 @@
             ],
             "format": "uuid",
             "description": "Who approved or rejected it, when and why. A later cancellation keeps\nthese (the approval stays on record) and fills `cancelled_*`."
+          },
+          "decided_by_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who decided it, by name — their employee's name when linked, else\ntheir account's — so a phone that can't look up the owner's account\nstill names them (RQ-F6)."
           },
           "decision_note": {
             "type": [
