@@ -1121,6 +1121,51 @@ async fn bonus_and_deduction_limits_are_separate_and_percent_lines_are_valued(po
     }
 }
 
+/// E2E B-PAY-1: a bonus percent outside 1–100 is told the range, not that "a
+/// deduction is an amount" (AD-1); a deduction with a percent still is (AD-2).
+#[sqlx::test]
+async fn a_bonus_percent_out_of_range_is_told_the_range(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    for p in [json!(0), json!(101), json!(-5)] {
+        let resp = call!(
+            app,
+            post,
+            "/staff/adjustments",
+            f.owner(),
+            json!({ "employee_id": f.amal, "kind": "bonus", "percent_of_base": p,
+                    "reason": "E2E", "effective_date": f.start })
+        );
+        assert_eq!(resp.status(), 400, "{p}");
+        let text = text_of(resp).await;
+        assert!(text.contains("percentage (1–100)"), "{p}: {text}");
+        assert!(!text.contains("deduction"), "{p}: {text}");
+    }
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        f.owner(),
+        json!({ "employee_id": f.amal, "kind": "deduction", "percent_of_base": 5,
+                "reason": "E2E", "effective_date": f.start })
+    );
+    assert_eq!(resp.status(), 400);
+    assert!(
+        text_of(resp)
+            .await
+            .contains("A deduction is an amount, not a percentage")
+    );
+    let n: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM payroll_bonuses WHERE org_id = $1) \
+              + (SELECT COUNT(*) FROM payroll_deductions WHERE org_id = $1)",
+    )
+    .bind(f.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 0, "nothing was written");
+}
+
 // ── the one pricing function (AT-9, RU-2, RU-6, RU-8, B2, PAY-13) ──────────
 
 #[sqlx::test]

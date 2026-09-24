@@ -546,7 +546,9 @@ pub async fn create_adjustment(
         (None, Some(p)) if body.kind == "bonus" && p > Decimal::ZERO && p <= Decimal::from(100) => {
             pricing::percent_of_salary(salary, p)
         }
-        (None, Some(_)) => {
+        // Only a deduction hears this; a bonus percent outside 1–100 falls
+        // through to the range (E2E B-PAY-1).
+        (None, Some(_)) if body.kind == "deduction" => {
             return Err(AppError::BadRequest(
                 "A deduction is an amount, not a percentage".into(),
             ));
