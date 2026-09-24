@@ -632,6 +632,7 @@ pub async fn replay(
             crate::orders::discount_authz::discount_ask(
                 pool.get_ref(),
                 token_org,
+                request.discount_id,
                 &request.discount_fields(),
             )
             .await?

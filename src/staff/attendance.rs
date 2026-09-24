@@ -1341,7 +1341,7 @@ pub(crate) async fn check_geofence(
         }
         return Ok(None);
     };
-    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
+    if !madar_dawam::geofence::in_range(lat, lng) {
         return Err(AppError::BadRequest("Coordinates are out of range".into()));
     }
 
@@ -1352,8 +1352,11 @@ pub(crate) async fn check_geofence(
         },
         LatLng { lat, lng },
     );
-    let radius = branch.geo_radius_meters.unwrap_or(200).max(0) as f64;
-    if require && distance > radius {
+    // The radius and the inside test are madar-shared's (`madar_dawam::geofence`),
+    // the staff app's fence too (DW2: an unset radius is 200 m, 0 is 0 m).
+    let radius_m = madar_dawam::geofence::effective_radius(branch.geo_radius_meters.map(i64::from));
+    let radius = radius_m as f64;
+    if require && !madar_dawam::geofence::inside(distance, radius_m) {
         // Coded with its figures so the app words it in the person's language
         // (AT-13, CL-2).
         return Err(AppError::CodedVars {

@@ -214,10 +214,11 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   re-emits that type.
 - **A report formula change regenerates the shared vectors.** Changing
   `compute_system_cash`, `report_figures` or the close-method figures means
-  `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run -E 'test(till_report_vectors)'`
-  and copying `tests/fixtures/till_report_vectors.json` into madar's
-  `rust-core/crates/madar-core/tests/fixtures/`; the POS computes the same
-  figures offline and its test asserts that file.
+  `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run --test tills_report_vectors_tests`,
+  which writes `till_report_vectors.json` / `till_edge_vectors.json` into the
+  madar-shared checkout beside this one (`crates/madar-till/vectors/`); the fold
+  there (`madar_till::report`, the POS core's too) must agree, and the change
+  ships with a madar-shared tag.
 - Additive fields only on payloads the POS mirrors (old tablets decode them).
 
 ### Realtime

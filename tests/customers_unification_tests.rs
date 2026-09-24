@@ -217,7 +217,7 @@ impl Drop for FreshDb {
 /// `phone_canonical`, with no exception list: the two may never disagree.
 #[sqlx::test]
 async fn phone_vectors_pass_in_rust_and_in_sql(pool: PgPool) {
-    let doc: Value = serde_json::from_str(include_str!("phone_vectors.json")).unwrap();
+    let doc: Value = serde_json::from_str(madar_ids::vectors::PHONE).unwrap();
     let valid = doc["valid"].as_array().unwrap();
     let invalid = doc["invalid"].as_array().unwrap();
     assert!(valid.len() >= 20 && invalid.len() >= 8);

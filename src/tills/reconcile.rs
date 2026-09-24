@@ -61,12 +61,13 @@ pub struct TillReconciliationLine {
     pub changed_after_close: bool,
 }
 
-pub const STATUS_CLEAN: &str = "clean";
-pub const STATUS_DISAGREED: &str = "disagreed";
-pub const STATUS_UNREVIEWED: &str = "unreviewed";
-pub const REPLAY_MISSING_NOTE: &str = "(no note)";
-pub const CODE_NOTE_REQUIRED: &str = "RECONCILIATION_NOTE_REQUIRED";
-pub const CODE_AMOUNT_REQUIRED: &str = "RECONCILIATION_AMOUNT_REQUIRED";
+// The pure half — the statuses, the codes, the rollup and the planner — is
+// madar-shared's (`madar_till::reconcile`), the one the till plans its offline
+// view with. This module keeps the SQL and the stored rows.
+pub use madar_till::reconcile::{
+    CODE_AMOUNT_REQUIRED, CODE_NOTE_REQUIRED, REPLAY_MISSING_NOTE, STATUS_CLEAN, STATUS_DISAGREED,
+    STATUS_UNREVIEWED, rollup_status,
+};
 
 const CASH_FALLBACK_NAME: &str = "cash";
 
@@ -191,47 +192,15 @@ fn clamp_i32(v: i64) -> i32 {
     v.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-fn blank_to_none(s: Option<&str>) -> Option<String> {
-    s.map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// Rollup: any disagreed → `disagreed`, else any unreviewed → `unreviewed`, else `clean`.
-pub fn rollup_status<'a>(statuses: impl IntoIterator<Item = &'a str>) -> &'static str {
-    let mut unreviewed = false;
-    for s in statuses {
-        match s {
-            "disagreed" => return STATUS_DISAGREED,
-            "unreviewed" => unreviewed = true,
-            _ => {}
-        }
-    }
-    if unreviewed {
-        STATUS_UNREVIEWED
-    } else {
-        STATUS_CLEAN
-    }
-}
-
 /// A line to insert, before it has a timestamp.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedLine {
-    pub method: String,
-    pub payment_method_id: Option<Uuid>,
-    pub is_cash: bool,
-    pub system_total: i32,
-    pub order_count: i32,
-    pub status: &'static str,
-    pub declared_amount: Option<i32>,
-    pub note: Option<String>,
-}
+pub type PlannedLine = madar_till::reconcile::PlannedLine<Uuid>;
 
-/// Pure planning step (no DB): validate inputs against the used methods.
-/// Live: a `disagreed` line without an amount → 400 `RECONCILIATION_AMOUNT_REQUIRED`,
-/// without a non-blank note (non-cash) → 400 `RECONCILIATION_NOTE_REQUIRED`, an
-/// unknown status → 400. Replay never fails: missing amount → system total,
-/// missing note → `(no note)`, unknown status → `unreviewed`.
+/// Validate the close inputs against the used methods and plan the lines
+/// (madar-shared's `plan_lines`). Live: a `disagreed` line without an amount →
+/// 400 `RECONCILIATION_AMOUNT_REQUIRED`, without a non-blank note (non-cash) →
+/// 400 `RECONCILIATION_NOTE_REQUIRED`, an unknown status → 400. Replay never
+/// fails: missing amount → system total, missing note → `(no note)`, unknown
+/// status → `unreviewed`.
 pub fn plan_lines(
     totals: &[MethodTotal],
     closing_cash_declared: i32,
@@ -240,118 +209,49 @@ pub fn plan_lines(
     inputs: &[ReconciliationInput],
     replay: bool,
 ) -> Result<Vec<PlannedLine>, AppError> {
-    let mut lines = Vec::with_capacity(totals.len() + 1);
-    let cash = totals.iter().find(|t| t.is_cash);
-    lines.push(PlannedLine {
-        method: cash
-            .map(|c| c.method.clone())
-            .unwrap_or_else(|| CASH_FALLBACK_NAME.into()),
-        payment_method_id: cash.and_then(|c| c.payment_method_id),
-        is_cash: true,
-        system_total: closing_cash_system,
-        order_count: cash.map(|c| clamp_i32(c.order_count)).unwrap_or(0),
-        status: if closing_cash_declared == closing_cash_system {
-            "checked"
-        } else {
-            "disagreed"
+    use madar_till::reconcile::{self as r, PlanError};
+    let totals: Vec<r::MethodTotal<Uuid>> = totals
+        .iter()
+        .map(|t| r::MethodTotal {
+            method: t.method.clone(),
+            payment_method_id: t.payment_method_id,
+            is_cash: t.is_cash,
+            system_total: t.system_total,
+            order_count: t.order_count,
+        })
+        .collect();
+    let inputs: Vec<r::Input<'_>> = inputs
+        .iter()
+        .map(|i| r::Input {
+            method: &i.method,
+            status: &i.status,
+            declared_amount: i.declared_amount,
+            note: i.note.as_deref(),
+        })
+        .collect();
+    r::plan_lines(
+        &totals,
+        closing_cash_declared,
+        closing_cash_system,
+        cash_note,
+        &inputs,
+        replay,
+    )
+    .map_err(|e| match e {
+        PlanError::AmountRequired { method } => AppError::Coded {
+            status: 400,
+            code: CODE_AMOUNT_REQUIRED,
+            reason: format!("{CODE_AMOUNT_REQUIRED}: enter the amount you see for {method}"),
         },
-        declared_amount: Some(closing_cash_declared),
-        note: blank_to_none(cash_note),
-    });
-    let cash_method = lines[0].method.clone();
-
-    let find_input = |method: &str| inputs.iter().find(|i| i.method.trim() == method);
-    let plan_one = |method: &str,
-                    pmid: Option<Uuid>,
-                    total: i64,
-                    count: i64|
-     -> Result<PlannedLine, AppError> {
-        let system_total = clamp_i32(total);
-        let base = PlannedLine {
-            method: method.to_string(),
-            payment_method_id: pmid,
-            is_cash: false,
-            system_total,
-            order_count: clamp_i32(count),
-            status: "unreviewed",
-            declared_amount: None,
-            note: None,
-        };
-        let Some(input) = find_input(method) else {
-            return Ok(base);
-        };
-        match input.status.trim() {
-            "checked" => Ok(PlannedLine {
-                status: "checked",
-                note: blank_to_none(input.note.as_deref()),
-                ..base
-            }),
-            "disagreed" => {
-                let amount = match input.declared_amount {
-                    Some(a) => a,
-                    None if replay => system_total,
-                    None => {
-                        return Err(AppError::Coded {
-                            status: 400,
-                            code: CODE_AMOUNT_REQUIRED,
-                            reason: format!(
-                                "{CODE_AMOUNT_REQUIRED}: enter the amount you see for {method}"
-                            ),
-                        });
-                    }
-                };
-                let note = match blank_to_none(input.note.as_deref()) {
-                    Some(n) => n,
-                    None if replay => REPLAY_MISSING_NOTE.to_string(),
-                    None => {
-                        return Err(AppError::Coded {
-                            status: 400,
-                            code: CODE_NOTE_REQUIRED,
-                            reason: format!(
-                                "{CODE_NOTE_REQUIRED}: add a note for the difference on {method}"
-                            ),
-                        });
-                    }
-                };
-                Ok(PlannedLine {
-                    status: "disagreed",
-                    declared_amount: Some(amount),
-                    note: Some(note),
-                    ..base
-                })
-            }
-            _ if replay => Ok(base),
-            other => Err(AppError::BadRequest(format!(
-                "Invalid reconciliation status '{other}' for {method}"
-            ))),
-        }
-    };
-
-    for t in totals.iter().filter(|t| !t.is_cash) {
-        lines.push(plan_one(
-            &t.method,
-            t.payment_method_id,
-            t.system_total,
-            t.order_count,
-        )?);
-    }
-    // Inputs naming a method not used on the till: stored with system total 0.
-    let mut extra: Vec<&ReconciliationInput> = Vec::new();
-    for i in inputs {
-        let m = i.method.trim();
-        if m.is_empty()
-            || m == cash_method
-            || lines.iter().any(|l| l.method == m)
-            || extra.iter().any(|e| e.method.trim() == m)
-        {
-            continue;
-        }
-        extra.push(i);
-    }
-    for i in extra {
-        lines.push(plan_one(i.method.trim(), None, 0, 0)?);
-    }
-    Ok(lines)
+        PlanError::NoteRequired { method } => AppError::Coded {
+            status: 400,
+            code: CODE_NOTE_REQUIRED,
+            reason: format!("{CODE_NOTE_REQUIRED}: add a note for the difference on {method}"),
+        },
+        PlanError::InvalidStatus { method, status } => AppError::BadRequest(format!(
+            "Invalid reconciliation status '{status}' for {method}"
+        )),
+    })
 }
 
 const LINE_COLUMNS: &str =
@@ -459,17 +359,7 @@ pub async fn write_force_close_reconciliation(
 }
 
 /// Force-close planning: no line was counted or checked by anyone.
-pub fn force_close_lines(planned: Vec<PlannedLine>) -> Vec<PlannedLine> {
-    planned
-        .into_iter()
-        .map(|l| PlannedLine {
-            status: STATUS_UNREVIEWED,
-            declared_amount: None,
-            note: None,
-            ..l
-        })
-        .collect()
-}
+pub use madar_till::reconcile::force_close_lines;
 
 async fn insert_planned(
     conn: &mut sqlx::PgConnection,

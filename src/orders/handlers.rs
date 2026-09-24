@@ -1005,17 +1005,26 @@ impl ResolvedItem {
     }
 
     /// The line as charged, before any reward: per-unit × quantity plus the
-    /// bundle component surcharge. THE figure a bill line shows.
+    /// bundle component surcharge. THE figure a bill line shows. The rule is
+    /// madar-shared's (`madar_money::line`), the till's too.
     pub(crate) fn charged_subtotal(&self) -> i32 {
-        self.charged_per_unit() * self.quantity + self.component_surcharge
+        madar_money::line::charged_subtotal(
+            i64::from(self.charged_per_unit()),
+            i64::from(self.quantity),
+            i64::from(self.component_surcharge),
+        ) as i32
     }
 
     /// The same line at catalog + branch-override prices — what the server
     /// expected. Used only to flag a deviation, never to overrule the till.
     fn expected_subtotal(&self) -> i32 {
-        (self.expected_unit_price + self.expected_addon_per_unit + self.optional_per_unit())
-            * self.quantity
-            + self.component_surcharge
+        madar_money::line::charged_subtotal(
+            i64::from(
+                self.expected_unit_price + self.expected_addon_per_unit + self.optional_per_unit(),
+            ),
+            i64::from(self.quantity),
+            i64::from(self.component_surcharge),
+        ) as i32
     }
 
     /// Addon names as the kitchen and the bill display them (`2× Oat milk`).
@@ -1266,8 +1275,12 @@ pub(crate) async fn resolve_order_line(
             )
             .await?;
 
-            component_surcharge +=
-                (config.addon_line + config.optional_line) * comp_in.quantity * item_input.quantity;
+            // Per component unit, per bundle: madar-shared's rule (M3), the till's too.
+            component_surcharge += madar_money::line::component_surcharge(
+                i64::from(config.addon_line + config.optional_line),
+                i64::from(comp_in.quantity),
+                i64::from(item_input.quantity),
+            ) as i32;
 
             for d in config.deductions {
                 deductions.push(InventoryDeduction {
@@ -1622,9 +1635,13 @@ pub async fn create_order(
     // the same way replay verifies one — never a second, forked check.
     let mut body = body;
     if let Some(org) = claims.org_id()
-        && let Some(ask) =
-            super::discount_authz::discount_ask(pool.get_ref(), org, &body.discount_fields())
-                .await?
+        && let Some(ask) = super::discount_authz::discount_ask(
+            pool.get_ref(),
+            org,
+            body.discount_id,
+            &body.discount_fields(),
+        )
+        .await?
     {
         let eff = crate::authz::require::effective_for_claims(
             pool.get_ref(),
@@ -2145,11 +2162,6 @@ pub(crate) async fn create_order_inner(
         // customer chose oat milk and the reward is the drink they chose. The
         // charge is reduced, never taken below zero.
         let reward_units = redemption_plan.units_for(line_index).unwrap_or(0);
-        let covered = crate::loyalty::redeem::covered_minor(
-            resolved.charged_per_unit() as i64,
-            charged_line_subtotal as i64,
-            reward_units as i64,
-        ) as i32;
         // A STAFF DRINK: the base configuration is comped, before the reward
         // and before anything is computed on the subtotal — so tax, service
         // and an order-level discount see the CHARGED part only.
@@ -2228,8 +2240,16 @@ pub(crate) async fn create_order_inner(
         let expected_line_subtotal = (expected_line_subtotal
             - staff_line.as_ref().map_or(0, |l| l.server.line_comp))
         .max(0);
-        let covered = covered.min((charged_line_subtotal - staff_applied).max(0));
-        let charged_line_subtotal = charged_line_subtotal - staff_applied - covered;
+        // The staff comp off first, then the reward covers whole units of what
+        // is left: madar-shared's `bill::net_line`, the till's order too.
+        let net = madar_money::bill::net_line(&madar_money::bill::BillLine {
+            charged: i64::from(charged_line_subtotal),
+            per_unit: i64::from(resolved.charged_per_unit()),
+            reward_units: i64::from(reward_units),
+            staff_comp: i64::from(staff_applied),
+        });
+        let covered = net.covered as i32;
+        let charged_line_subtotal = net.net as i32;
         let is_reward_line = covered > 0;
 
         // NO LINE MAY BE NEGATIVE (owner, 2026-09-18). A line goes below zero
@@ -2372,13 +2392,16 @@ pub(crate) async fn create_order_inner(
              zero. Check the line prices and their modifiers."
         )));
     }
-    let discount_amount = if rule_discount {
-        calc_discount(subtotal)
-    } else {
-        body.discount_amount
-            .unwrap_or_else(|| calc_discount(subtotal))
-    }
-    .clamp(0, subtotal);
+    // Clamped to `[0, subtotal]` by madar-shared's `bill::discount_on`.
+    let discount_amount = madar_money::bill::discount_on(
+        i64::from(subtotal),
+        madar_money::bill::BillDiscount::Stated(i64::from(if rule_discount {
+            calc_discount(subtotal)
+        } else {
+            body.discount_amount
+                .unwrap_or_else(|| calc_discount(subtotal))
+        })),
+    ) as i32;
     let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
     // Belt and braces over the whole priced bill: discount, service charge, tax
     // and total. `compute` floors what it taxes, so this fires only on a figure
@@ -2462,8 +2485,19 @@ pub(crate) async fn create_order_inner(
     // to reconcile perfectly and then be refused row by row, halfway through
     // the write. Cash handed over and change given back are the other two
     // figures a customer would feel, so they are named the same way.
+    // Each leg as madar-shared's tender rules read it (`bill::Leg`).
+    let legs: Vec<madar_money::bill::Leg> = body
+        .payment_splits
+        .iter()
+        .flatten()
+        .map(|s| madar_money::bill::Leg {
+            amount: i64::from(s.amount),
+            is_cash: is_cash_of(&s.method),
+        })
+        .collect();
     if let Some(splits) = &body.payment_splits
-        && let Some(bad) = splits.iter().find(|s| s.amount < 0)
+        && let Some(bad) = madar_money::bill::negative_leg(&legs)
+            .and_then(|l| splits.iter().find(|s| i64::from(s.amount) == l.amount))
     {
         return Err(AppError::BadRequest(format!(
             "A {} payment of {} is negative. A payment can never be less than zero.",
@@ -2476,48 +2510,37 @@ pub(crate) async fn create_order_inner(
         ));
     }
 
-    let (amount_tendered, change_given) =
-        match body.payment_splits.as_ref().filter(|s| !s.is_empty()) {
-            Some(splits) => {
-                let cash_legs: i32 = splits
-                    .iter()
-                    .filter(|s| is_cash_of(&s.method))
-                    .map(|s| s.amount)
-                    .sum();
-                match body
-                    .amount_tendered
-                    .filter(|t| cash_legs > 0 && *t >= cash_legs)
-                {
-                    Some(t) => (Some(t), Some(t - cash_legs)),
-                    None => (None, None),
-                }
-            }
-            None => (
-                body.amount_tendered,
-                body.change_given
-                    .or_else(|| body.amount_tendered.map(|t| (t - total_amount).max(0))),
-            ),
-        };
+    // What is recorded: madar-shared's `bill::recorded_tender` (a split's
+    // change is over its cash legs; otherwise the till's figures, the change
+    // falling back to tendered − total).
+    let (amount_tendered, change_given) = {
+        let (t, c) = madar_money::bill::recorded_tender(
+            &legs,
+            body.amount_tendered.map(i64::from),
+            body.change_given.map(i64::from),
+            i64::from(total_amount),
+        );
+        (t.map(|v| v as i32), c.map(|v| v as i32))
+    };
 
     // Split payments must reconcile to the order total. They are the SOLE source
     // of drawer cash in compute_system_cash, so a mismatch (POS bug / spoof) would
     // silently leave the teller over or short with no way to trace it. (Per-split
     // method + positivity are validated again where the rows are inserted.)
-    if let Some(splits) = &body.payment_splits {
-        let split_total: i64 = splits.iter().map(|s| s.amount as i64).sum();
-        if split_total != total_amount as i64 {
-            // Naming the cause, because on a reward the till's arithmetic and
-            // ours disagree BY DESIGN until the till is updated, and "splits do
-            // not add up" would send a teller hunting for a fault in the split.
-            let why = if claimed {
-                " The reward has been taken off the total; collect the reduced amount."
-            } else {
-                ""
-            };
-            return Err(AppError::BadRequest(format!(
-                "Split payments ({split_total}) must sum to the order total ({total_amount}).{why}"
-            )));
-        }
+    if body.payment_splits.is_some()
+        && let Err(split_total) = madar_money::bill::legs_cover(&legs, i64::from(total_amount))
+    {
+        // Naming the cause, because on a reward the till's arithmetic and
+        // ours disagree BY DESIGN until the till is updated, and "splits do
+        // not add up" would send a teller hunting for a fault in the split.
+        let why = if claimed {
+            " The reward has been taken off the total; collect the reduced amount."
+        } else {
+            ""
+        };
+        return Err(AppError::BadRequest(format!(
+            "Split payments ({split_total}) must sum to the order total ({total_amount}).{why}"
+        )));
     }
 
     // The order is flagged when any line deviated, the charged subtotal differs from the
@@ -2681,7 +2704,7 @@ pub(crate) async fn create_order_inner(
                     .await?;
             match (clash, body.device_id) {
                 (Some(other), Some(mine)) if other != Some(mine) => {
-                    format!("{r}~{}", mine.simple().to_string()[..4].to_uppercase())
+                    madar_ids::order_ref::with_device_suffix(r, &mine.simple().to_string())
                 }
                 _ => r.clone(),
             }
@@ -2695,13 +2718,11 @@ pub(crate) async fn create_order_inner(
             .bind(body.branch_id)
             .fetch_one(&mut *tx)
             .await?;
-            let shift6 = body.till_id.simple().to_string()[..6].to_uppercase();
-            format!(
-                "{}-{}-{}-{:03}",
-                branch_code,
-                madar_time::yymmdd(biz_date),
-                shift6,
-                order_number
+            madar_ids::order_ref::server_ref(
+                &branch_code,
+                &madar_time::yymmdd(biz_date),
+                &body.till_id.simple().to_string(),
+                i64::from(order_number),
             )
         }
     };
@@ -2867,7 +2888,7 @@ pub(crate) async fn create_order_inner(
     if let Some(ask) = super::discount_authz::ask_from(
         &body.discount_fields(),
         resolved_discount_type
-            .clone()
+            .as_deref()
             .filter(|_| body.discount_id.is_some())
             .map(|t| (t, resolved_discount_value)),
     ) {

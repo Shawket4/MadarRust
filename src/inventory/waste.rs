@@ -129,37 +129,14 @@ pub struct WastePlan {
 }
 
 /// A waste whose worth is not a real, non-negative amount of money, so it must
-/// not be recorded at all. Stock is destroyed, never created: a negative
-/// quantity or unit cost is bad data, and letting it through would also make
-/// the total compare as under every `max_value` ceiling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BadValue;
+/// not be recorded at all (madar-shared's `madar_money::waste::BadValue`).
+pub use madar_money::waste::BadValue;
 
-/// `Σ qty × unit cost`, rounded once; partial when a line has no cost.
-/// The till computes the same figure (`madar-core` `waste::value_of`) — keep
-/// the two in step, including the `BadValue` rules.
+/// `Σ qty × unit cost`, rounded once; partial when a line has no cost. The
+/// rule is madar-shared's (`madar_money::waste::value_of`), the till's too.
 pub fn value_of(lines: &[(Uuid, f64, Option<f64>)]) -> Result<(Option<i64>, bool), BadValue> {
-    let mut known: Vec<f64> = Vec::with_capacity(lines.len());
-    for (_, q, c) in lines {
-        if !q.is_finite() || *q < 0.0 {
-            return Err(BadValue);
-        }
-        if let Some(c) = c {
-            if !c.is_finite() || *c < 0.0 {
-                return Err(BadValue);
-            }
-            known.push(q * c);
-        }
-    }
-    let partial = known.len() < lines.len();
-    if known.is_empty() {
-        return Ok((None, partial));
-    }
-    let total = known.iter().sum::<f64>().round();
-    if !total.is_finite() || total < 0.0 || total > i64::MAX as f64 {
-        return Err(BadValue);
-    }
-    Ok((Some(total as i64), partial))
+    let lines: Vec<(f64, Option<f64>)> = lines.iter().map(|(_, q, c)| (*q, *c)).collect();
+    madar_money::waste::value_of(&lines)
 }
 
 /// The branch's actual cost per unit, else the org standard cost (unrounded).
@@ -197,9 +174,14 @@ pub async fn plan_waste(
             WASTE_REASONS.join(", ")
         )));
     }
-    if !req.quantity.is_finite() || req.quantity <= 0.0 || req.quantity > 1_000_000.0 {
-        return Err(bad("quantity must be greater than 0"));
-    }
+    // The input rules are madar-shared's (`madar_money::waste`), the till's too.
+    use madar_money::waste::{self as w, WasteInputError};
+    let refused = |e: WasteInputError| match e {
+        WasteInputError::Quantity => bad("quantity must be greater than 0"),
+        WasteInputError::MenuItemUnit => bad("a menu item is wasted in whole units (pcs)"),
+        WasteInputError::WholeUnits => bad("a menu item is wasted in whole units"),
+    };
+    w::check_quantity(req.quantity).map_err(refused)?;
     let branch_org = crate::inventory::handlers::branch_org(pool, req.branch_id).await?;
     if branch_org != org_id {
         return Err(AppError::Forbidden(
@@ -221,20 +203,13 @@ pub async fn plan_waste(
                 row.ok_or_else(|| bad("Ingredient not found in this organization's catalog"))?;
             let unit = req.unit.clone().unwrap_or_else(|| base.clone());
             let qty = crate::units::convert(req.quantity, &unit, &base)?;
-            if qty <= 0.0 {
-                return Err(bad("quantity must be greater than 0"));
-            }
+            w::check_converted(qty).map_err(refused)?;
             let cost = exact_unit_cost(pool, req.branch_id, req.subject_id).await?;
             lines.push((req.subject_id, qty, cost));
             (name, unit)
         }
         "menu_item" => {
-            if req.unit.as_deref().is_some_and(|u| u != "pcs") {
-                return Err(bad("a menu item is wasted in whole units (pcs)"));
-            }
-            if req.quantity.fract() != 0.0 {
-                return Err(bad("a menu item is wasted in whole units"));
-            }
+            w::check_menu_item(req.unit.as_deref(), req.quantity).map_err(refused)?;
             let name: Option<String> = sqlx::query_scalar(
                 "SELECT name FROM menu_items WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL",
             )

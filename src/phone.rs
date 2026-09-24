@@ -1,9 +1,10 @@
 //! The one canonical phone form: E.164 digits without the `+`
 //! (`201001234567`). Customers, loyalty, delivery and bookings all key on it.
 //!
-//! The same rule lives in SQL (`phone_canonical`), in the POS core and in the
-//! dashboard (`src/lib/phone.ts`). All four run `tests/phone_vectors.json`, so
-//! they cannot drift. The rule, in order:
+//! The rule is madar-shared's (`madar_ids::phone`, the POS core's too). The
+//! same rule lives in SQL (`phone_canonical`) and in the dashboard
+//! (`src/lib/phone.ts`); all run `madar_ids::vectors::PHONE`, so they cannot
+//! drift. The rule, in order:
 //!
 //!   1. raw input longer than 32 characters is invalid;
 //!   2. Arabic-Indic (U+0660–0669) and Extended Arabic-Indic (U+06F0–06F9)
@@ -20,76 +21,19 @@
 
 use crate::errors::AppError;
 
-/// Longest raw input considered at all.
-pub const MAX_PHONE_RAW_LEN: usize = 32;
-
-fn ascii_digit(c: char) -> Option<char> {
-    match c {
-        '0'..='9' => Some(c),
-        '\u{0660}'..='\u{0669}' => char::from_digit(c as u32 - 0x0660, 10),
-        '\u{06F0}'..='\u{06F9}' => char::from_digit(c as u32 - 0x06F0, 10),
-        _ => None,
-    }
-}
-
-/// ASCII digits of `raw`, with Arabic-Indic digits mapped. No validation.
-pub fn digits(raw: &str) -> String {
-    raw.chars().filter_map(ascii_digit).collect()
-}
-
-/// The canonical form, or `None` when `raw` is not a phone number.
-pub fn canonical(raw: &str) -> Option<String> {
-    if raw.chars().count() > MAX_PHONE_RAW_LEN {
-        return None;
-    }
-    let d = digits(raw);
-    let n = if let Some(rest) = d.strip_prefix("00") {
-        rest.to_string()
-    } else if d.starts_with("20") {
-        d
-    } else if let Some(rest) = d.strip_prefix('0') {
-        format!("20{rest}")
-    } else if d.len() == 10 && d.starts_with('1') {
-        format!("20{d}")
-    } else {
-        d
-    };
-    if n.len() < 10 || n.len() > 15 {
-        return None;
-    }
-    let mobile = ["2010", "2011", "2012", "2015"]
-        .iter()
-        .any(|p| n.starts_with(p));
-    if mobile && n.len() != 12 {
-        return None;
-    }
-    Some(n)
-}
+// The rule is madar-shared's (`madar_ids::phone`), the POS core's too, pinned
+// with this database's `phone_canonical` by `madar_ids::vectors::PHONE`.
+pub use madar_ids::phone::{MAX_PHONE_RAW_LEN, canonical, digits, search_digits};
 
 /// [`canonical`] for a request field: an invalid phone is the caller's 400.
 pub fn normalize_phone(raw: &str) -> Result<String, AppError> {
     canonical(raw).ok_or_else(|| AppError::BadRequest("phone number looks invalid".into()))
 }
 
-/// What a search box's digits should be matched against canonical keys with:
-/// a partial number cannot be canonicalised, but its local prefix can be
-/// dropped (`0100…` is stored as `20100…`, so `100…` is what both contain).
-pub fn search_digits(raw: &str) -> Option<String> {
-    let d = digits(raw);
-    let d = d
-        .strip_prefix("00")
-        .or_else(|| d.strip_prefix('0'))
-        .unwrap_or(&d);
-    (d.len() >= 3).then(|| d.to_string())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     pub(crate) fn vectors() -> (Vec<(String, String)>, Vec<String>) {
-        let v: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/phone_vectors.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(madar_ids::vectors::PHONE).unwrap();
         let valid = v["valid"]
             .as_array()
             .unwrap()
@@ -108,20 +52,6 @@ mod tests {
             .map(|s| s.as_str().unwrap().to_string())
             .collect();
         (valid, invalid)
-    }
-
-    #[test]
-    fn the_shared_vectors_hold_in_rust() {
-        let (valid, invalid) = vectors();
-        assert!(valid.len() >= 20 && invalid.len() >= 8);
-        for (raw, want) in valid {
-            assert_eq!(canonical(&raw).as_deref(), Some(want.as_str()), "{raw:?}");
-            // Canonical is a fixed point.
-            assert_eq!(canonical(&want).as_deref(), Some(want.as_str()), "{want:?}");
-        }
-        for raw in invalid {
-            assert_eq!(canonical(&raw), None, "{raw:?}");
-        }
     }
 
     #[sqlx::test]
@@ -148,14 +78,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(null, None);
-    }
-
-    #[test]
-    fn a_search_drops_the_local_prefix() {
-        assert_eq!(search_digits("0100 123").as_deref(), Some("100123"));
-        assert_eq!(search_digits("+20100").as_deref(), Some("20100"));
-        assert_eq!(search_digits("٠١٠٠").as_deref(), Some("100"));
-        assert_eq!(search_digits("01"), None);
-        assert_eq!(search_digits("Ali"), None);
     }
 }

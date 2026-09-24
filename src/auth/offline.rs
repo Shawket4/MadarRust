@@ -3,8 +3,8 @@
 //! shipped to devices (via `GET /orgs/{id}/offline-auth-bundle`), so it is
 //! memory-hard and a leak is never the login credential. The device verifies a
 //! typed PIN against it OFFLINE; the server only ever DERIVES it.
-use argon2::password_hash::{PasswordHash, SaltString};
-use argon2::{Argon2, PasswordHasher, PasswordVerifier};
+use argon2::password_hash::SaltString;
+use argon2::{Argon2, PasswordHasher};
 
 /// Derive an argon2id PHC string for a teller's offline PIN.
 pub fn hash_offline_pin(pin: &str) -> Result<String, argon2::password_hash::Error> {
@@ -19,18 +19,9 @@ pub fn hash_offline_pin(pin: &str) -> Result<String, argon2::password_hash::Erro
 }
 
 /// Verify a typed PIN against a stored argon2id PHC string. The shipping
-/// verification runs in the rust-core on the device; this is kept for tests
-/// and completeness.
-#[allow(dead_code)]
-pub fn verify_offline_pin(pin: &str, phc: &str) -> bool {
-    PasswordHash::new(phc)
-        .map(|h| {
-            Argon2::default()
-                .verify_password(pin.as_bytes(), &h)
-                .is_ok()
-        })
-        .unwrap_or(false)
-}
+/// verification runs in the rust-core on the device; both run madar-shared's
+/// `madar_authz::pin::verify_offline_pin`.
+pub use madar_authz::pin::verify_offline_pin;
 
 #[cfg(test)]
 mod tests {
@@ -45,6 +36,20 @@ mod tests {
         );
         assert!(verify_offline_pin("1234", &phc));
         assert!(!verify_offline_pin("9999", &phc));
+    }
+
+    /// The one PHC string both sides verify: madar-shared's `TEST_PHC` is what
+    /// THIS hasher derives under its fixed salt.
+    #[test]
+    fn the_shared_phc_string_is_this_hashers_output() {
+        use madar_authz::pin::{TEST_PHC, TEST_PIN};
+        let salt = SaltString::encode_b64(b"madar-shared-pin").unwrap();
+        let phc = Argon2::default()
+            .hash_password(TEST_PIN.as_bytes(), &salt)
+            .unwrap()
+            .to_string();
+        assert_eq!(phc, TEST_PHC);
+        assert!(verify_offline_pin(TEST_PIN, TEST_PHC));
     }
 
     #[test]

@@ -148,7 +148,7 @@ pub(crate) async fn settle_discount_ask(
     let (discount_id, discount_type, discount_value) = resolve_settle_discount(body, ticket);
     let spoke = settle_cashier_spoke(body);
     let fields = crate::orders::discount_authz::DiscountFields {
-        discount_id,
+        has_preset: discount_id.is_some(),
         discount_type: discount_type.as_deref(),
         discount_value,
         discount_amount: body.discount_amount,
@@ -157,7 +157,7 @@ pub(crate) async fn settle_discount_ask(
         discount_kind: body.discount_kind.as_deref().filter(|_| spoke),
         discount_percent_bps: body.discount_percent_bps.filter(|_| spoke),
     };
-    crate::orders::discount_authz::discount_ask(pool, org_id, &fields).await
+    crate::orders::discount_authz::discount_ask(pool, org_id, discount_id, &fields).await
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]

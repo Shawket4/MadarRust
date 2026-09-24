@@ -7,23 +7,27 @@
 //! totals. The POS core loads the same file (`madar-core` `ledger::report`) and
 //! must agree field by field.
 //!
-//! The file is committed. A change to the drawer formula, the report or the
-//! projections fails this test until the vectors are regenerated and copied to
-//! the POS:
+//! The files live in madar-shared (`madar_till::vectors::TILL_REPORT` and
+//! `TILL_EDGE`), the one copy the fold (`madar_till::report`) and the POS core
+//! are tested against. A change to the drawer formula, the report or the
+//! projections fails this test until the vectors are regenerated into the
+//! madar-shared checkout beside this one (or `$MADAR_SHARED_DIR`) and
+//! released there with a tag:
 //!
 //! ```sh
-//! MADAR_WRITE_TILL_VECTORS=1 cargo nextest run -E 'test(till_report_vectors)'
-//! cp tests/fixtures/till_report_vectors.json \
-//!    ../madar/rust-core/crates/madar-core/tests/fixtures/till_report_vectors.json
+//! MADAR_WRITE_TILL_VECTORS=1 cargo nextest run --test tills_report_vectors_tests
 //! ```
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/till_report_vectors.json"
-);
+fn vectors_out(file: &str) -> std::path::PathBuf {
+    let shared = std::env::var("MADAR_SHARED_DIR")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../madar-shared").into());
+    std::path::Path::new(&shared)
+        .join("crates/madar-till/vectors")
+        .join(file)
+}
 
 fn id(label: &str) -> Uuid {
     Uuid::new_v5(
@@ -237,6 +241,59 @@ INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VA
     },
 ];
 
+/// The edges where the till's fold once read a row differently from this SQL
+/// (madar-shared discovery T1); the fold now takes this server's reading, and
+/// these pin it (`madar_till::vectors::TILL_EDGE`).
+const EDGE_SCENARIOS: &[Scenario] = &[
+    Scenario {
+        // `btrim` strips spaces only: a method named with a TAB is a method.
+        name: "a_tab_named_method_is_kept_and_a_spaces_one_is_not",
+        tills: &["t1"],
+        sql: r#"
+INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ('{id:t1}', '{branch}', '{sara}', 'open', 500, '2026-09-14 08:00+00');
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, total_amount, created_at)
+     VALUES ('{id:a}', '{branch}', '{id:t1}', '{sara}', 1, 'mixed', 'V-TAB', 1000, 1000, '2026-09-14 09:00+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:a}', E'\t', 700, false), ('{id:a}', 'Card', 300, false);
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, total_amount, created_at)
+     VALUES ('{id:b}', '{branch}', '{id:t1}', '{sara}', 2, 'mixed', 'V-SPACES', 200, 200, '2026-09-14 09:05+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:b}', '   ', 200, false);
+-- a refund on the TAB method is a refund on a method (the table refuses only
+-- one blank of spaces)
+INSERT INTO order_refunds (id, org_id, branch_id, order_id, till_id, amount, method, is_cash, reason, issued_by, issued_at, created_at)
+     VALUES ('{id:ra}', '{org}', '{branch}', '{id:a}', '{id:t1}', 100, E'\t', false, 'goodwill', '{sara}', '2026-09-14 10:00+00', '2026-09-14 10:00+00');
+"#,
+    },
+    Scenario {
+        // No cash leg on the till: the drawer line is named after the org's
+        // cash method, `ORDER BY (name = 'cash') DESC, is_active DESC, created_at`.
+        name: "the_fallback_cash_method_prefers_the_literal_cash_then_active_then_oldest",
+        tills: &["t1"],
+        sql: r#"
+INSERT INTO org_payment_methods (id, org_id, name, color, icon, is_cash, is_active, created_at) VALUES
+  ('{id:pm_petty}', '{org}', 'Petty', '#0f0', 'cash', true, true, '2025-06-01 00:00+00'),
+  ('{id:pm_lit}', '{org}', 'cash', '#0f0', 'cash', true, false, '2026-03-01 00:00+00');
+INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ('{id:t1}', '{branch}', '{sara}', 'open', 100, '2026-09-14 08:00+00');
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, total_amount, created_at)
+     VALUES ('{id:a}', '{branch}', '{id:t1}', '{sara}', 1, 'Card', 'V-FB1', 900, 900, '2026-09-14 09:00+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:a}', 'Card', 900, false);
+"#,
+    },
+    Scenario {
+        // Without the literal `cash`: active first, then the OLDEST.
+        name: "the_fallback_cash_method_is_the_oldest_active_one",
+        tills: &["t1"],
+        sql: r#"
+INSERT INTO org_payment_methods (id, org_id, name, color, icon, is_cash, is_active, created_at) VALUES
+  ('{id:pm_petty}', '{org}', 'Petty', '#0f0', 'cash', true, true, '2025-06-01 00:00+00'),
+  ('{id:pm_old}', '{org}', 'Old drawer', '#0f0', 'cash', true, false, '2024-01-01 00:00+00');
+INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ('{id:t1}', '{branch}', '{sara}', 'open', 100, '2026-09-14 08:00+00');
+INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref, subtotal, total_amount, created_at)
+     VALUES ('{id:a}', '{branch}', '{id:t1}', '{sara}', 1, 'Card', 'V-FB2', 900, 900, '2026-09-14 09:00+00');
+INSERT INTO order_payments (order_id, method, amount, is_cash) VALUES ('{id:a}', 'Card', 900, false);
+"#,
+    },
+];
+
 async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
     let org = id(&format!("{}:org", sc.name));
     let branch = id(&format!("{}:branch", sc.name));
@@ -312,10 +369,13 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
             .await
             .unwrap();
         let mut conn = pool.acquire().await.unwrap();
-        let methods =
-            madar_rust::tills::reconcile::system_totals_by_method(&mut conn, till_id, f.expected_cash)
-                .await
-                .unwrap();
+        let methods = madar_rust::tills::reconcile::system_totals_by_method(
+            &mut conn,
+            till_id,
+            f.expected_cash,
+        )
+        .await
+        .unwrap();
         tills.insert(
             till_id.to_string(),
             json!({
@@ -395,30 +455,52 @@ fn scrub(v: &mut Value) {
     }
 }
 
-#[sqlx::test]
-async fn till_report_vectors(pool: PgPool) {
-    let mut scenarios = Vec::new();
-    for sc in SCENARIOS {
-        let mut v = run_scenario(&pool, sc).await;
+async fn vectors_doc(pool: &PgPool, scenarios: &[Scenario]) -> String {
+    let mut out = Vec::new();
+    for sc in scenarios {
+        let mut v = run_scenario(pool, sc).await;
         scrub(&mut v);
-        scenarios.push(v);
+        out.push(v);
     }
     let doc = json!({
         "about": "Till drawer + Z report vectors generated by MadarRust src/tills/report_vectors_tests.rs; \
                   rows are /sync/pull projections, expected is the backend's own computation.",
-        "scenarios": scenarios,
+        "scenarios": out,
     });
-    let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
+    serde_json::to_string_pretty(&doc).unwrap() + "\n"
+}
+
+fn check_or_write(file: &str, text: &str, committed: &str) {
     if std::env::var("MADAR_WRITE_TILL_VECTORS").is_ok() {
-        std::fs::create_dir_all(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")).unwrap();
-        std::fs::write(PATH, &text).unwrap();
+        std::fs::write(vectors_out(file), text).unwrap();
         return;
     }
-    let committed = std::fs::read_to_string(PATH)
-        .expect("tests/fixtures/till_report_vectors.json (regenerate: see module docs)");
-    let committed: Value = serde_json::from_str(&committed).unwrap();
+    let committed: Value = serde_json::from_str(committed).unwrap();
+    let doc: Value = serde_json::from_str(text).unwrap();
     assert_eq!(
         committed, doc,
-        "the till report or its projections changed: regenerate the vectors and copy them to the POS (module docs)"
+        "{file}: the till report or its projections changed: regenerate the vectors into madar-shared (module docs)"
+    );
+}
+
+#[sqlx::test]
+async fn till_report_vectors(pool: PgPool) {
+    let text = vectors_doc(&pool, SCENARIOS).await;
+    check_or_write(
+        "till_report_vectors.json",
+        &text,
+        madar_till::vectors::TILL_REPORT,
+    );
+}
+
+/// The edges the fold takes this server's reading of (a blank-looking method
+/// name, the fallback cash method's order).
+#[sqlx::test]
+async fn till_edge_vectors(pool: PgPool) {
+    let text = vectors_doc(&pool, EDGE_SCENARIOS).await;
+    check_or_write(
+        "till_edge_vectors.json",
+        &text,
+        madar_till::vectors::TILL_EDGE,
     );
 }
