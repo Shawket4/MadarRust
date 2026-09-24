@@ -108,7 +108,8 @@ pub(crate) fn refused(r: StaffDrinkRefusal) -> AppError {
 }
 
 /// One pick as the line resolver priced it.
-pub(crate) struct RungPick {
+#[doc(hidden)]
+pub struct RungPick {
     pub option_id: Uuid,
     pub unit_price: i32,
     pub quantity: i32,
@@ -125,8 +126,13 @@ pub(crate) struct RungPick {
 ///   ingredient (see `component_resolve`), so it is an extra by construction.
 ///   Options are the attachment's allow-list, priced exactly as the resolver
 ///   prices a pick: `addon_items.default_price` under the branch's override.
+///
+/// SUPERSEDED by madar-shared's `madar_catalog::staff::comp_input` over the
+/// order's loaded catalogue; kept one commit for the parity test
+/// (`tests/staff_pool_input_tests.rs`) that writes the crate's vectors.
+#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn comp_input(
+pub async fn comp_input(
     pool: &PgPool,
     branch_id: Uuid,
     menu_item_id: Uuid,

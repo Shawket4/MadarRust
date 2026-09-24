@@ -21,8 +21,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use madar_catalog::{
-    BaseCandidate, BaseCandidates, CatalogView, IngredientLine, IngredientRef, ItemView,
-    OptionView, OptionalView, RecipeLine, SizeView, SizedLine,
+    BaseCandidate, BaseCandidates, CatalogView, GroupOption, GroupView, IngredientLine,
+    IngredientRef, ItemView, OptionView, OptionalView, RecipeLine, SizeView, SizedLine,
 };
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -291,6 +291,70 @@ impl Catalog {
 
         let recipes = load_recipes(conn, ids).await?;
 
+        // The choice groups attached to each item (active groups only), every
+        // option with its catalogue price, the branch's price and whether it is
+        // on — what madar-catalog's staff comp input reads (`staff`). Ordered
+        // as the staff pool always read them: attachment sort, group name, id,
+        // then option sort, name, id.
+        let group_rows: Vec<(
+            Uuid,
+            Uuid,
+            i32,
+            bool,
+            Option<Vec<Uuid>>,
+            String,
+            Option<String>,
+            Uuid,
+            i32,
+            Option<i32>,
+            bool,
+            bool,
+        )> = sqlx::query_as(
+            "SELECT a.menu_item_id, g.id, COALESCE(a.min_override, g.min_selections),
+                    COALESCE(a.is_required_override, g.is_required), a.included_option_ids,
+                    g.effect, g.legacy_addon_type,
+                    mo.id, ai.default_price, bao.price_override, mo.is_default,
+                    (mo.is_active AND ai.is_active AND COALESCE(bao.is_available, true))
+               FROM menu_item_modifier_groups a
+               JOIN modifier_groups g ON g.id = a.group_id AND g.is_active
+               JOIN modifier_options mo ON mo.group_id = g.id
+               JOIN addon_items ai ON ai.id = mo.id
+               LEFT JOIN branch_addon_overrides bao
+                      ON bao.addon_item_id = mo.id AND bao.branch_id = $2
+              WHERE a.menu_item_id = ANY($1)
+              ORDER BY a.menu_item_id, a.sort, g.name, g.id, mo.sort, mo.name, mo.id",
+        )
+        .bind(ids)
+        .bind(branch)
+        .fetch_all(&mut *conn)
+        .await?;
+        let mut groups_of: HashMap<Uuid, Vec<GroupView>> = HashMap::new();
+        for (item, gid, min, required, included, effect, legacy, oid, price, bp, default, on) in
+            group_rows
+        {
+            let groups = groups_of.entry(item).or_default();
+            if groups.last().is_none_or(|g| g.id != s(gid)) {
+                groups.push(GroupView {
+                    id: s(gid),
+                    min: i64::from(min),
+                    is_required: required,
+                    effect,
+                    legacy_type: legacy,
+                    included: included.map(|ids| ids.into_iter().map(s).collect()),
+                    options: Vec::new(),
+                });
+            }
+            if let Some(g) = groups.last_mut() {
+                g.options.push(GroupOption {
+                    id: s(oid),
+                    price: i64::from(price),
+                    branch_price: bp.map(i64::from),
+                    is_default: default,
+                    is_active: on,
+                });
+            }
+        }
+
         let optionals: Vec<(
             Uuid,
             Uuid,
@@ -437,7 +501,7 @@ impl Catalog {
                         size_label: o.size_label.clone(),
                     })
                     .collect(),
-                groups: Vec::new(),
+                groups: groups_of.remove(&id).unwrap_or_default(),
             };
             self.items.insert(
                 id,

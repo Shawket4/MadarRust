@@ -2195,27 +2195,33 @@ pub(crate) async fn create_order_inner(
             }
             let (input, base_line, addon_lines) = match resolved.menu_item_id {
                 Some(item) => {
-                    let picks: Vec<sp::RungPick> = resolved
-                        .addons
-                        .iter()
-                        .map(|a| sp::RungPick {
-                            option_id: a.addon_item_id,
-                            unit_price: a.unit_price,
-                            quantity: a.quantity,
-                        })
-                        .collect();
-                    let input = sp::comp_input(
-                        pool.get_ref(),
-                        body.branch_id,
-                        item,
-                        resolved.size_label.as_deref(),
-                        refusal.is_none(),
-                        resolved.unit_price,
-                        &picks,
-                        resolved.optional_per_unit(),
-                        resolved.quantity,
-                    )
-                    .await?;
+                    // The rule's input, built from the order's own catalogue
+                    // by madar-shared's `madar_catalog::staff::comp_input` (the
+                    // till builds it from the same view).
+                    let line = madar_catalog::staff::StaffLine {
+                        size_label: resolved.size_label.clone(),
+                        eligible: refusal.is_none(),
+                        unit_price: resolved.unit_price,
+                        picks: resolved
+                            .addons
+                            .iter()
+                            .map(|a| crate::staff_pool::comp::CompPick {
+                                option_id: a.addon_item_id.to_string(),
+                                unit_price: a.unit_price,
+                                quantity: a.quantity,
+                            })
+                            .collect(),
+                        optionals_per_unit: resolved.optional_per_unit(),
+                        quantity: resolved.quantity,
+                    };
+                    catalog.ensure_on(pool.get_ref(), &[item], &[]).await?;
+                    let input = match catalog.item(item) {
+                        Some(loaded) => madar_catalog::staff::comp_input(&loaded.view, &line),
+                        None => madar_catalog::staff::comp_input(
+                            &madar_catalog::ItemView::default(),
+                            &line,
+                        ),
+                    };
                     let addon_lines: Vec<i32> = resolved
                         .addons
                         .iter()
