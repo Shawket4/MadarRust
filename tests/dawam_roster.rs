@@ -2916,3 +2916,124 @@ async fn confirming_a_cover_flag_confirms_the_cover_and_deciding_a_cover_resolve
     assert_eq!(s, 200);
     assert_eq!(status_of(rec3).await.0.as_deref(), Some("pending"));
 }
+
+/// Mac E2E R-B1 (SC-8): the manager's approval re-checks what the ask
+/// checked. A swap agreed while both shifts were ahead is refused once its
+/// week is no longer published (WEEK_NOT_PUBLISHED) or a shift has started
+/// (SWAP_STARTED); it stays pending and neither roster moves.
+#[sqlx::test]
+async fn a_swap_is_not_approved_once_its_shift_started_or_its_week_is_unpublished(pool: PgPool) {
+    use madar_rust::staff::dawam::week_start;
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(0, 0), t(12, 0)).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let owner = f.owner();
+    for (who, s) in [(f.a, m), (f.b, l)] {
+        let (st, body) = done(call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            owner,
+            json!({ "employee_id": who, "on_date": d, "shifts": [{ "work_shift_id": s }] })
+        ))
+        .await;
+        assert_eq!(st, 200, "{body}");
+    }
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
+    let (st, swap) = done(call!(
+        app,
+        "POST",
+        "/staff/me/swaps",
+        ta,
+        json!({ "my_date": d, "my_shift_id": m, "peer_id": f.b, "peer_date": d, "peer_shift_id": l })
+    ))
+    .await;
+    assert_eq!(st, 201, "{swap}");
+    let id = swap["id"].as_str().unwrap().to_string();
+    let (st, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/me/swaps/{id}"),
+        tb,
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(st, 200);
+    let status = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM staff_swaps WHERE id = $1::uuid")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    // 1. The week is no longer published.
+    sqlx::query("DELETE FROM staff_week_publications WHERE branch_id = $1")
+        .bind(f.br_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/swaps/{id}/decision"),
+        owner,
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(st, 409, "{body}");
+    assert_eq!(body["code"], "WEEK_NOT_PUBLISHED", "{body}");
+    assert_eq!(status().await, "pending");
+
+    // 2. Both shifts moved to today, and the morning one has begun.
+    let today = today();
+    sqlx::query(
+        "INSERT INTO staff_week_publications (org_id, branch_id, week_start) VALUES ($1, $2, $3)",
+    )
+    .bind(f.org)
+    .bind(f.br_a)
+    .bind(week_start(today))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (who, s) in [(f.a, m), (f.b, l)] {
+        override_row(&pool, &f, who, today, Some(s)).await;
+    }
+    sqlx::query("UPDATE staff_swaps SET requester_date = $2, peer_date = $2 WHERE id = $1::uuid")
+        .bind(&id)
+        .bind(today)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/swaps/{id}/decision"),
+        owner,
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(st, 409, "{body}");
+    assert_eq!(body["code"], "SWAP_STARTED", "{body}");
+    assert_eq!(status().await, "pending");
+    assert_eq!(shifts_on(&pool, f.a, today).await, vec![m], "nothing moved");
+    assert_eq!(shifts_on(&pool, f.b, today).await, vec![l]);
+    // Rejecting still works: nothing changes hands.
+    let (st, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/swaps/{id}/decision"),
+        owner,
+        json!({ "approve": false })
+    ))
+    .await;
+    assert_eq!(st, 204);
+    assert_eq!(status().await, "rejected");
+}

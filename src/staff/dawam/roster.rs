@@ -1474,6 +1474,39 @@ pub async fn decide_swap(
             "You can't approve a swap you're part of.".into(),
         ));
     }
+    // Approving re-checks what the ask checked (Mac E2E R-B1, SC-8): time has
+    // passed since, so a shift may have begun or its week been withdrawn. The
+    // swap then stays pending and neither roster moves. (A shift no longer on
+    // the roster is SWAP_STALE, from apply_swap.)
+    if body.approve {
+        let mut conn = pool.acquire().await?;
+        let mine = rostered_on(
+            &mut conn,
+            s.requester_id,
+            s.requester_date,
+            s.requester_shift_id,
+        )
+        .await?;
+        let theirs = rostered_on(&mut conn, s.peer_id, s.peer_date, s.peer_shift_id).await?;
+        drop(conn);
+        let now = Utc::now();
+        for r in [&mine, &theirs].into_iter().flatten() {
+            if r.scheduled_start_at <= now {
+                return Err(AppError::Refused {
+                    code: "SWAP_STARTED",
+                    reason: "A shift that already started can't be swapped.".into(),
+                });
+            }
+        }
+        for r in [&mine, &theirs].into_iter().flatten() {
+            if !is_published(pool, r.branch_id.unwrap_or_default(), r.on_date).await? {
+                return Err(AppError::Refused {
+                    code: "WEEK_NOT_PUBLISHED",
+                    reason: "That week isn't published any more.".into(),
+                });
+            }
+        }
+    }
     let mut tx = pool.begin().await?;
     let won: Option<Uuid> = sqlx::query_scalar(
         "UPDATE staff_swaps SET status = $2, decided_by = $3 \
