@@ -1820,6 +1820,7 @@ pub async fn check_out(
     })
     .execute(pool.get_ref())
     .await?;
+    settle_cover(pool.get_ref(), open.id).await?;
     if stamped.unverified {
         crate::staff::dawam::presence::raise_flag(
             pool.get_ref(),
@@ -1852,6 +1853,23 @@ pub async fn check_out(
 
     let record = load_record(pool.get_ref(), org_id, open.id).await?;
     Ok(HttpResponse::Ok().json(record))
+}
+
+/// A cover is time worked for a colleague, counted as a cover (CV-3, CV-7):
+/// the coverer is never late or leaving early against the colleague's shift,
+/// and a short cover is not a half day. Run after every write that derives a
+/// record's figures (a no-op for anything but a cover); a status set by hand
+/// sticks (AT-7). E2E B-TEAM-5.
+pub(crate) async fn settle_cover(pool: &PgPool, record_id: Uuid) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE attendance_records SET late_minutes = 0, early_leave_minutes = 0, \
+                status = CASE WHEN status_overridden THEN status ELSE 'present' END \
+          WHERE id = $1 AND covered_employee_id IS NOT NULL",
+    )
+    .bind(record_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Re-materialise a work shift's window on a given business date. Used by
@@ -2771,6 +2789,7 @@ async fn rederive(
     .execute(pool)
     .await?;
 
+    settle_cover(pool, record_id).await?;
     // A correction changes what is owed. Recompute — but `penalties` leaves any
     // deduction a human has already waived or overridden exactly as it is.
     crate::staff::penalties::recompute_record(pool, record_id, &settings).await?;

@@ -2113,3 +2113,63 @@ async fn a_manager_never_decides_their_own_flag(pool: PgPool) {
     );
     assert_ne!(resp.status(), 403, "revoking your own phone is allowed");
 }
+
+/// E2E B-TEAM-5 (CV-3, CV-7): a cover is time worked for a colleague, counted
+/// as a cover — never as the coverer's lateness. Opening it an hour into the
+/// colleague's shift and leaving early is 0 late minutes and "present", after
+/// the phone's check-out and after a manager's correction alike.
+#[sqlx::test]
+async fn a_cover_is_never_late_or_a_half_day(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    // Bassem's shift began an hour ago and he never came.
+    let shift_id = shift_around_now(&pool, &f, f.b, 60, 240).await;
+    let s = session(&pool, f.a).await;
+    let rec = json_of(call!(
+        app,
+        post,
+        "/staff/me/cover",
+        phone(&s),
+        with(
+            here(),
+            json!({ "employee_id": f.b, "work_shift_id": shift_id })
+        )
+    ))
+    .await;
+    let id = rec["id"].as_str().unwrap().to_string();
+    let rec = json_of(call!(app, post, "/staff/me/check-out", phone(&s), here())).await;
+    assert_eq!(rec["id"], json!(id), "{rec}");
+    let figures = || {
+        let pool = pool.clone();
+        let id = id.clone();
+        async move {
+            sqlx::query_as::<_, (i32, i32, String)>(
+                "SELECT late_minutes, early_leave_minutes, status FROM attendance_records \
+                  WHERE id = $1::uuid",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        figures().await,
+        (0, 0, "present".to_string()),
+        "the phone's close"
+    );
+    // A manager's correction re-derives it the same way.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{id}"),
+        owner_t(&f),
+        json!({ "check_out_at": Utc::now(), "reason": "Tidy" })
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        figures().await,
+        (0, 0, "present".to_string()),
+        "a correction"
+    );
+}

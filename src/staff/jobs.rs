@@ -381,6 +381,8 @@ async fn close_forgotten(pool: &PgPool, row: &OpenRecord) -> Result<(), AppError
     .bind(close_at)
     .execute(pool)
     .await?;
+    // A cover is never late or a half day (CV-7, E2E B-TEAM-5).
+    crate::staff::attendance::settle_cover(pool, row.id).await?;
 
     tracing::debug!(
         record = %row.id, org = %row.org_id, branch = %row.branch_id,
