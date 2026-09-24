@@ -2704,7 +2704,7 @@ pub(crate) async fn create_order_inner(
                     .await?;
             match (clash, body.device_id) {
                 (Some(other), Some(mine)) if other != Some(mine) => {
-                    format!("{r}~{}", mine.simple().to_string()[..4].to_uppercase())
+                    madar_ids::order_ref::with_device_suffix(r, &mine.simple().to_string())
                 }
                 _ => r.clone(),
             }
@@ -2718,13 +2718,11 @@ pub(crate) async fn create_order_inner(
             .bind(body.branch_id)
             .fetch_one(&mut *tx)
             .await?;
-            let shift6 = body.till_id.simple().to_string()[..6].to_uppercase();
-            format!(
-                "{}-{}-{}-{:03}",
-                branch_code,
-                madar_time::yymmdd(biz_date),
-                shift6,
-                order_number
+            madar_ids::order_ref::server_ref(
+                &branch_code,
+                &madar_time::yymmdd(biz_date),
+                &body.till_id.simple().to_string(),
+                i64::from(order_number),
             )
         }
     };

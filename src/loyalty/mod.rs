@@ -40,12 +40,9 @@ use crate::errors::AppError;
 /// base64url'd to 22 characters — short enough that the QR stays sparse and
 /// scans off a phone screen on a cheap counter imager.
 pub fn mint_member_token() -> String {
-    use base64::Engine;
-    let raw = Uuid::new_v4();
-    format!(
-        "M{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
-    )
+    // The format is madar-shared's (`madar_ids::member`), the shape the till
+    // recognises in a scan; the randomness is this server's.
+    madar_ids::member::member_token(Uuid::new_v4().as_bytes())
 }
 
 /// The org a branch belongs to, or 404. Mirrors `reservations::resolve_branch_org`.
