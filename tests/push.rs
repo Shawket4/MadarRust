@@ -202,3 +202,75 @@ async fn the_dawam_app_and_a_staff_token_cannot_use_push_token(pool: PgPool) {
     assert_eq!(resp.status(), 401);
     assert!(live_row(&pool, "tok-e").await.is_none());
 }
+
+/// Every `"staff.n_…"` key literal under `src/`, plus `staff.n_flag_{kind}`
+/// for every kind the database allows on `attendance_flags`.
+async fn every_staff_key(pool: &PgPool) -> std::collections::BTreeSet<String> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with("push/words.rs") {
+                // Not the words table itself: its keys are what is checked.
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    // A whole literal only: `"staff.n_flag_{kind}"` (a format string) is
+    // covered by the flag kinds below.
+    let lit = regex::Regex::new(r#""(staff\.n_[a-z_]+)""#).unwrap();
+    let mut keys = std::collections::BTreeSet::new();
+    for f in files {
+        let text = std::fs::read_to_string(&f).unwrap();
+        for c in lit.captures_iter(&text) {
+            keys.insert(c[1].to_string());
+        }
+    }
+    let def: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+          WHERE conname = 'attendance_flags_kind_chk'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let kinds: Vec<String> = regex::Regex::new(r"'([a-z_]+)'::text")
+        .unwrap()
+        .captures_iter(&def)
+        .map(|c| c[1].to_string())
+        .collect();
+    assert!(kinds.len() >= 6, "the flag kinds were read: {def}");
+    for k in kinds {
+        keys.insert(format!("staff.n_flag_{k}"));
+    }
+    keys
+}
+
+/// E2E PN-1 (APP-6): a notification the server writes is also PUSHED, which
+/// needs its words in both languages on the server (`push::words`, from
+/// madar-core's i18n). A key without words rendered to nothing and its push
+/// was silently skipped — seven keys were. A new key without words fails here.
+#[sqlx::test]
+async fn every_staff_notification_key_has_push_words(pool: PgPool) {
+    let keys = every_staff_key(&pool).await;
+    assert!(keys.len() > 40, "{keys:?}");
+    let missing: Vec<String> = keys
+        .iter()
+        .filter(|k| {
+            [false, true]
+                .iter()
+                .any(|ar| madar_rust::push::render(k, &serde_json::json!({}), *ar).is_none())
+        })
+        .cloned()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "keys with no push words — add them to madar-core's i18n.rs and run \
+         scripts/sync_push_words.py: {missing:?}"
+    );
+}

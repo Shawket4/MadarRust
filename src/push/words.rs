@@ -90,6 +90,16 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "اتضاف خصم: {reason} ({amount})",
     ),
     (
+        "staff.n_fairness_flagged",
+        "Night shifts at {branch} ({month}) look uneven between men and women ({gap} points) — have a look",
+        "الورديات الليلية في {branch} ({month}) مش متوازنة بين الرجالة والستات ({gap} نقطة) — بص عليها",
+    ),
+    (
+        "staff.n_fairness_ready",
+        "The night-shift fairness check for {branch} ({month}) is ready",
+        "مراجعة عدالة الورديات الليلية لـ {branch} ({month}) جاهزة",
+    ),
+    (
         "staff.n_flag_cover",
         "{name} opened a cover shift",
         "{name} فتح وردية تغطية",
@@ -125,6 +135,16 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "{name} في الوردية والتتبع مقفول",
     ),
     (
+        "staff.n_learning_frozen",
+        "Roster suggestions at {branch} stopped learning: managers accepted {accepted} of {decided} in 4 weeks",
+        "اقتراحات الجدول في {branch} وقفت تتعلم: المديرين قبلوا {accepted} من {decided} في 4 أسابيع",
+    ),
+    (
+        "staff.n_learning_resumed",
+        "Roster suggestions at {branch} are learning again",
+        "اقتراحات الجدول في {branch} رجعت تتعلم",
+    ),
+    (
         "staff.n_new_phone",
         "{name} moved to a new phone ({device}); the old one is signed out",
         "{name} نقل على موبايل جديد ({device})؛ القديم اتقفل",
@@ -133,6 +153,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "staff.n_open_shift",
         "An open shift on {date} was posted — claim it in Shifts",
         "في وردية متاحة يوم {date} — احجزها من الورديات",
+    ),
+    (
+        "staff.n_open_shift_cancelled",
+        "The open shift on {date} you claimed was taken back",
+        "الوردية المتاحة يوم {date} اللي حجزتها اتلغت",
     ),
     (
         "staff.n_overtime",
@@ -153,6 +178,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "staff.n_paid",
         "Your pay is marked paid ({method})",
         "مرتبك اتعلّم إنه اتدفع ({method})",
+    ),
+    (
+        "staff.n_prefs_changed",
+        "Your manager changed your shift preferences",
+        "مديرك غيّر تفضيلات ورديّاتك",
     ),
     (
         "staff.n_punched_for_you",
@@ -193,6 +223,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "staff.n_swap_asked",
         "{name} wants to swap a shift with you",
         "{name} عايز يبدّل وردية معاك",
+    ),
+    (
+        "staff.n_swap_cancelled",
+        "{name} took back the swap they asked for",
+        "{name} لغى طلب التبديل",
     ),
     (
         "staff.n_swap_declined",
