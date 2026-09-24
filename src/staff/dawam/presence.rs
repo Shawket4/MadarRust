@@ -722,6 +722,17 @@ pub async fn resolve_flag(
         Some(b) => access::require_at(pool, &claims, org_id, Cap::HrAttendanceEdit, b).await?,
         None => access::require_for(pool, &claims, Cap::HrAttendanceEdit, &subject).await?,
     }
+    // Nobody decides their own flag (RQ-5: "nobody approves their own request
+    // any other way", E2E B-TEAM-1): excusing your own time away, ignoring
+    // your own suspicious punch or confirming your own cover is someone
+    // else's call. Signing your own phone out favours nobody, so it stays.
+    if subject.is(&claims) && body.action != "revoke" {
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_DECISION",
+            reason: "Someone else has to decide this one.".into(),
+        });
+    }
     // Each act on its own right as well (PM-4): confirming a cover is the
     // cover-confirm right (as on the covers list), signing a phone out is the
     // staff-edit right (as on the employee). A deduction asks its own below.

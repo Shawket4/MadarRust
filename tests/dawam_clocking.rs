@@ -2012,3 +2012,104 @@ async fn one_bad_record_or_org_never_stops_the_sweep(pool: PgPool) {
         "an org that fails to open its month skips only itself"
     );
 }
+
+/// E2E B-TEAM-1: nobody decides their own flag (RQ-5, "nobody approves their
+/// own request any other way"): a manager can't excuse their own time away
+/// as paid, ignore their own suspicious punch or confirm their own cover.
+/// Someone above them does; revoking one's own phone stays allowed.
+#[sqlx::test]
+async fn a_manager_never_decides_their_own_flag(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    let mgr = user(&pool, f.org, "Karim", "branch_manager").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(mgr)
+        .bind(f.branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let karim = employee(
+        &pool,
+        f.org,
+        "Karim",
+        Some(mgr),
+        Some("+201012345670"),
+        true,
+        &[f.branch],
+        600_000,
+    )
+    .await;
+    let mgr_t = user_token(mgr, f.org, UserRole::BranchManager);
+    let flag = |who: Uuid, kind: &'static str| {
+        let pool = pool.clone();
+        let (org, branch) = (f.org, f.branch);
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind, minutes_away) \
+                 VALUES ($1, $2, $3, $4, 20) RETURNING id",
+            )
+            .bind(org)
+            .bind(who)
+            .bind(branch)
+            .bind(kind)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let left = flag(karim, "left_mid_shift").await;
+    let odd = flag(karim, "suspicious").await;
+    for (id, action) in [
+        (left, "excuse_paid"),
+        (left, "ignore"),
+        (odd, "ignore"),
+        (odd, "confirm"),
+    ] {
+        let resp = call!(
+            app,
+            patch,
+            format!("/staff/flags/{id}"),
+            mgr_t,
+            json!({ "action": action })
+        );
+        assert_eq!(resp.status(), 403, "{action}");
+        let body = json_of(resp).await;
+        assert_eq!(body["code"], "OWN_DECISION", "{action}: {body}");
+    }
+    let open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attendance_flags WHERE employee_id = $1 AND resolution IS NULL",
+    )
+    .bind(karim)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(open, 2, "both still open");
+    // The manager still decides a colleague's flag, and the owner decides his.
+    let bassem = flag(f.b, "left_mid_shift").await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/flags/{bassem}"),
+        mgr_t,
+        json!({ "action": "excuse_paid" })
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/flags/{left}"),
+        owner_t(&f),
+        json!({ "action": "excuse_paid" })
+    );
+    assert_eq!(resp.status(), 200);
+    // Signing one's own phone out is not a decision in one's own favour.
+    let phone = flag(karim, "new_phone").await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/flags/{phone}"),
+        mgr_t,
+        json!({ "action": "revoke" })
+    );
+    assert_ne!(resp.status(), 403, "revoking your own phone is allowed");
+}
