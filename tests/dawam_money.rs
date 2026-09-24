@@ -3279,3 +3279,149 @@ async fn a_closed_month_refusal_does_not_repeat_its_code_in_the_text(pool: PgPoo
         "{body}"
     );
 }
+
+/// A confirmed cover of `minutes` at branch `branch` for `emp`, on `date`.
+async fn confirmed_cover(
+    pool: &PgPool,
+    f: &F,
+    emp: Uuid,
+    covered: Uuid,
+    branch: Uuid,
+    date: NaiveDate,
+    minutes: i64,
+) -> Uuid {
+    let start = date.and_hms_opt(9, 0, 0).unwrap().and_utc();
+    let end = start + Duration::minutes(minutes);
+    sqlx::query_scalar(
+        "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, status, \
+             scheduled_start_at, scheduled_end_at, check_in_at, check_out_at, worked_minutes, \
+             check_in_method, covered_employee_id, cover_status) \
+         VALUES ($1, $2, $3, $4, 'present', $5, $6, $5, $6, $7, 'cover', $8, 'confirmed') \
+         RETURNING id",
+    )
+    .bind(f.org)
+    .bind(emp)
+    .bind(branch)
+    .bind(date)
+    .bind(start)
+    .bind(end)
+    .bind(minutes as i32)
+    .bind(covered)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Owner decision D5 (24 Sep 2026): how a cover is paid is a rule, set by
+/// the business with a per-branch override. `minute_rate` (the default) is
+/// the coverer's day rate over an 8-hour day × the minutes covered (CV-4);
+/// `full_block` pays the covered block as a full day. The preview, the
+/// approved payslip and its cover line all use the effective mode.
+#[sqlx::test]
+async fn a_cover_is_paid_by_the_cover_pay_mode_of_its_branch(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Amal covers 2.5 hours at branch A.
+    confirmed_cover(&pool, &f, f.amal, f.bassem, f.a, f.start, 150).await;
+    let cover_of = |slip: &Value| -> (i64, String) {
+        let line = slip["breakdown"]["bonuses"]
+            .as_array()
+            .and_then(|l| l.iter().find(|b| b["kind"] == "cover"))
+            .unwrap_or_else(|| panic!("{slip}"));
+        (
+            line["piastres"].as_i64().unwrap(),
+            line["covers"][0]["mode"].as_str().unwrap().to_string(),
+        )
+    };
+    // 600,000 × 150 ÷ (26 × 480) = 7,211.54 → 7,212 (a plain 2.5 hours).
+    const MINUTE_RATE: i64 = 7_212;
+    // 600,000 ÷ 26 = 23,076.92 → 23,077 (the block as a full day).
+    const FULL_BLOCK: i64 = 23_077;
+
+    let rules = json_of(call!(app, get, "/staff/attendance/settings", f.owner())).await;
+    assert_eq!(
+        rules["cover_pay_mode"], "minute_rate",
+        "the default: {rules}"
+    );
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(cover_of(&slip), (MINUTE_RATE, "minute_rate".into()));
+    assert_eq!(slip["bonuses_piastres"], MINUTE_RATE);
+
+    // The business pays covers as a full block.
+    macro_rules! put {
+        ($body:expr) => {
+            call!(app, put, "/staff/attendance/settings", f.owner(), $body)
+        };
+    }
+    let resp = put!(json!({ "cover_pay_mode": "full_block" }));
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        cover_of(&slip_of(&app, &f, f.amal).await),
+        (FULL_BLOCK, "full_block".into())
+    );
+
+    // Branch A overrides it back to the minute rate.
+    let resp = put!(json!({ "branch_id": f.a, "cover_pay_mode": "minute_rate" }));
+    assert_eq!(resp.status(), 200);
+    let a_rules = json_of(call!(
+        app,
+        get,
+        format!("/staff/attendance/settings?branch_id={}", f.a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(a_rules["cover_pay_mode"], "minute_rate");
+    assert!(
+        a_rules["overridden"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("cover_pay_mode")),
+        "{a_rules}"
+    );
+    let b_rules = json_of(call!(
+        app,
+        get,
+        format!("/staff/attendance/settings?branch_id={}", f.b),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(
+        b_rules["cover_pay_mode"], "full_block",
+        "B follows the business"
+    );
+    assert_eq!(
+        cover_of(&slip_of(&app, &f, f.amal).await),
+        (MINUTE_RATE, "minute_rate".into())
+    );
+
+    // The approved payslip keeps what the preview said.
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    let slip = slip_of(&app, &f, f.amal).await;
+    assert_eq!(cover_of(&slip), (MINUTE_RATE, "minute_rate".into()));
+    let resp = reopen(&app, &f).await;
+    assert_eq!(resp.status(), 200);
+
+    // Back to the business's rule.
+    let resp = put!(json!({ "branch_id": f.a, "inherit": ["cover_pay_mode"] }));
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        cover_of(&slip_of(&app, &f, f.amal).await),
+        (FULL_BLOCK, "full_block".into())
+    );
+
+    // Only the two modes, and only with the rules right.
+    let resp = put!(json!({ "cover_pay_mode": "per_hour" }));
+    assert_eq!(resp.status(), 400);
+    let body = json_of(resp).await;
+    assert_eq!(body["code"], "SETTING_OUT_OF_RANGE");
+    assert_eq!(body["vars"]["field"], "cover_pay_mode");
+    let resp = call!(
+        app,
+        put,
+        "/staff/attendance/settings",
+        f.mgr(),
+        json!({ "branch_id": f.a, "cover_pay_mode": "full_block" })
+    );
+    assert_eq!(resp.status(), 403);
+}

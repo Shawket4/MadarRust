@@ -180,6 +180,11 @@ pub struct AttendanceSettings {
     pub limit_overtime_day_hours: Decimal,
     /// POS-derived coverage: one person per this many orders an hour.
     pub orders_per_staff: i32,
+    /// How a confirmed cover is paid (owner decision D5): `minute_rate` (the
+    /// coverer's day rate ÷ 8 h × the minutes covered, CV-4; the default) or
+    /// `full_block` (the covered block as a full day). A branch may override
+    /// it (listed in `overridden`).
+    pub cover_pay_mode: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// For a branch: the rules it sets itself (every other field is the
@@ -387,6 +392,10 @@ pub struct PutAttendanceSettingsRequest {
     pub limit_overtime_day_hours: Option<Decimal>,
     #[serde(default)]
     pub orders_per_staff: Option<i32>,
+    /// `minute_rate` · `full_block` (D5). On a branch: its own override;
+    /// `inherit: ["cover_pay_mode"]` goes back to the business's.
+    #[serde(default)]
+    pub cover_pay_mode: Option<String>,
     /// Branch only: rules to take from the business again (field names, as
     /// in `overridden`).
     #[serde(default)]
@@ -1007,6 +1016,11 @@ const RULE_FIELDS: &[RuleField] = &[
         default: "12",
         branch: true,
     },
+    RuleField {
+        name: "cover_pay_mode",
+        default: "'minute_rate'",
+        branch: true,
+    },
 ];
 
 /// The rules a branch may override, by name (the wire's field names).
@@ -1232,6 +1246,7 @@ fn bind_rule<'q>(
         "limit_rest_hours" => q.bind(body.limit_rest_hours),
         "limit_overtime_day_hours" => q.bind(body.limit_overtime_day_hours),
         "orders_per_staff" => q.bind(body.orders_per_staff),
+        "cover_pay_mode" => q.bind(body.cover_pay_mode.as_deref()),
         other => unreachable!("rule field {other} has no binding"),
     }
 }
@@ -1262,6 +1277,7 @@ fn rule_sent(name: &str, body: &PutAttendanceSettingsRequest) -> bool {
         "limit_rest_hours" => body.limit_rest_hours.is_some(),
         "limit_overtime_day_hours" => body.limit_overtime_day_hours.is_some(),
         "orders_per_staff" => body.orders_per_staff.is_some(),
+        "cover_pay_mode" => body.cover_pay_mode.is_some(),
         _ => false,
     }
 }
@@ -1551,7 +1567,12 @@ fn check_setting_ranges(body: &PutAttendanceSettingsRequest) -> Result<(), AppEr
             serde_json::json!({ "min": 1, "max": 28 }),
         ));
     }
-    let choices: [(&str, Option<&str>, &[&str]); 3] = [
+    let choices: [(&str, Option<&str>, &[&str]); 4] = [
+        (
+            "cover_pay_mode",
+            body.cover_pay_mode.as_deref(),
+            &["minute_rate", "full_block"],
+        ),
         (
             "overtime_mode",
             body.overtime_mode.as_deref(),

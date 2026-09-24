@@ -1519,6 +1519,8 @@ pub(crate) async fn compute_payslips(
         holiday_piastres: i64,
         /// Per-shift overtime lines, for the breakdown.
         shifts: Vec<serde_json::Value>,
+        /// Each confirmed cover and how it was paid (D5), for the breakdown.
+        covers: Vec<serde_json::Value>,
     }
     let mut totals: HashMap<Uuid, Totals> = HashMap::new();
     // A date counts once, by its best block (SC-11, E2E B-ROTA-6): a split day
@@ -1604,6 +1606,13 @@ pub(crate) async fn compute_payslips(
         t.overtime_piastres += price.overtime_piastres;
         t.cover_piastres += price.cover_piastres;
         t.holiday_piastres += price.holiday_piastres;
+        if facts.is_confirmed_cover {
+            t.covers.push(json!({
+                "date": r.business_date, "branch_id": r.branch_id,
+                "minutes": facts.worked_minutes, "piastres": price.cover_piastres,
+                "mode": if shift_rules.cover_full_block { "full_block" } else { "minute_rate" },
+            }));
+        }
         if price.overtime_piastres > 0 {
             t.shifts.push(json!({
                 "date": r.business_date, "branch_id": r.branch_id,
@@ -1769,6 +1778,8 @@ pub(crate) async fn compute_payslips(
             bonus_total = bonus_total.saturating_add(attendance.cover_piastres);
             bonus_lines.push(json!({
                 "id": null, "kind": "cover", "reason": "cover", "piastres": attendance.cover_piastres,
+                // Each cover, with the pay mode it was priced under (D5).
+                "covers": attendance.covers,
             }));
         }
         if attendance.holiday_piastres > 0 {
