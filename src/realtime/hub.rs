@@ -58,16 +58,76 @@ pub struct Replay {
     pub server_last_id: u64,
 }
 
+/// Live `/realtime/stream` connections that carry the `delivery` topic, per
+/// (branch, install). A count, not a flag: one install can hold two streams
+/// for a moment (a reconnect racing the old socket's teardown), and it is
+/// connected until the LAST of them goes.
+type Presence = HashMap<(Uuid, Uuid), usize>;
+
 /// Branch-keyed broadcast registry. Cheap to clone (`Arc` inside) so it lives in
 /// `web::Data` and is shared across all actix workers.
 #[derive(Clone, Default)]
 pub struct BranchEventHub {
     inner: Arc<Mutex<HashMap<Uuid, BranchBus>>>,
+    presence: Arc<Mutex<Presence>>,
+}
+
+/// One install's live stream at one branch, held by the SSE body for as long
+/// as the connection lives. Dropping it — actix drops the body when the
+/// connection closes, errors or lags out — deregisters the connection.
+pub struct Connection {
+    presence: Arc<Mutex<Presence>>,
+    key: (Uuid, Uuid),
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let mut map = self.presence.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                map.remove(&self.key);
+            }
+        }
+    }
 }
 
 impl BranchEventHub {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that `device` has a live stream at `branch` which carries new
+    /// online orders (the `delivery` topic). The push fallback
+    /// (`push::pos`) skips such a device: the open app already alerts from the
+    /// `delivery.created` event itself.
+    pub fn connect(&self, branch_id: Uuid, device_id: Uuid) -> Connection {
+        let key = (branch_id, device_id);
+        *self
+            .presence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_insert(0) += 1;
+        Connection {
+            presence: self.presence.clone(),
+            key,
+        }
+    }
+
+    /// How many live delivery-carrying streams `device` holds at `branch`.
+    pub fn connections(&self, branch_id: Uuid, device_id: Uuid) -> usize {
+        self.presence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(branch_id, device_id))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Does `device` hold a live delivery-carrying stream at `branch`?
+    pub fn is_connected(&self, branch_id: Uuid, device_id: Uuid) -> bool {
+        self.connections(branch_id, device_id) > 0
     }
 
     /// Subscribe to a branch's bus, creating it on first use.
@@ -196,6 +256,27 @@ mod tests {
             !hub.replay_since(branch, 99).complete,
             "stale cursor → resync"
         );
+    }
+
+    #[test]
+    fn a_device_is_connected_until_its_last_stream_closes() {
+        let hub = BranchEventHub::new();
+        let (branch, other_branch, device) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        assert!(!hub.is_connected(branch, device));
+        let first = hub.connect(branch, device);
+        let second = hub.connect(branch, device); // a reconnect racing the old socket
+        assert_eq!(hub.connections(branch, device), 2);
+        assert!(
+            !hub.is_connected(other_branch, device),
+            "a stream at one branch says nothing about another"
+        );
+        drop(first);
+        assert!(hub.is_connected(branch, device), "one stream is still up");
+        drop(second);
+        assert!(!hub.is_connected(branch, device));
+        // Clones share the registry (the hub lives in web::Data).
+        let _c = hub.clone().connect(branch, device);
+        assert!(hub.is_connected(branch, device));
     }
 
     #[test]

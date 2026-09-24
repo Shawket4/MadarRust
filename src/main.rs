@@ -309,6 +309,11 @@ async fn run() -> std::io::Result<()> {
     // Drop slow/stalled clients so a resource-tight box can't be tied up.
     .client_request_timeout(std::time::Duration::from_secs(30))
     .client_disconnect_timeout(std::time::Duration::from_secs(5))
+    // A client that closes its socket is gone at once, even mid-response. The
+    // default (allow half-closed) keeps a streaming response alive after the
+    // peer's FIN until a write fails — for `/realtime/stream` that is one or
+    // two 20 s pings, and the POS push fallback reads "stream up" meanwhile.
+    .h1_allow_half_closed(madar_rust::realtime::H1_ALLOW_HALF_CLOSED)
     // Actix defaults to one worker per CPU, and the production box has ONE
     // vCPU — so the whole API ran on a single thread. That is the right default
     // for work that is purely async, and the wrong one here, because a handful

@@ -111,6 +111,16 @@ pub async fn stream(
 
     let rx = hub.subscribe(query.branch_id);
 
+    // Presence for the push fallback: an install whose stream carries new
+    // online orders is "connected" at this branch while the body lives, and
+    // gets no FCM push for them (`push::pos`). The guard moves into the body
+    // stream below, so actix dropping the body — the client closing, an
+    // error, a lagged receiver — deregisters it. A client that names no
+    // install (`X-Madar-Device`) is not tracked.
+    let presence = crate::devices::DeviceHeader::from_request_headers(&req)
+        .filter(|_| topics.contains(&Topic::Delivery))
+        .map(|device| hub.connect(query.branch_id, device));
+
     // A fresh connect seeds from the list endpoints, not from replay. A resume
     // whose gap we cannot fully cover (buffer evicted, or a cursor from before a
     // restart) opens with a `resync` frame: the client re-seeds, then keeps
@@ -167,6 +177,7 @@ pub async fn stream(
     // and any id already delivered via replay. A lagged/closed receiver yields `Err`,
     // surfaced as a body error so actix drops the connection; the client reconnects.
     let events = BroadcastStream::new(rx).filter_map(move |res| {
+        let _held_for_the_connection = &presence;
         let out: Option<Result<Bytes, actix_web::Error>> = match res {
             Ok(ev) if ev.id > max_replayed && topics.contains(&ev.topic) => {
                 Some(Ok(Bytes::from(format!(
