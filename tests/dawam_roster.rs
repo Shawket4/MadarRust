@@ -3304,3 +3304,26 @@ async fn asking_the_same_swap_twice_is_refused(pool: PgPool) {
     let (st, body) = done(call!(app, "POST", "/staff/me/swaps", ta, ask)).await;
     assert_eq!(st, 201, "{body}");
 }
+
+/// E2E B-ROTA-2 (AT-13): deleting a shift block still on the roster is a
+/// coded refusal with its figures — SHIFT_IN_USE {n, name} — not a raw
+/// "Bad request:" sentence.
+#[sqlx::test]
+async fn deleting_a_block_in_use_is_coded(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    pattern(&pool, &f, f.a, m, None).await;
+    let (s, body) = done(call!(
+        app,
+        "DELETE",
+        format!("/staff/work-shifts/{m}"),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 409, "{body}");
+    assert_eq!(body["code"], "SHIFT_IN_USE", "{body}");
+    assert_eq!(body["vars"]["n"], 1, "{body}");
+    assert_eq!(body["vars"]["name"], "Morning", "{body}");
+    assert!(!body["error"].as_str().unwrap().starts_with("Bad request:"));
+}

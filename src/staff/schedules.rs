@@ -1047,10 +1047,21 @@ pub async fn delete_work_shift(
     .fetch_one(pool.get_ref())
     .await?;
     if assigned > 0 {
-        return Err(AppError::BadRequest(format!(
-            "{assigned} roster assignment(s) still use this shift — remove them first, \
-             or deactivate the shift instead"
-        )));
+        // Coded with its figures, for the client's own wording (AT-13, E2E
+        // B-ROTA-2); a conflict with the roster, like SHIFT_DAYS_IN_USE.
+        let name: String = sqlx::query_scalar("SELECT name FROM work_shifts WHERE id = $1")
+            .bind(*id)
+            .fetch_one(pool.get_ref())
+            .await?;
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "SHIFT_IN_USE",
+            reason: format!(
+                "{assigned} roster assignment(s) still use {name} — remove them first, \
+                 or switch the shift off instead"
+            ),
+            vars: serde_json::json!({ "n": assigned, "name": name }),
+        });
     }
 
     let deleted = sqlx::query("DELETE FROM work_shifts WHERE id = $1 AND org_id = $2")
