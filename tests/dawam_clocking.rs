@@ -2766,3 +2766,37 @@ async fn clocking_refusals_carry_codes(pool: PgPool) {
     )
     .await;
 }
+
+/// POS E2E B-POS-1 (P-010, PS-7): a till punch in a business without Dawam
+/// (or without POS) is 403 MODULE_OFF with the sentence the spec wants, so
+/// the till says it rather than "you don't have permission".
+#[sqlx::test]
+async fn a_till_punch_with_a_module_off_is_module_off(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    give_pin(&pool, f.a_user, "4321").await;
+    let device = open_till(&pool, f.org, f.branch, f.owner).await;
+    let owner = owner_t(&f);
+    for modules in ["{pos}", "{dawam}"] {
+        sqlx::query("UPDATE organizations SET modules = $2::text[] WHERE id = $1")
+            .bind(f.org)
+            .bind(modules)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let resp = call!(
+            app,
+            post,
+            "/staff/attendance/till-punch",
+            at_till(&owner, device),
+            json!({ "branch_id": f.branch, "pin": "4321" })
+        );
+        assert_eq!(resp.status(), 403, "{modules}");
+        let body = json_of(resp).await;
+        assert_eq!(body["code"], "MODULE_OFF", "{modules}: {body}");
+        assert_eq!(
+            body["error"], "Till punches need both POS and Dawam switched on.",
+            "{modules}"
+        );
+    }
+}

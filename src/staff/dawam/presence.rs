@@ -1648,11 +1648,16 @@ pub async fn till_punch(
     if !branch_ok {
         return Err(AppError::NotFound("Branch not found".into()));
     }
+    // Either module off: 403 MODULE_OFF with the spec's sentence (P-010,
+    // PS-7), so the till words it instead of "no permission" (B-POS-1).
     for m in ["pos", "dawam"] {
         if !super::roster::has_module(pool, org_id, m).await? {
-            return Err(AppError::Forbidden(
-                "Till punches need both POS and Dawam switched on.".into(),
-            ));
+            return Err(AppError::CodedVars {
+                status: 403,
+                code: "MODULE_OFF",
+                reason: "Till punches need both POS and Dawam switched on.".into(),
+                vars: serde_json::json!({ "module": m }),
+            });
         }
     }
     // The branch's own registered POS device, proven when it can be.

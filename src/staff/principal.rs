@@ -271,7 +271,14 @@ pub(crate) async fn check_session(
 
 /// A dashboard or POS session on `/staff/*`: the org must be active and have
 /// Dawam switched on (PS-7, SA-3). A super admin (no org of their own) passes.
-async fn check_user_org(pool: &PgPool, claims: &Claims) -> Result<(), AppError> {
+/// `module_checked_by_handler`: the route answers a switched-off module
+/// itself (the till punch, P-010: "Till punches need both POS and Dawam
+/// switched on." as MODULE_OFF), so only an inactive org is refused here.
+async fn check_user_org(
+    pool: &PgPool,
+    claims: &Claims,
+    module_checked_by_handler: bool,
+) -> Result<(), AppError> {
     let Some(org) = claims.org_id() else {
         return if claims.role == UserRole::SuperAdmin {
             Ok(())
@@ -290,6 +297,7 @@ async fn check_user_org(pool: &PgPool, claims: &Claims) -> Result<(), AppError> 
     .await?;
     match row {
         None | Some((false, _, _)) => Err(AppError::OrgSuspended),
+        Some((true, false, _)) if module_checked_by_handler => Ok(()),
         Some((true, false, name)) => Err(dawam_off(&name)),
         Some((true, true, _)) => Ok(()),
     }
@@ -342,7 +350,8 @@ async fn authenticate(req: &ServiceRequest) -> Result<Option<String>, AppError> 
 
     // A Madar user's session (dashboard, POS).
     if let Ok(claims) = verify_token(&secret, &token) {
-        check_user_org(pool.get_ref(), &claims).await?;
+        let till_punch = req.path().ends_with("/attendance/till-punch");
+        check_user_org(pool.get_ref(), &claims, till_punch).await?;
         req.extensions_mut().insert(claims);
         return Ok(None);
     }
