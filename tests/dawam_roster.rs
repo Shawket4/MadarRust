@@ -3537,3 +3537,140 @@ async fn refused_status(resp: actix_web::dev::ServiceResponse, status: u16) {
     let (s, body) = done(resp).await;
     assert_eq!(s, status, "{body}");
 }
+
+async fn absence_lines(pool: &PgPool, who: Uuid, on: NaiveDate) -> Vec<(Option<Uuid>, i64, bool)> {
+    sqlx::query_as(
+        "SELECT attendance_record_id, amount_piastres, waived_at IS NOT NULL \
+           FROM payroll_deductions WHERE employee_id = $1 AND source = 'absence' \
+            AND effective_date = $2 ORDER BY created_at",
+    )
+    .bind(who)
+    .bind(on)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn absent_at(pool: &PgPool, who: Uuid, on: NaiveDate) -> Vec<(Uuid, DateTime<Utc>)> {
+    sqlx::query_as(
+        "SELECT id, scheduled_start_at FROM attendance_records \
+          WHERE employee_id = $1 AND business_date = $2 AND status = 'absent' \
+          ORDER BY scheduled_start_at",
+    )
+    .bind(who)
+    .bind(on)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Owner decision D4 (24 Sep 2026): a roster edit that changes a shift's
+/// times, block or person clears the sweep's absence on it (and its
+/// automatic deduction), so the new times are judged from scratch. A
+/// manager's own decision is kept (AT-7): a waived line stays, and a day a
+/// manager set by hand stays.
+#[sqlx::test]
+async fn a_roster_edit_clears_the_sweeps_absence_on_the_changed_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let y = today() - Duration::days(1);
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    pattern(&pool, &f, f.a, m, None).await;
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let first = absent_at(&pool, f.a, y).await;
+    assert_eq!(first.len(), 1, "the sweep marked the morning");
+    assert_eq!(
+        absence_lines(&pool, f.a, y).await,
+        vec![(Some(first[0].0), 20_000, false)]
+    );
+
+    // Own times: the absence at 08:00 goes with its deduction.
+    let (s, b) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days/times",
+        f.manager(),
+        json!({ "employee_id": f.a, "on_date": y, "work_shift_id": m,
+                "start_time": "13:00:00", "end_time": "17:00:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert!(
+        absent_at(&pool, f.a, y).await.is_empty(),
+        "judged from scratch"
+    );
+    assert!(
+        absence_lines(&pool, f.a, y).await.is_empty(),
+        "its deduction went too"
+    );
+    // The sweep judges the new times.
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let second = absent_at(&pool, f.a, y).await;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].1, y.and_time(t(13, 0)).and_utc(), "the new times");
+
+    // The owner waives that line; then the shift is given to Bassem. Amal's
+    // absence goes (she isn't on it any more); the waived line is kept.
+    let line: Uuid = sqlx::query_scalar(
+        "SELECT id FROM payroll_deductions WHERE employee_id = $1 AND source = 'absence' \
+            AND effective_date = $2",
+    )
+    .bind(f.a)
+    .bind(y)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (s, b) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/payroll/deductions/{line}/waive"),
+        f.owner(),
+        json!({ "reason": "Her phone died" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules/days/move",
+        f.manager(),
+        json!({ "employee_id": f.a, "to_employee_id": f.b, "on_date": y, "work_shift_id": m })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert!(absent_at(&pool, f.a, y).await.is_empty());
+    assert_eq!(
+        absence_lines(&pool, f.a, y).await,
+        vec![(None, 20_000, true)],
+        "the manager's waiver stays (AT-7)"
+    );
+
+    // A day a manager set by hand is theirs: a later edit leaves it.
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let bassem = absent_at(&pool, f.b, y).await;
+    assert_eq!(bassem.len(), 1, "the sweep judged Bassem's new shift");
+    let (s, b) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/attendance/{}", bassem[0].0),
+        f.manager(),
+        json!({ "status": "absent", "reason": "Called in sick, no leave" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days/times",
+        f.manager(),
+        json!({ "employee_id": f.b, "on_date": y, "work_shift_id": m,
+                "start_time": "14:00:00", "end_time": "18:00:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(
+        absent_at(&pool, f.b, y).await,
+        bassem,
+        "a manager's day stays"
+    );
+}
