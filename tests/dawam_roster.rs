@@ -3037,3 +3037,37 @@ async fn a_swap_is_not_approved_once_its_shift_started_or_its_week_is_unpublishe
     assert_eq!(st, 204);
     assert_eq!(status().await, "rejected");
 }
+
+/// E2E B-ROTA-1 (SC-5c): moving a block to someone already on that block
+/// that day is refused (409 ALREADY_ROSTERED) and nothing changes. It used to
+/// answer 200, give the first person a day off and leave the second with one
+/// Morning: the day's headcount silently dropped by one.
+#[sqlx::test]
+async fn moving_a_block_to_someone_already_on_it_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    pattern(&pool, &f, f.a, m, None).await;
+    pattern(&pool, &f, f.b, m, None).await;
+    let d = today() + Duration::days(3);
+    refused!(
+        call!(
+            app,
+            "POST",
+            "/staff/schedules/days/move",
+            f.manager(),
+            json!({ "employee_id": f.a, "to_employee_id": f.b, "on_date": d, "work_shift_id": m })
+        ),
+        409,
+        "ALREADY_ROSTERED"
+    );
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![m], "Amal keeps it");
+    assert_eq!(shifts_on(&pool, f.b, d).await, vec![m]);
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM staff_schedule_overrides WHERE on_date = $1")
+            .bind(d)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "nothing written");
+}

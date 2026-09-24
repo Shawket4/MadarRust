@@ -1617,6 +1617,21 @@ pub async fn move_shift(
             reason: format!("{} isn't on that shift that day.", from.name),
         });
     };
+    // Already on that block that day? Adding it would be a no-op on the
+    // date's set and the block would simply vanish from `from` (E2E
+    // B-ROTA-1). Refused; the transaction rolls back and `from` keeps it.
+    if let Some(on) = resolve_range(&mut *tx, &[to.id], body.on_date, body.on_date, None)
+        .await?
+        .into_iter()
+        .find(|s| s.work_shift_id == body.work_shift_id)
+    {
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "ALREADY_ROSTERED",
+            reason: format!("{} is already on {} that day.", to.name, on.name),
+            vars: serde_json::json!({ "name": to.name, "shift": on.name, "date": body.on_date }),
+        });
+    }
     let block = Block {
         work_shift_id: body.work_shift_id,
         times,
