@@ -902,12 +902,13 @@ async fn approve_advance_checks(
     }
     let branch = access::decision_branch(pool, claims, Cap::HrAdvancesDecide, subject).await?;
     let mut ask = AuthzRequest::of(Cap::HrAdvancesDecide);
+    // Share of salary owed after this one, in BASIS POINTS like every percent
+    // limit (the dashboard stores 30% as 3000; E2E B-SETUP-4), rounded UP so
+    // a limit is never passed by a fraction of a point.
     ask.percent = Some(if salary > 0 {
-        // Share of salary owed after this one, rounded UP so a limit of 50%
-        // is never passed by a fraction of a percent.
-        (after * 100 + salary - 1).div_euclid(salary)
+        (after * 10_000 + salary - 1).div_euclid(salary)
     } else {
-        100
+        10_000
     });
     let pending = crate::authz::Pending {
         request: ask,

@@ -146,6 +146,14 @@ async fn a_cafe_is_provisioned_whole_with_the_new_org_limits(pool: PgPool) {
     ));
     assert!(!t.can(Cap::BookingsRead), "a café teller has no bookings");
 
+    // A percent limit is in basis points (E2E B-SETUP-4): a branch manager's
+    // advances go up to half a month's salary, 5000 bp, not 50 (0.5%).
+    let manager = add_user(&pool, org, "branch_manager").await;
+    let m = madar_rust::authz::require::effective(&pool, manager, None)
+        .await
+        .unwrap();
+    assert_eq!(m.limits_of(Cap::HrAdvancesDecide).max_percent, Some(5000));
+
     let waiter = add_user(&pool, org, "waiter").await;
     let w = madar_rust::authz::require::effective(&pool, waiter, None)
         .await

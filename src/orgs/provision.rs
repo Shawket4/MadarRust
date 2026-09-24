@@ -21,6 +21,21 @@ use crate::errors::{AppError, AppErrorResponse};
 
 use super::handlers::{Org, extract_claims};
 
+/// A percent limit is stored in basis points (the dashboard's 30% is 3000).
+/// madar-shared v0.3.0's templates still write the advance limit
+/// (`hr.advances.decide`) in whole percent (50 = half a month's salary), so a
+/// value of 100 or less there is lifted into bp (E2E B-SETUP-4). Once the spec
+/// says 5000 this does nothing.
+fn in_basis_points(cap: crate::authz::Cap, mut l: crate::authz::Limits) -> crate::authz::Limits {
+    if cap == crate::authz::Cap::HrAdvancesDecide
+        && let Some(p) = l.max_percent
+        && p <= 100
+    {
+        l.max_percent = Some(p * 100);
+    }
+    l
+}
+
 /// Every role kind's system role for `template`, with its grants and limits.
 /// Idempotent per kind: an existing live role with the kind's key is left as it
 /// is (the owner may have edited it).
@@ -63,7 +78,7 @@ pub async fn provision_roles(
             let l = limits
                 .iter()
                 .find(|(c, _)| *c == cap)
-                .map(|(_, l)| serde_json::to_value(l).unwrap_or_default())
+                .map(|(_, l)| serde_json::to_value(in_basis_points(cap, *l)).unwrap_or_default())
                 .unwrap_or_else(|| serde_json::json!({}));
             sqlx::query(
                 "INSERT INTO org_role_grants (org_role_id, org_id, capability_id, limits, source, template_version)

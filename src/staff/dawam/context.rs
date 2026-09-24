@@ -88,6 +88,8 @@ pub struct StaffContext {
     pub adjustment_limit_piastres: Option<i64>,
     /// My ceiling on a deduction (AD-5: separate from the bonus limit).
     pub deduction_limit_piastres: Option<i64>,
+    /// My ceiling on an advance, as whole percent of the person's salary owed
+    /// after it (the grant stores basis points); null = none.
     pub advance_limit_percent: Option<i64>,
     pub branches: Vec<ContextBranch>,
     pub people: Vec<ContextPerson>,
@@ -239,9 +241,11 @@ pub async fn my_context(
         deduction_limit_piastres: eff
             .limits_of(Cap::HrDeductionsCreate)
             .get(LimitKey::MaxAmount),
+        // Stored in basis points; the app reads whole percent (B-SETUP-4).
         advance_limit_percent: eff
             .limits_of(Cap::HrAdvancesDecide)
-            .get(LimitKey::MaxPercent),
+            .get(LimitKey::MaxPercent)
+            .map(|bp| bp / 100),
         branches,
         people,
         work_shifts,

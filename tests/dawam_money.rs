@@ -2776,3 +2776,113 @@ async fn a_split_day_with_one_block_missed_counts_one_worked_day(pool: PgPool) {
         "the missed block still costs its share: {slip}"
     );
 }
+
+/// E2E B-SETUP-4 (AV-5, PM-1): an advance limit is a `max_percent` in basis
+/// points like every other percent limit (the dashboard stores 30% as 3000).
+/// A manager's override of 30% holds a 39% advance for someone higher and
+/// lets a 25% one through; the role default is 50% (5000); the app is told
+/// the limit in whole percent.
+#[sqlx::test]
+async fn an_advance_percent_limit_is_in_basis_points(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let mgr = f.mgr();
+    // Out of the org cap's way: only the manager's own limit is judged here.
+    sqlx::query("UPDATE attendance_settings SET advance_cap_percent = 100 WHERE org_id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let role_default: Value = sqlx::query_scalar(
+        "SELECT g.limits FROM org_role_grants g JOIN org_roles r ON r.id = g.org_role_id \
+          WHERE r.org_id = $1 AND r.kind::text = 'branch_manager' AND g.capability_id = 228",
+    )
+    .bind(f.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(role_default, json!({ "max_percent": 5000 }), "50%, in bp");
+
+    macro_rules! ask {
+        ($who:expr, $amount:expr) => {{
+            let s = phone_token(&pool, $who).await;
+            let r = json_of(call!(app, post, "/staff/me/advances", s,
+                json!({ "amount_piastres": $amount, "installments": 3 }))).await;
+            r["id"].as_str().unwrap().to_string()
+        }};
+    }
+    macro_rules! review {
+        ($id:expr) => {
+            call!(
+                app,
+                patch,
+                format!("/staff/advances/{}/review", $id),
+                mgr,
+                json!({ "approve": true })
+            )
+        };
+    }
+    // The role default (50%) lets 45% through.
+    let a45 = ask!(f.amal, 270_000);
+    assert_eq!(review!(a45).status(), 200, "45% is within 50%");
+
+    // The owner lowers this manager to 30% (the dashboard sends 3000).
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, limits, reason) \
+         VALUES ($1, $2, 228, 'allow', '{\"max_percent\": 3000}'::jsonb, 'test')",
+    )
+    .bind(f.org)
+    .bind(f.mgr)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SELECT authz_bump_epoch($1)")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mgr_e = common::employees::employee(
+        &pool,
+        f.org,
+        "Mgr",
+        Some(f.mgr),
+        Some("+201012345670"),
+        true,
+        &[f.a],
+        0,
+    )
+    .await;
+    let ctx = json_of(call!(
+        app,
+        get,
+        "/staff/me/context",
+        phone_token(&pool, mgr_e).await
+    ))
+    .await;
+    assert_eq!(
+        ctx["advance_limit_percent"], 30,
+        "the app reads whole percent"
+    );
+
+    // Bassem earns 500,000: 195,000 is 39%, 125,000 is 25%.
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(f.mgr)
+        .bind(f.b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let b39 = ask!(f.bassem, 195_000);
+    let resp = review!(b39);
+    assert_eq!(resp.status(), 403, "39% is over 30%");
+    assert_eq!(
+        remaining(&pool, Uuid::parse_str(&b39).unwrap()).await.1,
+        "pending"
+    );
+    sqlx::query("DELETE FROM salary_advances WHERE id = $1::uuid")
+        .bind(&b39)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let b25 = ask!(f.bassem, 125_000);
+    assert_eq!(review!(b25).status(), 200, "25% is within 30%");
+}
