@@ -173,11 +173,7 @@ fn price_bill_under(
     //
     // The preview is madar-shared's `bill::price_open_bill` (the till re-runs
     // it after a void or a discount): floor, discount rule, then the engine.
-    let discount = match dtype {
-        Some("percentage") => crate::tax::Discount::Percentage(dvalue),
-        Some("fixed") => crate::tax::Discount::Fixed(dvalue),
-        _ => crate::tax::Discount::None,
-    };
+    let discount = madar_money::bill::rule_of(dtype, dvalue);
     let b = madar_money::bill::price_open_bill(i64::from(subtotal), discount, policy);
     TicketBill {
         subtotal: b.subtotal as i32,

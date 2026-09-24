@@ -437,6 +437,7 @@ impl Catalog {
                         size_label: o.size_label.clone(),
                     })
                     .collect(),
+                groups: Vec::new(),
             };
             self.items.insert(
                 id,

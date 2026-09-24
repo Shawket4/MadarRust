@@ -980,28 +980,40 @@ pub(crate) struct ResolvedAddon {
 }
 
 impl ResolvedItem {
-    /// Charged addon total per unit of the parent item. Zero for a bundle,
-    /// whose component addons are already inside `component_surcharge`.
-    fn charged_addon_per_unit(&self) -> i32 {
+    /// The line's add-ons as madar-shared's line rule reads them. Empty for a
+    /// bundle, whose component add-ons are inside `component_surcharge`.
+    fn line_addons(&self) -> Vec<madar_money::line::Addon> {
         if self.bundle_id.is_some() {
-            0
-        } else {
-            self.addons.iter().map(|a| a.unit_price * a.quantity).sum()
+            return Vec::new();
         }
+        self.addons
+            .iter()
+            .map(|a| madar_money::line::Addon {
+                price_modifier: i64::from(a.unit_price),
+                quantity: i64::from(a.quantity),
+            })
+            .collect()
     }
 
-    /// Optional-field prices per unit; zero for a bundle for the same reason.
+    /// The line's optional-field prices; empty for a bundle for the same reason.
+    fn line_optionals(&self) -> Vec<i64> {
+        if self.bundle_id.is_some() {
+            return Vec::new();
+        }
+        self.optionals.iter().map(|o| i64::from(o.price)).collect()
+    }
+
+    /// Optional-field prices per unit (`madar_money::line::extras_per_unit`
+    /// over the optionals alone).
     fn optional_per_unit(&self) -> i32 {
-        if self.bundle_id.is_some() {
-            0
-        } else {
-            self.optionals.iter().map(|o| o.price).sum()
-        }
+        madar_money::line::extras_per_unit(&[], &self.line_optionals()) as i32
     }
 
-    /// What one unit of this line costs the customer, modifiers included.
+    /// What one unit of this line costs the customer, modifiers included:
+    /// the unit price plus madar-shared's `line::extras_per_unit`.
     pub(crate) fn charged_per_unit(&self) -> i32 {
-        self.unit_price + self.charged_addon_per_unit() + self.optional_per_unit()
+        self.unit_price
+            + madar_money::line::extras_per_unit(&self.line_addons(), &self.line_optionals()) as i32
     }
 
     /// The line as charged, before any reward: per-unit × quantity plus the
@@ -2093,10 +2105,11 @@ pub(crate) async fn create_order_inner(
     .await?;
 
     let mut resolved_items: Vec<ResolvedItem> = Vec::new();
-    // `subtotal` accumulates the CHARGED line totals (what the customer paid);
-    // `expected_subtotal` mirrors it using catalog + branch-override prices so we
-    // can flag deviations without rejecting the order.
-    let mut subtotal: i32 = 0;
+    // `bill_lines` are the CHARGED lines (what the customer paid), for
+    // madar-shared's `bill::price_bill_on`; `expected_subtotal` mirrors their
+    // sum using catalog + branch-override prices so we can flag deviations
+    // without rejecting the order.
+    let mut bill_lines: Vec<madar_money::bill::BillLine> = Vec::new();
     let mut expected_subtotal: i32 = 0;
 
     let order_time = body.created_at.unwrap_or_else(Utc::now);
@@ -2237,17 +2250,18 @@ pub(crate) async fn create_order_inner(
             ));
         }
         let staff_applied = staff_line.as_ref().map_or(0, |l| l.applied);
-        let expected_line_subtotal = (expected_line_subtotal
-            - staff_line.as_ref().map_or(0, |l| l.server.line_comp))
-        .max(0);
+        let expected_line_subtotal =
+            (expected_line_subtotal - staff_line.as_ref().map_or(0, |l| l.server.line_comp)).max(0);
         // The staff comp off first, then the reward covers whole units of what
         // is left: madar-shared's `bill::net_line`, the till's order too.
-        let net = madar_money::bill::net_line(&madar_money::bill::BillLine {
+        let bill_line = madar_money::bill::BillLine {
             charged: i64::from(charged_line_subtotal),
             per_unit: i64::from(resolved.charged_per_unit()),
             reward_units: i64::from(reward_units),
             staff_comp: i64::from(staff_applied),
-        });
+        };
+        let net = madar_money::bill::net_line(&bill_line);
+        bill_lines.push(bill_line);
         let covered = net.covered as i32;
         let charged_line_subtotal = net.net as i32;
         let is_reward_line = covered > 0;
@@ -2287,25 +2301,22 @@ pub(crate) async fn create_order_inner(
         resolved.reward_units = if is_reward_line { reward_units } else { 0 };
         resolved.staff = staff_line;
 
-        subtotal += charged_line_subtotal;
         expected_subtotal += expected_line_subtotal;
         resolved_items.push(resolved);
     }
 
-    // Shared with the delivery-order discount path so the two can never drift.
-    let calc_discount = |sub: i32| -> i32 {
-        crate::discounts::handlers::calc_discount(
-            resolved_discount_type.as_deref(),
-            resolved_discount_value,
-            sub,
-        )
-    };
+    // The order's discount RULE, read as every bill reads one (madar-shared's
+    // `bill::rule_of`; the delivery-order path and the table bill too).
+    let discount_rule =
+        madar_money::bill::rule_of(resolved_discount_type.as_deref(), resolved_discount_value);
 
     // Server EXPECTED breakdown (catalog + branch override) — used only to detect and
     // flag deviations; it never overrides what the customer was actually charged.
-    let expected_discount = calc_discount(expected_subtotal);
-    let expected_breakdown =
-        crate::tax::compute(expected_subtotal as i64, expected_discount as i64, &policy);
+    let expected_breakdown = madar_money::bill::price_subtotal(
+        i64::from(expected_subtotal),
+        madar_money::bill::BillDiscount::Rule(discount_rule),
+        &policy,
+    );
     let expected_total = expected_breakdown.total as i32;
 
     // RECORDED breakdown — the POS's charged numbers are the source of truth; any field
@@ -2356,10 +2367,10 @@ pub(crate) async fn create_order_inner(
     // till, an old build, or a forged request wrote the tax line of the
     // accounts. A reward claim was already an exception (`loyalty::redeem::plan`
     // prices redemptions here); now every bill is.
-    let subtotal = if claimed {
-        subtotal
+    let stated_subtotal = if claimed {
+        None
     } else {
-        body.subtotal.unwrap_or(subtotal)
+        body.subtotal.map(i64::from)
     };
     // The discount stays the till's to state, as it always was: a manager can
     // approve an amount off that no discount rule expresses, and the server
@@ -2379,47 +2390,54 @@ pub(crate) async fn create_order_inner(
             resolved_discount_type.as_deref(),
             Some("percentage") | Some("fixed")
         );
-    // The subtotal the till stated, before anything is computed on it.
-    //
-    // This is checked HERE, ahead of the clamp below, for two reasons. The
-    // books store this figure verbatim, so a negative one is a negative sale
-    // on the P&L. And `clamp(0, subtotal)` PANICS when `subtotal` is negative
-    // (`min > max`), so a till sending `subtotal: -1` took the request thread
-    // down with a 500 rather than being told no.
-    if subtotal < 0 {
-        return Err(AppError::BadRequest(format!(
-            "This order's subtotal comes to {subtotal} — an order can never be less than \
-             zero. Check the line prices and their modifiers."
-        )));
+    // The discount: a rule the server applies to the subtotal it prices, or an
+    // amount the till stated — clamped to `[0, subtotal]` either way.
+    let discount = match body.discount_amount {
+        Some(stated) if !rule_discount => {
+            madar_money::bill::BillDiscount::Stated(i64::from(stated))
+        }
+        _ => madar_money::bill::BillDiscount::Rule(discount_rule),
+    };
+    // The bill: madar-shared's `bill::price_bill_on` — the net lines (staff
+    // comp, then reward), the stated subtotal when the till's word stands, the
+    // discount, then the service charge and tax under the sale's policy.
+    let bill = madar_money::bill::price_bill_on(&bill_lines, stated_subtotal, discount, &policy);
+    let breakdown = bill.breakdown;
+    let subtotal = breakdown.subtotal as i32;
+    match madar_money::bill::refusal(&bill) {
+        None => {}
+        // The subtotal the till stated. The books store this figure verbatim,
+        // so a negative one would be a negative sale on the P&L.
+        Some(madar_money::bill::BillRefusal::Part(crate::tax::NegativePart::Subtotal)) => {
+            return Err(AppError::BadRequest(format!(
+                "This order's subtotal comes to {subtotal} — an order can never be less than \
+                 zero. Check the line prices and their modifiers."
+            )));
+        }
+        // Belt and braces over the whole priced bill: discount, service charge,
+        // tax and total. The engine floors what it taxes, so this fires only on
+        // a figure that reached it another way — but this is the bill the
+        // books keep, and it is checked rather than assumed. (A line below zero
+        // was refused above, by its index.)
+        Some(r) => {
+            let part = match r {
+                madar_money::bill::BillRefusal::Part(p) => p,
+                madar_money::bill::BillRefusal::Line { .. } => crate::tax::NegativePart::Line,
+            };
+            return Err(AppError::BadRequest(format!(
+                "This order's {} is negative. An order can never be less than zero — the till's \
+                 settings are out of date; sign in again to refresh them, then retake the order.",
+                part.as_str()
+            )));
+        }
     }
-    // Clamped to `[0, subtotal]` by madar-shared's `bill::discount_on`.
-    let discount_amount = madar_money::bill::discount_on(
-        i64::from(subtotal),
-        madar_money::bill::BillDiscount::Stated(i64::from(if rule_discount {
-            calc_discount(subtotal)
-        } else {
-            body.discount_amount
-                .unwrap_or_else(|| calc_discount(subtotal))
-        })),
-    ) as i32;
-    let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
-    // Belt and braces over the whole priced bill: discount, service charge, tax
-    // and total. `compute` floors what it taxes, so this fires only on a figure
-    // that reached it another way — but this is the bill the books keep, and it
-    // is checked rather than assumed.
-    if let Some(part) = crate::tax::negative_part(&breakdown) {
-        return Err(AppError::BadRequest(format!(
-            "This order's {} is negative. An order can never be less than zero — the till's \
-             settings are out of date; sign in again to refresh them, then retake the order.",
-            part.as_str()
-        )));
-    }
+    let discount_amount = breakdown.discount as i32;
     let service_charge_amount = breakdown.service_charge as i32;
     // What the waiver took off: the charge this bill would have carried.
     let service_charge_waived_amount = if service_waiver.is_some() {
-        crate::tax::compute(
-            subtotal as i64,
-            discount_amount as i64,
+        madar_money::bill::price_subtotal(
+            breakdown.subtotal,
+            madar_money::bill::BillDiscount::Stated(breakdown.discount),
             &branch_policy.for_sale(channel, false),
         )
         .service_charge as i32

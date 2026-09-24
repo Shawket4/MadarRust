@@ -1712,7 +1712,11 @@ pub async fn create_delivery_order(
     // the tax is inside the base and the total does not grow; the identity
     // the row CHECKs is exactly this sum.
     let policy = online_tax_policy(pool.get_ref(), body.branch_id).await?;
-    let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
+    let breakdown = madar_money::bill::price_subtotal(
+        i64::from(subtotal),
+        madar_money::bill::BillDiscount::Stated(i64::from(discount_amount)),
+        &policy,
+    );
     let tax_amount = breakdown.tax as i32;
     let total = breakdown.total as i32 + delivery_fee;
 
@@ -1735,7 +1739,12 @@ pub async fn create_delivery_order(
     .bind(biz_date)
     .fetch_one(&mut *tx)
     .await?;
-    let delivery_ref = format!("D-{}-{}-{:04}", branch_code, madar_time::yymmdd(biz_date), seq);
+    let delivery_ref = format!(
+        "D-{}-{}-{:04}",
+        branch_code,
+        madar_time::yymmdd(biz_date),
+        seq
+    );
 
     // WHO (design §2.4). A card's customer as is; otherwise the live customer
     // holding this phone, created on first contact. A matched customer's

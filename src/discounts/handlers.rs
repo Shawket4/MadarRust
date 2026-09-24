@@ -298,19 +298,14 @@ fn validate_value(value: Decimal, dtype: &str) -> Result<(), AppError> {
 /// into an amount is a rounding point the till must land on identically, and it
 /// is pinned to the till by `tax_vectors.json` only if both run the same code.
 pub fn calc_discount(dtype: Option<&str>, value: Decimal, subtotal: i32) -> i32 {
-    use crate::tax;
-    let discount = match dtype {
-        // A FRACTION, like every other rate in this schema: 0.14 is 14%. It was
-        // stored as `14` and divided by 100 at each use site, which made it the
-        // one percentage in the money engine that did not look like the others —
-        // and an `integer` column could not express 12.5% at all.
-        Some("percentage") => tax::Discount::Percentage(value),
-        // Minor units, and never more than the bill.
-        Some("fixed") => tax::Discount::Fixed(value),
-        _ => tax::Discount::None,
-    };
+    // The rule is read as madar-shared's `bill::rule_of` reads it: a
+    // percentage is a FRACTION, like every other rate in this schema (0.14 is
+    // 14%; it was stored as `14` and divided by 100 at each use site once, and
+    // an `integer` column could not express 12.5% at all), a fixed discount is
+    // minor units, never more than the bill.
+    let discount = madar_money::bill::rule_of(dtype, value);
     // Clamped to `[0, subtotal]` by the engine; an `i32` subtotal fits back.
-    tax::discount_amount(i64::from(subtotal), discount) as i32
+    crate::tax::discount_amount(i64::from(subtotal), discount) as i32
 }
 
 #[cfg(test)]
