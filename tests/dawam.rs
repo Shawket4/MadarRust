@@ -2089,3 +2089,59 @@ async fn a_till_expense_advance_says_why_it_is_refused(pool: PgPool) {
         .unwrap();
     assert_eq!(n, 0, "nothing written");
 }
+
+/// An advance a till logs is dated by the business day it was handed over on,
+/// in the branch's zone (else Cairo's) — madar-shared's
+/// `madar_time::business_date_of`. 22:30 UTC on the 23rd is already the 24th
+/// in Cairo (+03 in September).
+#[sqlx::test]
+async fn a_till_advance_is_dated_by_the_branchs_business_day(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .configure(madar_rust::tills::routes::configure)
+            .configure(madar_rust::staff::routes::configure),
+    )
+    .await;
+    let f = seed(&pool).await;
+    let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/branches/{}/open", f.branch),
+        owner,
+        json!({ "id": Uuid::new_v4(), "opening_cash": 100000 })
+    );
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let till = json_of(resp).await["id"].as_str().unwrap().to_string();
+    for (zone, at, day) in [
+        (Some("Africa/Cairo"), "2026-09-23T22:30:00Z", "2026-09-24"),
+        (None, "2026-09-23T20:30:00Z", "2026-09-23"),
+        (Some("Asia/Tokyo"), "2026-09-23T15:30:00Z", "2026-09-24"),
+    ] {
+        sqlx::query("UPDATE branches SET timezone = $2::text::timezone_name WHERE id = $1")
+            .bind(f.branch)
+            .bind(zone)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let resp = call!(
+            app,
+            post,
+            format!("/tills/{till}/cash-movements"),
+            owner,
+            json!({ "amount": -1000, "kind": "pay_out", "note": format!("Milk {at}"),
+                    "expense_advance_to": f.a, "created_at": at })
+        );
+        assert_eq!(resp.status(), 201, "{zone:?}");
+        let given: chrono::NaiveDate = sqlx::query_scalar(
+            "SELECT given_on FROM expense_advances WHERE purpose = $1",
+        )
+        .bind(format!("Milk {at}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(given.to_string(), day, "{zone:?} {at}");
+    }
+}

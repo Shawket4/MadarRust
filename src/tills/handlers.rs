@@ -598,11 +598,11 @@ pub async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
 /// voided) + movements − cash refunds issued from this till. The figure is
 /// madar-shared's fold (`madar_till::report::system_cash`) over the till's rows
 /// (`tills::rows`), the one the POS core computes offline.
-pub async fn compute_system_cash<'c, A>(conn: A, till_id: Uuid) -> Result<i64, sqlx::Error>
+pub async fn compute_system_cash<'c, A>(exec: A, till_id: Uuid) -> Result<i64, sqlx::Error>
 where
     A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
 {
-    let mut conn = conn.acquire().await?;
+    let mut conn = exec.acquire().await?;
     Ok(crate::tills::rows::load(&mut conn, till_id).await?.system_cash())
 }
 
@@ -1510,12 +1510,23 @@ pub(crate) async fn add_cash_movement_inner(
         Err(e) => return Err(e.into()),
     };
     if let Some(to) = body.expense_advance_to {
+        // The advance is dated by the business day it was handed over on in
+        // the branch's zone (else Cairo's): madar-shared's
+        // `madar_time::business_date_of`, the rule every business date is.
+        let zone: Option<String> =
+            sqlx::query_scalar("SELECT timezone::text FROM branches WHERE id = $1")
+                .bind(till.branch_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .flatten();
+        let given_on = madar_time::business_date_of(
+            crate::tz::parse(zone.as_deref().unwrap_or("Africa/Cairo")),
+            body.created_at.unwrap_or_else(Utc::now),
+        );
         sqlx::query(
             "INSERT INTO expense_advances (org_id, employee_id, branch_id, amount_piastres, purpose, \
                 via, handed_by, given_on, till_movement_id) \
-             SELECT $1, $2, $3, $4, $5, 'till', $6, \
-                    (COALESCE($7, now()) AT TIME ZONE COALESCE(b.timezone::text, 'Africa/Cairo'))::date, $8 \
-               FROM branches b WHERE b.id = $3",
+             VALUES ($1, $2, $3, $4, $5, 'till', $6, $7, $8)",
         )
         .bind(actor.org_id)
         .bind(to)
@@ -1523,7 +1534,7 @@ pub(crate) async fn add_cash_movement_inner(
         .bind(-i64::from(body.amount))
         .bind(body.note.trim())
         .bind(actor.teller_id)
-        .bind(body.created_at)
+        .bind(given_on)
         .bind(id)
         .execute(&mut *tx)
         .await?;
