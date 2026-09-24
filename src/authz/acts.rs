@@ -28,19 +28,8 @@ use crate::errors::AppError;
 /// The facts a void limit is judged on: whose sale, and how old at the moment
 /// it was voided (`at` — `now()` live, the queued op's own timestamp on
 /// replay, so a queue drained hours later is not judged by the drain time).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VoidAsk {
-    pub own: bool,
-    pub age_minutes: i64,
-}
-
-impl VoidAsk {
-    pub fn request(&self) -> Request {
-        Request::of(Cap::OrdersVoid)
-            .own(self.own)
-            .age_minutes(self.age_minutes)
-    }
-}
+/// madar-shared's (`madar_authz::acts`), the till's too (A2).
+pub use madar_authz::acts::{VoidAsk, void_facts};
 
 /// Read the sale being voided: is it the actor's own, and how old is it.
 /// A sale the actor did not ring is `own = false`; a clock that puts the sale
@@ -61,10 +50,7 @@ pub async fn void_ask(
             .bind(order_id)
             .fetch_optional(pool)
             .await?;
-    Ok(row.map(|(teller_id, created_at)| VoidAsk {
-        own: teller_id == actor,
-        age_minutes: (at - created_at).num_minutes().max(0),
-    }))
+    Ok(row.map(|(teller_id, created_at)| void_facts(&teller_id, &actor, created_at, at)))
 }
 
 /// A refund is judged on the money going back (`max_amount`, minor units).
