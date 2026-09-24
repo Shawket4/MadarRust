@@ -220,6 +220,16 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   there (`madar_till::report`, the POS core's too) must agree, and the change
   ships with a madar-shared tag.
 - Additive fields only on payloads the POS mirrors (old tablets decode them).
+- **Catalogue pricing is madar-shared's `madar-catalog`** (the size price, swaps
+  over the recipe's own choice, add-ons, optional fields). The order path loads
+  a `CatalogView` in batches (`orders::catalog_view::Catalog`) and prices with
+  the crate; stock deduction reads the crate's decisions. The till builds the
+  same view from the `pricing` field of every `/menu-items?full=true` row and
+  add-on row. A change to the rule regenerates the crate's vectors
+  (`MADAR_WRITE_CATALOG_VECTORS=1 cargo nextest run --test catalog_pricing_tests`,
+  into the madar-shared checkout beside this one) and ships with a
+  madar-shared tag; `tests/fixtures/catalog_pricing/server_capture.json` is the
+  pre-move pin and changes only for a deliberate change of the rule.
 
 ### Realtime
 `src/realtime` publishes per-branch events consumers subscribe to, e.g.
