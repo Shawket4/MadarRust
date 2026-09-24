@@ -1217,6 +1217,10 @@ pub async fn log_expense_advance(
 pub struct ExpenseQuery {
     #[serde(default)]
     pub employee_id: Option<Uuid>,
+    /// Only the expenses logged at this branch (the expense's own branch,
+    /// AV-9). A branch the caller can't read is refused (403).
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[utoipa::path(
@@ -1239,14 +1243,22 @@ pub async fn list_expense_advances(
         &[Cap::HrExpenseAdvancesLog],
     )
     .await?;
+    // Per branch (AV-9, E2E B-PAY-3): only a branch the caller reads.
+    if let (Some(b), Some(at)) = (query.branch_id, scope.as_deref())
+        && !at.contains(&b)
+    {
+        return Err(crate::authz::require::denied(Cap::HrPayrollRead));
+    }
     let rows = sqlx::query_as::<_, ExpenseAdvance>(&format!(
         "{EXP_SELECT} WHERE e.org_id = $1 AND ($2::uuid IS NULL OR e.employee_id = $2) AND {} \
+            AND ($4::uuid IS NULL OR e.branch_id = $4) \
           ORDER BY e.given_on DESC, e.created_at DESC LIMIT 300",
         access::in_scope("e.employee_id", 3)
     ))
     .bind(org_id)
     .bind(query.employee_id)
     .bind(scope.as_deref())
+    .bind(query.branch_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))

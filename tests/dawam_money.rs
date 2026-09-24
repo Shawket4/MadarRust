@@ -2969,3 +2969,72 @@ async fn overtime_from_every_path_waits_for_approval(pool: PgPool) {
     assert!(ot > 0, "{ot}");
     assert_eq!(st.as_deref(), Some("pending"), "a correction");
 }
+
+/// E2E B-PAY-3 (AV-9): expense advances are listed per branch — the
+/// expense's own branch — and asking about a branch the caller can't read is
+/// refused, not answered with everything.
+#[sqlx::test]
+async fn expense_advances_are_listed_per_branch(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    for (who, branch, purpose) in [
+        (f.amal, f.a, "Milk"),
+        (f.amal, f.b, "Cups"),
+        (f.bassem, f.b, "Ice"),
+    ] {
+        let resp = call!(
+            app,
+            post,
+            "/staff/expense-advances",
+            owner,
+            json!({ "employee_id": who, "amount_piastres": 10_000, "purpose": purpose, "via": "safe",
+                    "given_on": f.start, "branch_id": branch })
+        );
+        assert_eq!(resp.status(), 201);
+    }
+    let purposes = |v: Value| {
+        let mut p: Vec<String> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["purpose"].as_str().unwrap().to_string())
+            .collect();
+        p.sort();
+        p
+    };
+    let all = json_of(call!(app, get, "/staff/expense-advances", owner)).await;
+    assert_eq!(
+        purposes(all),
+        ["Cups", "Ice", "Milk"],
+        "no param: unchanged"
+    );
+    let at_b = json_of(call!(
+        app,
+        get,
+        format!("/staff/expense-advances?branch_id={}", f.b),
+        owner
+    ))
+    .await;
+    assert_eq!(
+        purposes(at_b),
+        ["Cups", "Ice"],
+        "by the expense's own branch"
+    );
+    // A's manager: A's is answered, B's is refused.
+    let resp = call!(
+        app,
+        get,
+        format!("/staff/expense-advances?branch_id={}", f.b),
+        f.mgr()
+    );
+    assert_eq!(resp.status(), 403);
+    let resp = call!(
+        app,
+        get,
+        format!("/staff/expense-advances?branch_id={}", f.a),
+        f.mgr()
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(purposes(json_of(resp).await), ["Milk"]);
+}

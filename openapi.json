@@ -49131,6 +49131,16 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Only the expenses logged at this branch (the expense's own branch,\nAV-9). A branch the caller can't read is refused (403).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
