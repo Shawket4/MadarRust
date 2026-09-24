@@ -26,7 +26,7 @@ use uuid::Uuid;
 use crate::authz::Cap;
 use crate::errors::AppError;
 
-use super::comp::{self, CompGroup, CompInput, CompOption, CompPick, CompResult, CompSize};
+use super::comp::{self, CompInput, CompResult};
 use super::engine::{self, StaffDrinkRefusal, StaffPoolSettings};
 
 /// `staff_drink` on an order line. Additive: a client that never heard of it
@@ -105,125 +105,6 @@ pub(crate) fn refused(r: StaffDrinkRefusal) -> AppError {
         code: r.token(),
         reason: r.message().to_string(),
     }
-}
-
-/// One pick as the line resolver priced it.
-#[doc(hidden)]
-pub struct RungPick {
-    pub option_id: Uuid,
-    pub unit_price: i32,
-    pub quantity: i32,
-}
-
-/// Build the engine's input for one menu-item line from the catalogue.
-///
-/// * sizes — every size row with the branch's per-size price beside it. A line
-///   that names NO size rings at the item's "from" price, which is then the
-///   free amount: no sizes are passed.
-/// * groups — the item's attached, active choice groups that are REQUIRED
-///   (`min >= 1`, or flagged required with a lower min → 1) and are NOT swap
-///   groups. A swap pick already rings as the difference over the recipe's own
-///   ingredient (see `component_resolve`), so it is an extra by construction.
-///   Options are the attachment's allow-list, priced exactly as the resolver
-///   prices a pick: `addon_items.default_price` under the branch's override.
-///
-/// SUPERSEDED by madar-shared's `madar_catalog::staff::comp_input` over the
-/// order's loaded catalogue; kept one commit for the parity test
-/// (`tests/staff_pool_input_tests.rs`) that writes the crate's vectors.
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub async fn comp_input(
-    pool: &PgPool,
-    branch_id: Uuid,
-    menu_item_id: Uuid,
-    size_label: Option<&str>,
-    eligible: bool,
-    unit_price: i32,
-    picks: &[RungPick],
-    optionals_per_unit: i32,
-    quantity: i32,
-) -> Result<CompInput, AppError> {
-    let sizes: Vec<CompSize> = if size_label.is_some() {
-        sqlx::query_as::<_, (String, i32, bool, Option<i32>)>(
-            "SELECT z.label, z.price, z.is_active, o.price_override \
-               FROM menu_item_sizes z \
-               LEFT JOIN branch_menu_size_overrides o \
-                      ON o.branch_id = $2 AND o.menu_item_id = z.menu_item_id AND o.size_label = z.label \
-              WHERE z.menu_item_id = $1 ORDER BY z.sort, z.label",
-        )
-        .bind(menu_item_id)
-        .bind(branch_id)
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .map(|(label, price, is_active, branch_price)| CompSize { label, price, is_active, branch_price })
-        .collect()
-    } else {
-        Vec::new()
-    };
-
-    #[allow(clippy::type_complexity)]
-    let rows: Vec<(Uuid, i32, bool, Option<Vec<Uuid>>, Uuid, i32, Option<i32>, bool, bool)> = sqlx::query_as(
-        "SELECT g.id, COALESCE(a.min_override, g.min_selections), \
-                COALESCE(a.is_required_override, g.is_required), a.included_option_ids, \
-                mo.id, ai.default_price, bao.price_override, mo.is_default, \
-                (mo.is_active AND ai.is_active AND COALESCE(bao.is_available, true)) \
-           FROM menu_item_modifier_groups a \
-           JOIN modifier_groups g ON g.id = a.group_id AND g.is_active \
-           JOIN modifier_options mo ON mo.group_id = g.id \
-           JOIN addon_items ai ON ai.id = mo.id \
-           LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = mo.id AND bao.branch_id = $2 \
-          WHERE a.menu_item_id = $1 \
-            AND g.effect <> 'swaps' \
-            AND COALESCE(g.legacy_addon_type, '') NOT IN ('milk_type', 'coffee_type') \
-          ORDER BY a.sort, g.name, g.id, mo.sort, mo.name, mo.id",
-    )
-    .bind(menu_item_id)
-    .bind(branch_id)
-    .fetch_all(pool)
-    .await?;
-
-    let mut groups: Vec<CompGroup> = Vec::new();
-    for (gid, min, required, included, oid, price, branch_price, is_default, is_active) in rows {
-        let required_min = if min >= 1 { min } else { i32::from(required) };
-        if required_min < 1 || included.as_ref().is_some_and(|ids| !ids.contains(&oid)) {
-            continue;
-        }
-        let gid = gid.to_string();
-        if groups.last().is_none_or(|g| g.id != gid) {
-            groups.push(CompGroup {
-                id: gid,
-                required_min,
-                options: Vec::new(),
-            });
-        }
-        if let Some(g) = groups.last_mut() {
-            g.options.push(CompOption {
-                id: oid.to_string(),
-                price,
-                branch_price,
-                is_default,
-                is_active,
-            });
-        }
-    }
-
-    Ok(CompInput {
-        eligible,
-        unit_price,
-        sizes,
-        groups,
-        picks: picks
-            .iter()
-            .map(|p| CompPick {
-                option_id: p.option_id.to_string(),
-                unit_price: p.unit_price,
-                quantity: p.quantity,
-            })
-            .collect(),
-        optionals_per_unit,
-        quantity,
-    })
 }
 
 /// A priced staff line, carried on the resolved order line until it is stored.

@@ -3,20 +3,22 @@
 //! comp_input`, over the order's loaded catalogue (`orders::catalog_view`).
 //!
 //! It replaced this server's SQL builder (`staff_pool::order_line::
-//! comp_input`, which read the same rows per line). This suite seeds a
+//! comp_input`, which read the same rows per line); the input that builder
+//! made for every case below is madar-catalog's `staff_input_vectors.json`,
+//! written by this suite while the two ran side by side. This suite seeds a
 //! catalogue with every case the rule reads — sizes and a label only the
 //! branch prices, a required group with a default, an optional group, a group
 //! flagged required with a zero minimum, a swap group, a legacy milk group, an
 //! allow-listed attachment with its own minimum, an allow-list that leaves
 //! nothing, an inactive group, a switched-off option and add-on, a branch
-//! price and a branch that turned an option off — and checks the crate's input
-//! over the loaded view against the SQL builder's for every line shape.
-//! `MADAR_WRITE_STAFF_INPUT_VECTORS=1` writes the cases into the madar-shared
-//! checkout beside this one (`crates/madar-catalog/vectors/`).
+//! price and a branch that turned an option off — and checks that this
+//! server's loader builds the views recorded there and the crate's input over
+//! them is the one recorded. `MADAR_WRITE_STAFF_INPUT_VECTORS=1` rewrites the
+//! file in the madar-shared checkout beside this one
+//! (`crates/madar-catalog/vectors/`) — a deliberate change of the rule.
 use madar_catalog::staff::{StaffLine, comp_input, vectors::StaffInputVector};
 use madar_rust::orders::catalog_view::Catalog;
 use madar_rust::staff_pool::comp::CompPick;
-use madar_rust::staff_pool::order_line::RungPick;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -184,41 +186,27 @@ async fn the_shared_input_is_the_servers(pool: PgPool) {
         .await
         .unwrap();
 
+    let recorded: Vec<StaffInputVector> =
+        serde_json::from_str(madar_catalog::vectors::STAFF_INPUT).unwrap();
     let mut vectors = Vec::new();
     for c in cases() {
         let view = &catalog.item(c.item).expect("loaded").view;
-        let crate_input = comp_input(view, &c.line);
-        let picks: Vec<RungPick> = c
-            .line
-            .picks
-            .iter()
-            .map(|p| RungPick {
-                option_id: Uuid::parse_str(&p.option_id).unwrap(),
-                unit_price: p.unit_price,
-                quantity: p.quantity,
-            })
-            .collect();
-        let sql_input = madar_rust::staff_pool::order_line::comp_input(
-            &pool,
-            branch,
-            c.item,
-            c.line.size_label.as_deref(),
-            c.line.eligible,
-            c.line.unit_price,
-            &picks,
-            c.line.optionals_per_unit,
-            c.line.quantity,
-        )
-        .await
-        .unwrap();
-        assert_eq!(crate_input, sql_input, "{}", c.name);
+        let input = comp_input(view, &c.line);
+        if let Some(r) = recorded.iter().find(|r| r.name == c.name) {
+            assert_eq!(&r.item, view, "{}: the loader's view", c.name);
+            assert_eq!(r.line, c.line, "{}", c.name);
+            assert_eq!(input, r.expected, "{}: the input", c.name);
+        } else if std::env::var("MADAR_WRITE_STAFF_INPUT_VECTORS").is_err() {
+            panic!("{} is not in staff_input_vectors.json", c.name);
+        }
         vectors.push(StaffInputVector {
             name: c.name,
             item: view.clone(),
             line: c.line,
-            expected: sql_input,
+            expected: input,
         });
     }
+    assert_eq!(vectors.len(), recorded.len().max(vectors.len()));
     // The fixture reaches every branch of the rule.
     let latte = &catalog.item(id("latte")).unwrap().view;
     let groups: Vec<String> = comp_input(
