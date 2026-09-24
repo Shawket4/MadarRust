@@ -628,10 +628,14 @@ pub async fn my_roster(
         }
         w += Duration::days(7);
     }
+    let now = Utc::now();
     let open_shifts = open_shifts_at(pool, &branches, query.from, query.to)
         .await?
         .into_iter()
-        .filter(|o| o.status == "open" || o.claimed_by == Some(employee_id))
+        // One that already started can't be claimed, so it isn't offered.
+        .filter(|o| {
+            (o.status == "open" && not_started(o, now)) || o.claimed_by == Some(employee_id)
+        })
         .filter(|o| published.contains(&(o.branch_id, week_start(o.on_date))))
         .collect();
     let (pref_time, cant_work_days, prefs_set_by): (Option<String>, Vec<i16>, String) =
@@ -702,14 +706,16 @@ pub async fn publish(
     if fresh > 0 {
         // Each open shift is announced by its OWN date, one notice per date
         // (SC-9, N-031, Mac E2E R-B2) — as posting into a published week does.
-        let open_dates: Vec<NaiveDate> = sqlx::query_scalar(
-            "SELECT DISTINCT on_date FROM staff_open_shifts WHERE branch_id = $1 AND status = 'open' \
-                AND on_date BETWEEN $2 AND $2 + 6 ORDER BY on_date",
-        )
-        .bind(body.branch_id)
-        .bind(ws)
-        .fetch_all(pool)
-        .await?;
+        // One that already started is not (hunt B-H1-2).
+        let now = Utc::now();
+        let mut open_dates: Vec<NaiveDate> =
+            open_shifts_at(pool, &[body.branch_id], ws, ws + Duration::days(6))
+                .await?
+                .into_iter()
+                .filter(|o| o.status == "open" && not_started(o, now))
+                .map(|o| o.on_date)
+                .collect();
+        open_dates.dedup();
         for p in staff_at(pool, body.branch_id).await? {
             notify(
                 pool,
@@ -732,6 +738,47 @@ pub async fn publish(
         }
     }
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// Has `shift` started on `date` at `branch` — `date` plus that weekday's
+/// start (else the block's), on the branch's clock, as [`open_shifts_at`]
+/// shows it — at or before now?
+async fn block_started(
+    pool: &PgPool,
+    branch_id: Uuid,
+    shift_id: Uuid,
+    date: NaiveDate,
+) -> Result<bool, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT ($3::date + COALESCE(dt.start_time, ws.start_time)) \
+                    AT TIME ZONE COALESCE(b.timezone::text, org.timezone::text, 'Africa/Cairo') \
+                <= now() \
+           FROM work_shifts ws \
+           JOIN branches b ON b.id = $1 \
+           JOIN organizations org ON org.id = b.org_id \
+           LEFT JOIN work_shift_day_times dt ON dt.work_shift_id = ws.id \
+                AND dt.day_of_week = EXTRACT(DOW FROM $3::date)::smallint \
+          WHERE ws.id = $2",
+    )
+    .bind(branch_id)
+    .bind(shift_id)
+    .bind(date)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false))
+}
+
+/// An open shift that already started can be neither posted nor claimed.
+fn shift_started() -> AppError {
+    AppError::Refused {
+        code: "SHIFT_STARTED",
+        reason: "That shift has already started.".into(),
+    }
+}
+
+/// An open shift still worth offering: not yet started.
+fn not_started(o: &OpenShift, now: DateTime<Utc>) -> bool {
+    o.start_at.is_none_or(|s| s > now)
 }
 
 /// Is `date`'s week published at `branch`?
@@ -796,6 +843,10 @@ pub async fn post_open_shift(
                 body.on_date.format("%A")
             ),
         });
+    }
+    // Nobody could work it, and everyone would be told (hunt B-H1-2).
+    if block_started(pool, body.branch_id, body.work_shift_id, body.on_date).await? {
+        return Err(shift_started());
     }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date, posted_by) \
@@ -863,6 +914,9 @@ pub async fn claim_open_shift(
             code: "ALREADY_CLAIMED",
             reason: "Someone already claimed that shift.".into(),
         });
+    }
+    if block_started(pool, branch_id, shift_id, on_date).await? {
+        return Err(shift_started());
     }
     if !is_published(pool, branch_id, on_date).await? {
         return Err(AppError::Refused {

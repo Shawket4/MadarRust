@@ -3937,3 +3937,117 @@ async fn the_claims_log_is_backfilled_from_the_open_shifts(pool: PgPool) {
     amal.sort();
     assert_eq!(amal, ["declined", "pending"]);
 }
+
+/// Hunt B-H1-2 (SC-9): an open shift whose start has passed — on_date plus
+/// the block's start, in the branch's time zone — can't be posted (the
+/// owner's 19 Sep post on 24 Sep went out to all five staff) nor claimed:
+/// 409 SHIFT_STARTED, nothing posted, nobody told. One left from before is
+/// not offered to staff, and publishing its week doesn't announce it.
+#[sqlx::test]
+async fn an_open_shift_that_already_started_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let dawn = block(&pool, &f, Some(f.br_a), "Dawn", t(0, 0), t(4, 0)).await;
+    let y = today() - Duration::days(1);
+    publish(&app, &f, f.br_a, y).await;
+    publish(&app, &f, f.br_a, today()).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let post = async |shift: Uuid, on: NaiveDate| {
+        call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.owner(),
+            json!({ "branch_id": f.br_a, "work_shift_id": shift, "on_date": on })
+        )
+    };
+    refused!(post(l, y).await, 409, "SHIFT_STARTED");
+    // Today, but the block began at midnight.
+    refused!(post(dawn, today()).await, 409, "SHIFT_STARTED");
+    let (posted, told): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM staff_open_shifts), \
+                (SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((posted, told), (0, 0), "nothing posted, nobody told");
+
+    // The branch's own clock: at UTC+14, a block starting an hour from now
+    // on the UTC clock started 13 hours ago.
+    sqlx::query("UPDATE branches SET timezone = 'Pacific/Kiritimati'::timezone_name WHERE id = $1")
+        .bind(f.br_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let soon = Utc::now() + Duration::hours(1);
+    let later = block(
+        &pool,
+        &f,
+        Some(f.br_a),
+        "Later",
+        t(soon.hour(), soon.minute()),
+        t((soon.hour() + 2) % 24, soon.minute()),
+    )
+    .await;
+    refused!(post(later, today()).await, 409, "SHIFT_STARTED");
+    sqlx::query("UPDATE branches SET timezone = 'UTC'::timezone_name WHERE id = $1")
+        .bind(f.br_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // One posted before the check: not offered, not claimable.
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.br_a)
+    .bind(l)
+    .bind(y)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let ta = phone_token(&pool, f.a).await;
+    let (s, mine) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={y}&to={y}"),
+        ta
+    ))
+    .await;
+    assert_eq!(s, 200, "{mine}");
+    assert_eq!(mine["open_shifts"], json!([]), "not offered: {mine}");
+    refused!(
+        call!(app, "POST", format!("/staff/open-shifts/{old}/claim"), ta),
+        409,
+        "SHIFT_STARTED"
+    );
+    let (status, logged): (String, i64) = sqlx::query_as(
+        "SELECT status, (SELECT COUNT(*) FROM staff_open_shift_claims) \
+           FROM staff_open_shifts WHERE id = $1",
+    )
+    .bind(old)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), logged), ("open", 0));
+    // Publishing its week again (after an unpublish) doesn't announce it.
+    sqlx::query("DELETE FROM staff_week_publications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    publish(&app, &f, f.br_a, y).await;
+    let told: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(told, 0, "a started shift is not announced");
+}
