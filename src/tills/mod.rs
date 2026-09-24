@@ -4,5 +4,6 @@ pub mod legacy;
 pub mod legacy_routes;
 pub mod reconcile;
 pub mod routes;
+pub mod rows;
 pub mod spot_views;
 

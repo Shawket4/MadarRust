@@ -69,17 +69,6 @@ pub use madar_till::reconcile::{
     STATUS_UNREVIEWED, rollup_status,
 };
 
-const CASH_FALLBACK_NAME: &str = "cash";
-
-#[derive(sqlx::FromRow)]
-struct UsedRow {
-    method: String,
-    is_cash: bool,
-    total: i64,
-    order_count: i64,
-    payment_method_id: Option<Uuid>,
-}
-
 /// Every method used on the till, with the system's total for it.
 ///
 /// Non-cash `system_total` is what that method's terminal saw for this till:
@@ -92,100 +81,29 @@ struct UsedRow {
 /// Cash: ONE row, always present and first, `system_total = expected_cash`
 /// (the drawer), named after the cash-flagged method used on the till (else the
 /// org's first cash method, else `cash`). Other cash-flagged names fold into it.
+///
+/// The rule is madar-shared's (`madar_till::report::close_methods`), over the
+/// till's rows (`tills::rows`); the POS core plans its offline close with it.
 pub async fn system_totals_by_method(
     conn: &mut sqlx::PgConnection,
     till_id: Uuid,
     expected_cash: i64,
 ) -> Result<Vec<MethodTotal>, AppError> {
-    let sql = format!(
-        r#"
-        WITH t AS (
-            SELECT tl.id, b.org_id FROM tills tl JOIN branches b ON b.id = tl.branch_id WHERE tl.id = $1
-        ),
-        used AS (
-            SELECT op.method::text AS method,
-                   COALESCE(op.is_cash, op.method = 'cash') AS is_cash,
-                   op.amount::bigint AS amount, op.order_id
-            FROM order_payments op JOIN orders o ON o.id = op.order_id
-            WHERE o.till_id = $1 AND o.{tendered}
-          UNION ALL
-            SELECT COALESCE(o.tip_payment_method, o.payment_method)::text,
-                   COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash'),
-                   o.tip_amount::bigint, NULL::uuid
-            FROM orders o
-            WHERE o.till_id = $1 AND o.{tendered} AND COALESCE(o.tip_amount, 0) <> 0
-          UNION ALL
-            SELECT r.method, r.is_cash, -r.amount::bigint, NULL::uuid
-            FROM order_refunds r WHERE r.till_id = $1
-        )
-        SELECT u.method,
-               bool_or(u.is_cash) AS is_cash,
-               COALESCE(SUM(u.amount), 0)::bigint AS total,
-               COUNT(DISTINCT u.order_id)::bigint AS order_count,
-               (SELECT m.id FROM org_payment_methods m, t WHERE m.org_id = t.org_id AND m.name = u.method) AS payment_method_id
-        FROM used u
-        WHERE u.method IS NOT NULL AND btrim(u.method) <> ''
-        GROUP BY u.method
-        -- "C" collation: byte order, so case-varying method names (e.g. "Cash"
-        -- vs "cash") sort the same regardless of the server's default locale.
-        ORDER BY u.method COLLATE "C"
-        "#,
-        tendered = crate::orders::TENDERED
-    );
-    let rows = sqlx::query_as::<_, UsedRow>(&sql)
-        .bind(till_id)
-        .fetch_all(&mut *conn)
-        .await?;
-
-    let mut cash_name: Option<(String, Option<Uuid>)> = None;
-    let mut cash_orders = 0i64;
-    let mut out = Vec::with_capacity(rows.len() + 1);
-    for r in rows {
-        if r.is_cash {
-            cash_orders += r.order_count;
-            // Prefer the literal `cash`, else the first cash-flagged name.
-            if cash_name.is_none() || r.method == CASH_FALLBACK_NAME {
-                cash_name = Some((r.method, r.payment_method_id));
-            }
-        } else {
-            out.push(MethodTotal {
-                method: r.method,
-                payment_method_id: r.payment_method_id,
-                is_cash: false,
-                system_total: r.total,
-                order_count: r.order_count,
-            });
-        }
-    }
-    let (method, payment_method_id) = match cash_name {
-        Some(c) => c,
-        None => {
-            let org_cash: Option<(String, Uuid)> = sqlx::query_as(
-                "SELECT m.name, m.id FROM org_payment_methods m
-                 JOIN branches b ON b.org_id = m.org_id JOIN tills tl ON tl.branch_id = b.id
-                 WHERE tl.id = $1 AND m.is_cash
-                 ORDER BY (m.name = 'cash') DESC, m.is_active DESC, m.created_at LIMIT 1",
-            )
-            .bind(till_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            match org_cash {
-                Some((n, id)) => (n, Some(id)),
-                None => (CASH_FALLBACK_NAME.to_string(), None),
-            }
-        }
-    };
-    out.insert(
-        0,
-        MethodTotal {
-            method,
-            payment_method_id,
-            is_cash: true,
-            system_total: expected_cash,
-            order_count: cash_orders,
-        },
-    );
-    Ok(out)
+    let rows = crate::tills::rows::load(conn, till_id).await?;
+    Ok(
+        madar_till::report::close_methods(&rows.sales, &rows.refunds, expected_cash, &rows.methods)
+            .into_iter()
+            .map(|m| MethodTotal {
+                method: m.method,
+                payment_method_id: m
+                    .payment_method_id
+                    .and_then(|id| Uuid::parse_str(&id).ok()),
+                is_cash: m.is_cash,
+                system_total: m.system_total,
+                order_count: m.order_count,
+            })
+            .collect(),
+    )
 }
 
 fn clamp_i32(v: i64) -> i32 {

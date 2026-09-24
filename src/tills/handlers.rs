@@ -279,15 +279,6 @@ pub struct CashMovementSummaryRow {
     pub created_at: DateTime<Utc>,
 }
 
-impl CashMovementSummaryRow {
-    fn bucket(&self) -> &str {
-        match (self.kind.as_str(), self.corrects_kind.as_deref()) {
-            ("correction", Some(corrected)) => corrected,
-            (kind, _) => kind,
-        }
-    }
-}
-
 /// The report figures shared by the new `TillReportResponse` and the legacy
 /// `ShiftReportResponse` (flattened into both).
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
@@ -562,54 +553,57 @@ where
 /// fallback matters because 926 of the 932 tills in production carry no
 /// device_id at all, and those branches each ran a single drawer.
 ///
-/// The device key is `COALESCE(.., false)`: for a device-less row `device_id =
-/// $2` is NULL, and Postgres sorts NULL FIRST in a DESC key — an older
-/// device-less close used to beat this device's own (madar-shared T2).
+/// The pick is madar-shared's (`madar_till::carryover::last_close_declared`,
+/// the till's too; fix T2: a device-less close never beats this device's own).
+/// This query only LOADS its candidates: the branch's latest declared close
+/// and, when the device is known, the device's latest — the only two rows the
+/// picker can choose between.
 pub async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     exec: E,
     branch_id: Uuid,
     device_id: Option<Uuid>,
 ) -> Result<Option<i32>, sqlx::Error> {
-    sqlx::query_scalar::<_, Option<i32>>(
-        "SELECT closing_cash_declared FROM tills \
-          WHERE branch_id = $1 AND status IN ('closed','force_closed') \
-            AND closing_cash_declared IS NOT NULL \
-          ORDER BY COALESCE(device_id = $2, false) DESC, opened_at DESC \
-          LIMIT 1",
+    let rows: Vec<(String, Option<Uuid>, DateTime<Utc>, Option<i32>)> = sqlx::query_as(
+        "(SELECT status::text, device_id, opened_at, closing_cash_declared FROM tills \
+           WHERE branch_id = $1 AND status IN ('closed','force_closed') \
+             AND closing_cash_declared IS NOT NULL AND device_id = $2 \
+           ORDER BY opened_at DESC LIMIT 1) \
+         UNION ALL \
+         (SELECT status::text, device_id, opened_at, closing_cash_declared FROM tills \
+           WHERE branch_id = $1 AND status IN ('closed','force_closed') \
+             AND closing_cash_declared IS NOT NULL \
+           ORDER BY opened_at DESC LIMIT 1)",
     )
     .bind(branch_id)
     .bind(device_id)
-    .fetch_optional(exec)
-    .await
-    .map(Option::flatten)
+    .fetch_all(exec)
+    .await?;
+    let tills: Vec<madar_till::carryover::ClosedTill> = rows
+        .into_iter()
+        .map(|(status, device, opened_at, declared)| madar_till::carryover::ClosedTill {
+            status,
+            device_id: device.map(|d| d.to_string()),
+            opened_at: opened_at.to_rfc3339(),
+            closing_cash_declared: declared.map(i64::from),
+        })
+        .collect();
+    let device = device_id.map(|d| d.to_string());
+    Ok(
+        madar_till::carryover::last_close_declared(&tills, device.as_deref())
+            .map(|c| c as i32),
+    )
 }
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
-/// voided) + movements − cash refunds issued from this till.
-pub async fn compute_system_cash<'e, E>(executor: E, till_id: Uuid) -> Result<i64, sqlx::Error>
+/// voided) + movements − cash refunds issued from this till. The figure is
+/// madar-shared's fold (`madar_till::report::system_cash`) over the till's rows
+/// (`tills::rows`), the one the POS core computes offline.
+pub async fn compute_system_cash<'c, A>(conn: A, till_id: Uuid) -> Result<i64, sqlx::Error>
 where
-    E: sqlx::PgExecutor<'e>,
+    A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
 {
-    let sql = format!(
-        r#"
-        SELECT (
-            (SELECT opening_cash FROM tills WHERE id = $1)
-          + COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders o ON o.id = op.order_id
-                WHERE o.till_id = $1 AND COALESCE(op.is_cash, op.method = 'cash') = true AND o.{TENDERED}), 0)
-          + COALESCE((SELECT SUM(o.tip_amount) FROM orders o
-                WHERE o.till_id = $1
-                  AND COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
-                  AND o.{TENDERED}), 0)
-          + COALESCE((SELECT SUM(amount) FROM till_cash_movements WHERE till_id = $1), 0)
-          - COALESCE((SELECT SUM(r.amount) FROM order_refunds r WHERE r.till_id = $1 AND r.is_cash), 0)
-        )::bigint
-        "#,
-        TENDERED = crate::orders::TENDERED
-    );
-    sqlx::query_scalar::<_, i64>(&sql)
-        .bind(till_id)
-        .fetch_one(executor)
-        .await
+    let mut conn = conn.acquire().await?;
+    Ok(crate::tills::rows::load(&mut conn, till_id).await?.system_cash())
 }
 
 /// Branch bill counts (open bills notice / last-till warning / close snapshot).
@@ -1203,101 +1197,30 @@ pub async fn get_till_report(
     }))
 }
 
+/// The report's figures: madar-shared's fold (`madar_till::report::fold`) over
+/// the till's rows (`tills::rows`), with the drawer frozen at close when the
+/// till is closed. The float, the safe-drop suggestion, the spot views and the
+/// staff-drink counts are this server's own reads beside it.
 pub async fn report_figures(pool: &PgPool, till: &Till) -> Result<TillReportFigures, AppError> {
     let till_id = till.id;
-    let payment_summary = sqlx::query_as::<_, PaymentSummaryRow>(
-        r#"SELECT op.method::text AS payment_method,
-                  bool_or(COALESCE(op.is_cash, op.method = 'cash')) AS is_cash,
-                  COALESCE(SUM(op.amount), 0)::bigint AS total,
-                  COUNT(DISTINCT op.order_id)::bigint AS order_count
-           FROM order_payments op JOIN orders o ON o.id = op.order_id
-           WHERE o.till_id = $1 AND o.status NOT IN ('voided', 'refunded')
-           GROUP BY op.method
-           -- "C" collation: byte order, so "Cash" vs "cash" sorts the same on
-           -- every server regardless of its default locale (case-varying
-           -- payment method names exist — e.g. seeded test data — and the
-           -- till-report test vectors pin this exact order).
-           ORDER BY op.method COLLATE "C""#,
-    )
-    .bind(till_id)
-    .fetch_all(pool)
-    .await?;
-    let (total_tips, cash_tips): (i64, i64) = sqlx::query_as(
-        r#"SELECT COALESCE(SUM(o.tip_amount), 0)::bigint,
-                  COALESCE(SUM(o.tip_amount) FILTER (WHERE COALESCE(o.tip_is_cash,
-                       COALESCE(o.tip_payment_method, o.payment_method) = 'cash')), 0)::bigint
-           FROM orders o WHERE o.till_id = $1 AND o.status NOT IN ('voided', 'refunded')"#,
-    )
-    .bind(till_id)
-    .fetch_one(pool)
-    .await?;
-    let (total_tax, total_service_charge, service_charge_waived_count, service_charge_waived_amount): (i64, i64, i64, i64) =
-        sqlx::query_as(
-            r#"SELECT COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)), 0)::bigint,
-                      COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)), 0)::bigint,
-                      COUNT(*) FILTER (WHERE o.service_charge_waived_by IS NOT NULL)::bigint,
-                      COALESCE(SUM(o.service_charge_waived_amount), 0)::bigint
-               FROM orders o LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-               WHERE o.till_id = $1 AND o.status NOT IN ('voided', 'refunded')"#,
-        )
-        .bind(till_id)
-        .fetch_one(pool)
-        .await?;
-    let (refunds_issued_tax, refunds_issued_service_charge): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(tax_amount), 0)::bigint, COALESCE(SUM(service_charge_amount), 0)::bigint \
-         FROM order_refunds WHERE till_id = $1",
-    )
-    .bind(till_id)
-    .fetch_one(pool)
-    .await?;
-    let voided_amount: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(total_amount), 0)::bigint FROM orders WHERE till_id = $1 AND status = 'voided'",
-    )
-    .bind(till_id)
-    .fetch_one(pool)
-    .await?;
-    let cash_movements = sqlx::query_as::<_, CashMovementSummaryRow>(
-        r#"SELECT m.id, m.amount, m.kind, m.corrects_id, c.kind AS corrects_kind, m.note,
-                  u.name AS moved_by_name, m.created_at
-           FROM till_cash_movements m JOIN users u ON u.id = m.moved_by
-           LEFT JOIN till_cash_movements c ON c.id = m.corrects_id
-           WHERE m.till_id = $1 ORDER BY m.created_at ASC"#,
-    )
-    .bind(till_id)
-    .fetch_all(pool)
-    .await?;
-    let bucket_total = |bucket: &str| -> i64 {
-        cash_movements
-            .iter()
-            .filter(|m| m.bucket() == bucket)
-            .map(|m| m.amount as i64)
-            .sum()
-    };
-    let cash_movements_in = bucket_total("pay_in");
-    let cash_movements_out = -bucket_total("pay_out");
-    let safe_drops = -bucket_total("safe_drop");
-    let cash_adjustments = bucket_total("correction");
-    let total_payments: i64 = payment_summary.iter().map(|r| r.total).sum();
-    let cash_movements_net: i64 = cash_movements.iter().map(|m| m.amount as i64).sum();
-    let refund_totals = {
+    let mut rows = {
         let mut conn = pool.acquire().await?;
-        crate::refunds::handlers::till_refund_totals(&mut conn, till_id).await?
+        crate::tills::rows::load(&mut conn, till_id).await?
     };
-    let cash_in_refunded_sales: i64 = sqlx::query_scalar(
-        r#"SELECT (
-             COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders o ON o.id = op.order_id
-                 WHERE o.till_id = $1 AND o.status = 'refunded' AND COALESCE(op.is_cash, op.method = 'cash') = true), 0)
-           + COALESCE((SELECT SUM(o.tip_amount) FROM orders o WHERE o.till_id = $1 AND o.status = 'refunded'
-                 AND COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash')), 0)
-           )::bigint"#,
-    )
-    .bind(till_id)
-    .fetch_one(pool)
-    .await?;
-    let expected_cash = match till.closing_cash_system {
-        Some(v) => v as i64,
-        None => compute_system_cash(pool, till_id).await?,
-    };
+    rows.closing_cash_system = till.closing_cash_system.map(i64::from);
+    let f = rows.fold();
+    let payment_summary: Vec<PaymentSummaryRow> = f
+        .payment_summary
+        .iter()
+        .map(|p| PaymentSummaryRow {
+            payment_method: p.payment_method.clone(),
+            is_cash: p.is_cash,
+            total: p.total,
+            order_count: p.order_count,
+        })
+        .collect();
+    let cash_movements = rows.movement_rows;
+    let expected_cash = f.expected_cash;
     let standard_float: Option<i64> =
         sqlx::query_scalar::<_, Option<i32>>("SELECT standard_float FROM branches WHERE id = $1")
             .bind(till.branch_id)
@@ -1324,28 +1247,28 @@ pub async fn report_figures(pool: &PgPool, till: &Till) -> Result<TillReportFigu
         staff_drinks_overspent_count: staff_drinks_overspent_count.unwrap_or(0),
         spot_views,
         payment_summary,
-        total_payments,
-        voided_amount,
-        net_payments: total_payments,
-        total_tips,
-        cash_tips,
-        non_cash_tips: total_tips - cash_tips,
+        total_payments: f.total_payments,
+        voided_amount: f.voided_amount,
+        net_payments: f.net_payments,
+        total_tips: f.total_tips,
+        cash_tips: f.cash_tips,
+        non_cash_tips: f.non_cash_tips,
         cash_movements,
-        cash_movements_in,
-        cash_movements_out,
-        safe_drops,
-        cash_adjustments,
-        cash_movements_net,
-        refunds_issued_count: refund_totals.refund_count,
-        refunds_issued_amount: refund_totals.refunded_amount,
-        refunds_issued_cash: refund_totals.refunded_cash,
-        cash_in_refunded_sales,
-        total_tax,
-        total_service_charge,
-        refunds_issued_tax,
-        refunds_issued_service_charge,
-        service_charge_waived_count,
-        service_charge_waived_amount,
+        cash_movements_in: f.cash_movements_in,
+        cash_movements_out: f.cash_movements_out,
+        safe_drops: f.safe_drops,
+        cash_adjustments: f.cash_adjustments,
+        cash_movements_net: f.cash_movements_net,
+        refunds_issued_count: f.refunds_issued_count,
+        refunds_issued_amount: f.refunds_issued_amount,
+        refunds_issued_cash: f.refunds_issued_cash,
+        cash_in_refunded_sales: f.cash_in_refunded_sales,
+        total_tax: f.total_tax,
+        total_service_charge: f.total_service_charge,
+        refunds_issued_tax: f.refunds_issued_tax,
+        refunds_issued_service_charge: f.refunds_issued_service_charge,
+        service_charge_waived_count: f.service_charge_waived_count,
+        service_charge_waived_amount: f.service_charge_waived_amount,
         standard_float,
         suggested_safe_drop,
         expected_cash,
