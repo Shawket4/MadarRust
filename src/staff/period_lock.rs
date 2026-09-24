@@ -114,12 +114,12 @@ where
         code: "PERIOD_CLOSED",
         reason: if paid {
             format!(
-                "PERIOD_CLOSED: that month is paid — {what} dated {from} can't change it. \
+                "That month is paid — {what} dated {from} can't change it. \
                  Add it to the next open month instead."
             )
         } else {
             format!(
-                "PERIOD_CLOSED: that month's payroll is approved — {what} dated {from} can't change it. \
+                "That month's payroll is approved — {what} dated {from} can't change it. \
                  Reopen it first, or add it to the next open month."
             )
         },

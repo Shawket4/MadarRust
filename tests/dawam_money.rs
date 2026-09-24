@@ -3214,3 +3214,68 @@ async fn adjustments_carry_the_rule_lines_reason_code(pool: PgPool) {
         "{b}"
     );
 }
+
+/// Mac E2E BB2: recording an advance over the cap is the same coded refusal
+/// as approving one — ADVANCE_OVER_CAP with {more_piastres, more_egp}, no
+/// "Conflict:" or code in the text. (Amal: 600,000, cap 50% = 300,000,
+/// 160,000 outstanding: 140,000 more at most.)
+#[sqlx::test]
+async fn recording_an_advance_over_the_cap_is_coded(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    approved_advance(&pool, &f, f.amal, 160_000, 4).await;
+    let resp = call!(
+        app,
+        post,
+        "/staff/advances/record",
+        f.mgr(),
+        json!({ "employee_id": f.amal, "amount_piastres": 200_000, "installments": 2 })
+    );
+    assert_eq!(resp.status(), 409);
+    let body = json_of(resp).await;
+    assert_eq!(body["code"], "ADVANCE_OVER_CAP", "{body}");
+    assert_eq!(body["vars"]["more_piastres"], 140_000, "{body}");
+    assert_eq!(body["vars"]["more_egp"], 1_400, "{body}");
+    let text = body["error"].as_str().unwrap();
+    assert!(
+        !text.starts_with("Conflict:") && !text.contains("ADVANCE_OVER_CAP"),
+        "{body}"
+    );
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM salary_advances WHERE employee_id = $1")
+        .bind(f.amal)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "nothing recorded");
+}
+
+/// BB2 follow-up: a closed-month refusal's text is a sentence, not the code
+/// again (the code is in `code`).
+#[sqlx::test]
+async fn a_closed_month_refusal_does_not_repeat_its_code_in_the_text(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query("UPDATE payroll_periods SET status = 'paid' WHERE id = $1")
+        .bind(f.period)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        f.owner(),
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 100,
+                "reason": "x", "effective_date": f.start })
+    );
+    assert_eq!(resp.status(), 409);
+    let body = json_of(resp).await;
+    assert_eq!(body["code"], "PERIOD_CLOSED");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("That month is paid"),
+        "{body}"
+    );
+}
