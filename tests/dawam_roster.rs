@@ -3071,3 +3071,42 @@ async fn moving_a_block_to_someone_already_on_it_is_refused(pool: PgPool) {
             .unwrap();
     assert_eq!(rows, 0, "nothing written");
 }
+
+/// Mac E2E (roster): a claim that loses to a colleague's is 409
+/// ALREADY_CLAIMED — a code the phone words — not an uncoded "Conflict:".
+#[sqlx::test]
+async fn claiming_a_taken_open_shift_is_already_claimed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/open-shifts",
+        f.owner(),
+        json!({ "branch_id": f.br_a, "work_shift_id": l, "on_date": d })
+    ))
+    .await;
+    assert_eq!(s, 201, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        phone_token(&pool, f.a).await
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    refused!(
+        call!(
+            app,
+            "POST",
+            format!("/staff/open-shifts/{id}/claim"),
+            phone_token(&pool, f.b).await
+        ),
+        409,
+        "ALREADY_CLAIMED"
+    );
+}

@@ -782,9 +782,10 @@ pub async fn claim_open_shift(
         return Err(AppError::NotFound("No open shift here.".into()));
     };
     if status != "open" {
-        return Err(AppError::Conflict(
-            "Someone already claimed that shift.".into(),
-        ));
+        return Err(AppError::Refused {
+            code: "ALREADY_CLAIMED",
+            reason: "Someone already claimed that shift.".into(),
+        });
     }
     if !is_published(pool, branch_id, on_date).await? {
         return Err(AppError::Refused {
@@ -824,9 +825,11 @@ pub async fn claim_open_shift(
     .fetch_optional(pool)
     .await?;
     if claimed.is_none() {
-        return Err(AppError::Conflict(
-            "Someone already claimed that shift.".into(),
-        ));
+        // Lost the race to a colleague's claim.
+        return Err(AppError::Refused {
+            code: "ALREADY_CLAIMED",
+            reason: "Someone already claimed that shift.".into(),
+        });
     }
     let name = employee_name(pool, employee_id).await;
     notify_managers(
