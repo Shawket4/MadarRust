@@ -132,6 +132,10 @@ impl From<sqlx::Error> for AppError {
                     code: "OVERLAPPING_REQUEST",
                     reason: "You already have a request like this for that time.".into(),
                 },
+                Some("staff_swaps_one_open") => AppError::Refused {
+                    code: "SWAP_EXISTS",
+                    reason: "You've already asked for this swap — it's waiting.".into(),
+                },
                 Some("staff_requests_live_correction_unique")
                 | Some("staff_requests_live_shift_correction_unique") => AppError::Refused {
                     code: "CORRECTION_WAITING",

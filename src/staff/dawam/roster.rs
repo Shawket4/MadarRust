@@ -1179,6 +1179,14 @@ async fn apply_swap(
     Ok(())
 }
 
+/// 409 `SWAP_EXISTS`: this very swap is already asked and still open.
+pub(crate) fn swap_exists() -> AppError {
+    AppError::Refused {
+        code: "SWAP_EXISTS",
+        reason: "You've already asked for this swap — it's waiting.".into(),
+    }
+}
+
 /// Ask a colleague to swap: they agree first, then the manager (SC-8). Both
 /// shifts must be on the published roster, ahead, at a branch both work at,
 /// and must fit where they land.
@@ -1233,6 +1241,24 @@ pub async fn ask_swap(
                 reason: "That week isn't published yet.".into(),
             });
         }
+    }
+    // The same swap, still open, is not asked again (SC-8, E2E B-ROTA-7);
+    // the `staff_swaps_one_open` index settles a race.
+    let open_already: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM staff_swaps WHERE requester_id = $1 AND requester_date = $2 \
+            AND requester_shift_id = $3 AND peer_id = $4 AND peer_date = $5 AND peer_shift_id = $6 \
+            AND status IN ('awaiting_peer', 'pending'))",
+    )
+    .bind(employee_id)
+    .bind(body.my_date)
+    .bind(body.my_shift_id)
+    .bind(body.peer_id)
+    .bind(body.peer_date)
+    .bind(body.peer_shift_id)
+    .fetch_one(pool)
+    .await?;
+    if open_already {
+        return Err(swap_exists());
     }
     // Would it fit on both sides? Try it in a transaction that never commits.
     let draft = Swap {

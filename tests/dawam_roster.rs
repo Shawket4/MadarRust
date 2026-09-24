@@ -3245,3 +3245,62 @@ async fn accepting_a_pattern_suggestion_in_a_published_week_notifies(pool: PgPoo
         "{keys:?}"
     );
 }
+
+/// E2E B-ROTA-7 (SC-8): the same swap can't be asked twice while the first
+/// is open — 409 SWAP_EXISTS, one row, and the colleague is asked once.
+#[sqlx::test]
+async fn asking_the_same_swap_twice_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(17, 0), t(21, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    for (who, s) in [(f.a, m), (f.b, e)] {
+        let (st, body) = done(call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            f.owner(),
+            json!({ "employee_id": who, "on_date": d, "shifts": [{ "work_shift_id": s }] })
+        ))
+        .await;
+        assert_eq!(st, 200, "{body}");
+    }
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ta = phone_token(&pool, f.a).await;
+    let ask = json!({ "my_date": d, "my_shift_id": m, "peer_id": f.b, "peer_date": d, "peer_shift_id": e });
+    let (st, body) = done(call!(app, "POST", "/staff/me/swaps", ta, ask.clone())).await;
+    assert_eq!(st, 201, "{body}");
+    refused!(
+        call!(app, "POST", "/staff/me/swaps", ta, ask.clone()),
+        409,
+        "SWAP_EXISTS"
+    );
+    let (rows, asked): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM staff_swaps), \
+                (SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_swap_asked')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((rows, asked), (1, 1));
+    // Once the first is cancelled, it may be asked again.
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM staff_swaps")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (st, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/me/swaps/{id}/cancel"),
+        ta
+    ))
+    .await;
+    assert_eq!(st, 200);
+    let (st, body) = done(call!(app, "POST", "/staff/me/swaps", ta, ask)).await;
+    assert_eq!(st, 201, "{body}");
+}
