@@ -1413,9 +1413,22 @@ pub async fn decide_suggestion(
         }
         None => None,
     };
+    // The days of a published week a pattern change moves, for SC-4.
+    let mut pattern_changes = std::collections::BTreeSet::new();
     if body.accept {
         let mut tx = pool.begin().await?;
         if pattern {
+            // Every published day from the change on, before and after, so
+            // the ones it moves are marked and the person told (SC-4, E2E
+            // B-ROTA-5) — as a day edit is.
+            let window = days::published_horizon(&mut tx, &[to.id])
+                .await?
+                .map(|(from, until)| (from.max(s.date), until))
+                .filter(|(from, until)| from <= until);
+            let before = match window {
+                Some((a, b)) => days::snapshot(&mut tx, &[to.id], a, b).await?,
+                None => Default::default(),
+            };
             // The standing pattern itself: the one suggestion that changes it.
             set_pattern_day(
                 &mut tx,
@@ -1426,6 +1439,10 @@ pub async fn decide_suggestion(
             )
             .await?;
             days::check_overlaps(&mut tx, to.id, s.date, s.date + Duration::days(14)).await?;
+            if let Some((a, b)) = window {
+                let after = days::snapshot(&mut tx, &[to.id], a, b).await?;
+                pattern_changes = days::diff(&before, &after);
+            }
         } else {
             let block = Block {
                 work_shift_id: s.work_shift_id,
@@ -1463,7 +1480,9 @@ pub async fn decide_suggestion(
             days::check_overlaps(&mut tx, to.id, s.date, s.date).await?;
         }
         tx.commit().await?;
-        if !pattern {
+        if pattern {
+            days::mark_changed(pool, org_id, &pattern_changes).await?;
+        } else {
             if let Some(f) = &from {
                 after_day_change(pool, org_id, f.id, s.date).await?;
             }

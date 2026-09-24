@@ -3189,3 +3189,59 @@ async fn posting_an_open_shift_on_a_switched_off_block_is_refused(pool: PgPool) 
     .unwrap();
     assert_eq!((posted, told), (0, 0));
 }
+
+/// E2E B-ROTA-5 (SC-4): accepting a PATTERN suggestion that changes a day
+/// of a published week tells the person and marks the day, as every other
+/// change to a published week does.
+#[sqlx::test]
+async fn accepting_a_pattern_suggestion_in_a_published_week_notifies(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let d = today() + Duration::days(3);
+    let ws = madar_rust::staff::dawam::week_start(d);
+    publish(&app, &f, f.br_a, d).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = format!("pattern|{d}|{m}|{}", f.a);
+    let payload = json!([{
+        "id": id, "date": d, "work_shift_id": m, "shift_name": "Morning",
+        "employee_id": f.a, "employee_name": "Amal",
+        "from_employee_id": null, "from_employee_name": null,
+        "reason_key": "staff.sg_pattern", "reason_args": {}, "confidence": 80,
+        "by_default": false
+    }]);
+    sqlx::query(
+        "INSERT INTO staff_suggestion_cache (org_id, branch_id, week_start, payload) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(f.org)
+    .bind(f.br_a)
+    .bind(ws)
+    .bind(&payload)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/roster/suggestions/decide",
+        f.manager(),
+        json!({ "branch_id": f.br_a, "id": id, "accept": true })
+    ))
+    .await;
+    assert!(s == 200 || s == 204, "{s} {body}");
+    assert_eq!(
+        shifts_on(&pool, f.a, d).await,
+        vec![m],
+        "the pattern changed"
+    );
+    assert!(changed(&pool, f.a, d).await, "the day is marked changed");
+    let keys = keys_for(&pool, f.a).await;
+    assert!(
+        keys.contains(&"staff.n_shift_changed".to_string()),
+        "{keys:?}"
+    );
+}
