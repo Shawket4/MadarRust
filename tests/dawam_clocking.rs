@@ -1895,3 +1895,120 @@ async fn money_acts_are_dated_on_the_branchs_day(pool: PgPool) {
     .map(|r| r.rows_affected());
     assert!(left.is_err(), "given_on has no server-date default");
 }
+
+/// E2E B-TEAM-4: one open record checked in AFTER its shift's end (a
+/// hand-entered record) used to fail the auto-close on the order check and
+/// abort the whole tick, for every org, every tick. It now closes at its own
+/// check-in; and any row or org that still fails is logged and skipped, so
+/// the rest of the tick runs — another org's absences are still marked.
+#[sqlx::test]
+async fn one_bad_record_or_org_never_stops_the_sweep(pool: PgPool) {
+    let f = seed(&pool, &tz_at(12)).await;
+    let g = seed(&pool, &tz_at(12)).await;
+    let now = Utc::now();
+    let today = local(&pool, now, &f.tz).await.date();
+    let open = |who: Uuid, check_in: DateTime<Utc>| {
+        let pool = pool.clone();
+        let f_org = f.org;
+        let f_branch = f.branch;
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, \
+                     status, scheduled_start_at, scheduled_end_at, check_in_at, check_in_method, \
+                     is_manual) \
+                 VALUES ($1, $2, $3, $4, 'present', $5, $6, $7, 'manager', true) RETURNING id",
+            )
+            .bind(f_org)
+            .bind(who)
+            .bind(f_branch)
+            .bind(today)
+            .bind(now - Duration::hours(5))
+            .bind(now - Duration::hours(4))
+            .bind(check_in)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Checked in an hour after the shift ended; never checked out.
+    let late_in = now - Duration::hours(3);
+    let bad = open(f.a, late_in).await;
+    // A second open record that fails for a reason the sweep can't know.
+    let doomed = open(f.b, now - Duration::hours(5)).await;
+    sqlx::query(&format!(
+        "CREATE FUNCTION e2e_boom() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+           IF TG_TABLE_NAME = 'attendance_records' AND NEW.id = '{doomed}'::uuid \
+              OR TG_TABLE_NAME = 'payroll_periods' AND NEW.org_id = '{}'::uuid THEN \
+             RAISE EXCEPTION 'boom'; \
+           END IF; RETURN NEW; END $$",
+        f.org
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for t in ["attendance_records", "payroll_periods"] {
+        sqlx::query(&format!(
+            "CREATE TRIGGER e2e_boom BEFORE INSERT OR UPDATE ON {t} \
+             FOR EACH ROW EXECUTE FUNCTION e2e_boom()"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // Another org's person missed a shift that is over.
+    let dawn = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO work_shifts (org_id, branch_id, name, start_time, end_time) \
+         VALUES ($1, $2, 'Dawn', '01:00', '02:00') RETURNING id",
+    )
+    .bind(g.org)
+    .bind(g.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    every_day(&pool, &g, g.b, dawn).await;
+
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+
+    let (out, method, worked): (Option<DateTime<Utc>>, Option<String>, i32) = sqlx::query_as(
+        "SELECT check_out_at, check_out_method, worked_minutes FROM attendance_records WHERE id = $1",
+    )
+    .bind(bad)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (out.map(|t| t.timestamp()), method.as_deref(), worked),
+        (Some(late_in.timestamp()), Some("auto"), 0),
+        "closed at its own check-in, never before it"
+    );
+    let still_open: Option<DateTime<Utc>> =
+        sqlx::query_scalar("SELECT check_out_at FROM attendance_records WHERE id = $1")
+            .bind(doomed)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(still_open.is_none(), "the failing row is skipped");
+    let absent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attendance_records \
+          WHERE employee_id = $1 AND business_date = $2 AND status = 'absent'",
+    )
+    .bind(g.b)
+    .bind(today)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        absent, 1,
+        "the other org's absence is marked in the same tick"
+    );
+    let g_periods: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM payroll_periods WHERE org_id = $1")
+            .bind(g.org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        g_periods, 1,
+        "an org that fails to open its month skips only itself"
+    );
+}

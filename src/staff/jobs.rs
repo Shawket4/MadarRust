@@ -23,6 +23,10 @@
 //!      nulled; distances, inside/outside and flags stay. The approval does it
 //!      at once; this is the safety net. See `purge_stale_coordinates`.
 //!
+//! One bad row or org never stops the tick (E2E B-TEAM-4): a row that fails is
+//! reported and skipped, every step runs even after one fails, and a record
+//! checked in after its shift's end closes at its own check-in.
+//!
 //! AT-1: every "which day is it" here is the BRANCH's day, never the database
 //! server's `CURRENT_DATE` or the org's zone.
 //!
@@ -45,6 +49,8 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::errors::AppError;
+use crate::observability::report::{Failure, report};
 use crate::staff::attendance::load_settings;
 use crate::staff::penalties;
 
@@ -78,19 +84,55 @@ pub fn spawn(pool: PgPool) {
 }
 
 /// One pass of the sweep (the tests drive it directly).
+///
+/// Every step runs even when an earlier one fails, and inside each step a
+/// row or an org that fails is reported and skipped (E2E B-TEAM-4): one bad
+/// record used to stop absences, penalties and the AT-4 purge for every org,
+/// every tick. The first step error is still returned, after the whole
+/// tick, so the job boundary sees it.
 #[doc(hidden)]
-pub async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
-    open_pay_periods(pool).await?;
-    close_forgotten_checkouts(pool).await?;
-    close_unrostered(pool).await?;
-    mark_absences(pool).await?;
-    apply_pending_penalties(pool).await?;
-    purge_stale_coordinates(pool).await?;
-    precompute_suggestions(pool).await?;
-    crate::staff::dawam::suggest::monthly_fairness(pool).await?;
-    phones_that_died(pool).await?;
-    tracking_went_quiet(pool).await?;
-    Ok(())
+pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
+    let mut first: Option<AppError> = None;
+    let mut step = |name: &'static str, r: Result<(), AppError>| {
+        if let Err(e) = r {
+            report(Failure::new("attendance_sweep", name), &e);
+            first.get_or_insert(e);
+        }
+    };
+    step("open_pay_periods", open_pay_periods(pool).await);
+    step(
+        "close_forgotten_checkouts",
+        close_forgotten_checkouts(pool).await,
+    );
+    step("close_unrostered", close_unrostered(pool).await);
+    step("mark_absences", mark_absences(pool).await);
+    step(
+        "apply_pending_penalties",
+        apply_pending_penalties(pool).await,
+    );
+    step(
+        "purge_stale_coordinates",
+        purge_stale_coordinates(pool).await,
+    );
+    step("precompute_suggestions", precompute_suggestions(pool).await);
+    step(
+        "monthly_fairness",
+        crate::staff::dawam::suggest::monthly_fairness(pool).await,
+    );
+    step("phones_that_died", phones_that_died(pool).await);
+    step("tracking_went_quiet", tracking_went_quiet(pool).await);
+    first.map_or(Ok(()), Err)
+}
+
+/// One row (or org) a step could not process: reported — a log line, and a
+/// deduplicated Sentry event keyed by the step — and skipped, so everyone
+/// else's tick goes on. The next tick tries it again.
+pub(crate) fn skipped(step: &'static str, org_id: Uuid, id: Option<Uuid>, e: &AppError) {
+    let mut f = Failure::new("attendance_sweep", step).with("org_id", org_id.to_string());
+    if let Some(id) = id {
+        f = f.with("row_id", id.to_string());
+    }
+    report(f, e);
 }
 
 /// A shift whose phone went silent without a low battery (audit 03 bug 8):
@@ -99,7 +141,7 @@ pub async fn run_tick(pool: &PgPool) -> Result<(), crate::errors::AppError> {
 /// shift is marked "tracking off" and the manager told, once — the server no
 /// longer relies on the phone's own word (CL-5).
 #[doc(hidden)]
-pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), AppError> {
     let quiet: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(&format!(
         "SELECT a.org_id, a.employee_id, a.branch_id, a.id FROM attendance_records a \
            JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
@@ -119,14 +161,17 @@ pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), crate::errors::App
     .fetch_all(pool)
     .await?;
     for (org_id, employee_id, branch_id, record_id) in quiet {
-        crate::staff::dawam::presence::mark_tracking_off(
+        if let Err(e) = crate::staff::dawam::presence::mark_tracking_off(
             pool,
             org_id,
             employee_id,
             branch_id,
             record_id,
         )
-        .await?;
+        .await
+        {
+            skipped("tracking_went_quiet", org_id, Some(record_id), &e);
+        }
     }
     Ok(())
 }
@@ -135,18 +180,28 @@ pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), crate::errors::App
 /// or not anyone looks at payroll that day: the app's estimate and the
 /// dashboard read the same row.
 #[doc(hidden)]
-pub async fn open_pay_periods(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+pub async fn open_pay_periods(pool: &PgPool) -> Result<(), AppError> {
     let orgs: Vec<(Uuid, i32, Option<String>)> = sqlx::query_as(&format!(
         "SELECT o.id, COALESCE(s.period_start_day, 26),                 (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL                   ORDER BY b.created_at LIMIT 1)            FROM organizations o            LEFT JOIN attendance_settings s ON s.org_id = o.id AND s.branch_id IS NULL           WHERE {LIVE_ORG}"
     ))
     .fetch_all(pool)
     .await?;
     for (org_id, start_day, tz) in orgs {
-        let today =
-            crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo"))
-                .await?;
-        crate::staff::dawam::pay::ensure_period_for(pool, org_id, today, start_day.max(1) as u32)
-            .await?;
+        let opened = async {
+            let today =
+                crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo"))
+                    .await?;
+            crate::staff::dawam::pay::ensure_period_for(
+                pool,
+                org_id,
+                today,
+                start_day.max(1) as u32,
+            )
+            .await
+        };
+        if let Err(e) = opened.await {
+            skipped("open_pay_periods", org_id, None, &e);
+        }
     }
     Ok(())
 }
@@ -155,7 +210,7 @@ pub async fn open_pay_periods(pool: &PgPool) -> Result<(), crate::errors::AppErr
 /// "left the branch" (CL-12). Pings come every 15 minutes; three missed is
 /// quiet.
 #[doc(hidden)]
-pub async fn phones_that_died(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+pub async fn phones_that_died(pool: &PgPool) -> Result<(), AppError> {
     let quiet: Vec<(Uuid, Uuid, Uuid, Uuid)> = sqlx::query_as(&format!(
         "SELECT a.org_id, a.employee_id, a.branch_id, a.id FROM attendance_records a \
            JOIN organizations o ON o.id = a.org_id AND {LIVE_ORG} \
@@ -173,7 +228,7 @@ pub async fn phones_that_died(pool: &PgPool) -> Result<(), crate::errors::AppErr
     .fetch_all(pool)
     .await?;
     for (org_id, employee_id, branch_id, record_id) in quiet {
-        crate::staff::dawam::presence::raise_flag(
+        if let Err(e) = crate::staff::dawam::presence::raise_flag(
             pool,
             org_id,
             employee_id,
@@ -182,7 +237,10 @@ pub async fn phones_that_died(pool: &PgPool) -> Result<(), crate::errors::AppErr
             "phone_died",
             0,
         )
-        .await?;
+        .await
+        {
+            skipped("phones_that_died", org_id, Some(record_id), &e);
+        }
     }
     Ok(())
 }
@@ -192,7 +250,7 @@ pub async fn phones_that_died(pool: &PgPool) -> Result<(), crate::errors::AppErr
 /// already holding that week is skipped; the cache drops itself when the
 /// roster changes. Learning history is kept 24 months.
 #[doc(hidden)]
-pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), AppError> {
     let due: Vec<(Uuid, Uuid, NaiveDate)> = sqlx::query_as(
         "WITH b AS ( \
              SELECT b.org_id, b.id, \
@@ -230,24 +288,24 @@ pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), crate::errors::
 
 // ── 1. Forgotten checkouts ────────────────────────────────────
 
-async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), crate::errors::AppError> {
-    #[derive(sqlx::FromRow)]
-    struct Open {
-        id: Uuid,
-        org_id: Uuid,
-        branch_id: Uuid,
-        check_in_at: DateTime<Utc>,
-        scheduled_start_at: DateTime<Utc>,
-        scheduled_end_at: DateTime<Utc>,
-        break_minutes: i32,
-        paid_break: bool,
-        half_day_threshold_minutes: Option<i32>,
-    }
+#[derive(sqlx::FromRow)]
+struct OpenRecord {
+    id: Uuid,
+    org_id: Uuid,
+    branch_id: Uuid,
+    check_in_at: DateTime<Utc>,
+    scheduled_start_at: DateTime<Utc>,
+    scheduled_end_at: DateTime<Utc>,
+    break_minutes: i32,
+    paid_break: bool,
+    half_day_threshold_minutes: Option<i32>,
+}
 
+async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), AppError> {
     // Only rows with a known scheduled end can be auto-closed: an unrostered
     // check-in has no "supposed to finish" to close it at, so it stays open for a
     // human to resolve.
-    let stale: Vec<Open> = sqlx::query_as(&format!(
+    let stale: Vec<OpenRecord> = sqlx::query_as(&format!(
         "SELECT a.id, a.org_id, a.branch_id, a.check_in_at, a.scheduled_start_at, \
                 a.scheduled_end_at, \
                 COALESCE(ws.break_minutes, 0) AS break_minutes, \
@@ -272,51 +330,62 @@ async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), crate::errors::A
     .await?;
 
     for row in stale {
-        let worked = crate::staff::rules::worked_minutes(
-            row.check_in_at,
-            row.scheduled_end_at,
-            row.break_minutes,
-            row.paid_break,
-        );
-        let span = (row.scheduled_end_at - row.scheduled_start_at)
-            .num_minutes()
-            .max(0);
-        // Late minutes were settled at check-in; only the closing figures move.
-        let late: i32 =
-            sqlx::query_scalar("SELECT late_minutes FROM attendance_records WHERE id = $1")
-                .bind(row.id)
-                .fetch_one(pool)
-                .await?;
-        // These rows all have a check-in by definition (that is what makes them
-        // "still open"), so they can never come out of this as absent.
-        let status = crate::staff::rules::classify(
-            true,
-            worked,
-            span,
-            row.half_day_threshold_minutes,
-            late as i64,
-        );
+        if let Err(e) = close_forgotten(pool, &row).await {
+            skipped("close_forgotten_checkouts", row.org_id, Some(row.id), &e);
+        }
+    }
+    Ok(())
+}
 
-        sqlx::query(
-            "UPDATE attendance_records SET \
-                 check_out_at = scheduled_end_at, check_out_method = 'auto', \
+/// Close one forgotten record at its scheduled end — or at its own check-in
+/// when that came after the end (a hand-entered record), since a check-out
+/// can never precede its check-in (E2E B-TEAM-4).
+async fn close_forgotten(pool: &PgPool, row: &OpenRecord) -> Result<(), AppError> {
+    let close_at = row.scheduled_end_at.max(row.check_in_at);
+    let worked = crate::staff::rules::worked_minutes(
+        row.check_in_at,
+        close_at,
+        row.break_minutes,
+        row.paid_break,
+    );
+    let span = (row.scheduled_end_at - row.scheduled_start_at)
+        .num_minutes()
+        .max(0);
+    // Late minutes were settled at check-in; only the closing figures move.
+    let late: i32 = sqlx::query_scalar("SELECT late_minutes FROM attendance_records WHERE id = $1")
+        .bind(row.id)
+        .fetch_one(pool)
+        .await?;
+    // These rows all have a check-in by definition (that is what makes them
+    // "still open"), so they can never come out of this as absent.
+    let status = crate::staff::rules::classify(
+        true,
+        worked,
+        span,
+        row.half_day_threshold_minutes,
+        late as i64,
+    );
+
+    sqlx::query(
+        "UPDATE attendance_records SET \
+                 check_out_at = $4, check_out_method = 'auto', \
                  worked_minutes = $2, overtime_minutes = 0, early_leave_minutes = 0, \
                  status = $3, \
                  edit_reason = COALESCE(edit_reason, 'Auto-closed: no checkout recorded'), \
                  updated_at = now() \
                WHERE id = $1 AND check_out_at IS NULL",
-        )
-        .bind(row.id)
-        .bind(worked as i32)
-        .bind(status.as_str())
-        .execute(pool)
-        .await?;
+    )
+    .bind(row.id)
+    .bind(worked as i32)
+    .bind(status.as_str())
+    .bind(close_at)
+    .execute(pool)
+    .await?;
 
-        tracing::debug!(
-            record = %row.id, org = %row.org_id, branch = %row.branch_id,
-            "auto-closed a forgotten checkout"
-        );
-    }
+    tracing::debug!(
+        record = %row.id, org = %row.org_id, branch = %row.branch_id,
+        "auto-closed a forgotten checkout"
+    );
     Ok(())
 }
 
@@ -326,10 +395,10 @@ async fn close_forgotten_checkouts(pool: &PgPool) -> Result<(), crate::errors::A
 /// is closed at check-in + that limit, `auto`, with no overtime; the person
 /// can still ask for a fix for that day.
 #[doc(hidden)]
-pub async fn close_unrostered(pool: &PgPool) -> Result<(), crate::errors::AppError> {
-    let rows: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&format!(
+pub async fn close_unrostered(pool: &PgPool) -> Result<(), AppError> {
+    let rows: Vec<(Uuid, Uuid, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(&format!(
         "WITH open AS ( \
-             SELECT a.id, a.check_in_at, \
+             SELECT a.id, a.org_id, a.check_in_at, \
                     COALESCE(( \
                         SELECT s.limit_presence_hours FROM attendance_settings s \
                          WHERE s.org_id = a.org_id \
@@ -346,7 +415,7 @@ pub async fn close_unrostered(pool: &PgPool) -> Result<(), crate::errors::AppErr
               WHERE a.check_in_at IS NOT NULL AND a.check_out_at IS NULL \
                 AND a.scheduled_end_at IS NULL \
          ) \
-         SELECT id, check_in_at, \
+         SELECT id, org_id, check_in_at, \
                 check_in_at + make_interval(secs => (hours * 3600)::double precision) \
            FROM open \
           WHERE now() > check_in_at + make_interval(secs => (hours * 3600)::double precision) \
@@ -355,9 +424,9 @@ pub async fn close_unrostered(pool: &PgPool) -> Result<(), crate::errors::AppErr
     ))
     .fetch_all(pool)
     .await?;
-    for (id, check_in, close_at) in rows {
+    for (id, org_id, check_in, close_at) in rows {
         let worked = (close_at - check_in).num_minutes().max(0) as i32;
-        sqlx::query(
+        if let Err(e) = sqlx::query(
             "UPDATE attendance_records SET \
                  check_out_at = $2, check_out_method = 'auto', \
                  worked_minutes = $3, overtime_minutes = 0, early_leave_minutes = 0, \
@@ -369,7 +438,10 @@ pub async fn close_unrostered(pool: &PgPool) -> Result<(), crate::errors::AppErr
         .bind(close_at)
         .bind(worked)
         .execute(pool)
-        .await?;
+        .await
+        {
+            skipped("close_unrostered", org_id, Some(id), &e.into());
+        }
     }
     Ok(())
 }
@@ -377,7 +449,7 @@ pub async fn close_unrostered(pool: &PgPool) -> Result<(), crate::errors::AppErr
 // ── 2. Absences ───────────────────────────────────────────────
 
 #[doc(hidden)]
-pub async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
     #[derive(sqlx::FromRow)]
     struct Missing {
         org_id: Uuid,
@@ -451,7 +523,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError>
     .await?;
 
     for row in missing {
-        sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO attendance_records \
                  (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
                   scheduled_start_at, scheduled_end_at, is_manual, edit_reason) \
@@ -469,7 +541,10 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError>
         .bind(row.scheduled_start_at)
         .bind(row.scheduled_end_at)
         .execute(pool)
-        .await?;
+        .await
+        {
+            skipped("mark_absences", row.org_id, Some(row.employee_id), &e.into());
+        }
     }
     Ok(())
 }
@@ -483,7 +558,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), crate::errors::AppError>
 /// the sweep itself closed and for anything a restart interrupted. It is
 /// idempotent, and `penalties` refuses to touch a row a human has waived or
 /// overridden — so a manager's decision made during the day survives the night.
-async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+async fn apply_pending_penalties(pool: &PgPool) -> Result<(), AppError> {
     #[derive(sqlx::FromRow)]
     struct Pending {
         id: Uuid,
@@ -514,8 +589,13 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::App
     .await?;
 
     for row in rows {
-        let settings = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
-        penalties::recompute_record(pool, row.id, &settings).await?;
+        let priced = async {
+            let settings = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
+            penalties::recompute_record(pool, row.id, &settings).await
+        };
+        if let Err(e) = priced.await {
+            skipped("apply_pending_penalties", row.org_id, Some(row.id), &e);
+        }
     }
     Ok(())
 }
@@ -528,7 +608,7 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), crate::errors::App
 /// its own month at once (`privacy::wipe_period_coordinates`); this catches
 /// anything it missed and anything added to an approved month since. It is a
 /// privacy duty, so it runs for every org, Dawam on or off.
-pub async fn purge_stale_coordinates(pool: &PgPool) -> Result<(), crate::errors::AppError> {
+pub async fn purge_stale_coordinates(pool: &PgPool) -> Result<(), AppError> {
     crate::staff::dawam::privacy::wipe_approved_months(pool).await?;
     Ok(())
 }

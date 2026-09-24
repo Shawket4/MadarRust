@@ -154,7 +154,11 @@ pub async fn wipe_approved_months(pool: &PgPool) -> Result<u64, AppError> {
     .await?;
     let mut n = 0;
     for (org, from, to) in periods {
-        n += wipe_period_coordinates(pool, org, from, to).await?;
+        // One month that fails is reported and skipped (E2E B-TEAM-4).
+        match wipe_period_coordinates(pool, org, from, to).await {
+            Ok(k) => n += k,
+            Err(e) => crate::staff::jobs::skipped("purge_stale_coordinates", org, None, &e),
+        }
     }
     if n > 0 {
         tracing::info!(rows = n, "wiped the coordinates of approved payroll months");

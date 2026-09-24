@@ -1755,40 +1755,47 @@ pub async fn monthly_fairness(pool: &PgPool) -> Result<(), AppError> {
     )
     .fetch_all(pool)
     .await?;
+    // One branch that fails is reported and skipped (E2E B-TEAM-4).
     for (org_id, branch_id, month) in due {
-        let report = branch_fairness(pool, org_id, branch_id, month).await?;
-        let fresh = sqlx::query(
-            "INSERT INTO staff_fairness_audits (org_id, branch_id, month, flagged, payload) \
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-        )
-        .bind(org_id)
-        .bind(branch_id)
-        .bind(month)
-        .bind(report.flagged)
-        .bind(json!(report))
-        .execute(pool)
-        .await?
-        .rows_affected();
-        if fresh == 0 {
-            continue;
-        }
-        for o in owners(pool, org_id).await? {
-            notify(
-                pool,
-                org_id,
-                o,
-                if report.flagged {
-                    "staff.n_fairness_flagged"
-                } else {
-                    "staff.n_fairness_ready"
-                },
-                json!({
-                    "branch": report.branch_name,
-                    "month": month,
-                    "gap": report.gap_points,
-                }),
+        let one = async {
+            let report = branch_fairness(pool, org_id, branch_id, month).await?;
+            let fresh = sqlx::query(
+                "INSERT INTO staff_fairness_audits (org_id, branch_id, month, flagged, payload) \
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
             )
-            .await;
+            .bind(org_id)
+            .bind(branch_id)
+            .bind(month)
+            .bind(report.flagged)
+            .bind(json!(report))
+            .execute(pool)
+            .await?
+            .rows_affected();
+            if fresh == 0 {
+                return Ok(());
+            }
+            for o in owners(pool, org_id).await? {
+                notify(
+                    pool,
+                    org_id,
+                    o,
+                    if report.flagged {
+                        "staff.n_fairness_flagged"
+                    } else {
+                        "staff.n_fairness_ready"
+                    },
+                    json!({
+                        "branch": report.branch_name,
+                        "month": month,
+                        "gap": report.gap_points,
+                    }),
+                )
+                .await;
+            }
+            Ok::<(), AppError>(())
+        };
+        if let Err(e) = one.await {
+            crate::staff::jobs::skipped("monthly_fairness", org_id, Some(branch_id), &e);
         }
     }
     Ok(())
