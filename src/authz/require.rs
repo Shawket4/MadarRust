@@ -120,12 +120,16 @@ pub async fn settle(
 ) -> Result<(), AppError> {
     let eff = effective(pool, approver, branch).await?;
     super::can_settle(&eff, &approver.to_string(), pending).map_err(|why| match why {
-        super::Why::SamePerson => {
-            AppError::Forbidden("Someone else has to decide this one.".into())
-        }
-        _ => AppError::Forbidden(
-            "This is above your limit too — it waits for someone with a higher one.".into(),
-        ),
+        super::Why::SamePerson => AppError::Coded {
+            status: 403,
+            code: "OWN_DECISION",
+            reason: "Someone else has to decide this one.".into(),
+        },
+        _ => AppError::Coded {
+            status: 403,
+            code: "ABOVE_LIMIT",
+            reason: "This is above your limit too — it waits for someone with a higher one.".into(),
+        },
     })
 }
 

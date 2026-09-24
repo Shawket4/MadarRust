@@ -522,9 +522,11 @@ pub async fn create_adjustment(
     let (table, cap) = gate_kind(pool, &claims, org_id, &body.kind).await?;
     let subject = access::subject(pool, org_id, body.employee_id).await?;
     if subject.is(&claims) {
-        return Err(AppError::Forbidden(
-            "You can't add pay lines for yourself.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_PAY_LINE",
+            reason: "You can't add pay lines for yourself.".into(),
+        });
     }
     // A manager adds pay lines for the people of their branches (RO-6).
     access::require_for(pool, &claims, cap, &subject).await?;
@@ -894,10 +896,17 @@ async fn approve_advance_checks(
     if after > cap {
         let owner = access::can_everywhere(pool, claims, org_id, Cap::HrPayrollRun).await?;
         if !owner {
-            return Err(AppError::Conflict(format!(
-                "ADVANCE_OVER_CAP: that's over the advance cap — at most {} EGP more; the owner can approve it.",
-                (cap - outstanding + already_counted).max(0) / 100
-            )));
+            // 409 with the room left, for the client's own wording (B-TEAM-2).
+            let more = (cap - outstanding + already_counted).max(0);
+            return Err(AppError::CodedVars {
+                status: 409,
+                code: "ADVANCE_OVER_CAP",
+                reason: format!(
+                    "That's over the advance cap — at most {} EGP more; the owner can approve it.",
+                    more / 100
+                ),
+                vars: json!({ "more_piastres": more, "more_egp": more / 100 }),
+            });
         }
     }
     let branch = access::decision_branch(pool, claims, Cap::HrAdvancesDecide, subject).await?;
@@ -953,9 +962,11 @@ pub async fn review_advance(
     .ok_or_else(|| AppError::Conflict("This advance has already been decided".into()))?;
     let subject = access::subject(pool, org_id, employee_id).await?;
     if subject.is(&claims) {
-        return Err(AppError::Forbidden(
-            "Someone else has to decide your advance.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_ADVANCE",
+            reason: "Someone else has to decide your advance.".into(),
+        });
     }
     // Approve or reject: at one of the person's branches (audit B-3).
     access::require_for(pool, &claims, Cap::HrAdvancesDecide, &subject).await?;
@@ -1052,9 +1063,11 @@ pub async fn record_advance(
     access::gate(pool, &claims, org_id, Cap::HrAdvancesDecide).await?;
     let subject = access::subject(pool, org_id, body.employee_id).await?;
     if subject.is(&claims) {
-        return Err(AppError::Forbidden(
-            "Someone else has to record your advance.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_ADVANCE",
+            reason: "Someone else has to record your advance.".into(),
+        });
     }
     access::require_for(pool, &claims, Cap::HrAdvancesDecide, &subject).await?;
     let installments = body.installments.unwrap_or(1);

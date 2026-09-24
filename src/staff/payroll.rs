@@ -644,10 +644,13 @@ pub async fn override_deduction(
         {
             Decision::Allow => {}
             _ => {
-                return Err(AppError::Forbidden(
-                    "Raising this deduction is above your limit — the owner can override it."
-                        .into(),
-                ));
+                return Err(AppError::Coded {
+                    status: 403,
+                    code: "ABOVE_LIMIT",
+                    reason:
+                        "Raising this deduction is above your limit — the owner can override it."
+                            .into(),
+                });
             }
         }
     }

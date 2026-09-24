@@ -2464,3 +2464,53 @@ async fn cancelling_an_approved_request_keeps_the_approver_and_tells_the_person(
     .unwrap();
     assert_eq!(n, 0);
 }
+
+/// E2E B-TEAM-2 (AT-13): request refusals carry stable codes.
+#[sqlx::test]
+async fn request_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let mine = file(
+        &app,
+        &f,
+        f.e_mgr,
+        json!({ "kind": "late_arrival", "on_date": "2026-09-10", "to_time": "10:00:00" }),
+    )
+    .await;
+    let (st, b) = decide(
+        &app,
+        &f.mgr_token(),
+        &mine["id"],
+        json!({ "status": "approved" }),
+    )
+    .await;
+    assert_eq!((st, b["code"].clone()), (403, json!("OWN_REQUEST")), "{b}");
+    let (st, b) = decide(
+        &app,
+        &f.peer_token(),
+        &mine["id"],
+        json!({ "status": "approved" }),
+    )
+    .await;
+    assert_eq!(
+        (st, b["code"].clone()),
+        (403, json!("MANAGER_REQUEST_ABOVE")),
+        "{b}"
+    );
+    // The same excuse twice.
+    let body = json!({ "employee_id": f.e, "kind": "excuse", "on_date": "2026-09-11",
+                       "from_time": "12:00:00", "to_time": "13:00:00" });
+    file(&app, &f, f.e, body.clone()).await;
+    let (st, b) = send!(
+        app,
+        "POST",
+        "/staff/requests".to_string(),
+        f.owner_token(),
+        body
+    );
+    assert_eq!(
+        (st, b["code"].clone()),
+        (409, json!("OVERLAPPING_REQUEST")),
+        "{b}"
+    );
+}

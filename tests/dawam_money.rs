@@ -3038,3 +3038,113 @@ async fn expense_advances_are_listed_per_branch(pool: PgPool) {
     assert_eq!(resp.status(), 200);
     assert_eq!(purposes(json_of(resp).await), ["Milk"]);
 }
+
+/// E2E B-TEAM-2 (AT-13): every money refusal carries a stable code (and its
+/// figures), so the Arabic dashboard can word it instead of showing the
+/// server's English with a "Forbidden:" / "Conflict:" prefix.
+#[sqlx::test]
+async fn money_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    async fn coded(resp: actix_web::dev::ServiceResponse, status: u16, code: &str) -> Value {
+        assert_eq!(resp.status(), status, "{code}");
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], code, "{body}");
+        let text = body["error"].as_str().unwrap();
+        assert!(
+            !text.starts_with("Forbidden:") && !text.starts_with("Conflict:"),
+            "{body}"
+        );
+        body
+    }
+    let mgr_e = common::employees::employee(
+        &pool,
+        f.org,
+        "Mgr",
+        Some(f.mgr),
+        Some("+201012345670"),
+        true,
+        &[f.a],
+        600_000,
+    )
+    .await;
+    // Your own pay line.
+    coded(
+        call!(
+            app,
+            post,
+            "/staff/adjustments",
+            f.mgr(),
+            json!({ "employee_id": mgr_e, "kind": "bonus", "amount_piastres": 100, "reason": "x" })
+        ),
+        403,
+        "OWN_PAY_LINE",
+    )
+    .await;
+    // Over the advance cap (50% of 600,000 = 300,000).
+    let s = phone_token(&pool, f.amal).await;
+    let adv = json_of(call!(
+        app,
+        post,
+        "/staff/me/advances",
+        s,
+        json!({ "amount_piastres": 400_000, "installments": 4 })
+    ))
+    .await;
+    let body = coded(
+        call!(
+            app,
+            patch,
+            format!("/staff/advances/{}/review", adv["id"].as_str().unwrap()),
+            f.mgr(),
+            json!({ "approve": true })
+        ),
+        409,
+        "ADVANCE_OVER_CAP",
+    )
+    .await;
+    assert_eq!(body["vars"]["more_piastres"], 300_000, "{body}");
+    // Your own advance.
+    let mine = json_of(call!(
+        app,
+        post,
+        "/staff/me/advances",
+        phone_token(&pool, mgr_e).await,
+        json!({ "amount_piastres": 10_000, "installments": 1 })
+    ))
+    .await;
+    coded(
+        call!(
+            app,
+            patch,
+            format!("/staff/advances/{}/review", mine["id"].as_str().unwrap()),
+            f.mgr(),
+            json!({ "approve": true })
+        ),
+        403,
+        "OWN_ADVANCE",
+    )
+    .await;
+    // Above your limit too: a pending line another manager with the same
+    // limit can't settle.
+    let big = json_of(call!(app, post, "/staff/adjustments", f.mgr(),
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 150_000, "reason": "Big" }))).await;
+    assert_eq!(big["status"], "pending", "{big}");
+    let mgr2 = user(&pool, f.org, "Manager 2", "branch_manager").await;
+    assign(&pool, mgr2, f.a).await;
+    coded(
+        call!(
+            app,
+            patch,
+            format!(
+                "/staff/adjustments/bonus/{}/decision",
+                big["id"].as_str().unwrap()
+            ),
+            token_for(mgr2, f.org, UserRole::BranchManager),
+            json!({ "approve": true })
+        ),
+        403,
+        "ABOVE_LIMIT",
+    )
+    .await;
+}

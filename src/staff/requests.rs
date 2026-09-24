@@ -1383,9 +1383,11 @@ pub async fn decide_request(
         // `hr.requests.self_approve` it was approved as it was filed; without
         // it, someone above them decides.
         if is_own {
-            return Err(AppError::Forbidden(
-                "Your own requests are decided by someone above you.".into(),
-            ));
+            return Err(AppError::Coded {
+                status: 403,
+                code: "OWN_REQUEST",
+                reason: "Your own requests are decided by someone above you.".into(),
+            });
         }
         // A manager's request goes ABOVE them: a peer manager of the same
         // branch can't decide it (RQ-5).
@@ -1394,11 +1396,12 @@ pub async fn decide_request(
         {
             crate::permissions::guard::require_dominance(pool, &claims, user, Cap::HrLeaveEdit)
                 .await
-                .map_err(|_| {
-                    AppError::Forbidden(
+                .map_err(|_| AppError::Coded {
+                    status: 403,
+                    code: "MANAGER_REQUEST_ABOVE",
+                    reason:
                         "A manager's own request is decided by someone above them, usually the owner."
                             .into(),
-                    )
                 })?;
         }
     }

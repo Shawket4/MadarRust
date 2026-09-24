@@ -2292,3 +2292,95 @@ async fn the_sweep_charges_nothing_before_the_rules_are_saved(pool: PgPool) {
     .unwrap();
     assert_eq!(day, today);
 }
+
+/// E2E B-TEAM-2 (AT-13): the team board's refusals carry stable codes.
+#[sqlx::test]
+async fn team_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    async fn coded(resp: actix_web::dev::ServiceResponse, status: u16, code: &str) {
+        assert_eq!(resp.status(), status, "{code}");
+        let body: Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], code, "{body}");
+    }
+    // A flag decided twice.
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind) \
+         VALUES ($1, $2, $3, 'suspicious') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.b)
+    .bind(f.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let uri = format!("/staff/flags/{flag}");
+    assert_eq!(
+        call!(app, patch, uri, owner_t(&f), json!({ "action": "ignore" })).status(),
+        200
+    );
+    coded(
+        call!(app, patch, uri, owner_t(&f), json!({ "action": "ignore" })),
+        404,
+        "FLAG_HANDLED",
+    )
+    .await;
+    // Punching yourself in from the dashboard.
+    coded(
+        call!(
+            app,
+            post,
+            "/staff/attendance/punch",
+            owner_t(&f),
+            json!({ "employee_id": f.owner_e, "reason": "x" })
+        ),
+        403,
+        "OWN_PUNCH",
+    )
+    .await;
+    // Punching in someone suspended.
+    sqlx::query("UPDATE employees SET employment_status = 'suspended' WHERE id = $1")
+        .bind(f.b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    coded(
+        call!(
+            app,
+            post,
+            "/staff/attendance/punch",
+            owner_t(&f),
+            json!({ "employee_id": f.b, "reason": "x" })
+        ),
+        403,
+        "EMPLOYMENT_NOT_ACTIVE",
+    )
+    .await;
+    // Approving your own overtime.
+    let today = local(&pool, Utc::now(), &f.tz).await.date();
+    let rec: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, status, \
+             check_in_at, check_out_at, worked_minutes, overtime_minutes, overtime_status) \
+         VALUES ($1, $2, $3, $4, 'present', now() - INTERVAL '9 hours', now(), 540, 60, 'pending') \
+         RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.owner_e)
+    .bind(f.branch)
+    .bind(today)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    coded(
+        call!(
+            app,
+            patch,
+            format!("/staff/attendance/{rec}/overtime"),
+            owner_t(&f),
+            json!({ "approve": true })
+        ),
+        403,
+        "OWN_OVERTIME",
+    )
+    .await;
+}

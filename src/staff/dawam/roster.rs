@@ -885,9 +885,11 @@ pub async fn decide_claim(
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
     let subject = access::subject(pool, org_id, claimer).await?;
     if subject.is(&claims) {
-        return Err(AppError::Forbidden(
-            "You can't approve your own claim.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_CLAIM",
+            reason: "You can't approve your own claim.".into(),
+        });
     }
     let mut tx = pool.begin().await?;
     if body.approve {
@@ -1470,9 +1472,11 @@ pub async fn decide_swap(
     access::require_for(pool, &claims, Cap::HrScheduleEdit, &requester).await?;
     access::require_for(pool, &claims, Cap::HrScheduleEdit, &peer).await?;
     if requester.is(&claims) || peer.is(&claims) {
-        return Err(AppError::Forbidden(
-            "You can't approve a swap you're part of.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_SWAP",
+            reason: "You can't approve a swap you're part of.".into(),
+        });
     }
     // Approving re-checks what the ask checked (Mac E2E R-B1, SC-8): time has
     // passed since, so a shift may have begun or its week been withdrawn. The

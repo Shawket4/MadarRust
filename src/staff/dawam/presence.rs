@@ -713,7 +713,11 @@ pub async fn resolve_flag(
     .fetch_optional(pool)
     .await?;
     let Some((employee_id, branch_id, record_id, kind, minutes)) = flag else {
-        return Err(AppError::NotFound("That flag is already handled.".into()));
+        return Err(AppError::Coded {
+            status: 404,
+            code: "FLAG_HANDLED",
+            reason: "That flag is already handled.".into(),
+        });
     };
     let subject = access::subject(pool, org_id, employee_id).await?;
     // At the flag's branch; a flag with none (a new phone before any branch)
@@ -802,9 +806,11 @@ pub async fn resolve_flag(
         // from themselves, and above the manager's limit it waits for the owner
         // (AD-5, audit B-8).
         if subject.is(&claims) {
-            return Err(AppError::Forbidden(
-                "You can't add pay lines for yourself.".into(),
-            ));
+            return Err(AppError::Coded {
+                status: 403,
+                code: "OWN_PAY_LINE",
+                reason: "You can't add pay lines for yourself.".into(),
+            });
         }
         if let Some(d) = date {
             crate::staff::period_lock::assert_open(pool, org_id, d, "this deduction").await?;
@@ -1174,9 +1180,11 @@ async fn decide_cover_record(
     };
     access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
     if Some(by) == coverer_user || Some(by) == owner_user {
-        return Err(AppError::Forbidden(
-            "You can't confirm a cover you're part of.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_COVER",
+            reason: "You can't confirm a cover you're part of.".into(),
+        });
     }
     // Confirming pays the cover: never into an approved or paid month
     // (AD-10). Rejecting pays nothing, so it may still be recorded. After the
@@ -1280,9 +1288,11 @@ pub async fn decide_overtime(
     };
     let subject = access::subject(pool, org_id, employee_id).await?;
     if subject.is(&claims) {
-        return Err(AppError::Forbidden(
-            "You can't approve your own overtime.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_OVERTIME",
+            reason: "You can't approve your own overtime.".into(),
+        });
     }
     access::require_at(pool, &claims, org_id, Cap::HrOvertimeApprove, branch_id).await?;
     // An approved month is a snapshot: its overtime is decided (AD-10).
@@ -1370,15 +1380,20 @@ pub async fn punch_for(
     }
     let subject = access::subject(pool, org_id, body.employee_id).await?;
     if subject.employment_status != "active" {
-        return Err(AppError::Conflict(
-            "That person isn't an active employee.".into(),
-        ));
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "EMPLOYMENT_NOT_ACTIVE",
+            reason: "That person isn't an active employee.".into(),
+            vars: json!({ "status": subject.employment_status }),
+        });
     }
     // Nobody punches for themselves: their own phone or the till does that.
     if subject.is(&claims) {
-        return Err(AppError::Forbidden(
-            "Punch yourself in from your own phone.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWN_PUNCH",
+            reason: "Punch yourself in from your own phone.".into(),
+        });
     }
     crate::staff::attendance::require_rules(pool, org_id).await?;
     if subject.branches.is_empty() {

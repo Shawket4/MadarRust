@@ -128,13 +128,15 @@ impl From<sqlx::Error> for AppError {
             // The database refuses these on its own (Dawam RQ-9, RQ-11), so two
             // requests sent at once can't both land; say why in words.
             other => match other.as_database_error().and_then(|d| d.constraint()) {
-                Some("staff_requests_no_overlap") => {
-                    AppError::Conflict("You already have a request like this for that time.".into())
-                }
+                Some("staff_requests_no_overlap") => AppError::Refused {
+                    code: "OVERLAPPING_REQUEST",
+                    reason: "You already have a request like this for that time.".into(),
+                },
                 Some("staff_requests_live_correction_unique")
-                | Some("staff_requests_live_shift_correction_unique") => {
-                    AppError::Conflict("This shift already has a correction waiting.".into())
-                }
+                | Some("staff_requests_live_shift_correction_unique") => AppError::Refused {
+                    code: "CORRECTION_WAITING",
+                    reason: "This shift already has a correction waiting.".into(),
+                },
                 _ => AppError::Db(other),
             },
         }
