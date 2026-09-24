@@ -503,6 +503,12 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
                 WHERE s.org_id = r.org_id AND s.branch_id IS NULL
                   AND s.rules_saved_at IS NOT NULL AND s.rules_saved_at <= r.start_at
            )
+           -- Nothing is written into an approved or paid month (BC-3).
+           AND NOT EXISTS (
+               SELECT 1 FROM payroll_periods pp
+                WHERE pp.org_id = r.org_id AND pp.status IN ('generated', 'paid', 'closed')
+                  AND pp.start_date <= r.business_date AND pp.end_date >= r.business_date
+           )
            -- A confirmed public holiday marks nobody absent (RU-10).
            AND NOT EXISTS (
                SELECT 1 FROM staff_holidays h
@@ -626,6 +632,9 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), AppError> {
             AND (a.check_out_at IS NOT NULL OR a.status IN ('absent', 'on_leave')) \
             AND (a.late_minutes > 0 OR a.status IN ('absent', 'on_leave')) \
             AND NOT COALESCE(COALESCE(a.scheduled_start_at, a.check_in_at) < rs.rules_saved_at, false) \
+            AND NOT EXISTS (SELECT 1 FROM payroll_periods pp \
+                             WHERE pp.org_id = a.org_id AND pp.status IN ('generated', 'paid', 'closed') \
+                               AND pp.start_date <= a.business_date AND pp.end_date >= a.business_date) \
             AND NOT EXISTS ( \
                 SELECT 1 FROM payroll_deductions d \
                  WHERE d.attendance_record_id = a.id AND d.source <> 'manual' \

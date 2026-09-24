@@ -1713,6 +1713,10 @@ pub async fn check_in(
         resolve_punch_shift(pool.get_ref(), employee_id, today, &tz, now).await?;
 
     check_window(shift.as_ref(), now)?;
+    // Nothing is written into an approved or paid month, live or queued
+    // (owner decision BC-3): 409 PERIOD_CLOSED, final for the outbox.
+    crate::staff::period_lock::assert_open(pool.get_ref(), org_id, business_date, "a check-in")
+        .await?;
 
     let adjustments =
         adjustments_for(pool.get_ref(), &settings, employee_id, business_date, &tz).await?;
@@ -1908,6 +1912,14 @@ pub async fn check_out(
         .await?;
     }
     let open = open.ok_or_else(|| AppError::NotFound("You are not checked in".into()))?;
+    // Nothing is written into an approved or paid month (BC-3).
+    crate::staff::period_lock::assert_open(
+        pool.get_ref(),
+        org_id,
+        open.business_date,
+        "a check-out",
+    )
+    .await?;
 
     let settings = load_settings(pool.get_ref(), org_id, Some(open.branch_id)).await?;
     let distance = check_geofence(

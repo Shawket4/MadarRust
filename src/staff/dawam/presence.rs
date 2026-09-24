@@ -340,6 +340,9 @@ pub async fn ping(
     let Some((record_id, branch_id, business_date, scheduled_start)) = open else {
         return Err(AppError::Conflict("You are not clocked in.".into()));
     };
+    // Nothing is written into an approved or paid month — not a ping, not
+    // its flags (owner decision BC-3).
+    crate::staff::period_lock::assert_open(pool, org_id, business_date, "a location ping").await?;
     let fence: (Option<f64>, Option<f64>, Option<i32>) =
         sqlx::query_as("SELECT latitude, longitude, geo_radius_meters FROM branches WHERE id = $1")
             .bind(branch_id)
@@ -1054,6 +1057,8 @@ pub async fn open_cover(
         .into_iter()
         .find(|c| c.employee_id == body.employee_id && c.work_shift_id == body.work_shift_id)
         .ok_or_else(|| AppError::Conflict("That shift can't be covered now.".into()))?;
+    // Nothing is written into an approved or paid month (BC-3).
+    crate::staff::period_lock::assert_open(pool, org_id, shift.business_date, "a cover").await?;
     // The same fence as a clock-in, always (CL-2).
     let distance = crate::staff::attendance::check_geofence(
         pool,
@@ -1488,8 +1493,8 @@ pub(crate) async fn punch(
     stamped: super::clock::Stamped,
 ) -> Result<(Uuid, bool), AppError> {
     let at = stamped.at;
-    let open: Option<(Uuid, Uuid, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, branch_id, check_in_at FROM attendance_records \
+    let open: Option<(Uuid, Uuid, DateTime<Utc>, NaiveDate)> = sqlx::query_as(
+        "SELECT id, branch_id, check_in_at, business_date FROM attendance_records \
           WHERE employee_id = $1 AND check_in_at IS NOT NULL AND check_in_at <= $2 \
             AND check_out_at IS NULL ORDER BY check_in_at DESC LIMIT 1",
     )
@@ -1498,7 +1503,9 @@ pub(crate) async fn punch(
     .fetch_optional(pool)
     .await?;
     let (id, checked_in, flag_branch) = match open {
-        Some((id, record_branch, _)) => {
+        Some((id, record_branch, _, day)) => {
+            // Nothing is written into an approved or paid month (BC-3).
+            crate::staff::period_lock::assert_open(pool, org_id, day, "a punch").await?;
             sqlx::query(
                 "UPDATE attendance_records SET check_out_at = $5, check_out_method = $4, \
                         punch_reason = $2, edited_by = $3 WHERE id = $1",
@@ -1519,6 +1526,7 @@ pub(crate) async fn punch(
                 crate::staff::attendance::resolve_punch_shift(pool, employee_id, today, &tz, at)
                     .await?;
             crate::staff::attendance::check_window(shift.as_ref(), at)?;
+            crate::staff::period_lock::assert_open(pool, org_id, business_date, "a punch").await?;
             let id = sqlx::query_scalar(
                 "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                     business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, \
