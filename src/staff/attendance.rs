@@ -2330,7 +2330,16 @@ pub async fn team_presence(
                    l.branch_name,
                    l.d,
                    COALESCE(sh.minutes, 0)                        AS scheduled_minutes,
-                   sh.due_at                                      AS due_at
+                   sh.due_at                                      AS due_at,
+                   -- An approved leave or mission covers their today: the
+                   -- sweep excuses the day on the same test (E2E B-TEAM-7).
+                   EXISTS (
+                       SELECT 1 FROM staff_requests sr
+                        WHERE sr.employee_id = l.id AND sr.status = 'approved'
+                          AND sr.kind IN ('leave', 'mission')
+                          AND sr.on_date <= l.d
+                          AND COALESCE(sr.end_date, sr.on_date) >= l.d
+                   )                                              AS away
               FROM local l
               -- Their today from the one roster function (SC-6): date changes,
               -- split days, day-scoped blocks and their effective times.
@@ -2367,6 +2376,10 @@ pub async fn team_presence(
                    WHEN t.check_in_at IS NOT NULL
                         AND t.check_out_at IS NULL                  THEN 'in'
                    WHEN t.check_out_at IS NOT NULL                  THEN 'done'
+                   -- On an approved leave today and not clocked in: on leave
+                   -- from the moment it is approved, not absent until the
+                   -- sweep writes the day (DSH-1, APP-7).
+                   WHEN r.away AND r.scheduled_minutes > 0          THEN 'on_leave'
                    -- Rostered, nothing recorded, and the shift is already due:
                    -- that is an absence. Before it is due, they are just off.
                    WHEN r.scheduled_minutes > 0 AND r.due_at <= now() THEN 'absent'

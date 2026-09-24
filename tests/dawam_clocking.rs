@@ -2173,3 +2173,49 @@ async fn a_cover_is_never_late_or_a_half_day(pool: PgPool) {
         "a correction"
     );
 }
+
+/// E2E B-TEAM-7 (DSH-1, APP-7): someone on an approved leave (or mission)
+/// today shows "on leave" on the team board as soon as it is approved — not
+/// "absent" until the sweep writes their day after the shift ends.
+#[sqlx::test]
+async fn an_approved_leave_today_shows_on_leave_at_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    // Both were due an hour ago and neither has a record yet.
+    shift_around_now(&pool, &f, f.a, 60, 240).await;
+    shift_around_now(&pool, &f, f.b, 60, 240).await;
+    let today = local(&pool, Utc::now(), &f.tz).await.date();
+    sqlx::query(
+        "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, end_date, status, \
+             decided_at, is_paid) \
+         VALUES ($1, $2, 'leave', $3, $3, 'approved', now(), true)",
+    )
+    .bind(f.org)
+    .bind(f.b)
+    .bind(today)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let body = json_of(call!(
+        app,
+        get,
+        format!("/staff/team/presence?branch_id={}", f.branch),
+        owner_t(&f)
+    ))
+    .await;
+    let state = |who: Uuid| {
+        body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["employee_id"] == json!(who))
+            .map(|r| r["state"].clone())
+            .unwrap()
+    };
+    assert_eq!(state(f.b), "on_leave", "{body}");
+    assert_eq!(state(f.a), "absent", "no leave, still absent");
+    assert_eq!(
+        (body["on_leave"].as_i64(), body["absent"].as_i64()),
+        (Some(1), Some(1))
+    );
+}
