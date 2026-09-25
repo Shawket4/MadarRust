@@ -117,6 +117,10 @@ pub struct ScheduleAssignment {
     pub effective_from: NaiveDate,
     pub effective_to: Option<NaiveDate>,
     pub created_at: DateTime<Utc>,
+    /// Where a business-wide block is worked (hunt H2-B8b); null = the
+    /// block's own branch, else the person's first.
+    #[sqlx(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -258,6 +262,11 @@ pub struct CreateAssignmentRequest {
     pub effective_from: Option<NaiveDate>,
     #[serde(default)]
     pub effective_to: Option<NaiveDate>,
+    /// The branch whose board sets the pattern: a business-wide block is
+    /// worked there every week (one of the person's branches, else 400
+    /// `EMPLOYEE_NOT_AT_BRANCH`). Omitted = the person's first branch.
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -1135,7 +1144,7 @@ pub async fn list_assignments(
 
     let rows = sqlx::query_as::<_, ScheduleAssignment>(&format!(
         "SELECT s.id, s.org_id, s.employee_id, s.work_shift_id, ws.name AS work_shift_name, \
-                s.day_of_week, s.effective_from, s.effective_to, s.created_at \
+                s.day_of_week, s.effective_from, s.effective_to, s.created_at, s.branch_id \
            FROM staff_schedules s \
            JOIN work_shifts ws ON ws.id = s.work_shift_id \
           WHERE ($1::uuid IS NULL OR s.employee_id = $1) AND s.org_id = $2 AND {} \
@@ -1180,6 +1189,10 @@ pub async fn create_assignment(
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
     let subject = access::subject(pool.get_ref(), org_id, body.employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
+    // The board it is set from (hunt H2-B8b): the person's, and the caller's.
+    if let Some(at) = body.branch_id {
+        board_branch(pool.get_ref(), &claims, org_id, &subject, at).await?;
+    }
 
     if body.day_of_week.is_some_and(|d| !(0..=6).contains(&d)) {
         return Err(crate::staff::coded(
@@ -1231,12 +1244,19 @@ pub async fn create_assignment(
     let row = sqlx::query_as::<_, ScheduleAssignment>(
         "WITH ins AS (
              INSERT INTO staff_schedules
-                 (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to)
-             VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6)
+                 (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to,
+                  branch_id)
+             VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6,
+                     (SELECT $7::uuid
+                       WHERE EXISTS (SELECT 1 FROM work_shifts w
+                                      WHERE w.id = $3 AND w.branch_id IS NULL)
+                         AND EXISTS (SELECT 1 FROM employee_branches eb
+                                      WHERE eb.employee_id = $2 AND eb.branch_id = $7)))
              RETURNING *
          )
          SELECT ins.id, ins.org_id, ins.employee_id, ins.work_shift_id, ws.name AS work_shift_name,
-                ins.day_of_week, ins.effective_from, ins.effective_to, ins.created_at
+                ins.day_of_week, ins.effective_from, ins.effective_to, ins.created_at,
+                ins.branch_id
            FROM ins JOIN work_shifts ws ON ws.id = ins.work_shift_id",
     )
     .bind(org_id)
@@ -1245,6 +1265,7 @@ pub async fn create_assignment(
     .bind(body.day_of_week)
     .bind(body.effective_from)
     .bind(body.effective_to)
+    .bind(body.branch_id)
     .fetch_one(&mut *tx)
     .await?;
     // Two weeks from when it starts covers every weekday twice, the night
@@ -1530,14 +1551,7 @@ pub async fn put_day(
     let subject = editable_subject(pool, &claims, org_id, body.employee_id).await?;
     // The board it is set from (hunt H2-B8): the person's, and the caller's.
     if let Some(at) = body.branch_id {
-        if !subject.branches.contains(&at) {
-            return Err(AppError::Coded {
-                status: 400,
-                code: "EMPLOYEE_NOT_AT_BRANCH",
-                reason: format!("{} doesn't work at that branch.", subject.name),
-            });
-        }
-        access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, at).await?;
+        board_branch(pool, &claims, org_id, &subject, at).await?;
     }
     let mut blocks = Vec::with_capacity(body.shifts.len());
     for s in &body.shifts {
@@ -1576,6 +1590,26 @@ pub async fn put_day(
     tx.commit().await?;
     after_day_change(pool, org_id, subject.id, body.on_date).await?;
     Ok(HttpResponse::Ok().json(day_view(pool, org_id, subject.id, body.on_date).await?))
+}
+
+/// The branch whose board sets a day or a pattern (hunt H2-B8, B8b): one of
+/// the person's (400 `EMPLOYEE_NOT_AT_BRANCH`), where the caller may edit
+/// the roster (403).
+async fn board_branch(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    subject: &access::Subject,
+    at: Uuid,
+) -> Result<(), AppError> {
+    if !subject.branches.contains(&at) {
+        return Err(AppError::Coded {
+            status: 400,
+            code: "EMPLOYEE_NOT_AT_BRANCH",
+            reason: format!("{} doesn't work at that branch.", subject.name),
+        });
+    }
+    access::require_at(pool, claims, org_id, Cap::HrScheduleEdit, at).await
 }
 
 /// Put a date back on the standing pattern.

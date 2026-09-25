@@ -4956,3 +4956,110 @@ async fn roster_refusals_carry_codes(pool: PgPool) {
     .await;
     assert_eq!(out["vars"]["status"], json!("approved"), "{out}");
 }
+
+/// Hunt H2-B8b (SC-5, RO-6): a business-wide PATTERN for a two-branch
+/// person, set from branch B's board, is worked at B every week — it
+/// resolved to their first branch A. `POST /staff/schedules` takes the
+/// board's `branch_id`; a day edit on such a date keeps it at B.
+#[sqlx::test]
+async fn a_business_wide_pattern_set_from_branch_b_is_worked_at_b(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let w = block(&pool, &f, None, "Wide", t(9, 0), t(13, 0)).await;
+    let d = today() + Duration::days(3);
+    let board = async |branch: Uuid, on: NaiveDate| -> Vec<(Uuid, Uuid)> {
+        let (s, body) = done(call!(
+            app,
+            "GET",
+            format!("/staff/roster?branch_id={branch}&from={on}&to={on}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+        body["shifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["employee_id"].as_str().unwrap().parse().unwrap(),
+                    s["work_shift_id"].as_str().unwrap().parse().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let (s, row) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules",
+        f.owner(),
+        json!({ "employee_id": f.a, "work_shift_id": w, "day_of_week": dow(d),
+                "effective_from": today(), "branch_id": f.br_b })
+    ))
+    .await;
+    assert_eq!(s, 201, "{row}");
+    assert_eq!(row["branch_id"], json!(f.br_b), "{row}");
+    for week in [0, 7, 14] {
+        let on = d + Duration::days(week);
+        assert_eq!(board(f.br_b, on).await, vec![(f.a, w)], "B's, week +{week}");
+        assert!(board(f.br_a, on).await.is_empty(), "not A's, week +{week}");
+    }
+    // A day edit on that date keeps the pattern's block at B.
+    let (s, body) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days/times",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d, "work_shift_id": w,
+                "start_time": "09:30:00", "end_time": "13:00:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(
+        board(f.br_b, d).await,
+        vec![(f.a, w)],
+        "still B's after an edit"
+    );
+    // Not one of Amal's branches; not the A manager's to set at B.
+    let br_c = branch(&pool, f.org, "C").await;
+    refused!(
+        call!(
+            app,
+            "POST",
+            "/staff/schedules",
+            f.owner(),
+            json!({ "employee_id": f.a, "work_shift_id": w, "branch_id": br_c })
+        ),
+        400,
+        "EMPLOYEE_NOT_AT_BRANCH"
+    );
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules",
+        f.manager(),
+        json!({ "employee_id": f.a, "work_shift_id": w, "branch_id": f.br_b })
+    ))
+    .await;
+    assert_eq!(s, 403);
+    // The list says where each row is worked.
+    let (s, rows) = done(call!(
+        app,
+        "GET",
+        format!("/staff/schedules?employee_id={}", f.a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{rows}");
+    assert_eq!(rows[0]["branch_id"], json!(f.br_b), "{rows}");
+}
