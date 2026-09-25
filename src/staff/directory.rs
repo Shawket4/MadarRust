@@ -81,8 +81,14 @@ pub struct Employee {
     pub termination_date: Option<NaiveDate>,
     /// `active` · `suspended` · `terminated`
     pub employment_status: String,
-    /// `None` when the caller may not read this person's pay — see the module docs.
+    /// `None` when the caller may not read this person's pay — see the module
+    /// docs — or when no salary is set (`salary_set` tells the two apart).
     pub base_salary_piastres: Option<i64>,
+    /// A salary is on file (owner decision D9): false = "not set" (someone a
+    /// manager added or imported), shown as "—" and flagged by payroll.
+    /// Never hidden: it says nothing about the amount.
+    #[sqlx(default)]
+    pub salary_set: bool,
     pub national_id: Option<String>,
     pub photo_url: Option<String>,
     pub emergency_contact_name: Option<String>,
@@ -499,6 +505,7 @@ const EMPLOYEE_SELECT: &str = r#"
            e.name, e.phone, e.app_access, u.role::text AS role, u.email,
            e.department_id, d.name AS department_name, e.employee_code, e.job_title,
            e.hire_date, e.termination_date, e.employment_status, e.base_salary_piastres,
+           e.base_salary_piastres IS NOT NULL AS salary_set,
            e.national_id, e.photo_url, e.emergency_contact_name, e.emergency_contact_phone,
            e.notes, e.gender, e.pay_method, e.pay_account, e.pref_time, e.cant_work_days,
            e.on_payroll,
@@ -853,6 +860,9 @@ pub async fn create_employee(
     if body.base_salary_piastres.is_some_and(|s| s < 0) {
         return Err(AppError::BadRequest("Salary cannot be negative".into()));
     }
+    // Without the pay right the figure is ignored (a manager may not set pay)
+    // and the salary is "not set", never a silent 0 (owner decision D9); the
+    // owner is told below.
     let may_edit_pay = access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await?;
     let salary = if may_edit_pay {
         body.base_salary_piastres
@@ -876,7 +886,7 @@ pub async fn create_employee(
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO employees (org_id, user_id, name, phone, app_access, job_title, hire_date, \
              base_salary_piastres, gender, department_id, employee_code) \
-         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_DATE), COALESCE($8, 0), $9, $10, $11) \
+         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_DATE), $8, $9, $10, $11) \
          RETURNING id",
     )
     .bind(org_id)
@@ -905,6 +915,21 @@ pub async fn create_employee(
         .await?;
     }
     tx.commit().await?;
+    // Added by someone who may not set pay: the owner hears (D9), so the
+    // salary is set before payroll (which refuses approval until then).
+    if salary.is_none() && !may_edit_pay {
+        let by = crate::staff::dawam::user_name(pool, claims.user_id_safe()?).await;
+        for owner in crate::staff::dawam::owners(pool, org_id).await? {
+            crate::staff::dawam::notify(
+                pool,
+                org_id,
+                owner,
+                "staff.n_salary_missing",
+                serde_json::json!({ "name": name, "employee_id": id, "by": by }),
+            )
+            .await;
+        }
+    }
     let (pay, may_pay) = pay_scope(pool, &claims, org_id).await?;
     let row = load_employee(pool, org_id, id).await?;
     Ok(HttpResponse::Created().json(row.redact_salary(&pay, may_pay)))

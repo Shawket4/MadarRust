@@ -1420,6 +1420,11 @@ pub struct ComputedPayslip {
     #[serde(skip)]
     #[schema(ignore)]
     pub advance_applications: Vec<(Uuid, i64)>,
+    /// On payroll with no salary set (owner decision D9): everything prices
+    /// at 0, and approval is refused (409 SALARY_MISSING) until the owner
+    /// sets it or marks them not on payroll.
+    #[serde(default)]
+    pub salary_missing: bool,
 }
 
 /// The whole run's figures, added up by the server (AT-3).
@@ -1433,6 +1438,9 @@ pub struct PayrollTotals {
     pub advances_piastres: i64,
     pub net_piastres: i64,
     pub carry_out_piastres: i64,
+    /// People on payroll with no salary set (D9); approval waits for them.
+    #[serde(default)]
+    pub missing_salary_count: i64,
 }
 
 impl PayrollTotals {
@@ -1447,6 +1455,7 @@ impl PayrollTotals {
             t.advances_piastres += s.advance_installment_piastres;
             t.net_piastres += s.net_piastres;
             t.carry_out_piastres += s.carry_out_piastres;
+            t.missing_salary_count += i64::from(s.salary_missing);
         }
         t
     }
@@ -1502,11 +1511,14 @@ pub(crate) async fn compute_payslips(
         employee_id: Uuid,
         name: String,
         base_salary_piastres: i64,
+        salary_missing: bool,
         hire_date: Option<NaiveDate>,
         termination_date: Option<NaiveDate>,
     }
+    // No salary set (D9) prices at 0 and is flagged.
     let staff: Vec<Staff> = sqlx::query_as(
-        "SELECT p.id AS employee_id, p.name, p.base_salary_piastres, p.hire_date, \
+        "SELECT p.id AS employee_id, p.name, COALESCE(p.base_salary_piastres, 0) AS base_salary_piastres, \
+                p.base_salary_piastres IS NULL AS salary_missing, p.hire_date, \
                 p.termination_date \
            FROM employees p \
           WHERE p.org_id = $1 \
@@ -1993,6 +2005,7 @@ pub(crate) async fn compute_payslips(
             advance_installment_piastres: advance,
             net_piastres: net,
             carry_out_piastres: capped,
+            salary_missing: person.salary_missing,
             breakdown: json!({
                 "bonuses": bonus_lines,
                 "deductions": deduction_lines,
@@ -2078,6 +2091,25 @@ pub async fn generate_period(
         None,
     )
     .await?;
+    // Nobody on payroll is paid 0 because a salary was never set (owner
+    // decision D9): approval waits until each is set or marked not on
+    // payroll.
+    let missing: Vec<&ComputedPayslip> = computed.iter().filter(|s| s.salary_missing).collect();
+    if !missing.is_empty() {
+        let names: Vec<&str> = missing.iter().map(|s| s.name.as_str()).collect();
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "SALARY_MISSING",
+            reason: format!(
+                "Set a salary first (or mark them not on payroll): {}.",
+                names.join(", ")
+            ),
+            vars: json!({
+                "names": names,
+                "employee_ids": missing.iter().map(|s| s.employee_id).collect::<Vec<_>>(),
+            }),
+        });
+    }
 
     let mut employee_count = 0i32;
     let mut grand_total = 0i64;

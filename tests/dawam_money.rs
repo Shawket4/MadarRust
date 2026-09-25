@@ -3789,3 +3789,177 @@ async fn every_money_act_is_audited_and_a_rejection_needs_a_reason(pool: PgPool)
     .await;
     assert!(other.get("history").is_none(), "{other}");
 }
+
+/// Owner decision D9 (24 Sep 2026): a salary a manager can't set is "not
+/// set" (NULL), never a silent 0; the owner is told; the payroll preview
+/// flags the person and approval is refused until the owner sets it or
+/// marks them not on payroll. Penalties for them price at 0.
+#[sqlx::test]
+async fn a_salary_nobody_set_is_flagged_and_payroll_waits_for_it(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner_e =
+        common::employees::employee(&pool, f.org, "Owner", Some(f.owner), None, false, &[], 0)
+            .await;
+    sqlx::query("UPDATE employees SET on_payroll = false WHERE id = $1")
+        .bind(owner_e)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The manager adds Nour (the figure they typed is ignored).
+    let resp = call!(
+        app,
+        post,
+        "/staff/employees",
+        f.mgr(),
+        json!({ "name": "Nour", "branch_ids": [f.a], "base_salary_piastres": 500_000 })
+    );
+    assert_eq!(resp.status(), 201);
+    let nour = json_of(resp).await;
+    let nour_id = Uuid::parse_str(nour["id"].as_str().unwrap()).unwrap();
+    assert_eq!(nour["salary_set"], false, "{nour}");
+    assert!(nour["base_salary_piastres"].is_null());
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
+            .bind(nour_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, None, "not set, never 0");
+    let (key, args): (String, Value) = sqlx::query_as(
+        "SELECT key, args FROM staff_notifications WHERE employee_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(owner_e)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(key, "staff.n_salary_missing");
+    assert_eq!(args["name"], "Nour");
+    assert_eq!(args["employee_id"], json!(nour_id));
+    // Seen by the owner: set = false, so "—" (not "hidden").
+    let seen = json_of(call!(
+        app,
+        get,
+        format!("/staff/employees/{nour_id}"),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(
+        (
+            seen["salary_set"].clone(),
+            seen["base_salary_piastres"].clone()
+        ),
+        (json!(false), Value::Null)
+    );
+    let amal = json_of(call!(
+        app,
+        get,
+        format!("/staff/employees/{}", f.amal),
+        f.mgr()
+    ))
+    .await;
+    assert_eq!(
+        amal["salary_set"], true,
+        "set, hidden from the manager: {amal}"
+    );
+    assert!(amal["base_salary_piastres"].is_null());
+
+    // Her absence prices at 0 (no line), and nothing fails.
+    let rec = day(&pool, &f, nour_id, f.a, f.start, "absent", 9, 480, 0, 0).await;
+    let settings = madar_rust::staff::attendance::load_settings(&pool, f.org, Some(f.a))
+        .await
+        .unwrap();
+    madar_rust::staff::penalties::recompute_record(&pool, rec, &settings)
+        .await
+        .unwrap();
+    let lines: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions WHERE employee_id = $1")
+            .bind(nour_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(lines, 0);
+
+    // The preview flags her; approval is refused.
+    let cur = json_of(call!(app, get, "/staff/payroll/current", f.owner())).await;
+    assert_eq!(cur["missing_salary_count"], 1, "{cur}");
+    assert_eq!(cur["totals"]["missing_salary_count"], 1);
+    let row = |cur: &Value, id: Uuid| {
+        cur["preview"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["employee_id"] == json!(id))
+            .cloned()
+    };
+    assert_eq!(row(&cur, nour_id).unwrap()["salary_missing"], true);
+    assert_eq!(row(&cur, f.amal).unwrap()["salary_missing"], false);
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 409);
+    let body = json_of(resp).await;
+    assert_eq!(body["code"], "SALARY_MISSING", "{body}");
+    assert_eq!(
+        body["vars"],
+        json!({ "names": ["Nour"], "employee_ids": [nour_id] })
+    );
+    assert_eq!(period_status(&pool, f.period).await, "draft");
+
+    // Marked not on payroll: approval goes through.
+    let resp = call!(
+        app,
+        put,
+        format!("/staff/employees/{nour_id}"),
+        f.owner(),
+        json!({ "on_payroll": false })
+    );
+    assert_eq!(resp.status(), 200);
+    let cur = json_of(call!(app, get, "/staff/payroll/current", f.owner())).await;
+    assert_eq!(cur["missing_salary_count"], 0);
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    let resp = reopen(&app, &f).await;
+    assert_eq!(resp.status(), 200);
+    // Back on payroll with a salary set: approval goes through too.
+    let resp = call!(
+        app,
+        put,
+        format!("/staff/employees/{nour_id}"),
+        f.owner(),
+        json!({ "on_payroll": true, "base_salary_piastres": 450_000 })
+    );
+    assert_eq!(resp.status(), 200);
+    let seen = json_of(resp).await;
+    assert_eq!(
+        (
+            seen["salary_set"].clone(),
+            seen["base_salary_piastres"].clone()
+        ),
+        (json!(true), json!(450_000))
+    );
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+
+    // The owner adding someone without a salary: not set either, no notice.
+    let before: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1")
+            .bind(owner_e)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let nada = json_of(call!(
+        app,
+        post,
+        "/staff/employees",
+        f.owner(),
+        json!({ "name": "Nada", "branch_ids": [f.a] })
+    ))
+    .await;
+    assert_eq!(nada["salary_set"], false, "{nada}");
+    let after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1")
+            .bind(owner_e)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after);
+}

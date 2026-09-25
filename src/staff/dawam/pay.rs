@@ -152,6 +152,9 @@ pub struct CurrentPayroll {
     pub totals: PayrollTotals,
     /// How many payslips are marked paid (a 'none' mark counts).
     pub paid_count: i64,
+    /// People on payroll with no salary set (D9): the preview rows with
+    /// `salary_missing`; approval is refused until it is 0.
+    pub missing_salary_count: i64,
 }
 
 /// The running period with everyone's pay (PAY-1..PAY-5).
@@ -202,6 +205,7 @@ pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
         PayrollTotals::of_payslips(&payslips)
     };
     let paid_count = payslips.iter().filter(|s| s.paid_at.is_some()).count() as i64;
+    let missing_salary_count = preview.iter().filter(|s| s.salary_missing).count() as i64;
     Ok(HttpResponse::Ok().json(CurrentPayroll {
         period,
         preview,
@@ -209,6 +213,7 @@ pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
         history,
         totals,
         paid_count,
+        missing_salary_count,
     }))
 }
 
@@ -234,7 +239,7 @@ async fn advance_room(
     employee_id: Uuid,
 ) -> Result<(i64, i64, i64, i64), AppError> {
     let (salary, outstanding, cap): (i64, i64, i64) = sqlx::query_as(
-        "SELECT p.base_salary_piastres, \
+        "SELECT COALESCE(p.base_salary_piastres, 0), \
                 COALESCE((SELECT SUM(remaining_piastres) FROM salary_advances a \
                            WHERE a.employee_id = p.id AND a.status IN ('pending', 'approved')), 0)::bigint, \
                 dawam_advance_cap(p.org_id, p.base_salary_piastres) \
@@ -555,7 +560,7 @@ pub async fn create_adjustment(
         return Err(AppError::BadRequest("A reason is required".into()));
     }
     let salary: i64 = sqlx::query_scalar(
-        "SELECT base_salary_piastres FROM employees WHERE id = $1 AND org_id = $2",
+        "SELECT COALESCE(base_salary_piastres, 0) FROM employees WHERE id = $1 AND org_id = $2",
     )
     .bind(body.employee_id)
     .bind(org_id)

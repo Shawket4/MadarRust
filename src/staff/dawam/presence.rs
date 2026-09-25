@@ -645,7 +645,7 @@ async fn away_exact(
         ));
     }
     let salary: i64 =
-        sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
+        sqlx::query_scalar("SELECT COALESCE(base_salary_piastres, 0) FROM employees WHERE id = $1")
             .bind(employee_id)
             .fetch_optional(pool)
             .await?
