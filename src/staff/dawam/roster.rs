@@ -716,6 +716,7 @@ pub async fn publish(
                 .map(|o| o.on_date)
                 .collect();
         open_dates.dedup();
+        let own = own_employees(pool, org_id, &claims).await?;
         for p in staff_at(pool, body.branch_id).await? {
             notify(
                 pool,
@@ -725,6 +726,9 @@ pub async fn publish(
                 json!({ "date": ws }),
             )
             .await;
+            if own.contains(&p.employee_id) {
+                continue;
+            }
             for d in &open_dates {
                 notify(
                     pool,
@@ -766,6 +770,25 @@ async fn block_started(
     .fetch_optional(pool)
     .await?
     .unwrap_or(false))
+}
+
+/// The caller's own employee record(s) in the org: whoever posts or
+/// publishes an open shift isn't told to claim it (hunt B-H1-3).
+async fn own_employees(
+    pool: &PgPool,
+    org_id: Uuid,
+    claims: &crate::auth::jwt::Claims,
+) -> Result<Vec<Uuid>, AppError> {
+    let Ok(user) = claims.user_id_safe() else {
+        return Ok(Vec::new());
+    };
+    Ok(
+        sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
+            .bind(user)
+            .bind(org_id)
+            .fetch_all(pool)
+            .await?,
+    )
 }
 
 /// An open shift that already started can be neither posted nor claimed.
@@ -861,7 +884,11 @@ pub async fn post_open_shift(
     .await?;
     // A draft week's open shift is announced when the week is published.
     if is_published(pool, body.branch_id, body.on_date).await? {
+        let own = own_employees(pool, org_id, &claims).await?;
         for p in staff_at(pool, body.branch_id).await? {
+            if own.contains(&p.employee_id) {
+                continue;
+            }
             notify(
                 pool,
                 org_id,

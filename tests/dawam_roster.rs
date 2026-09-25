@@ -4051,3 +4051,75 @@ async fn an_open_shift_that_already_started_is_refused(pool: PgPool) {
     .unwrap();
     assert_eq!(told, 0, "a started shift is not announced");
 }
+
+/// Hunt B-H1-3 (SC-9): a manager who posts an open shift — or publishes the
+/// week that announces it — isn't told to claim it; the rest of the branch
+/// is.
+#[sqlx::test]
+async fn the_poster_is_not_told_of_their_own_open_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Karim, the manager, also works at A.
+    employee(
+        &pool,
+        f.org,
+        "Karim",
+        Some(f.manager),
+        Some("+201060000009"),
+        true,
+        &[f.br_a],
+        600_000,
+    )
+    .await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let told = async || -> Vec<Uuid> {
+        let mut who: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT employee_id FROM staff_notifications WHERE key = 'staff.n_open_shift'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        who.sort();
+        sqlx::query("DELETE FROM staff_notifications")
+            .execute(&pool)
+            .await
+            .unwrap();
+        who
+    };
+    told().await;
+    let mut others = vec![f.a, f.b];
+    others.sort();
+    let post = async |on: NaiveDate| {
+        let (s, body) = done(call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.manager(),
+            json!({ "branch_id": f.br_a, "work_shift_id": l, "on_date": on })
+        ))
+        .await;
+        assert_eq!(s, 201, "{body}");
+    };
+    post(d).await;
+    assert_eq!(told().await, others, "Karim posted it");
+    // Posted into a draft week, announced when Karim publishes it.
+    let next = d + Duration::days(7);
+    post(next).await;
+    assert_eq!(
+        told().await,
+        Vec::<Uuid>::new(),
+        "a draft week tells nobody"
+    );
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/roster/publish",
+        f.manager(),
+        json!({ "branch_id": f.br_a, "week_start": next })
+    ))
+    .await;
+    assert_eq!(s, 204, "{body}");
+    assert_eq!(told().await, others, "Karim published it");
+}
