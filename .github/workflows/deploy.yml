@@ -1,8 +1,12 @@
 name: Build and Deploy
 
+# Deploys ONLY on a version tag (owner, 2026-09-25: no deploy on pushes to main):
+#   git tag v1.2.3 && git push origin v1.2.3
+# or by hand from the Actions tab (workflow_dispatch).
 on:
   push:
-    branches: [main, master]
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
 
 # Deploys touch one box and one container, so they must not overlap. Without
@@ -48,7 +52,8 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref_name == 'main' || github.ref_name == 'master' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.ref_name == 'main' || github.ref_name == 'master' }}
+            type=semver,pattern={{version}}
             type=sha,format=long
 
       - name: Build and push
