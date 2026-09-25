@@ -705,18 +705,22 @@ pub async fn publish(
     .await?
     .rows_affected();
     if fresh > 0 {
-        // Each open shift is announced by its OWN date, one notice per date
-        // (SC-9, N-031, Mac E2E R-B2) — as posting into a published week does.
-        // One that already started is not (hunt B-H1-2).
+        // The week's open shifts in ONE notice per person per publish ("3 open
+        // shifts this week"), which opens the list: minor default M21 (it was
+        // one notice per open-shift date, R-B2). The dates ride along. One
+        // that already started is not announced (hunt B-H1-2), and whoever
+        // publishes isn't told to claim (hunt B-H1-3).
         let now = Utc::now();
-        let mut open_dates: Vec<NaiveDate> =
+        let open: Vec<NaiveDate> =
             open_shifts_at(pool, &[body.branch_id], ws, ws + Duration::days(6))
                 .await?
                 .into_iter()
                 .filter(|o| o.status == "open" && not_started(o, now))
                 .map(|o| o.on_date)
                 .collect();
-        open_dates.dedup();
+        let mut dates = open.clone();
+        dates.sort();
+        dates.dedup();
         let own = own_employees(pool, org_id, &claims).await?;
         for p in staff_at(pool, body.branch_id).await? {
             notify(
@@ -727,16 +731,14 @@ pub async fn publish(
                 json!({ "date": ws }),
             )
             .await;
-            if own.contains(&p.employee_id) {
-                continue;
-            }
-            for d in &open_dates {
+            if !open.is_empty() && !own.contains(&p.employee_id) {
                 notify(
                     pool,
                     org_id,
                     p.employee_id,
-                    "staff.n_open_shift",
-                    json!({ "date": d }),
+                    "staff.n_open_shifts_week",
+                    json!({ "week_start": ws, "count": open.len(), "dates": dates,
+                            "branch_id": body.branch_id }),
                 )
                 .await;
             }
@@ -1187,12 +1189,21 @@ async fn no_swap_waiting(
     }
 }
 
+/// A claim decision: the labour limits the approved day now breaks (a long
+/// day, a short rest). A warning, never a block (RU-13, minor default M26).
+#[derive(Serialize, ToSchema)]
+pub struct ClaimDecision {
+    /// `approved` · `rejected`
+    pub status: String,
+    pub warnings: Vec<engine::LabourWarning>,
+}
+
 /// Approve a claim: the shift becomes theirs for that date, beside the rest
 /// of their day. Rejecting reopens it. One decision only.
 #[utoipa::path(
     patch, path = "/staff/open-shifts/{id}/decision", tag = "staff", request_body = DecideRoster,
     params(("id" = Uuid, Path)),
-    responses((status = 204), AppErrorResponse),
+    responses((status = 200, body = ClaimDecision), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn decide_claim(
@@ -1270,6 +1281,15 @@ pub async fn decide_claim(
             json!({ "date": on_date }),
         )
         .await;
+        // The day as it now stands against the labour limits: approving a
+        // claim onto a full day warns, like any roster edit (RU-13).
+        let warnings = crate::staff::schedules::day_view(pool, org_id, claimer, on_date)
+            .await?
+            .warnings;
+        return Ok(HttpResponse::Ok().json(ClaimDecision {
+            status: "approved".into(),
+            warnings,
+        }));
     } else {
         let won: Option<Uuid> = sqlx::query_scalar(
             "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL \
@@ -1293,7 +1313,10 @@ pub async fn decide_claim(
         )
         .await;
     }
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::Ok().json(ClaimDecision {
+        status: "rejected".into(),
+        warnings: Vec::new(),
+    }))
 }
 
 /// Take an open shift back (open or claimed, never filled). A claimer hears.

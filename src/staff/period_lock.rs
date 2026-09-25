@@ -34,6 +34,35 @@ where
     .await?)
 }
 
+/// The first day on or after `day` that is not inside an approved, paid or
+/// closed period: where a new pay line lands by default (minor default M27),
+/// so a line added after an early approval goes to next month's pay instead
+/// of being refused.
+pub async fn first_open_day(
+    pool: &sqlx::PgPool,
+    org_id: Uuid,
+    day: NaiveDate,
+) -> Result<NaiveDate, AppError> {
+    let mut d = day;
+    // Closed periods never overlap, so this walks at most a few of them.
+    for _ in 0..24 {
+        let end: Option<NaiveDate> = sqlx::query_scalar(&format!(
+            "SELECT end_date FROM payroll_periods \
+              WHERE org_id = $1 AND status IN ({CLOSED}) AND start_date <= $2 AND end_date >= $2 \
+              ORDER BY end_date DESC LIMIT 1"
+        ))
+        .bind(org_id)
+        .bind(d)
+        .fetch_optional(pool)
+        .await?;
+        match end {
+            Some(e) => d = e + chrono::Duration::days(1),
+            None => break,
+        }
+    }
+    Ok(d)
+}
+
 /// Does any approved, paid or closed period overlap `[from, to]`?
 pub async fn any_closed_in<'e, E>(
     conn: E,

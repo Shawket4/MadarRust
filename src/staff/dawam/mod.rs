@@ -73,6 +73,18 @@ pub(crate) async fn notify(pool: &PgPool, org_id: Uuid, employee_id: Uuid, key: 
     notify_keyed(pool, org_id, employee_id, key, args, None).await;
 }
 
+/// [`notify`] at most once per `dedupe` key for this person.
+pub(crate) async fn notify_once(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    key: &str,
+    args: Value,
+    dedupe: &str,
+) {
+    notify_keyed(pool, org_id, employee_id, key, args, Some(dedupe)).await;
+}
+
 /// [`notify`], at most once per `dedupe` key per person when one is given
 /// (APP-6, 06 B7): a repeat — the same open flag seen again on the next ping —
 /// writes no inbox row and sends no push.

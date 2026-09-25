@@ -1302,7 +1302,7 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
     ))
     .await;
     assert_eq!(s, 200, "{body}");
-    let (s, _) = done(call!(
+    let (s, body) = done(call!(
         app,
         "PATCH",
         format!("/staff/open-shifts/{lunch}/decision"),
@@ -1310,7 +1310,25 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
         json!({ "approve": true })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["status"], "approved");
+    // Minor default M26 (RU-13): 4 + 3 + 4 hours is past the 8-hour day,
+    // and 08:00–21:00 past the 10-hour presence cap: warned, not blocked.
+    let warned: Vec<(String, i64, i64)> = body["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["date"] == json!(d))
+        .map(|w| {
+            (
+                w["kind"].as_str().unwrap().to_string(),
+                w["minutes"].as_i64().unwrap(),
+                w["limit_minutes"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(warned.contains(&("day_hours".into(), 660, 480)), "{body}");
+    assert!(warned.contains(&("presence".into(), 780, 600)), "{body}");
     assert_eq!(shifts_on(&pool, f.a, d).await, vec![m, l, e]);
     let keys = keys_for(&pool, f.a).await;
     assert!(
@@ -3123,7 +3141,7 @@ async fn claiming_a_taken_open_shift_is_already_claimed(pool: PgPool) {
 /// open shift in it by its OWN date — one notice per date, not one dated at
 /// the week's start.
 #[sqlx::test]
-async fn publishing_announces_each_open_shift_date(pool: PgPool) {
+async fn publishing_announces_the_weeks_open_shifts_once(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
     let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
@@ -3146,16 +3164,27 @@ async fn publishing_announces_each_open_shift_date(pool: PgPool) {
         .await
         .unwrap();
     publish(&app, &f, f.br_a, ws).await;
-    let mut dates: Vec<String> = sqlx::query_scalar(
-        "SELECT args->>'date' FROM staff_notifications \
-          WHERE employee_id = $1 AND key = 'staff.n_open_shift'",
+    // Minor default M21: ONE notice per publish ("3 open shifts this week")
+    // that opens the list, with the dates; no per-date notices.
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications \
+          WHERE employee_id = $1 AND key = 'staff.n_open_shifts_week'",
     )
     .bind(f.a)
     .fetch_all(&pool)
     .await
     .unwrap();
-    dates.sort();
-    assert_eq!(dates, [d1.to_string(), d2.to_string()], "one per date");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["count"], 3);
+    assert_eq!(told[0]["week_start"], json!(ws));
+    assert_eq!(told[0]["dates"], json!([d1, d2]));
+    let per_date: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(per_date, 0);
 }
 
 /// E2E B-ROTA-4 (SC-9, SC-5): an open shift can't be posted on a
@@ -3539,11 +3568,6 @@ async fn only_the_owner_decides_a_holiday(pool: PgPool) {
     ))
     .await;
     assert!(everywhere(&ctx).is_empty(), "no Madar account: {ctx}");
-}
-
-async fn refused_status(resp: actix_web::dev::ServiceResponse, status: u16) {
-    let (s, body) = done(resp).await;
-    assert_eq!(s, status, "{body}");
 }
 
 async fn absence_lines(pool: &PgPool, who: Uuid, on: NaiveDate) -> Vec<(Option<Uuid>, i64, bool)> {
@@ -4965,4 +4989,123 @@ async fn roster_refusals_carry_codes(pool: PgPool) {
     ))
     .await;
     assert_eq!(out["vars"]["status"], json!("approved"), "{out}");
+}
+
+/// Minor default M22: one edit, one "your shift changed" notice per person.
+/// A drag to another day reaches the server as two day edits; the second
+/// joins the first (unread, within two minutes) with both dates.
+#[sqlx::test]
+async fn one_edit_tells_each_person_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(15, 0), t(19, 0)).await;
+    let ws = week_start(today() + Duration::days(7));
+    publish(&app, &f, f.br_a, ws).await;
+    let (d1, d2) = (ws + Duration::days(1), ws + Duration::days(3));
+    override_row(&pool, &f, f.a, d1, Some(m)).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The drag: Morning leaves d1 and lands on d2.
+    for (on, shifts) in [(d1, json!([])), (d2, json!([{ "work_shift_id": m }]))] {
+        let (s, body) = done(call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            f.manager(),
+            json!({ "employee_id": f.a, "on_date": on, "shifts": shifts })
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+    }
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_shift_changed'",
+    )
+    .bind(f.a)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["date"], json!(d1));
+    assert_eq!(told[0]["dates"], json!([d1, d2]));
+    // Read, the next edit is a new notice.
+    sqlx::query("UPDATE staff_notifications SET read_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (s, _) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.manager(),
+        json!({ "employee_id": f.a, "on_date": d2, "shifts": [{ "work_shift_id": e }] })
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_shift_changed'",
+    )
+    .bind(f.a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 2);
+}
+
+/// Minor default M24: a public holiday a week away that nobody has decided
+/// is brought to whoever decides it (the owner, D3), once, by the sweep.
+/// Decided or far-off holidays aren't.
+#[sqlx::test]
+async fn an_undecided_holiday_a_week_away_is_brought_to_the_owner_once(pool: PgPool) {
+    let f = seed(&pool).await;
+    let (soon, decided, far) = (
+        today() + Duration::days(3),
+        today() + Duration::days(2),
+        today() + Duration::days(20),
+    );
+    for (on, decision) in [(soon, None), (decided, Some("holiday")), (far, None)] {
+        sqlx::query(
+            "INSERT INTO staff_holidays (org_id, on_date, name_en, name_ar, decision) \
+             VALUES ($1, $2, 'Test day', 'يوم تجربة', $3)",
+        )
+        .bind(f.org)
+        .bind(on)
+        .bind(decision)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for _ in 0..2 {
+        madar_rust::staff::jobs::remind_holidays(&pool)
+            .await
+            .unwrap();
+    }
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_holiday_undecided' ORDER BY args->>'date'",
+    )
+    .bind(f.owner_emp)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let ours: Vec<&Value> = told
+        .iter()
+        .filter(|a| [json!(soon), json!(decided), json!(far)].contains(&a["date"]))
+        .collect();
+    assert_eq!(ours.len(), 1, "{told:?}");
+    assert_eq!(ours[0]["date"], json!(soon));
+    assert_eq!(ours[0]["name_en"], "Test day");
+    let staff: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = ANY($1) \
+            AND key = 'staff.n_holiday_undecided'",
+    )
+    .bind(vec![f.a, f.b, f.x])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(staff, 0, "only whoever decides");
 }

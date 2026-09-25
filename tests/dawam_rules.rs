@@ -2954,3 +2954,122 @@ async fn approved_time_off_counts_only_the_minutes_actually_away(pool: PgPool) {
     approve(early["id"].clone(), false).await;
     assert_eq!(deduction(&pool, rec, "excused_unpaid").await, 0, "stayed");
 }
+
+/// Minor default M16: a mission (or leave) over a day the person already
+/// worked still turns it into a paid day away (the punches are kept), but
+/// the request says which of its days were worked, so the approver is
+/// warned before approving.
+#[sqlx::test]
+async fn a_mission_over_a_worked_day_names_the_worked_day(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    roster(&pool, &f, f.e, &[f.day_shift]).await;
+    let (d1, d2) = ("2026-08-10", "2026-08-11");
+    record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d1,
+        (at(d1, "09:00"), at(d1, "17:00")),
+        Some((at(d1, "09:00"), at(d1, "17:00"))),
+        "present",
+    )
+    .await;
+    let mission = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "mission", "on_date": d1, "end_date": d2,
+        "title": "Supplier visit" }),
+    )
+    .await;
+    assert_eq!(mission["worked_dates"], json!([d1]), "{mission}");
+    let (st, list) = send!(
+        app,
+        "GET",
+        format!("/staff/requests?employee_id={}", f.e),
+        f.owner_token()
+    );
+    assert_eq!(st, 200);
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == mission["id"])
+        .unwrap();
+    assert_eq!(row["worked_dates"], json!([d1]));
+    // Other kinds carry none.
+    let late = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "late_arrival", "on_date": d1,
+        "to_time": "10:00:00" }),
+    )
+    .await;
+    assert_eq!(late["worked_dates"], json!([]));
+    // Approving still works: the day is paid time away, the punches stay.
+    let (st, row) = decide(
+        &app,
+        &f.owner_token(),
+        &mission["id"],
+        json!({ "status": "approved" }),
+    )
+    .await;
+    assert_eq!(st, 200, "{row}");
+    let punched: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attendance_records WHERE employee_id = $1 AND check_in_at IS NOT NULL",
+    )
+    .bind(f.e)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(punched, 1);
+}
+
+/// Minor default M17: nobody is told of a request they filed themselves.
+/// The owner filing a leave for Eman isn't notified of it; Eman's managers
+/// are; Eman filing her own isn't told either.
+#[sqlx::test]
+async fn nobody_is_told_of_a_request_they_filed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let told = |who: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 \
+                    AND key = 'staff.n_request'",
+            )
+            .bind(who)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "mission", "on_date": "2026-08-10",
+        "title": "Bank" }),
+    )
+    .await;
+    assert_eq!(told(f.e_owner).await, 0, "the owner filed it");
+    assert_eq!(told(f.e_mgr).await, 1, "Eman's manager hears");
+    assert_eq!(told(f.e).await, 0);
+    // Eman files her own from the app: she isn't told, her managers are.
+    let s = session(&pool, f.e).await;
+    let resp = call!(
+        app,
+        "POST",
+        "/staff/me/requests",
+        format!("{}|{}", s.token, s.device),
+        json!({ "kind": "mission", "on_date": "2026-08-12", "title": "Supplier" })
+    );
+    assert_eq!(resp.status(), 201);
+    assert_eq!(told(f.e).await, 0);
+    assert_eq!(told(f.e_mgr).await, 2);
+    assert_eq!(told(f.e_owner).await, 1, "the owner manages A too");
+}

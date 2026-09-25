@@ -175,6 +175,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/expense-advances",
                 web::post().to(pay::log_expense_advance),
             )
+            .route(
+                "/expense-advances/{id}",
+                web::delete().to(pay::clear_expense_advance),
+            )
+            .route(
+                "/expense-advances/{id}",
+                web::patch().to(pay::reassign_expense_advance),
+            )
             // ── Directory ────────────────────────────────────────
             .route("/departments", web::get().to(directory::list_departments))
             .route("/departments", web::post().to(directory::create_department))
