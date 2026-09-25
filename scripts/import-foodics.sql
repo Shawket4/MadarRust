@@ -167,16 +167,64 @@ SELECT pg_temp.purge_activity('delivery_ref_counters', 'branch_id');
 -- come back to zero with it — the one sanctioned direct write (see the
 -- branch_stock_on_hand_guard trigger). The rows themselves stay: they carry the
 -- unit, par level and cost the catalog set up.
+-- --keep-stock: remember today's levels before they go to zero with the ledger.
+\if :keep_stock
+CREATE TEMP TABLE keep_stock_levels AS
+SELECT id, branch_id, org_ingredient_id, on_hand, cost_per_unit
+FROM branch_stock
+WHERE branch_id IN (SELECT id FROM branches WHERE org_id = :'org'::uuid)
+  AND on_hand <> 0;
+\endif
 SELECT set_config('madar.stock_rebase', 'on', true) AS stock_rebase \gset
 UPDATE branch_stock SET on_hand = 0
 WHERE branch_id IN (SELECT id FROM branches WHERE org_id = :'org'::uuid)
   AND on_hand <> 0;
 SELECT set_config('madar.stock_rebase', 'off', true) AS stock_rebase \gset
+-- --keep-stock: each remembered level comes back as one opening stock count, the
+-- ordinary way stock moves (the movement trigger rebuilds on_hand from 0), so
+-- the counts stay and the new ledger explains them.
+\if :keep_stock
+INSERT INTO inventory_movements
+  (id, branch_id, org_ingredient_id, branch_stock_id, type, quantity, balance_after,
+   unit_cost, reason, below_zero, source_type, note, created_at)
+SELECT gen_random_uuid(), k.branch_id, k.org_ingredient_id, k.id, 'stock_count', k.on_hand, 0,
+       k.cost_per_unit, 'Opening balance after reset', false, 'reset',
+       'Stock level carried over by import-foodics.sh --reset-activity --keep-stock', now()
+FROM keep_stock_levels k;
+\echo '== Stock carried over (opening counts) =='
+SELECT count(*) AS items, sum(on_hand) AS total_units FROM keep_stock_levels;
+\endif
 
 -- Occupancy lives on the table row too; every table is free again.
 UPDATE branch_tables SET status = 'free'
 WHERE org_id = :'org'::uuid AND status IS DISTINCT FROM 'free';
 
+-- Optional extras on top of the activity (flags; see import-foodics.sh).
+\o /dev/null
+\if :reset_devices
+SELECT pg_temp.purge_activity('device_payment_methods');
+SELECT pg_temp.purge_activity('device_activation_codes');
+SELECT pg_temp.purge_activity('push_devices');
+SELECT pg_temp.purge_activity('staff_devices');
+SELECT pg_temp.purge_activity('devices');
+\endif
+\if :reset_tables
+SELECT pg_temp.purge_activity('branch_tables');
+SELECT pg_temp.purge_activity('floor_sections');
+\endif
+\if :reset_loyalty
+SELECT pg_temp.purge_activity('loyalty_pass_cache');
+SELECT pg_temp.purge_activity('loyalty_token_aliases');
+SELECT pg_temp.purge_activity('loyalty_winbacks');
+SELECT pg_temp.purge_activity('loyalty_birthday_greetings');
+SELECT pg_temp.purge_activity('loyalty_earning_items');
+SELECT pg_temp.purge_activity('loyalty_reward_items');
+SELECT pg_temp.purge_activity('loyalty_settings');
+\endif
+\if :reset_qr
+SELECT pg_temp.purge_activity('qr_short_links');
+\endif
+\o
 UPDATE organizations o SET is_demo = k.is_demo FROM keep_org k WHERE o.id = k.id;
 \echo '== Reset activity: rows deleted (setup kept) =='
 SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;

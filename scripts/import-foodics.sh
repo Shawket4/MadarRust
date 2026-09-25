@@ -4,7 +4,8 @@
 #
 #   scripts/import-foodics.sh --org <org-uuid> [--dir drops] [--db URL] [--dry-run]
 #                             [--replace-menu | --reset-org | --reset-activity]
-#                             [--yes] [--yes-prod]
+#                             [--keep-stock] [--reset-devices] [--reset-tables]
+#                             [--reset-loyalty] [--reset-qr] [--yes] [--yes-prod]
 #
 #   --replace-menu     hard-delete the org's menu (categories, items, modifier groups,
 #                      bundles) AND every row referencing it — orders, tickets, recipes,
@@ -23,6 +24,19 @@
 #                      menu, recipes, the ingredient & supplier catalog, floor
 #                      geometry, payment methods, discounts, schedules, settings.
 #                      No CSV is read and nothing is imported in this mode.
+#     With --reset-activity only (each adds to what is cleared, or changes it):
+#   --keep-stock       carry today's stock levels over: after the ledger is cleared,
+#                      each non-zero level is recorded as an opening 'stock_count'
+#                      movement, so the counts stay and the history starts clean.
+#                      Without it, every level goes to 0.
+#   --reset-devices    also clear the org's devices: POS/KDS devices, their activation
+#                      codes and payment-method bindings, push registrations and staff
+#                      phones. Every till and phone has to be activated/signed in again.
+#   --reset-tables     also clear the floor: floor sections and their tables.
+#   --reset-loyalty    also clear the loyalty setup: settings, reward and earning items,
+#                      birthday greetings, win-backs, pass cache and token aliases
+#                      (members and their history already go with --reset-activity).
+#   --reset-qr         also clear the org's QR short links.
 #   All three ask you to type the org name unless --yes or --dry-run.
 #
 # Expects in --dir (Foodics console exports, renamed):
@@ -44,6 +58,11 @@ yes_prod=0
 replace_menu=off
 reset_org=off
 reset_activity=off
+keep_stock=off
+reset_devices=off
+reset_tables=off
+reset_loyalty=off
+reset_qr=off
 do_import=on
 yes=0
 
@@ -59,6 +78,11 @@ while [[ $# -gt 0 ]]; do
     --replace-menu) replace_menu=on; shift ;;
     --reset-org) reset_org=on; shift ;;
     --reset-activity) reset_activity=on; do_import=off; shift ;;
+    --keep-stock) keep_stock=on; shift ;;
+    --reset-devices) reset_devices=on; shift ;;
+    --reset-tables) reset_tables=on; shift ;;
+    --reset-loyalty) reset_loyalty=on; shift ;;
+    --reset-qr) reset_qr=on; shift ;;
     --yes) yes=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown argument: $1" >&2; usage ;;
@@ -73,6 +97,9 @@ command -v psql >/dev/null || die "psql not found"
 modes=0
 for m in "$replace_menu" "$reset_org" "$reset_activity"; do [[ "$m" == on ]] && modes=$((modes + 1)); done
 [[ $modes -gt 1 ]] && die "use only one of --replace-menu, --reset-org, --reset-activity"
+for m in "$keep_stock" "$reset_devices" "$reset_tables" "$reset_loyalty" "$reset_qr"; do
+  [[ "$m" == on && "$reset_activity" != on ]] && die "--keep-stock/--reset-devices/--reset-tables/--reset-loyalty/--reset-qr need --reset-activity"
+done
 if [[ "$db" == *prod* && $yes_prod -eq 0 ]]; then
   die "database URL looks like production; re-run with --yes-prod if intended"
 fi
@@ -123,7 +150,16 @@ sq() { sed "s/'/''/g" <<<"$1"; }
 mode="add"
 [[ "$replace_menu" == on ]] && mode="replace-menu: the whole menu and every order/ticket that uses it"
 [[ "$reset_org" == on ]] && mode="reset-org: ALL data of the org (branches, users, orders, inventory, menu)"
-[[ "$reset_activity" == on ]] && mode="reset-activity: everything the org DID (orders, tickets, tills, inventory ledger, customers, HR activity) — the setup stays"
+if [[ "$reset_activity" == on ]]; then
+  mode="reset-activity: everything the org DID (orders, tickets, tills, inventory ledger, customers, HR activity)"
+  extras=""
+  [[ "$reset_devices" == on ]] && extras+=", devices"
+  [[ "$reset_tables" == on ]] && extras+=", floor sections + tables"
+  [[ "$reset_loyalty" == on ]] && extras+=", the loyalty setup"
+  [[ "$reset_qr" == on ]] && extras+=", QR short links"
+  [[ -n "$extras" ]] && mode+=" AND${extras#,}"
+  if [[ "$keep_stock" == on ]]; then mode+=" — stock levels carried over"; else mode+=" — stock levels go to 0"; fi
+fi
 
 if [[ "$mode" != add && "$final" == COMMIT && $yes -eq 0 ]]; then
   echo "This permanently DELETES $mode" >&2
@@ -162,7 +198,9 @@ fi
   cat "$here/import-foodics.sql"
 } | psql "$db" -X -q -v ON_ERROR_STOP=1 -v org="$org" -v final="$final" \
     -v replace_menu="$replace_menu" -v reset_org="$reset_org" \
-    -v reset_activity="$reset_activity" -v do_import="$do_import"
+    -v reset_activity="$reset_activity" -v do_import="$do_import" \
+    -v keep_stock="$keep_stock" -v reset_devices="$reset_devices" -v reset_tables="$reset_tables" \
+    -v reset_loyalty="$reset_loyalty" -v reset_qr="$reset_qr"
 
 if [[ "$final" == "ROLLBACK" ]]; then
   echo "Dry run: nothing was written."
