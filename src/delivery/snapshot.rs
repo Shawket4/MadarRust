@@ -25,9 +25,7 @@
 //!   but not delivered, so the frozen plan is deducted from stock and logged as a
 //!   `waste` movement.
 //!
-//! Bundles are intentionally not supported in delivery carts yet (the public
-//! page only offers à-la-carte items); intake rejects bundle lines. Money is
-//! integer piastres throughout.
+//! Money is integer piastres throughout.
 
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
@@ -138,7 +136,7 @@ pub struct ResolvedCart {
 
 /// Server-price and freeze a cart for a branch + channel. Rejects unknown,
 /// deleted, or channel/branch-disabled items (the public menu would not have
-/// offered them). Bundles are not supported yet.
+/// offered them).
 pub async fn resolve_cart(
     pool: &PgPool,
     org_id: Uuid,
@@ -699,8 +697,8 @@ pub async fn apply_snapshot(
             r#"INSERT INTO order_items
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
-                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, price_flagged)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, $11, $12, $13, false)
+                 line_cost, unit_cost, cost_missing, price_flagged)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false)
                RETURNING id"#,
         )
         .bind(order.id)

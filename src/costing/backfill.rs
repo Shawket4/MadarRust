@@ -3,7 +3,7 @@
 //! costs.
 //!
 //! Order cost snapshots (`order_items.unit_cost`/`line_cost`, addon /
-//! optional / bundle-component costs) are immutable by design — they record
+//! optional costs) are immutable by design — they record
 //! what things cost when the order was placed. This module exists for the
 //! deliberate exception: after correcting recipes and catalog costs, an
 //! operator can rewrite history so COGS reports and the Menu Advisor
@@ -14,17 +14,14 @@
 //! composition applied to realized quantities):
 //!   - recipe scope: the SKU's CURRENT `menu_item_recipes` rollup at
 //!     `COALESCE(open ingredient_cost_history epoch, org_ingredients
-//!     .cost_per_unit)` — piastres. `unit_cost` = that rollup; NULL for
-//!     bundle lines and whenever the rollup is unresolvable.
+//!     .cost_per_unit)` — piastres. `unit_cost` = that rollup; NULL
+//!     whenever the rollup is unresolvable.
 //!   - addon rows: the addon item's CURRENT `addon_item_ingredients`
 //!     rollup × addon quantity × line quantity.
 //!   - optional rows: stored `quantity_deducted` (per parent unit) × the
 //!     ingredient's current cost; rows without a linked ingredient keep
 //!     their value (genuinely zero marginal cost).
-//!   - bundle components: each component item's current recipe rollup ×
-//!     component quantity × line quantity.
-//!   - `line_cost` = recipe×qty + addons + optionals×qty (bundle lines:
-//!     Σ components); NULL — and `cost_missing = true` — when ANY
+//!   - `line_cost` = recipe×qty + addons + optionals×qty; NULL — and `cost_missing = true` — when ANY
 //!     contributing rollup is unresolvable (never-entered ingredient cost,
 //!     unlinked recipe row, recipe/size that no longer exists, addon with
 //!     no ingredient links).
@@ -53,7 +50,6 @@ pub struct BackfillSummary {
     pub order_lines_updated: u64,
     pub addon_rows_updated: u64,
     pub optional_rows_updated: u64,
-    pub bundle_component_rows_updated: u64,
     /// Σ order_items.line_cost over the scope (piastres).
     pub line_cost_total_before: i64,
     pub line_cost_total_after: i64,
@@ -134,7 +130,7 @@ pub async fn backfill_cost_snapshots(
 
     let (lines_in_scope, total_before, missing_before) = scope_stats(&mut tx, &branch_ids).await?;
 
-    // ── 1. Children first: addon / optional / bundle-component rows ─────
+    // ── 1. Children first: addon / optional rows ────────────────────────
     // (their recomputed values also feed the parent line totals via the
     // same rollup expressions, recomputed independently below).
 
@@ -198,36 +194,10 @@ pub async fn backfill_cost_snapshots(
         .await?
         .rows_affected();
 
-    let components_sql = format!(
-        r#"
-        WITH {CURRENT_COSTS_CTE}
-        UPDATE order_line_bundle_components c SET line_cost = calc.new_cost
-        FROM (
-            SELECT c.order_line_id, c.item_id,
-                   CASE WHEN cr.rollup IS NULL THEN NULL
-                        ELSE round(cr.rollup * c.quantity * oi.quantity)::bigint
-                   END AS new_cost
-            FROM order_line_bundle_components c
-            JOIN order_items oi ON oi.id = c.order_line_id
-            JOIN orders o ON o.id = oi.order_id
-            LEFT JOIN LATERAL ({component_rollup}) cr ON TRUE
-            WHERE o.branch_id = ANY($1)
-        ) calc
-        WHERE c.order_line_id = calc.order_line_id AND c.item_id = calc.item_id
-        "#,
-        component_rollup = recipe_rollup("c.item_id", "c.size_label")
-    );
-    let bundle_component_rows_updated = sqlx::query(&components_sql)
-        .bind(&branch_ids)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-
     // ── 2. Parent lines: unit_cost / line_cost / cost_missing ───────────
     //
-    // Non-bundle: unit_cost = recipe rollup; line_cost = recipe×qty +
-    // Σ addons + Σ optionals×qty. Bundle: unit_cost NULL; line_cost =
-    // Σ component costs. Any unresolvable contribution ⟹ cost_missing,
+    // unit_cost = recipe rollup; line_cost = recipe×qty + Σ addons +
+    // Σ optionals×qty. Any unresolvable contribution ⟹ cost_missing,
     // line_cost NULL.
     let order_items_sql = format!(
         r#"
@@ -239,22 +209,14 @@ pub async fn backfill_cost_snapshots(
         FROM (
             SELECT
                 oi.id,
-                CASE WHEN oi.bundle_id IS NOT NULL THEN
-                    comp.n = 0 OR comp.missing
-                ELSE
-                    rr.rollup IS NULL OR ad.missing OR op.missing
-                END AS cost_missing,
+                rr.rollup IS NULL OR ad.missing OR op.missing AS cost_missing,
                 CASE
-                    WHEN oi.bundle_id IS NOT NULL THEN
-                        CASE WHEN comp.n = 0 OR comp.missing THEN NULL
-                             ELSE comp.total END
                     WHEN rr.rollup IS NULL OR ad.missing OR op.missing THEN NULL
                     ELSE round(rr.rollup * oi.quantity)::bigint
                          + COALESCE(ad.total, 0)
                          + COALESCE(op.total, 0) * oi.quantity
                 END AS line_cost,
-                CASE WHEN oi.bundle_id IS NOT NULL THEN NULL
-                     ELSE round(rr.rollup)::bigint END AS unit_cost
+                round(rr.rollup)::bigint AS unit_cost
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
             LEFT JOIN LATERAL ({line_recipe_rollup}) rr ON TRUE
@@ -268,12 +230,6 @@ pub async fn backfill_cost_snapshots(
                        SUM(p.cost)::bigint AS total
                 FROM order_item_optionals p WHERE p.order_item_id = oi.id
             ) op ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT COUNT(*) AS n,
-                       COALESCE(bool_or(c.line_cost IS NULL), FALSE) AS missing,
-                       SUM(c.line_cost)::bigint AS total
-                FROM order_line_bundle_components c WHERE c.order_line_id = oi.id
-            ) comp ON TRUE
             WHERE o.branch_id = ANY($1)
         ) calc
         WHERE oi.id = calc.id
@@ -300,7 +256,6 @@ pub async fn backfill_cost_snapshots(
         order_lines_updated,
         addon_rows_updated,
         optional_rows_updated,
-        bundle_component_rows_updated,
         line_cost_total_before: total_before,
         line_cost_total_after: total_after,
         lines_cost_missing_before: missing_before,

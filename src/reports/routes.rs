@@ -71,10 +71,6 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
                 web::get().to(handlers::branch_stock),
             )
             .route(
-                "/branches/{branch_id}/bundles",
-                web::get().to(handlers::branch_bundle_sales),
-            )
-            .route(
                 "/branches/{branch_id}/items-combined",
                 web::get().to(handlers::branch_combined_item_sales),
             )

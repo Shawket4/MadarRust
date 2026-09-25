@@ -551,7 +551,7 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
 ///
 /// The SAME per-line resolution the till's checkout uses
 /// (`orders::handlers::resolve_order_line_in`), so a line on the bill is priced
-/// with its optionals and bundle surcharges exactly as the settle will charge
+/// with its optionals exactly as the settle will charge
 /// it. Pricing stays client-authoritative — a `unit_price` the client sent is
 /// kept — and the resolved prices are written back into the stored input so
 /// the settle replays THIS bill rather than repricing against a later catalog.
@@ -559,12 +559,10 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
 /// names when it syncs.
 pub(crate) async fn resolve_ticket_lines(
     pool: &sqlx::PgPool,
-    org_id: Uuid,
     branch_id: Uuid,
     items: &[OrderItemInput],
     prices: crate::orders::handlers::ClientPrices,
 ) -> Result<Vec<StoredTicketLine>, AppError> {
-    let fired_at = Utc::now();
     let mut out = Vec::with_capacity(items.len());
     // The round's items and add-ons in one batched load (madar-catalog's view).
     let mut catalog = crate::orders::catalog_view::Catalog::new(Some(branch_id));
@@ -586,22 +584,17 @@ pub(crate) async fn resolve_ticket_lines(
                 reason: "A staff drink is rung at the till, not on a table's bill".into(),
             });
         }
-        let resolved =
-            resolve_order_line_in(pool, &mut catalog, org_id, branch_id, fired_at, it, prices)
-                .await?;
+        let resolved = resolve_order_line_in(pool, &mut catalog, it, prices).await?;
 
         let mut frozen = it.clone();
         if frozen.staff_drink.take().is_some() {
             tracing::warn!(%branch_id, "a replayed ticket line named the staff pool; rung as a paid line");
         }
         frozen.unit_price = Some(resolved.unit_price);
-        // Bundle-component addons are server-priced through the surcharge and
-        // the resolver ignores a client price for them; a plain item's addons
-        // are overlaid one-to-one in input order, which is how they resolve.
-        if frozen.bundle_id.is_none() {
-            for (a, r) in frozen.addons.iter_mut().zip(resolved.addons.iter()) {
-                a.unit_price = Some(r.unit_price);
-            }
+        // The addons are overlaid one-to-one in input order, which is how
+        // they resolve.
+        for (a, r) in frozen.addons.iter_mut().zip(resolved.addons.iter()) {
+            a.unit_price = Some(r.unit_price);
         }
 
         out.push(StoredTicketLine {

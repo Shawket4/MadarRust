@@ -917,10 +917,6 @@ const ITEM_JOINS: &[Join] = &[
         id: "category",
         sql: "LEFT JOIN categories c ON c.id = mi.category_id",
     },
-    Join {
-        id: "bundle",
-        sql: "LEFT JOIN bundles bn ON bn.id = oi.bundle_id",
-    },
 ];
 
 const ITEM_MEASURES: &[Meas] = &[
@@ -1041,14 +1037,6 @@ const ITEM_DIMS: &[Dim] = dims_with_time!(
             expr: "COALESCE(oi.size_label, 'Regular')",
             kind: ColumnKind::Label,
             joins: &[],
-            time: false
-        },
-        Dim {
-            id: "bundle",
-            label: "Bundle",
-            expr: "COALESCE(bn.name, 'Not in a bundle')",
-            kind: ColumnKind::Label,
-            joins: &["bundle"],
             time: false
         },
         Dim {
@@ -2124,7 +2112,7 @@ pub const DATASETS: &[Dataset] = &[
     Dataset {
         id: "order_items",
         title: "Order items",
-        help: "One row per line on an order. Use for product, category, size and bundle \
+        help: "One row per line on an order. Use for product, category and size \
                questions, item profitability, and units sold. Line revenue excludes \
                order-level discounts and tax.",
         from: "order_items oi JOIN orders o ON o.id = oi.order_id",

@@ -320,7 +320,7 @@ async fn ingest_original_kept_only_for_logo_and_card(pool: PgPool) {
         (AssetPurpose::OrgLogo, true),
         (AssetPurpose::LoyaltyCardImage, true),
         (AssetPurpose::MenuItemPhoto, false),
-        (AssetPurpose::BundlePhoto, false),
+        (AssetPurpose::CategoryPhoto, false),
     ]
     .into_iter()
     .enumerate()

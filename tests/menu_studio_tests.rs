@@ -316,23 +316,6 @@ async fn test_get_studio_aggregate(pool: PgPool) {
     .await
     .unwrap();
 
-    // This item used in a bundle.
-    let bundle = Uuid::new_v4();
-    sqlx::query("INSERT INTO bundles (id, org_id, name, price) VALUES ($1, $2, 'Combo A', 9000)")
-        .bind(bundle)
-        .bind(org)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO bundle_components (bundle_id, item_id, quantity, position) VALUES ($1, $2, 1, 0)",
-    )
-    .bind(bundle)
-    .bind(item)
-    .execute(&pool)
-    .await
-    .unwrap();
-
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
@@ -412,9 +395,10 @@ async fn test_get_studio_aggregate(pool: PgPool) {
     assert_eq!(br.sizes[0].size_id, small);
     assert_eq!(br.sizes[0].is_available, Some(false));
 
-    // Bundles.
-    assert_eq!(agg.used_in_bundles.len(), 1);
-    assert_eq!(agg.used_in_bundles[0].name, "Combo A");
+    // Combos are gone; the key stays, empty, for dashboards built before
+    // (their studio reads `used_in_bundles.length`).
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(raw["used_in_bundles"], serde_json::json!([]));
 }
 
 // ── Test 2: PUT /sizes replace-set round-trip + soft-deactivate ──────

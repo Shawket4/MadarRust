@@ -91,7 +91,7 @@ pub use madar_money::loyalty::covered_minor;
 ///
 /// `lenient` is the REPLAY of a sale that already happened (see
 /// [`RedemptionPlan::refused`]): nothing is refused, lines that cannot be
-/// covered at all (no such line, a bundle) are dropped, units are clamped to
+/// covered at all (no such line, a line with no menu item) are dropped, units are clamped to
 /// the line, and the reason the points could not pay is kept.
 pub async fn plan(
     pool: &PgPool,
@@ -126,8 +126,7 @@ pub async fn plan(
     })
 }
 
-/// The sale's lines as madar-shared's planner reads them. A bundle has no
-/// menu item. The staff-drink pairing is not the planner's to judge here: the
+/// The sale's lines as madar-shared's planner reads them. The staff-drink pairing is not the planner's to judge here: the
 /// order path refuses it live, with its own message.
 fn plan_lines(items: &[OrderItemInput]) -> Vec<madar_loyalty::Line> {
     items
@@ -189,10 +188,10 @@ fn refused(r: madar_loyalty::Refusal, member_name: &str) -> AppError {
         R::MoreUnitsThanLine { have, asked } => AppError::BadRequest(format!(
             "That line has {have} of them; a reward cannot cover {asked}"
         )),
-        // A bundle is priced as a whole and its components are resolved
-        // server-side; covering "one unit" of it has no single honest meaning,
-        // so it is refused rather than guessed at.
-        R::Bundle => AppError::BadRequest("A bundle cannot be taken as a reward".into()),
+        // A line with no menu item has nothing to be a reward of. (madar-loyalty
+        // v0.4.0 still calls this refusal `Bundle`, from when combo lines were
+        // the lines without one; the order path no longer accepts such a line.)
+        R::Bundle => AppError::BadRequest("That line has no menu item to reward".into()),
         R::NotOnOffer => AppError::BadRequest("That item is not a reward at this branch".into()),
         // A reward priced at nothing is a free item bounded by nothing but the
         // cap. Refused rather than honoured, whatever the catalogue row says.

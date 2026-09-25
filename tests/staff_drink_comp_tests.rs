@@ -615,26 +615,13 @@ async fn the_live_path_refuses_by_the_pools_own_tokens(pool: PgPool) {
         assert_eq!(e["code"], code, "{e}");
     }
 
-    // A bundle is never on the pool.
-    let bundle: Uuid = sqlx::query_scalar(
-        "INSERT INTO bundles (org_id, name, price, status) VALUES ($1, 'Duo', 2000, 'active') RETURNING id",
-    )
-    .bind(s.org)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO bundle_components (bundle_id, item_id) VALUES ($1, $2)")
-        .bind(bundle)
-        .bind(s.cake)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let line =
-        json!({ "bundle_id": bundle, "quantity": 1, "staff_drink": staff(Uuid::new_v4(), "Sara") });
+    // A line with no menu item (what an old till's combo line looked like;
+    // combos are gone) is refused outright, staff drink or not.
+    let line = json!({
+        "bundle_id": Uuid::new_v4(), "quantity": 1, "staff_drink": staff(Uuid::new_v4(), "Sara")
+    });
     let resp = post!(app, "/orders", bearer, &order(&s, s.till, vec![line]));
     assert_eq!(resp.status(), 400);
-    let e: Value = test::read_body_json(resp).await;
-    assert_eq!(e["code"], "item_not_eligible", "{e}");
 
     let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM orders")
         .fetch_one(&pool)

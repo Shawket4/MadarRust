@@ -539,15 +539,13 @@ DECLARE
     org uuid := '{org}';
     br uuid := '{branch}';
     adm uuid := '{admin}';
-    cat uuid; item uuid; item2 uuid; bun uuid; icat uuid; pm uuid; dev uuid; sec uuid; tbl uuid; tbl2 uuid;
+    cat uuid; item uuid; item2 uuid; icat uuid; pm uuid; dev uuid; sec uuid; tbl uuid; tbl2 uuid;
     ot uuid; ot2 uuid; til uuid; ord uuid; ord2 uuid;
 BEGIN
     INSERT INTO categories (org_id, name) VALUES (org, 'Hot') RETURNING id INTO cat;
     INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Latte', cat) RETURNING id INTO item;
     INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Mocha', cat) RETURNING id INTO item2;
     INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES (item, 'M', 1000), (item2, 'M', 1200);
-    INSERT INTO bundles (org_id, name, price, status) VALUES (org, 'Duo', 2000, 'active') RETURNING id INTO bun;
-    INSERT INTO bundle_components (bundle_id, item_id) VALUES (bun, item), (bun, item2);
     INSERT INTO ingredient_categories (org_id, slug, name) VALUES (org, 'dairy', 'Dairy') RETURNING id INTO icat;
     INSERT INTO org_ingredients (org_id, name, unit, category_id) VALUES (org, 'Milk', 'ml', icat);
     INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash) VALUES (org, 'Cash', '#000', 'cash', true) RETURNING id INTO pm;
@@ -1065,7 +1063,6 @@ async fn a_late_branch_has_its_staff_and_addons_too(pool: PgPool) {
         "category",
         "discount",
         "ingredient",
-        "bundle",
         "customer",
     ] {
         assert!(

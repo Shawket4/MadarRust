@@ -252,10 +252,6 @@ name = "backfill-menu-unification"
 path = "src/bin/backfill_menu_unification.rs"
 
 [[bin]]
-name = "bundle-margin-flip"
-path = "src/bin/bundle_margin_flip.rs"
-
-[[bin]]
 name = "backfill-assets"
 path = "src/bin/backfill-assets.rs"
 

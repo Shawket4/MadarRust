@@ -116,7 +116,10 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "menu_item" => {
             "EXISTS (SELECT 1 FROM menu_items x WHERE x.id = $ID AND sync_live_menu_item(x))"
         }
-        "bundle" => "EXISTS (SELECT 1 FROM bundles x WHERE x.id = $ID AND sync_live_bundle(x))",
+        // COMPAT STUB: combos were removed (2026-09-25). The wire type stays
+        // (madar-sync's ALL_TYPES; tills v0.7+ ask for it and v0.8 counts a
+        // full snapshot complete only when it is answered), with nothing in it.
+        "bundle" => "false",
         "ingredient" => {
             "EXISTS (SELECT 1 FROM org_ingredients x WHERE x.id = $ID AND sync_live_ingredient(x))"
         }
@@ -295,25 +298,8 @@ pub async fn project(
             )
             .await?
         }
-        "bundle" => {
-            let mut out = keyed(
-                crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,
-                &["org_id", "created_at", "updated_at", "created_by", "image_url"],
-            );
-            let hashes: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
-                "SELECT b.id, {} FROM bundles b WHERE b.id = ANY($1)",
-                tile_hash("b.image_group_id")
-            ))
-            .bind(ids)
-            .fetch_all(&mut *conn)
-            .await?;
-            for (id, h) in hashes {
-                if let Some(Value::Object(m)) = out.get_mut(&id) {
-                    m.insert("image_hash".into(), json!(h));
-                }
-            }
-            out
-        }
+        // COMPAT STUB: always empty; see `projects_sql`.
+        "bundle" => HashMap::new(),
         "ingredient" => {
             by_sql(
                 conn,

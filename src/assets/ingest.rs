@@ -56,7 +56,6 @@ pub const ZSTD_LEVEL: i32 = 19;
 pub enum AssetPurpose {
     MenuItemPhoto,
     CategoryPhoto,
-    BundlePhoto,
     OrgLogo,
     LoyaltyCardImage,
     StepAnimation,
@@ -70,7 +69,6 @@ impl AssetPurpose {
         match self {
             Self::MenuItemPhoto => "menu_item_photo",
             Self::CategoryPhoto => "category_photo",
-            Self::BundlePhoto => "bundle_photo",
             Self::OrgLogo => "org_logo",
             Self::LoyaltyCardImage => "loyalty_card_image",
             Self::StepAnimation => "step_animation",
@@ -83,7 +81,6 @@ impl AssetPurpose {
         Some(match s {
             "menu_item_photo" => Self::MenuItemPhoto,
             "category_photo" => Self::CategoryPhoto,
-            "bundle_photo" => Self::BundlePhoto,
             "org_logo" => Self::OrgLogo,
             "loyalty_card_image" => Self::LoyaltyCardImage,
             "step_animation" => Self::StepAnimation,
@@ -156,7 +153,6 @@ impl SourceKind {
 pub enum AssetTable {
     MenuItems,
     Categories,
-    Bundles,
     Organizations,
     RecipeStepPresets,
 }
@@ -214,14 +210,6 @@ impl AssetTarget {
                 legacy_dir: "categories",
                 purpose: AssetPurpose::CategoryPhoto,
             },
-            (T::Bundles, F::Image) => Slot {
-                table: "bundles",
-                field: "image",
-                group_col: "image_group_id",
-                legacy_col: Some("image_url"),
-                legacy_dir: "bundles",
-                purpose: AssetPurpose::BundlePhoto,
-            },
             (T::Organizations, F::Logo) => Slot {
                 table: "organizations",
                 field: "logo",
@@ -261,7 +249,6 @@ impl AssetTarget {
         let (t, f) = match (table, field) {
             ("menu_items", "image") => (T::MenuItems, F::Image),
             ("categories", "image") => (T::Categories, F::Image),
-            ("bundles", "image") => (T::Bundles, F::Image),
             ("organizations", "logo") => (T::Organizations, F::Logo),
             ("organizations", "brand_card_image") => (T::Organizations, F::BrandCardImage),
             ("recipe_step_presets", "animation") => (T::RecipeStepPresets, F::Animation),

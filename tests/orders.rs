@@ -245,12 +245,10 @@ async fn test_create_order_success(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -328,12 +326,10 @@ async fn test_order_ref_generated_and_decoded(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -487,7 +483,6 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 2, // 2 items = 1000
             addons: vec![madar_rust::orders::component_resolve::AddonInput {
@@ -496,7 +491,6 @@ async fn test_create_order_with_addons_and_discount(pool: PgPool) {
                 unit_price: None,
             }],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -584,7 +578,6 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![madar_rust::orders::component_resolve::AddonInput {
@@ -593,7 +586,6 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
                 unit_price: None,
             }],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -701,7 +693,6 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![
@@ -717,7 +708,6 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
                 },
             ],
             optional_field_ids: vec![vanilla_field],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -804,12 +794,10 @@ async fn test_list_orders(pool: PgPool) {
             payment_splits: None,
             items: vec![OrderItemInput {
                 menu_item_id: Some(menu_item_id),
-                bundle_id: None,
                 size_label: None,
                 quantity: 1,
                 addons: vec![],
                 optional_field_ids: vec![],
-                bundle_components: vec![],
                 unit_price: None,
                 notes: None,
                 ..Default::default()
@@ -918,12 +906,10 @@ async fn test_list_orders_all_branches(pool: PgPool) {
             payment_splits: None,
             items: vec![OrderItemInput {
                 menu_item_id: Some(item),
-                bundle_id: None,
                 size_label: None,
                 quantity: 1,
                 addons: vec![],
                 optional_field_ids: vec![],
-                bundle_components: vec![],
                 unit_price: None,
                 notes: None,
                 ..Default::default()
@@ -1042,12 +1028,10 @@ async fn test_void_order(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -1140,12 +1124,10 @@ async fn test_void_always_restores_stock_live_and_replayed(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -1349,7 +1331,6 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 2,
             addons: vec![madar_rust::orders::component_resolve::AddonInput {
@@ -1358,7 +1339,6 @@ async fn test_order_cost_snapshot_with_recipe_and_addon(pool: PgPool) {
                 unit_price: None,
             }],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -1431,12 +1411,10 @@ async fn test_order_cost_missing_without_recipe(pool: PgPool) {
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -1491,12 +1469,10 @@ fn simple_order(branch_id: Uuid, shift_id: Uuid, menu_item_id: Uuid) -> CreateOr
         payment_splits: None,
         items: vec![OrderItemInput {
             menu_item_id: Some(menu_item_id),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()
@@ -2092,11 +2068,11 @@ async fn test_summary_excludes_voided_discounts(pool: PgPool) {
     );
 }
 
-/// V19: the bundle-COMPONENT swap path (resolve_menu_item_configuration) must
-/// convert the recipe quantity into the replacement ingredient's base unit just
-/// like the direct-item path — otherwise a g↔kg component swap mis-deducts 1000×.
+/// V19: the standalone configuration resolver (resolve_menu_item_configuration)
+/// must convert the recipe quantity into the replacement ingredient's base unit
+/// just like the order-line path — otherwise a g↔kg swap mis-deducts 1000×.
 #[sqlx::test]
-async fn test_bundle_component_swap_converts_units(pool: PgPool) {
+async fn test_configuration_swap_converts_units(pool: PgPool) {
     let org_id = seed_org(&pool).await;
     let cat_id = seed_category(&pool, org_id).await;
     let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
@@ -4586,12 +4562,10 @@ async fn a_zero_priced_line_still_takes_its_recipe_off_the_stock(pool: PgPool) {
         amount_tendered: Some(0),
         items: vec![OrderItemInput {
             menu_item_id: Some(free_item),
-            bundle_id: None,
             size_label: None,
             quantity: 1,
             addons: vec![],
             optional_field_ids: vec![],
-            bundle_components: vec![],
             unit_price: None,
             notes: None,
             ..Default::default()

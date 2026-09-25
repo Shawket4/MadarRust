@@ -154,7 +154,7 @@ async fn load_order(
     // replayed offline order and a teller pressing the button tomorrow all read
     // the same rows and reach the same count.
     //
-    // `menu_item_id` is nullable — a bundle or a one-off line has none. Those
+    // `menu_item_id` is nullable — a one-off line has none. Those
     // become the nil uuid, which counts while the eligible list is empty (every
     // item collects) and can never match a chosen item (an admin cannot pick a
     // line that has no menu item to pick). `reward_units` is what a redemption

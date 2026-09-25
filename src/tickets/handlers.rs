@@ -485,7 +485,6 @@ pub(crate) async fn create_open_ticket_inner(
     // one connection per request, never a second one while `tx` is held.
     let lines = super::resolve_ticket_lines(
         pool.get_ref(),
-        org_id,
         body.branch_id,
         &body.items,
         client_prices(&actor),
@@ -689,7 +688,6 @@ pub(crate) async fn add_round_inner(
     let label = table_label(pool.get_ref(), table_id).await?;
     let lines = super::resolve_ticket_lines(
         pool.get_ref(),
-        org_id,
         branch_id,
         &body.items,
         client_prices(&actor),

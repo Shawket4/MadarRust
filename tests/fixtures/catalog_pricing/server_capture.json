@@ -1,21 +1,5 @@
 {
   "bills": {
-    "bundle_with_component_options": {
-      "items": [
-        {
-          "addons": [],
-          "bundle_components": [],
-          "line_total": 13800,
-          "price_flagged": null,
-          "quantity": 2,
-          "unit_price": 5000
-        }
-      ],
-      "price_flagged": false,
-      "subtotal": 13800,
-      "tax_amount": 1932,
-      "total_amount": 15732
-    },
     "drift_lines": {
       "items": [
         {
@@ -27,7 +11,6 @@
               "unit_price": 0
             }
           ],
-          "bundle_components": [],
           "line_total": 3000,
           "price_flagged": null,
           "quantity": 1,
@@ -42,7 +25,6 @@
               "unit_price": 50
             }
           ],
-          "bundle_components": [],
           "line_total": 3500,
           "price_flagged": null,
           "quantity": 1,
@@ -50,7 +32,6 @@
         },
         {
           "addons": [],
-          "bundle_components": [],
           "line_total": 4000,
           "price_flagged": null,
           "quantity": 1,
@@ -79,7 +60,6 @@
               "unit_price": 150
             }
           ],
-          "bundle_components": [],
           "line_total": 6000,
           "price_flagged": null,
           "quantity": 2,
@@ -94,7 +74,6 @@
               "unit_price": 400
             }
           ],
-          "bundle_components": [],
           "line_total": 1500,
           "price_flagged": null,
           "quantity": 1,
@@ -109,7 +88,6 @@
               "unit_price": 300
             }
           ],
-          "bundle_components": [],
           "line_total": 3500,
           "price_flagged": null,
           "quantity": 1,

@@ -29,7 +29,7 @@ pub struct BranchSalesQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     pub limit: Option<i64>, // for top_items (default 20)
-    /// Comma-separated menu_item/bundle UUIDs left out of `total_line_items`
+    /// Comma-separated menu_item UUIDs left out of `total_line_items`
     /// (units sold) ONLY — revenue, top items, and categories are untouched.
     pub exclude_items: Option<String>,
 }
@@ -614,7 +614,7 @@ pub async fn branch_sales(
               WHERE o3.branch_id = ANY($1) AND o3.status NOT IN ('voided', 'refunded')
                 AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
                 AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
-                AND ($4::uuid[] IS NULL OR COALESCE(oi.menu_item_id, oi.bundle_id) != ALL($4::uuid[]))
+                AND ($4::uuid[] IS NULL OR oi.menu_item_id != ALL($4::uuid[]))
             ), 0)::bigint AS total_line_items,
             COALESCE((
               SELECT json_object_agg(method, rev) FROM (
@@ -658,7 +658,7 @@ pub async fn branch_sales(
 
     let top_items = sqlx::query_as::<_, ItemSales>(
         r#"
-        SELECT COALESCE(oi.menu_item_id, oi.bundle_id) AS menu_item_id, oi.item_name,
+        SELECT oi.menu_item_id, oi.item_name,
                COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb) AS item_name_translations,
                SUM(oi.quantity)::bigint   AS quantity_sold,
                SUM(oi.line_total)::bigint AS revenue
@@ -667,7 +667,7 @@ pub async fn branch_sales(
         WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY COALESCE(oi.menu_item_id, oi.bundle_id), oi.item_name
+        GROUP BY oi.menu_item_id, oi.item_name
         -- One ranking everywhere (the POS metrics and the POS core too):
         -- quantity, then revenue, then name.
         ORDER BY quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
@@ -691,14 +691,11 @@ pub async fn branch_sales(
 
     let cat_rows = sqlx::query_as::<_, CategoryItemRow>(
         r#"
-        SELECT 
-            CASE 
-                WHEN oi.bundle_id IS NOT NULL THEN '00000000-0000-0000-0000-000000000000'::uuid
-                ELSE m.category_id
-            END AS category_id,
-            COALESCE(c.name, CASE WHEN oi.bundle_id IS NOT NULL THEN 'Bundles' ELSE 'Uncategorized' END) AS category_name,
+        SELECT
+            m.category_id AS category_id,
+            COALESCE(c.name, 'Uncategorized') AS category_name,
             (array_agg(c.name_translations))[1] AS category_name_translations,
-            COALESCE(oi.menu_item_id, oi.bundle_id) AS menu_item_id,
+            oi.menu_item_id AS menu_item_id,
             oi.item_name,
             COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb) AS item_name_translations,
             SUM(oi.quantity)::bigint   AS quantity_sold,
@@ -711,12 +708,9 @@ pub async fn branch_sales(
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY
-            CASE 
-                WHEN oi.bundle_id IS NOT NULL THEN '00000000-0000-0000-0000-000000000000'::uuid
-                ELSE m.category_id
-            END,
-            COALESCE(c.name, CASE WHEN oi.bundle_id IS NOT NULL THEN 'Bundles' ELSE 'Uncategorized' END),
-            COALESCE(oi.menu_item_id, oi.bundle_id),
+            m.category_id,
+            COALESCE(c.name, 'Uncategorized'),
+            oi.menu_item_id,
             oi.item_name
         ORDER BY category_name NULLS LAST, quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
         "#,
@@ -2953,74 +2947,18 @@ async fn branch_label(pool: &PgPool, branch_id: Uuid) -> Result<String, AppError
         .ok_or_else(|| AppError::NotFound("Branch not found".into()))
 }
 
-// ── Bundles Reporting ────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
-pub struct BundleSalesRow {
-    pub bundle_id: Option<Uuid>,
-    pub bundle_name: String,
-    pub quantity_sold: i64,
-    pub revenue: i64,
-}
+// ── Item sales ───────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct CombinedItemSalesRow {
-    pub item_id: Option<Uuid>,
+    pub item_id: Uuid,
     pub item_name: String,
     #[schema(value_type = Object)]
     pub item_name_translations: serde_json::Value,
+    /// Equal to `total_qty` since combos were removed (it used to exclude
+    /// units sold inside a combo). Kept so dashboards built before still render.
     pub standalone_qty: i64,
-    pub bundle_qty: i64,
     pub total_qty: i64,
-}
-
-// GET /reports/branches/:id/bundles
-#[utoipa::path(
-    get,
-    path = "/reports/branches/{branch_id}/bundles",
-    tag = "reports",
-    params(("branch_id" = Uuid, Path, description = "Branch ID")),
-    params(DateRangeQuery),
-    responses((status = 200, description = "Branch bundle sales", body = Vec<BundleSalesRow>), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-#[tracing::instrument(skip_all, fields(branch_id = %*branch_id, from = ?query.from, to = ?query.to))]
-pub async fn branch_bundle_sales(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    branch_id: web::Path<Uuid>,
-    query: web::Query<DateRangeQuery>,
-) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "orders", "read").await?;
-    let (branch_ids, _org) =
-        resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
-
-    let rows = sqlx::query_as::<_, BundleSalesRow>(
-        r#"
-        SELECT
-            oi.bundle_id AS bundle_id,
-            oi.item_name AS bundle_name,
-            SUM(oi.quantity)::bigint AS quantity_sold,
-            SUM(oi.line_total)::bigint AS revenue
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
-        WHERE o.branch_id = ANY($1)
-          AND o.status NOT IN ('voided', 'refunded')
-          AND oi.bundle_id IS NOT NULL
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oi.bundle_id, oi.item_name
-        ORDER BY quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
-        "#,
-    )
-    .bind(&branch_ids)
-    .bind(query.from)
-    .bind(query.to)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(rows))
 }
 
 // GET /reports/branches/:id/items-combined
@@ -3047,51 +2985,22 @@ pub async fn branch_combined_item_sales(
 
     let rows = sqlx::query_as::<_, CombinedItemSalesRow>(
         r#"
-        WITH standalone_sales AS (
-            SELECT
-                oi.menu_item_id AS item_id,
-                oi.item_name    AS item_name,
-                COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb)
-                    AS item_name_translations,
-                SUM(oi.quantity)::bigint AS qty
-            FROM order_items oi
-            JOIN orders o ON o.id = oi.order_id
-            WHERE o.branch_id = ANY($1)
-              AND o.status NOT IN ('voided', 'refunded')
-              AND oi.menu_item_id IS NOT NULL
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY oi.menu_item_id, oi.item_name
-        ),
-        bundle_component_sales AS (
-            SELECT
-                bc.item_id   AS item_id,
-                mi.name      AS item_name,
-                COALESCE((array_agg(mi.name_translations))[1], '{}'::jsonb)
-                    AS item_name_translations,
-                SUM(oi.quantity * bc.quantity)::bigint AS qty
-            FROM order_line_bundle_components bc
-            JOIN order_items oi ON oi.id = bc.order_line_id
-            JOIN orders o ON o.id = oi.order_id
-            JOIN menu_items mi ON mi.id = bc.item_id
-            WHERE o.branch_id = ANY($1)
-              AND o.status NOT IN ('voided', 'refunded')
-              AND oi.bundle_id IS NOT NULL
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY bc.item_id, mi.name
-        )
         SELECT
-            COALESCE(s.item_id, b.item_id) AS item_id,
-            COALESCE(s.item_name, b.item_name) AS item_name,
-            COALESCE(s.item_name_translations, b.item_name_translations, '{}'::jsonb)
+            oi.menu_item_id AS item_id,
+            oi.item_name    AS item_name,
+            COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb)
                 AS item_name_translations,
-            COALESCE(s.qty, 0)::bigint AS standalone_qty,
-            COALESCE(b.qty, 0)::bigint AS bundle_qty,
-            (COALESCE(s.qty, 0) + COALESCE(b.qty, 0))::bigint AS total_qty
-        FROM standalone_sales s
-        FULL OUTER JOIN bundle_component_sales b ON b.item_id = s.item_id
-        ORDER BY total_qty DESC, COALESCE(s.item_name, b.item_name) COLLATE "C"
+            SUM(oi.quantity)::bigint AS standalone_qty,
+            SUM(oi.quantity)::bigint AS total_qty
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.branch_id = ANY($1)
+          AND o.status NOT IN ('voided', 'refunded')
+          AND oi.menu_item_id IS NOT NULL
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        GROUP BY oi.menu_item_id, oi.item_name
+        ORDER BY total_qty DESC, oi.item_name COLLATE "C"
         "#,
     )
     .bind(&branch_ids)

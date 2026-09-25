@@ -286,20 +286,18 @@ mod backfill_tests {
         pool: &PgPool,
         order: Uuid,
         menu_item: Option<Uuid>,
-        bundle_id: Option<Uuid>,
         quantity: i32,
         stale_line_cost: Option<i64>,
         stale_unit_cost: Option<i64>,
         cost_missing: bool,
     ) -> Uuid {
         sqlx::query_scalar(
-            "INSERT INTO order_items (order_id, menu_item_id, bundle_id, item_name, unit_price, \
+            "INSERT INTO order_items (order_id, menu_item_id, item_name, unit_price, \
                                       quantity, line_total, line_cost, unit_cost, cost_missing) \
-             VALUES ($1, $2, $3, 'x', 1000, $4, 1000, $5, $6, $7) RETURNING id",
+             VALUES ($1, $2, 'x', 1000, $3, 1000, $4, $5, $6) RETURNING id",
         )
         .bind(order)
         .bind(menu_item)
-        .bind(bundle_id)
         .bind(quantity)
         .bind(stale_line_cost)
         .bind(stale_unit_cost)
@@ -349,7 +347,6 @@ mod backfill_tests {
             &pool,
             s.order,
             Some(m1),
-            None,
             2,
             Some(99_999),
             Some(99_999),
@@ -378,49 +375,22 @@ mod backfill_tests {
         .await
         .unwrap();
 
-        // L2: bundle line — one component whose current recipe is 3 × ing.
+        // L2: a second item whose current recipe is 3 × ing, stale costs.
         let m2 = seed_item_with_recipe(&pool, org, ing, 3.0).await;
-        let bundle: Uuid = sqlx::query_scalar(
-            "INSERT INTO bundles (org_id, name, price) VALUES ($1, 'B', 900) RETURNING id",
-        )
-        .bind(org)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
         let l2 = insert_line(
             &pool,
             s.order,
-            None,
-            Some(bundle),
+            Some(m2),
             1,
             Some(22_222),
             Some(5_555),
             false,
         )
         .await;
-        sqlx::query(
-            "INSERT INTO order_line_bundle_components (order_line_id, item_id, quantity, line_cost) \
-             VALUES ($1, $2, 1, 11111)",
-        )
-        .bind(l2)
-        .bind(m2)
-        .execute(&pool)
-        .await
-        .unwrap();
 
         // L3: item with NO recipe today → unknowable.
         let m3 = seed_bare_item(&pool, org).await;
-        let l3 = insert_line(
-            &pool,
-            s.order,
-            Some(m3),
-            None,
-            1,
-            Some(4_444),
-            Some(4_444),
-            false,
-        )
-        .await;
+        let l3 = insert_line(&pool, s.order, Some(m3), 1, Some(4_444), Some(4_444), false).await;
 
         // L4: costed recipe BUT an addon with no ingredient links → the
         // line's full cost is unknowable; recipe-scope unit_cost resolves.
@@ -432,7 +402,7 @@ mod backfill_tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        let l4 = insert_line(&pool, s.order, Some(m1), None, 1, None, None, true).await;
+        let l4 = insert_line(&pool, s.order, Some(m1), 1, None, None, true).await;
         sqlx::query(
             "INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, \
                                             unit_price, quantity, line_total, line_cost) \
@@ -457,21 +427,11 @@ mod backfill_tests {
         .await
         .unwrap();
         let m_tie = seed_item_with_recipe(&pool, org, tie_ing, 0.5).await;
-        let l5 = insert_line(&pool, s.order, Some(m_tie), None, 1, None, None, true).await;
+        let l5 = insert_line(&pool, s.order, Some(m_tie), 1, None, None, true).await;
 
         // Other org: must be untouched by a branch-scoped run.
         let (_org_b, sb) = seed_org_branch_order(&pool).await;
-        let lb = insert_line(
-            &pool,
-            sb.order,
-            None,
-            None,
-            1,
-            Some(7_777),
-            Some(7_777),
-            false,
-        )
-        .await;
+        let lb = insert_line(&pool, sb.order, None, 1, Some(7_777), Some(7_777), false).await;
 
         let summary = backfill_cost_snapshots(&pool, BackfillScope::Branch(s.branch), false)
             .await
@@ -498,16 +458,8 @@ mod backfill_tests {
                 .unwrap();
         assert_eq!(opt_cost, Some(50)); // 0.5 × 100, per parent unit
 
-        // L2: bundle — component 3×100 = 300; unit_cost NULL by definition.
-        assert_eq!(line_costs(&pool, l2).await, (Some(300), None, false));
-        let comp_cost: Option<i64> = sqlx::query_scalar(
-            "SELECT line_cost FROM order_line_bundle_components WHERE order_line_id = $1",
-        )
-        .bind(l2)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(comp_cost, Some(300));
+        // L2: recipe 3×100 = 300, restated over the stale figures.
+        assert_eq!(line_costs(&pool, l2).await, (Some(300), Some(300), false));
 
         // L3: no current recipe → unknowable.
         assert_eq!(line_costs(&pool, l3).await, (None, None, true));
@@ -530,17 +482,7 @@ mod backfill_tests {
         let (org, s) = seed_org_branch_order(&pool).await;
         let ing = seed_ingredient_at_100(&pool, org).await;
         let m1 = seed_item_with_recipe(&pool, org, ing, 2.0).await;
-        let l1 = insert_line(
-            &pool,
-            s.order,
-            Some(m1),
-            None,
-            1,
-            Some(9_999),
-            Some(9_999),
-            false,
-        )
-        .await;
+        let l1 = insert_line(&pool, s.order, Some(m1), 1, Some(9_999), Some(9_999), false).await;
 
         // Dry run: summary reflects the would-be state, data unchanged.
         let dry = backfill_cost_snapshots(&pool, BackfillScope::Org(org), true)

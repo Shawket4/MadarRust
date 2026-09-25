@@ -81,10 +81,6 @@ SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
 SELECT pg_temp.purge('modifier_groups', format('org_id = %L', :'org'));
 SELECT pg_temp.purge('menu_items', format('org_id = %L', :'org'));
 SELECT pg_temp.purge('categories', format('org_id = %L', :'org'));
-SELECT CASE WHEN to_regclass('bundles') IS NOT NULL
-             AND EXISTS (SELECT 1 FROM information_schema.columns
-                         WHERE table_name = 'bundles' AND column_name = 'org_id')
-            THEN pg_temp.purge('bundles', format('org_id = %L', :'org')) END;
 \o
 UPDATE organizations o SET is_demo = k.is_demo FROM keep_org k WHERE o.id = k.id;
 \echo '== Replace menu: rows deleted =='
@@ -95,7 +91,7 @@ SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
 -- one of them is cleared without editing this list. What is deliberately NOT a
 -- root: branches, users/roles/permissions/overrides, devices, the menu, recipes,
 -- org_ingredients/suppliers/packaging, floor sections + branch_tables, payment
--- methods, discounts, bundles, work_shifts + staff_schedules/profiles, loyalty
+-- methods, discounts, work_shifts + staff_schedules/profiles, loyalty
 -- settings and reward catalog, qr_short_links, asset_* (menu images).
 CREATE FUNCTION pg_temp.purge_activity(tbl text, col text DEFAULT 'org_id')
 RETURNS void LANGUAGE plpgsql AS $fn$

@@ -28,7 +28,6 @@ pub(crate) async fn image_url_side_effects(
     let tbl = match table {
         crate::assets::ingest::AssetTable::Categories => "categories",
         crate::assets::ingest::AssetTable::MenuItems => "menu_items",
-        crate::assets::ingest::AssetTable::Bundles => "bundles",
         _ => return Ok(()),
     };
     match new {

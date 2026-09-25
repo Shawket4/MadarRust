@@ -24,9 +24,17 @@ fn operation_ids_are_unique() {
     }
     let dups: Vec<_> = seen.into_iter().filter(|(_, v)| v.len() > 1).collect();
     assert!(dups.is_empty(), "duplicate operationIds: {dups:?}");
-    assert_eq!(
-        doc["paths"]["/bundles/{id}"]["get"]["operationId"],
-        "get_bundle"
+    // Combos were removed (2026-09-25); `GET /bundles` survives only as an
+    // undocumented empty-page stub for old tills.
+    let combo_paths: Vec<&String> = doc["paths"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|p| p.starts_with("/bundles") || p.contains("/bundles/") || p.ends_with("/bundles"))
+        .collect();
+    assert!(
+        combo_paths.is_empty(),
+        "combo paths documented: {combo_paths:?}"
     );
     assert_eq!(
         doc["paths"]["/tills/{till_id}/cash-movements"]["post"]["operationId"],
