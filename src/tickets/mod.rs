@@ -536,6 +536,7 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     KitchenLine {
+        combo: None,
         menu_item_id,
         name: l.name.clone(),
         qty: l.qty,

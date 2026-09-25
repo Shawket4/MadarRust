@@ -135,6 +135,8 @@ fn plan_lines(items: &[OrderItemInput]) -> Vec<madar_loyalty::Line> {
             menu_item_id: i.menu_item_id.map(|id| id.to_string()),
             quantity: i64::from(i.quantity),
             is_staff_drink: false,
+            // A combo line (a header or its parts) never takes a reward (C7).
+            in_combo: i.combo.is_some(),
         })
         .collect()
 }
@@ -188,10 +190,15 @@ fn refused(r: madar_loyalty::Refusal, member_name: &str) -> AppError {
         R::MoreUnitsThanLine { have, asked } => AppError::BadRequest(format!(
             "That line has {have} of them; a reward cannot cover {asked}"
         )),
-        // A line with no menu item has nothing to be a reward of. (madar-loyalty
-        // v0.4.0 still calls this refusal `Bundle`, from when combo lines were
-        // the lines without one; the order path no longer accepts such a line.)
-        R::Bundle => AppError::BadRequest("That line has no menu item to reward".into()),
+        // A line with no menu item has nothing to be a reward of; the order
+        // path no longer accepts such a line.
+        R::NoMenuItem => AppError::BadRequest("That line has no menu item to reward".into()),
+        // C7: stamps per item inside a combo, but never a reward.
+        R::InCombo => AppError::Coded {
+            status: 409,
+            code: "REWARD_IN_COMBO",
+            reason: "Rewards can't be used inside a combo.".into(),
+        },
         R::NotOnOffer => AppError::BadRequest("That item is not a reward at this branch".into()),
         // A reward priced at nothing is a free item bounded by nothing but the
         // cap. Refused rather than honoured, whatever the catalogue row says.

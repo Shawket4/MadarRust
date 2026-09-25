@@ -98,6 +98,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route(web::get().to(public::public_menu)),
         )
         .service(
+            web::resource("/public/branches/{id}/cart-quote")
+                .wrap(Condition::new(limited, Governor::new(&browse_gov)))
+                .route(web::post().to(crate::deals::public::branch_cart_quote)),
+        )
+        .service(
             web::resource("/public/delivery-orders/{id}/track")
                 .wrap(Condition::new(limited, Governor::new(&browse_gov)))
                 .route(web::get().to(public::track_delivery_order)),

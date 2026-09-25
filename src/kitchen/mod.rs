@@ -58,6 +58,11 @@ pub struct KitchenLine {
     /// the kitchen reads.
     #[serde(skip)]
     pub open_ticket_item_id: Option<Uuid>,
+    /// The combo this line is a part of (C12): each part routes to its own
+    /// station, tagged with the combo's name. `null` for a plain line; old KDS
+    /// builds ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo: Option<crate::combos::types::KitchenComboTag>,
 }
 
 /// Deterministic kitchen ids: the kitchen-ticket id a fire will create, derived

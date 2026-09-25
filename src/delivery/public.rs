@@ -317,6 +317,15 @@ pub struct DeliveryMenuItem {
     /// The item's modifier groups (unified model), channel-effective. Empty ⇒
     /// the customizer falls back to `addons` + `allowed_addon_ids`.
     pub modifier_groups: Vec<DeliveryModifierGroup>,
+    /// `item` | `combo` (combos module). Additive.
+    pub kind: String,
+    /// A kind=item row: its "make it a meal" upsell (C14), when that combo is
+    /// on this menu.
+    pub meal: Option<crate::combos::types::MealLink>,
+    /// A kind=combo row: its slots with every choice priced for this channel
+    /// (categories expanded to their available items). The server still
+    /// prices the order.
+    pub combo: Option<crate::combos::types::PublicCombo>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -340,6 +349,9 @@ pub struct DeliveryMenu {
     /// to the item subtotal only — the delivery fee is always charged in full.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discount: Option<DeliveryMenuDiscount>,
+    /// The deals on offer on this channel now (§11.2): checkout applies the
+    /// best ones automatically (`POST …/cart-quote` shows them). Additive.
+    pub deals: Vec<crate::deals::types::DealRule>,
 }
 
 /// Customer-facing summary of a channel's active discount, so the public UI can
@@ -579,6 +591,9 @@ pub(crate) async fn load_public_menu(
                     description,
                     image_url: public_image_url(org_id, image_url),
                     price,
+                    kind: "item".into(),
+                    meal: None,
+                    combo: None,
                 }
             },
         )
@@ -589,6 +604,7 @@ pub(crate) async fn load_public_menu(
         items,
         addons,
         discount,
+        deals: Vec::new(),
     })
 }
 

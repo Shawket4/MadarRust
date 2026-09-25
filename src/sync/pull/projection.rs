@@ -170,6 +170,12 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         // A recorded staff drink is an immutable audit row: once it exists it
         // is live, and it is never edited or withdrawn. Nothing to age out.
         "staff_drink" => "EXISTS (SELECT 1 FROM staff_drinks x WHERE x.id = $ID)",
+        // Combos module: an active, undeleted rule. Its branch override and
+        // the channel toggles ride IN the row (`is_active`, `sell`), so a
+        // branch switch-off never makes the row vanish from one till only.
+        "deal_rule" => {
+            "EXISTS (SELECT 1 FROM deal_rules x WHERE x.id = $ID AND sync_live_deal_rule(x))"
+        }
         _ => return None,
     })
 }
@@ -300,6 +306,7 @@ pub async fn project(
         }
         // COMPAT STUB: always empty; see `projects_sql`.
         "bundle" => HashMap::new(),
+        "deal_rule" => crate::deals::load::feed_rows(&mut *conn, org_id, branch_id, ids).await?,
         "ingredient" => {
             by_sql(
                 conn,

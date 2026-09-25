@@ -171,6 +171,16 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
     ("GET", "/public/tables/{id}/menu", "QR table menu"),
     (
         "POST",
+        "/public/tables/{id}/cart-quote",
+        "QR cart priced with the best deals applied; writes nothing",
+    ),
+    (
+        "POST",
+        "/public/branches/{id}/cart-quote",
+        "guest ordering: cart priced with the best deals applied; writes nothing",
+    ),
+    (
+        "POST",
         "/public/table-orders",
         "a guest's table order; lands as a pending order for staff",
     ),

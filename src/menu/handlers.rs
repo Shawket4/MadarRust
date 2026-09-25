@@ -149,6 +149,11 @@ pub struct MenuItem {
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub default_milk_addon_id: Option<String>,
+    /// `item` | `combo` (combos module). A combo's price is its `one_size`
+    /// row like any item; its slots are on `GET /combos/{id}`. Additive.
+    #[sqlx(default)]
+    #[serde(default = "crate::combos::types::item_kind")]
+    pub kind: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
@@ -287,6 +292,14 @@ pub struct MenuItemFull {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Object>)]
     pub pricing: Option<madar_catalog::ItemView>,
+    /// A kind=item row: its "make it a meal" upsell (C14), or `null`.
+    #[serde(default)]
+    pub meal: Option<crate::combos::types::MealLink>,
+    /// A kind=combo row: its slots, windows and channel toggles for the
+    /// requested branch; `null` for an item. Combo rows are served only to a
+    /// client that can sell them (a browser, POS ≥ 0.9.0, the KDS).
+    #[serde(default)]
+    pub combo: Option<crate::combos::types::ComboFeed>,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -966,6 +979,8 @@ pub async fn list_menu_items(
                 recipe_steps,
                 allowed_addon_ids,
                 pricing: item_pricing,
+                meal: None,
+                combo: None,
             });
         }
         let body = web::Bytes::from(serde_json::to_vec(&result).map_err(|_| AppError::Internal)?);
@@ -1169,6 +1184,8 @@ pub async fn get_menu_item(
         recipe_steps,
         allowed_addon_ids,
         pricing: None,
+        meal: None,
+        combo: None,
     }))
 }
 
@@ -1273,6 +1290,8 @@ pub async fn create_menu_item(
         recipe_steps: vec![],
         allowed_addon_ids: vec![],
         pricing: None,
+        meal: None,
+        combo: None,
     }))
 }
 

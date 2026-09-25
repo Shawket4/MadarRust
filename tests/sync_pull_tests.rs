@@ -552,6 +552,9 @@ BEGIN
     INSERT INTO branch_payment_methods (branch_id, payment_method_id, org_id) VALUES (br, pm, org);
     INSERT INTO user_payment_methods (user_id, payment_method_id, org_id) VALUES (adm, pm, org);
     INSERT INTO discounts (org_id, name, type, value) VALUES (org, 'Staff', 'percentage', 0.1);
+    -- Combos module: one live deal rule (and a deleted one that must not project).
+    INSERT INTO deal_rules (org_id, name, kind, qty, price) VALUES (org, 'Any 2 for 90', 'n_for_price', 2, 9000);
+    INSERT INTO deal_rules (org_id, name, kind, qty, price, deleted_at) VALUES (org, 'Gone', 'n_for_price', 2, 9000, now());
     INSERT INTO addon_items (org_id, name, type, default_price) VALUES (org, 'Oat milk', 'milk', 1500);
     INSERT INTO customers (org_id, name, phone, phone_key) VALUES (org, 'Mona', '0100 123 4567', '01001234567');
     INSERT INTO staff_drinks (id, org_id, branch_id, menu_item_id, item_name, note, business_date, recorded_at)

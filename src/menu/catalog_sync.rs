@@ -140,6 +140,15 @@ pub struct SyncItem {
     pub category_id: Option<Uuid>,
     pub sizes: Vec<SyncSize>,
     pub modifier_groups: Vec<SyncModifierGroup>,
+    /// `item` | `combo` (combos module). Additive.
+    #[serde(default = "crate::combos::types::item_kind")]
+    pub kind: String,
+    /// A kind=item row: its "make it a meal" upsell (C14).
+    #[serde(default)]
+    pub meal: Option<crate::combos::types::MealLink>,
+    /// A kind=combo row: its slots, windows and resolved channel toggles.
+    #[serde(default)]
+    pub combo: Option<crate::combos::types::ComboFeed>,
 }
 
 /// An org ingredient referenced by a returned option recipe.
@@ -326,6 +335,9 @@ async fn build_catalog_snapshot(
             category_id,
             sizes: sizes_by_item.get(&id).cloned().unwrap_or_default(),
             modifier_groups: groups_by_item.get(&id).cloned().unwrap_or_default(),
+            kind: "item".into(),
+            meal: None,
+            combo: None,
         });
     }
 
@@ -738,6 +750,9 @@ pub(crate) async fn sync_items_by_ids(
             category_id,
             sizes: sizes_by_item.get(&id).cloned().unwrap_or_default(),
             modifier_groups: groups_by_item.get(&id).cloned().unwrap_or_default(),
+            kind: "item".into(),
+            meal: None,
+            combo: None,
         })
         .collect())
 }

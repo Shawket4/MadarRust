@@ -420,6 +420,45 @@ pub struct OrderItem {
     #[sqlx(default)]
     #[serde(default)]
     pub staff_drink_id: Option<Uuid>,
+    /// Combos (additive). `item` = a plain line; `combo` = a combo's HEADER
+    /// (its `menu_item_id` is the combo; it carries no money: `unit_price` and
+    /// `line_total` are 0, P is in `combo_unit_price`); `combo_part` = one
+    /// chosen item of a combo, a real line of that item whose `line_total` is
+    /// `combo_share + combo_surcharge` and whose `unit_price` stays the item's
+    /// normal price at its size. Lines come header first, then its parts in
+    /// slot order.
+    #[sqlx(default)]
+    #[serde(default = "crate::combos::types::item_kind")]
+    pub line_kind: String,
+    /// A part: its header's `id`.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_line_id: Option<Uuid>,
+    /// A part: the slot it filled (soft: the slot may be gone since).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_slot_id: Option<Uuid>,
+    /// A part: the slot's name at the sale.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_slot_name: Option<String>,
+    /// A header: P per combo unit, as charged.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_unit_price: Option<i32>,
+    /// A part: its share of the combo price, whole line.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_share: i32,
+    /// A part: its choice and size surcharges, whole line.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_surcharge: i32,
+    /// A plain line: what an applied deal took off it, already out of
+    /// `line_total` (print it as a line discount, never subtract it again).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub deal_minor: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -487,6 +526,9 @@ pub struct OrderFull {
     /// the order is flagged. The till shows this sentence to the teller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loyalty_redemption_refused: Option<String>,
+    /// The deals applied to this sale (combos module). Additive.
+    #[serde(default)]
+    pub deals: Vec<crate::deals::types::OrderDeal>,
 }
 
 /// Customer-facing delivery context attached to a finalized delivery order's
@@ -577,6 +619,12 @@ pub struct OrderItemInput {
     /// carried by a ticket's line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staff_drink: Option<crate::staff_pool::order_line::StaffDrinkLine>,
+    /// A line naming a combo item (`kind=combo`) carries its picks here; see
+    /// COMBOS_CONTRACT.md §3.1. On replay `unit_price` is P as the till
+    /// charged it and each pick's `share`/`surcharge` are per combo unit.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo: Option<crate::combos::types::ComboInput>,
 }
 
 #[derive(Deserialize, Serialize, Default, ToSchema)]
@@ -696,6 +744,10 @@ pub struct CreateOrderRequest {
     /// a sale is never refused over its customer.
     #[serde(default)]
     pub customer_id: Option<Uuid>,
+    /// Deals the teller applied (combos module, C8). Each names order lines
+    /// by index and the units it takes. Needs `orders.deals.apply`. Additive.
+    #[serde(default)]
+    pub deals: Vec<crate::deals::types::DealApplicationInput>,
 }
 
 /// One reward applied to one line of the cart.
@@ -978,14 +1030,11 @@ impl ResolvedItem {
 
     /// The line as charged, before any reward: per-unit × quantity. THE
     /// figure a bill line shows. The rule is madar-shared's
-    /// (`madar_money::line`), the till's too. Its last argument is a combo
-    /// component surcharge, always 0 now that combos are gone (madar-money
-    /// v0.4.0 still takes it).
+    /// (`madar_money::line`), the till's too.
     pub(crate) fn charged_subtotal(&self) -> i32 {
         madar_money::line::charged_subtotal(
             i64::from(self.charged_per_unit()),
             i64::from(self.quantity),
-            0,
         ) as i32
     }
 
@@ -997,7 +1046,6 @@ impl ResolvedItem {
                 self.expected_unit_price + self.expected_addon_per_unit + self.optional_per_unit(),
             ),
             i64::from(self.quantity),
-            0,
         ) as i32
     }
 
@@ -1586,6 +1634,7 @@ pub(crate) async fn create_order_inner(
             items,
             warnings: Vec::new(),
             delivery: None,
+            deals: Vec::new(),
         }));
     }
 
@@ -2580,12 +2629,12 @@ pub(crate) async fn create_order_inner(
             if let Some(key) = body.idempotency_key
                 && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
+                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None, deals: Vec::new() }));
                 }
             if let Some(order_ref) = &body.order_ref
                 && let Some(existing) = fetch_order_by_order_ref(pool.get_ref(), order_ref, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
+                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None, deals: Vec::new() }));
                 }
             return Err(AppError::Conflict("Duplicate order".into()));
         }
@@ -2812,6 +2861,7 @@ pub(crate) async fn create_order_inner(
             .iter()
             .map(|ri| {
                 crate::kitchen::KitchenLine {
+                    combo: None,
                     menu_item_id: ri.menu_item_id,
                     name: ri.item_name.clone(),
                     qty: ri.quantity,
@@ -3172,6 +3222,7 @@ pub(crate) async fn create_order_inner(
         warnings,
         delivery: None,
         loyalty_redemption_refused: redemption_refused,
+        deals: Vec::new(),
     }))
 }
 
@@ -3385,6 +3436,7 @@ pub async fn list_orders(
                     warnings: Vec::new(),
                     delivery: None,
                     loyalty_redemption_refused: None,
+                    deals: Vec::new(),
                 }
             })
             .collect();
@@ -3439,6 +3491,7 @@ pub async fn get_order(
         warnings: Vec::new(),
         delivery,
         loyalty_redemption_refused,
+        deals: Vec::new(),
     }))
 }
 

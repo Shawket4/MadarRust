@@ -24,13 +24,14 @@ fn operation_ids_are_unique() {
     }
     let dups: Vec<_> = seen.into_iter().filter(|(_, v)| v.len() > 1).collect();
     assert!(dups.is_empty(), "duplicate operationIds: {dups:?}");
-    // Combos were removed (2026-09-25); `GET /bundles` survives only as an
-    // undocumented empty-page stub for old tills.
+    // The old combos module was removed (2026-09-25); `GET /bundles`
+    // survives only as an undocumented empty-page stub for old tills. The new
+    // module's Bundles report (`/reports/bundles…`) is documented.
     let combo_paths: Vec<&String> = doc["paths"]
         .as_object()
         .unwrap()
         .keys()
-        .filter(|p| p.starts_with("/bundles") || p.contains("/bundles/") || p.ends_with("/bundles"))
+        .filter(|p| p.starts_with("/bundles"))
         .collect();
     assert!(
         combo_paths.is_empty(),

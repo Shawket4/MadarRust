@@ -53,6 +53,9 @@ pub struct CartLineInput {
     pub optional_field_ids: Vec<Uuid>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// A combo line's picks (§3.1); the server prices every part. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo: Option<crate::combos::types::ComboInput>,
 }
 
 // ── Frozen snapshot shapes (serialised into delivery_orders.cart) ──
@@ -838,6 +841,7 @@ pub fn kitchen_lines(cart: &CartSnapshot) -> Vec<crate::kitchen::KitchenLine> {
                 })
                 .collect();
             crate::kitchen::KitchenLine {
+                combo: None,
                 menu_item_id: Some(line.menu_item_id),
                 name: line.item_name.clone(),
                 qty: line.quantity,

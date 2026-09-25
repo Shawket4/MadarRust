@@ -7618,6 +7618,537 @@
         ]
       }
     },
+    "/combos": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "list_combos",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Name search (EN or AR).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "is_active",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's combos",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedCombos"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "create_combo",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComboWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The combo, created in one transaction",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Combo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/combos/economics": {
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "combo_economics",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComboEconomicsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The editor's live panel; nothing is saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComboEconomics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/combos/{id}": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_combo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The combo's menu item id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "Price the economics for this branch; omitted = the org's catalogue.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The combo with its economics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Combo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "update_combo",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The combo's menu item id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComboWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The combo; slots and choices diffed in place by id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Combo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/costing/addon-items": {
       "get": {
         "tags": [
@@ -8802,6 +9333,600 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/deals": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "list_deals",
+        "parameters": [
+          {
+            "name": "is_active",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's deal rules (not deleted)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DealRule"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "create_deal",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DealWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The deal rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DealRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/deals/{id}": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "update_deal",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deal rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DealWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The deal rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DealRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "delete_deal",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deal rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Soft-deleted; applied deals keep pointing at it"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/deals/{id}/branches/{branch_id}": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "put_deal_branch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deal rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DealBranchWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The branch's on/off override saved"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "delete_deal_branch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Deal rule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The branch inherits the rule's own active flag"
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -21875,6 +23000,106 @@
         ]
       }
     },
+    "/menu-items/{id}/meal": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "put_meal",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "A kind=item menu item",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MealLinkWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Linked (or unlinked when both fields are null)"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/menu-items/{id}/modifier-groups": {
       "put": {
         "tags": [
@@ -31233,6 +32458,109 @@
         }
       }
     },
+    "/public/branches/{id}/cart-quote": {
+      "post": {
+        "tags": [
+          "delivery"
+        ],
+        "summary": "Price an online (storefront) cart at a branch, deals applied.",
+        "operationId": "public_branch_cart_quote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicCartQuoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The cart as the order will be priced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartQuote"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/public/branches/{id}/delivery-quote": {
       "get": {
         "tags": [
@@ -33335,6 +34663,109 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/PublicTable"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/tables/{id}/cart-quote": {
+      "post": {
+        "tags": [
+          "open_tickets"
+        ],
+        "summary": "Price a QR table cart, deals applied.",
+        "operationId": "public_table_cart_quote",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Table ID, from the QR",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicCartQuoteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The cart as the order will be priced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartQuote"
                 }
               }
             }
@@ -39838,6 +41269,255 @@
         ]
       }
     },
+    "/reports/bundles": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "bundles_report",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Business date, inclusive.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Business date, inclusive.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`combo` | `deal`; omitted = both.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Each combo and deal as its own line",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BundlesReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/reports/bundles/combos/{id}/mix": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "operationId": "combo_mix",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The combo's menu item id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What customers picked per slot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComboMix"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/reports/orgs/{org_id}/attendance-corrections-audit": {
       "get": {
         "tags": [
@@ -42472,6 +44152,372 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/settings/combos": {
+      "get": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "get_settings",
+        "responses": {
+          "200": {
+            "description": "The minimum margin and the channel toggles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComboSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "put_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComboSettingsWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The settings as saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComboSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/settings/combos/branches/{branch_id}": {
+      "put": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "put_branch_channels",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelOverride"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The branch's channel override saved (all null = inherit)"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "delete_branch_channels",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "path",
+            "description": "Branch ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The branch inherits the org's toggles"
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -64360,6 +66406,28 @@
           }
         }
       },
+      "BranchChannelOverride": {
+        "type": "object",
+        "description": "One branch's override, with what it resolves to.",
+        "required": [
+          "branch_id",
+          "sell",
+          "effective"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "effective": {
+            "$ref": "#/components/schemas/ChannelToggles",
+            "description": "The org's toggles with this override applied."
+          },
+          "sell": {
+            "$ref": "#/components/schemas/ChannelOverride"
+          }
+        }
+      },
       "BranchComparison": {
         "type": "object",
         "required": [
@@ -65327,6 +67395,139 @@
           }
         }
       },
+      "BundlesReport": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "rows",
+          "totals"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BundlesRow"
+            }
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/BundlesTotals"
+          }
+        }
+      },
+      "BundlesRow": {
+        "type": "object",
+        "description": "One combo or deal over the period.",
+        "required": [
+          "kind",
+          "id",
+          "name",
+          "name_translations",
+          "sold",
+          "orders",
+          "revenue",
+          "list_value",
+          "saving",
+          "cost",
+          "cost_missing"
+        ],
+        "properties": {
+          "cost": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cost_missing": {
+            "type": "boolean",
+            "description": "True when any line's cost was unknown (`cost` then counts the known part)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The combo's menu item id, or the deal rule's id."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`combo` | `deal`."
+          },
+          "list_value": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The same lines at their normal prices."
+          },
+          "margin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`(revenue − cost) / revenue` as a fraction string; `null` when revenue is 0."
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "orders": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "A combo: Σ its parts' line_total + their add-ons. A deal: Σ the\nconsumed lines' line_total (after the deal)."
+          },
+          "saving": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`list_value − revenue`."
+          },
+          "sold": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Combo units (Σ header quantity, refunds netted) or deal applications (Σ times)."
+          }
+        }
+      },
+      "BundlesTotals": {
+        "type": "object",
+        "required": [
+          "sold",
+          "revenue",
+          "list_value",
+          "saving",
+          "cost"
+        ],
+        "properties": {
+          "cost": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "list_value": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "saving": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sold": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "CampaignEffectiveness": {
         "type": "object",
         "required": [
@@ -65647,6 +67848,17 @@
               "$ref": "#/components/schemas/AddonInput"
             }
           },
+          "combo": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComboInput",
+                "description": "A combo line's picks (§3.1); the server prices every part. Additive."
+              }
+            ]
+          },
           "menu_item_id": {
             "type": "string",
             "format": "uuid"
@@ -65673,6 +67885,45 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "CartQuote": {
+        "type": "object",
+        "required": [
+          "lines",
+          "items_total",
+          "deals",
+          "deal_discount",
+          "total_after_deals"
+        ],
+        "properties": {
+          "deal_discount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Σ deals' discount."
+          },
+          "deals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotedDeal"
+            }
+          },
+          "items_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Σ line_total, before deals."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotedLine"
+            }
+          },
+          "total_after_deals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`items_total − deal_discount` (before the channel discount, tax and fees)."
           }
         }
       },
@@ -66178,6 +68429,36 @@
           }
         }
       },
+      "ChannelOverride": {
+        "type": "object",
+        "description": "A branch's override of the org's toggles. `null` (or absent) inherits.",
+        "properties": {
+          "delivery": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "online": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "pos": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "qr": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
       "ChannelOverrideInput": {
         "type": "object",
         "required": [
@@ -66227,6 +68508,24 @@
             "items": {
               "$ref": "#/components/schemas/SizeOverrideOut"
             }
+          }
+        }
+      },
+      "ChannelToggles": {
+        "type": "object",
+        "description": "The four sale channels' toggles, resolved: `pos` (the till), `qr` (the\ntable QR menu), `online` (the storefront, all four delivery sub-channels)\nand `delivery` (aggregator apps; stored and returned, honoured by the\nfuture menu push). Every channel is on until the owner switches it off.",
+        "properties": {
+          "delivery": {
+            "type": "boolean"
+          },
+          "online": {
+            "type": "boolean"
+          },
+          "pos": {
+            "type": "boolean"
+          },
+          "qr": {
+            "type": "boolean"
           }
         }
       },
@@ -66806,6 +69105,762 @@
           "total_qty": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "Combo": {
+        "type": "object",
+        "description": "`GET /combos/{id}`, `POST /combos`, `PUT /combos/{id}`.",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "name_translations",
+          "description_translations",
+          "is_active",
+          "price",
+          "is_fixed",
+          "windows",
+          "slots",
+          "available_now",
+          "economics",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "available_now": {
+            "type": "boolean",
+            "description": "Sellable right now on the till at the requested branch (or anywhere,\norg-level): active, the POS channel on, a window open, every required\nslot with an available choice."
+          },
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description_translations": {
+            "type": "object"
+          },
+          "economics": {
+            "$ref": "#/components/schemas/ComboEconomics"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "is_fixed": {
+            "type": "boolean",
+            "description": "C1's fixed bundle: every slot has exactly one item choice with min == max."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Always `combo`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "P, piastres (the catalogue price; branch prices live in `/menu/pricing`)."
+          },
+          "slots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboSlot"
+            }
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SaleWindow"
+            }
+          }
+        }
+      },
+      "ComboChoice": {
+        "type": "object",
+        "description": "A choice as stored, with its target's display name.",
+        "required": [
+          "id",
+          "surcharge",
+          "size_surcharges",
+          "sort"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "included_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "menu_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "The item's or the category's name (display only)."
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "size_surcharges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SizeSurcharge"
+            }
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "surcharge": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "ComboChoiceWrite": {
+        "type": "object",
+        "description": "What a slot allows: exactly one of `menu_item_id` (an item) or\n`category_id` (every kind=item item of that category).",
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The choice's id, to keep it on an edit; omit for a new choice."
+          },
+          "included_size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The size the combo price covers; `null` = the item's cheapest active size."
+          },
+          "menu_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "size_surcharges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SizeSurcharge"
+            }
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "surcharge": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Per pick unit, piastres (C9 \"per-choice surcharge\")."
+          }
+        }
+      },
+      "ComboEconomics": {
+        "type": "object",
+        "description": "The editor's live panel: list value, cost, margin and saving of a combo at\na branch (or the org's catalogue prices when `branch_id` is null).",
+        "required": [
+          "price",
+          "list_default",
+          "list_min",
+          "list_max",
+          "saving_default",
+          "warnings"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "cost_default": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`null` when any cost involved is unknown."
+          },
+          "cost_max": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "list_default": {
+            "type": "integer",
+            "format": "int64",
+            "description": "À la carte value of the default picks at their included sizes."
+          },
+          "list_max": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "list_min": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The cheapest and dearest valid pick sets, at their included sizes."
+          },
+          "margin_default": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Fractions as strings (\"0.5933\"); `null` when the cost is unknown or P is 0."
+          },
+          "margin_worst": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "min_margin": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price": {
+            "type": "integer",
+            "format": "int64",
+            "description": "P at this branch."
+          },
+          "saving_default": {
+            "type": "integer",
+            "format": "int64",
+            "description": "`list_default − price`."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboWarning"
+            }
+          }
+        }
+      },
+      "ComboEconomicsRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ComboWrite"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "branch_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uuid"
+              }
+            }
+          }
+        ],
+        "description": "`POST /combos/economics`: a draft, priced for a branch (or the org)."
+      },
+      "ComboFeed": {
+        "type": "object",
+        "description": "The `combo` object on a `kind=combo` row of `GET /menu-items?full=true`,\n`/catalog/sync` and the `/sync/pull` `menu_item` row. The price is in the\nrow's usual price fields. Choices keep `category_id`: the till expands a\ncategory from its own menu.",
+        "required": [
+          "is_fixed",
+          "sell",
+          "windows",
+          "slots"
+        ],
+        "properties": {
+          "is_fixed": {
+            "type": "boolean"
+          },
+          "sell": {
+            "$ref": "#/components/schemas/ChannelToggles",
+            "description": "The org's channel toggles, resolved for the requested branch."
+          },
+          "slots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboSlot"
+            }
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SaleWindow"
+            },
+            "description": "Only the windows for this branch or for every branch."
+          }
+        }
+      },
+      "ComboInput": {
+        "type": "object",
+        "description": "The `combo` field of an order line naming a combo item.",
+        "required": [
+          "picks"
+        ],
+        "properties": {
+          "picks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboPickInput"
+            }
+          }
+        }
+      },
+      "ComboMix": {
+        "type": "object",
+        "description": "What customers picked in each slot of one combo.",
+        "required": [
+          "combo_id",
+          "from",
+          "to",
+          "slots"
+        ],
+        "properties": {
+          "combo_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "slots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MixSlot"
+            }
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      },
+      "ComboPickInput": {
+        "type": "object",
+        "description": "One pick of a combo line. On replay the till's `share` and `surcharge`\n(per combo unit) and add-on prices are stored as charged; live they are\nignored and the server prices every part.",
+        "required": [
+          "slot_id",
+          "menu_item_id"
+        ],
+        "properties": {
+          "addons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AddonInput"
+            }
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "optional_field_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Units per combo unit; the part line's quantity is this × the line's."
+          },
+          "share": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Replay only: this pick's share of P, per combo unit."
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "surcharge": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Replay only: this pick's surcharge (choice + size), per combo unit."
+          }
+        }
+      },
+      "ComboSettings": {
+        "type": "object",
+        "description": "`GET /settings/combos`: the minimum margin (C11) and the channel toggles\n(§11.1) that gate every combo and every deal.",
+        "required": [
+          "channels",
+          "branch_overrides"
+        ],
+        "properties": {
+          "branch_overrides": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BranchChannelOverride"
+            },
+            "description": "Every branch that overrides at least one toggle."
+          },
+          "channels": {
+            "$ref": "#/components/schemas/ChannelToggles",
+            "description": "The org-wide toggles."
+          },
+          "min_margin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owner's minimum margin as a decimal fraction string (\"0.5500\");\n`null` = no margin warning."
+          }
+        }
+      },
+      "ComboSettingsWrite": {
+        "type": "object",
+        "description": "`PUT /settings/combos`. `min_margin` is replaced (omitted or `null` = no\nwarning); `channels`, when present, replaces the org-wide toggles.",
+        "properties": {
+          "channels": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChannelToggles"
+              }
+            ]
+          },
+          "min_margin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A fraction between \"0\" and \"1\", e.g. \"0.55\"."
+          }
+        }
+      },
+      "ComboSlot": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "name_translations",
+          "sort",
+          "min",
+          "max",
+          "choices"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboChoice"
+            }
+          },
+          "default_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "default_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "max": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "ComboSlotWrite": {
+        "type": "object",
+        "required": [
+          "name",
+          "min",
+          "max",
+          "choices"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboChoiceWrite"
+            }
+          },
+          "default_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Pre-selected on the till and used for unpicked replays; must be one of\nthe slot's choices (by id, or by its category)."
+          },
+          "default_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The slot's id, to keep it on an edit; omit for a new slot."
+          },
+          "max": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Picks allowed (1–10, ≥ min)."
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Picks required (0–10). 0 = optional slot."
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "ComboSummary": {
+        "type": "object",
+        "description": "One row of `GET /combos`.",
+        "required": [
+          "id",
+          "name",
+          "name_translations",
+          "price",
+          "is_active",
+          "is_fixed",
+          "slot_count",
+          "window_count",
+          "available_now",
+          "warning_count"
+        ],
+        "properties": {
+          "available_now": {
+            "type": "boolean",
+            "description": "Org-level: active, a window open now (org time zone), POS channel on."
+          },
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "is_fixed": {
+            "type": "boolean"
+          },
+          "margin_default": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "slot_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "warning_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "window_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ComboWarning": {
+        "type": "object",
+        "description": "A margin/saving warning (C11). Never a refusal: a combo saves with any.\nCodes: `MARGIN_BELOW_MIN {margin, min}`, `NO_SAVING`,\n`COST_UNKNOWN {menu_item_id}`, `SLOT_EMPTY_NOW {slot_id}`,\n`CHOICE_INACTIVE {menu_item_id}`.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "vars": {
+            "type": "object"
+          }
+        }
+      },
+      "ComboWrite": {
+        "type": "object",
+        "description": "`POST /combos`, `PUT /combos/{id}`, `POST /combos/economics`.",
+        "required": [
+          "name",
+          "price",
+          "slots"
+        ],
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description_translations": {
+            "type": "object"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "P, piastres: the combo's `one_size` price (its `base_price`)."
+          },
+          "slots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboSlotWrite"
+            }
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SaleWindow"
+            }
           }
         }
       },
@@ -68632,6 +71687,13 @@
               "null"
             ]
           },
+          "deals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealApplicationInput"
+            },
+            "description": "Deals the teller applied (combos module, C8). Each names order lines\nby index and the units it takes. Needs `orders.deals.apply`. Additive."
+          },
           "device_code": {
             "type": [
               "string",
@@ -70273,6 +73335,314 @@
           }
         }
       },
+      "DealApplicationInput": {
+        "type": "object",
+        "description": "An applied deal on an order (the till's teller applied it). Live, the\nserver re-prices it exactly over these units (`409 DEAL_NOT_ELIGIBLE` when\nthey don't satisfy the rule; `orders.deals.apply` required). On replay the\ntill's `discount` is kept and the server's verdict stored beside it.",
+        "required": [
+          "deal_rule_id",
+          "times",
+          "lines"
+        ],
+        "properties": {
+          "deal_rule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "discount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Replay only: what the till took off, piastres."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealLineInput"
+            }
+          },
+          "times": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "DealBranchOverride": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "is_active"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DealBranchWrite": {
+        "type": "object",
+        "description": "`PUT /deals/{id}/branches/{branch_id}`.",
+        "required": [
+          "is_active"
+        ],
+        "properties": {
+          "is_active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DealLineInput": {
+        "type": "object",
+        "description": "Units of one order line a deal takes.",
+        "required": [
+          "line_index",
+          "units"
+        ],
+        "properties": {
+          "line_index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Index into the order's `items[]`."
+          },
+          "units": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "DealPoolEntry": {
+        "type": "object",
+        "description": "An item or a category (every kind=item item of it) a deal counts, at one\nsize or any (`size_label` null).",
+        "properties": {
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "menu_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "DealRule": {
+        "type": "object",
+        "description": "A deal rule. `n_for_price`: any `qty` units of the pool for `price`.\n`buy_get`: buy `qty`, get `get_qty` at `get_percent`% off (100 = free),\nthe rewarded units drawn from `reward_pool` (or the pool when empty).\nA deal covers the item's size price only; add-ons always pay.\n\nAlso the `deal_rule` feed row of `/sync/pull`, where `is_active` is\nresolved for the device's branch and `sell` carries the branch's channel\ntoggles.",
+        "required": [
+          "id",
+          "name",
+          "name_translations",
+          "kind",
+          "qty",
+          "sort",
+          "is_active",
+          "pool",
+          "reward_pool",
+          "windows",
+          "branch_overrides",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "branch_overrides": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealBranchOverride"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "get_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "get_qty": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`n_for_price` | `buy_get`."
+          },
+          "max_per_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "pool": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealPoolEntry"
+            }
+          },
+          "price": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "n_for_price: the price of `qty` units, piastres."
+          },
+          "qty": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "reward_pool": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealPoolEntry"
+            },
+            "description": "buy_get only; `[]` = the rewarded units come from `pool`."
+          },
+          "sell": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChannelToggles",
+                "description": "Feed rows only: the branch's channel toggles (§11.1). Absent elsewhere."
+              }
+            ]
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SaleWindow"
+            }
+          }
+        }
+      },
+      "DealWrite": {
+        "type": "object",
+        "description": "`POST /deals`, `PUT /deals/{id}`.",
+        "required": [
+          "name",
+          "kind",
+          "qty",
+          "pool"
+        ],
+        "properties": {
+          "get_percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "buy_get only (1–100; 100 = free)."
+          },
+          "get_qty": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "buy_get only (1–20)."
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`n_for_price` | `buy_get`."
+          },
+          "max_per_order": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "pool": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealPoolEntry"
+            }
+          },
+          "price": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "n_for_price only."
+          },
+          "qty": {
+            "type": "integer",
+            "format": "int32",
+            "description": "N (n_for_price, 2–20) or the \"buy\" count (buy_get, 1–20)."
+          },
+          "reward_pool": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealPoolEntry"
+            }
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SaleWindow"
+            }
+          }
+        }
+      },
       "Decide": {
         "type": "object",
         "required": [
@@ -70632,7 +74002,8 @@
         "required": [
           "categories",
           "items",
-          "addons"
+          "addons",
+          "deals"
         ],
         "properties": {
           "addons": {
@@ -70647,6 +74018,13 @@
             "items": {
               "$ref": "#/components/schemas/DeliveryMenuCategory"
             }
+          },
+          "deals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealRule"
+            },
+            "description": "The deals on offer on this channel now (§11.2): checkout applies the\nbest ones automatically (`POST …/cart-quote` shows them). Additive."
           },
           "discount": {
             "oneOf": [
@@ -70741,7 +74119,8 @@
           "sizes",
           "optionals",
           "allowed_addon_ids",
-          "modifier_groups"
+          "modifier_groups",
+          "kind"
         ],
         "properties": {
           "allowed_addon_ids": {
@@ -70758,6 +74137,17 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "combo": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicCombo",
+                "description": "A kind=combo row: its slots with every choice priced for this channel\n(categories expanded to their available items). The server still\nprices the order."
+              }
+            ]
           },
           "default_milk_addon_id": {
             "type": [
@@ -70781,6 +74171,21 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "`item` | `combo` (combos module). Additive."
+          },
+          "meal": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MealLink",
+                "description": "A kind=item row: its \"make it a meal\" upsell (C14), when that combo is\non this menu."
+              }
             ]
           },
           "modifier_groups": {
@@ -74323,6 +77728,27 @@
           }
         }
       },
+      "KitchenComboTag": {
+        "type": "object",
+        "description": "The combo a kitchen line belongs to (C12): the KDS groups and tags by it.\nOld KDS builds ignore it.",
+        "required": [
+          "line_id",
+          "name"
+        ],
+        "properties": {
+          "line_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The combo's header line (`order_items.id`, or the ticket line's id)."
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          }
+        }
+      },
       "KitchenLine": {
         "type": "object",
         "description": "A slim kitchen display line (NO prices) — what the cook reads. Built from an\norder item or a ticket round line by the caller.",
@@ -74331,6 +77757,17 @@
           "qty"
         ],
         "properties": {
+          "combo": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/KitchenComboTag",
+                "description": "The combo this line is a part of (C12): each part routes to its own\nstation, tagged with the combo's name. `null` for a plain line; old KDS\nbuilds ignore it."
+              }
+            ]
+          },
           "menu_item_id": {
             "type": [
               "string",
@@ -76185,6 +79622,44 @@
           }
         }
       },
+      "MealLink": {
+        "type": "object",
+        "description": "An item's \"make it a meal\" upsell: the combo, and the slot this item fills.",
+        "required": [
+          "combo_id",
+          "slot_id"
+        ],
+        "properties": {
+          "combo_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slot_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "MealLinkWrite": {
+        "type": "object",
+        "description": "`PUT /menu-items/{id}/meal`. Both set = link; both `null` (or a JSON\n`null` body) = unlink.",
+        "properties": {
+          "combo_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "slot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
       "MemberDetail": {
         "type": "object",
         "required": [
@@ -76392,6 +79867,10 @@
           "is_active": {
             "type": "boolean"
           },
+          "kind": {
+            "type": "string",
+            "description": "`item` | `combo` (combos module). A combo's price is its `one_size`\nrow like any item; its slots are on `GET /combos/{id}`. Additive."
+          },
           "name": {
             "type": "string"
           },
@@ -76443,6 +79922,28 @@
                   "format": "uuid"
                 },
                 "description": "Explicit per-item addon allowlist. Empty = no restriction (use org catalog)."
+              },
+              "combo": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ComboFeed",
+                    "description": "A kind=combo row: its slots, windows and channel toggles for the\nrequested branch; `null` for an item. Combo rows are served only to a\nclient that can sell them (a browser, POS ≥ 0.9.0, the KDS)."
+                  }
+                ]
+              },
+              "meal": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/MealLink",
+                    "description": "A kind=item row: its \"make it a meal\" upsell (C14), or `null`."
+                  }
+                ]
               },
               "optional_fields": {
                 "type": "array",
@@ -76698,6 +80199,71 @@
           "timezone": {
             "type": "string",
             "description": "The timezone all time buckets were computed in."
+          }
+        }
+      },
+      "MixPick": {
+        "type": "object",
+        "required": [
+          "name",
+          "name_translations",
+          "count",
+          "surcharge_total"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Units picked (Σ part quantity, refunds netted)."
+          },
+          "menu_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "surcharge_total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "MixSlot": {
+        "type": "object",
+        "required": [
+          "name",
+          "picks"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "picks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MixPick"
+            }
+          },
+          "slot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`null` for parts whose slot was deleted since."
           }
         }
       },
@@ -78512,6 +82078,80 @@
           }
         }
       },
+      "OrderDeal": {
+        "type": "object",
+        "description": "An applied deal as stored: `OrderFull.deals[]`.",
+        "required": [
+          "id",
+          "deal_rule_id",
+          "name",
+          "name_translations",
+          "times",
+          "discount",
+          "lines"
+        ],
+        "properties": {
+          "deal_rule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "discount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What came off the lines (the till's figure on a replay)."
+          },
+          "discount_server": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The server's verdict; equals `discount` live; `null` when not computable."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderDealLine"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "times": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "OrderDealLine": {
+        "type": "object",
+        "required": [
+          "order_item_id",
+          "units",
+          "discount"
+        ],
+        "properties": {
+          "discount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "order_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "units": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "OrderDeliveryInfo": {
         "type": "object",
         "description": "Customer-facing delivery context attached to a finalized delivery order's\ndetail view. Sourced from the linked `delivery_orders` row (joined to its\ndelivery zone for the zone name). The delivery *fee* lives on [Order];\nthis carries the non-financial fulfilment details a teller/manager needs.",
@@ -78633,6 +82273,13 @@
               "items"
             ],
             "properties": {
+              "deals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/OrderDeal"
+                },
+                "description": "The deals applied to this sale (combos module). Additive."
+              },
               "delivery": {
                 "oneOf": [
                   {
@@ -78786,9 +82433,55 @@
           "cost_missing"
         ],
         "properties": {
+          "combo_line_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A part: its header's `id`."
+          },
+          "combo_share": {
+            "type": "integer",
+            "format": "int32",
+            "description": "A part: its share of the combo price, whole line."
+          },
+          "combo_slot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A part: the slot it filled (soft: the slot may be gone since)."
+          },
+          "combo_slot_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A part: the slot's name at the sale."
+          },
+          "combo_surcharge": {
+            "type": "integer",
+            "format": "int32",
+            "description": "A part: its choice and size surcharges, whole line."
+          },
+          "combo_unit_price": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "A header: P per combo unit, as charged."
+          },
           "cost_missing": {
             "type": "boolean",
             "description": "True when any cost component could not be resolved."
+          },
+          "deal_minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "A plain line: what an applied deal took off it, already out of\n`line_total` (print it as a line discount, never subtract it again)."
           },
           "deductions_snapshot": {},
           "id": {
@@ -78809,6 +82502,10 @@
             ],
             "format": "int64",
             "description": "Full line COGS in piastres (recipe + addons + optionals).\n`null` ⟺ unknown."
+          },
+          "line_kind": {
+            "type": "string",
+            "description": "Combos (additive). `item` = a plain line; `combo` = a combo's HEADER\n(its `menu_item_id` is the combo; it carries no money: `unit_price` and\n`line_total` are 0, P is in `combo_unit_price`); `combo_part` = one\nchosen item of a combo, a real line of that item whose `line_total` is\n`combo_share + combo_surcharge` and whose `unit_price` stays the item's\nnormal price at its size. Lines come header first, then its parts in\nslot order."
           },
           "line_total": {
             "type": "integer",
@@ -78978,6 +82675,17 @@
             "items": {
               "$ref": "#/components/schemas/AddonInput"
             }
+          },
+          "combo": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComboInput",
+                "description": "A line naming a combo item (`kind=combo`) carries its picks here; see\nCOMBOS_CONTRACT.md §3.1. On replay `unit_price` is P as the till\ncharged it and each pick's `share`/`surcharge` are per combo unit.\nAdditive."
+              }
+            ]
           },
           "menu_item_id": {
             "type": [
@@ -80116,6 +83824,40 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AddonItem"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "per_page": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_pages": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "PaginatedCombos": {
+        "type": "object",
+        "required": [
+          "data",
+          "total",
+          "page",
+          "per_page",
+          "total_pages"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComboSummary"
             }
           },
           "page": {
@@ -83112,6 +86854,176 @@
           }
         }
       },
+      "PublicCartQuoteRequest": {
+        "type": "object",
+        "description": "`POST /public/branches/{id}/cart-quote` (online) and\n`POST /public/tables/{id}/cart-quote` (QR): the cart priced by the server\nexactly as the order will be, with the best deals applied automatically.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "channel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Online only: the delivery sub-channel whose prices apply\n(`in_mall` | `outside` | `umbrella` | `pickup`); default `pickup`."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderItemInput"
+            }
+          }
+        }
+      },
+      "PublicCombo": {
+        "type": "object",
+        "description": "The `combo` object of a public menu item.",
+        "required": [
+          "is_fixed",
+          "slots"
+        ],
+        "properties": {
+          "is_fixed": {
+            "type": "boolean"
+          },
+          "slots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicComboSlot"
+            }
+          }
+        }
+      },
+      "PublicComboChoice": {
+        "type": "object",
+        "description": "One concrete item a public combo slot offers (categories expanded to the\nitems available on this channel and branch).",
+        "required": [
+          "menu_item_id",
+          "name",
+          "name_translations",
+          "base_price",
+          "included_size_label",
+          "sizes",
+          "surcharge"
+        ],
+        "properties": {
+          "base_price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The included size's channel price (what the split weighs it by)."
+          },
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "included_size_label": {
+            "type": "string"
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "sizes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicComboSize"
+            }
+          },
+          "surcharge": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The choice's own surcharge, per pick unit."
+          }
+        }
+      },
+      "PublicComboSize": {
+        "type": "object",
+        "description": "A size of a public combo choice.",
+        "required": [
+          "label",
+          "price",
+          "extra"
+        ],
+        "properties": {
+          "extra": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What picking it adds inside the combo (the owner's surcharge, else the\ndifference over the included size, floored at 0; 0 for the included size)."
+          },
+          "label": {
+            "type": "string"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Its normal channel price."
+          }
+        }
+      },
+      "PublicComboSlot": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "name_translations",
+          "sort",
+          "min",
+          "max",
+          "choices"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicComboChoice"
+            }
+          },
+          "default_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "default_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "max": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "PublicReward": {
         "type": "object",
         "description": "A reward as the signup page lists it: what it is, and what it costs.",
@@ -84563,6 +88475,177 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "QuotedCombo": {
+        "type": "object",
+        "required": [
+          "price",
+          "unit_total",
+          "saving_unit",
+          "parts"
+        ],
+        "properties": {
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotedComboPart"
+            }
+          },
+          "price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "P per combo unit."
+          },
+          "saving_unit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "À la carte value of one combo minus `unit_total` (may be ≤ 0)."
+          },
+          "unit_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "One combo with its surcharges and add-ons."
+          }
+        }
+      },
+      "QuotedComboPart": {
+        "type": "object",
+        "description": "One part of a quoted combo line.",
+        "required": [
+          "slot_id",
+          "menu_item_id",
+          "size_label",
+          "quantity",
+          "unit_price",
+          "combo_share",
+          "combo_surcharge",
+          "line_total",
+          "addons_total"
+        ],
+        "properties": {
+          "addons_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Its add-ons and optional fields, whole line."
+          },
+          "combo_share": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "combo_surcharge": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "line_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "`combo_share + combo_surcharge`."
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size_label": {
+            "type": "string"
+          },
+          "slot_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "unit_price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The item's normal price at this size."
+          }
+        }
+      },
+      "QuotedDeal": {
+        "type": "object",
+        "description": "A deal the server applied to the cart.",
+        "required": [
+          "deal_rule_id",
+          "name",
+          "name_translations",
+          "times",
+          "discount",
+          "lines"
+        ],
+        "properties": {
+          "deal_rule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "discount": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealLineInput"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "times": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "QuotedLine": {
+        "type": "object",
+        "required": [
+          "index",
+          "quantity",
+          "unit_price",
+          "line_total",
+          "deal_minor"
+        ],
+        "properties": {
+          "combo": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QuotedCombo"
+              }
+            ]
+          },
+          "deal_minor": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What the applied deals took off this line."
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Index into the request's `items[]`."
+          },
+          "line_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The whole line with its add-ons, before deals."
+          },
+          "quantity": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "unit_price": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The size price per unit (a combo: 0; see `combo`)."
           }
         }
       },
@@ -87179,6 +91262,61 @@
           }
         }
       },
+      "SaleWindow": {
+        "type": "object",
+        "description": "An availability window. A combo or deal with no window is always\navailable; with windows, it is available while any window that applies to\nthe branch (its own, or an all-branch one) is open.",
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`null` = every branch."
+          },
+          "ends_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Ignored on write (windows are replaced as a set)."
+          },
+          "starts_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "\"HH:MM\"; with `ends_at`, or neither (the whole day). `ends_at` before\n`starts_at` crosses midnight: the part after midnight belongs to the day\nthe window started (its weekday and date range)."
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "Optional date range, inclusive, judged on the day the window started."
+          },
+          "valid_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "weekdays": {
+            "type": "integer",
+            "format": "int32",
+            "description": "bit0 = Sunday … bit6 = Saturday; 127 = every day (the default)."
+          }
+        }
+      },
       "SaveLayoutRequest": {
         "type": "object",
         "required": [
@@ -88281,6 +92419,23 @@
           "size_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "SizeSurcharge": {
+        "type": "object",
+        "description": "C9: an owner-set surcharge for picking this size instead of the included\none. Without a row, a bigger size costs its usual price difference.",
+        "required": [
+          "size_label",
+          "surcharge"
+        ],
+        "properties": {
+          "size_label": {
+            "type": "string"
+          },
+          "surcharge": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -90542,9 +94697,35 @@
             ],
             "format": "uuid"
           },
+          "combo": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComboFeed",
+                "description": "A kind=combo row: its slots, windows and resolved channel toggles."
+              }
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`item` | `combo` (combos module). Additive."
+          },
+          "meal": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MealLink",
+                "description": "A kind=item row: its \"make it a meal\" upsell (C14)."
+              }
+            ]
           },
           "modifier_groups": {
             "type": "array",

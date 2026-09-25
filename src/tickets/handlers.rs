@@ -1715,6 +1715,9 @@ pub async fn settle_open_ticket_inner(
         order_ref: None,
         // A settle's second person is the waiter, derived from the ticket.
         started_by: None,
+        // Deals are a till act (the teller applies one); a settled ticket
+        // carries none.
+        deals: Vec::new(),
     };
 
     // hub = None → don't re-fire the kitchen (the items already fired at order

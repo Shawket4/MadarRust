@@ -916,12 +916,9 @@ pub async fn seed(pool: &PgPool) {
 pub struct Case {
     pub name: &'static str,
     pub item: Uuid,
-    /// `line` (a menu-item line) or `component` (an item's options priced
-    /// without its size price: madar-catalog `price_options`). The component
-    /// cases were a combo's components; combos are gone (2026-09-25), but
-    /// madar-shared v0.4.0's vectors still carry them and this test must
-    /// write exactly those vectors. They leave with the madar-shared release
-    /// that drops them.
+    /// Always `line` (a menu-item line). The `component` cases (a combo's
+    /// components priced without their size) left with madar-shared v0.5.0;
+    /// the field stays so no vector's shape moves.
     pub part: &'static str,
     pub size: Option<&'static str>,
     pub options: Vec<(Uuid, i32)>,
@@ -942,19 +939,6 @@ fn case(
         size,
         options: options.to_vec(),
         optionals: optionals.to_vec(),
-    }
-}
-
-fn component(
-    name: &'static str,
-    item: Uuid,
-    size: Option<&'static str>,
-    options: &[(Uuid, i32)],
-    optionals: &[Uuid],
-) -> Case {
-    Case {
-        part: "component",
-        ..case(name, item, size, options, optionals)
     }
 }
 
@@ -1228,29 +1212,6 @@ pub fn cases() -> Vec<Case> {
                 (A_CARAMEL, 1),
             ],
             &[O_HOT, O_CREAM],
-        ),
-        // Options priced alone (see `Case::part`).
-        component(
-            "component_latte_small_oat_shot",
-            M_LATTE,
-            s,
-            &[(A_OAT, 1), (A_SHOT, 1)],
-            &[],
-        ),
-        component(
-            "component_latte_no_size_barista",
-            M_LATTE,
-            None,
-            &[(A_BARISTA_WHOLE, 1)],
-            &[],
-        ),
-        component("component_croissant", M_CROISSANT, None, &[], &[]),
-        component(
-            "component_retired_is_still_resolved",
-            M_RETIRED,
-            Some("Regular"),
-            &[(A_SHOT, 1)],
-            &[],
         ),
     ]
 }
@@ -1613,10 +1574,6 @@ fn as_captured(c: &Case, out: &madar_catalog::vectors::Expected) -> Value {
             let (a, o, at, ot) = options(&l.options);
             json!({"unit_price": l.unit_price, "addons": a, "optionals": o, "addon_line": at, "optional_line": ot})
         }
-        Expected::Component(p) => {
-            let (a, o, at, ot) = options(p);
-            json!({"unit_price": null, "addons": a, "optionals": o, "addon_line": at, "optional_line": ot})
-        }
         Expected::Error(madar_catalog::PriceError::UnknownOption { id }) => {
             json!({"error": format!("Not found: Addon {id} not found")})
         }
@@ -1883,19 +1840,19 @@ async fn the_shared_prices_make_the_servers_bill(pool: PgPool) {
 
     let lines = [
         BillLine {
-            charged: charged_subtotal(price(&latte).per_unit(), 1, 0),
+            charged: charged_subtotal(price(&latte).per_unit(), 1),
             per_unit: price(&latte).per_unit(),
             reward_units: 0,
             staff_comp: comp_of(0),
         },
         BillLine {
-            charged: charged_subtotal(price(&tea).per_unit(), 3, 0),
+            charged: charged_subtotal(price(&tea).per_unit(), 3),
             per_unit: price(&tea).per_unit(),
             reward_units: 0,
             staff_comp: 0,
         },
         BillLine {
-            charged: charged_subtotal(price(&small_latte).per_unit(), 2, 0),
+            charged: charged_subtotal(price(&small_latte).per_unit(), 2),
             per_unit: price(&small_latte).per_unit(),
             reward_units: 0,
             staff_comp: 0,
