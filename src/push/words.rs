@@ -180,6 +180,26 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "{count} ورديات متاحة في أسبوع {week_start} — احجز واحدة من الورديات",
     ),
     (
+        "staff.n_open_shifts_week_few",
+        "{count} open shifts in the week of {week_start} — claim one in Shifts",
+        "{count} ورديات متاحة في أسبوع {week_start} — احجز واحدة من الورديات",
+    ),
+    (
+        "staff.n_open_shifts_week_many",
+        "{count} open shifts in the week of {week_start} — claim one in Shifts",
+        "{count} وردية متاحة في أسبوع {week_start} — احجز واحدة من الورديات",
+    ),
+    (
+        "staff.n_open_shifts_week_one",
+        "1 open shift in the week of {week_start} — claim it in Shifts",
+        "وردية متاحة واحدة في أسبوع {week_start} — احجزها من الورديات",
+    ),
+    (
+        "staff.n_open_shifts_week_two",
+        "2 open shifts in the week of {week_start} — claim one in Shifts",
+        "ورديتين متاحتين في أسبوع {week_start} — احجز واحدة من الورديات",
+    ),
+    (
         "staff.n_overtime",
         "{name} worked {minutes} min overtime — approve it",
         "{name} اشتغل {minutes} د إضافي — وافق عليه",
