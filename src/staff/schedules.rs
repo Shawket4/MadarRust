@@ -1565,12 +1565,32 @@ pub async fn put_day(
     authorize_blocks(pool, &claims, org_id, &blocks).await?;
     let mut tx = pool.begin().await?;
     check_blocks(&mut tx, &subject, body.on_date, &blocks).await?;
+    // A board sends only its own branch's blocks (hunt H2-D15, SC-5): from a
+    // branch, the date's blocks worked at ANOTHER branch stay as they are
+    // (own times and branch) unless the request names them. With no branch
+    // (an old client) the whole date is replaced, as before.
+    let mut day = blocks.clone();
+    if let Some(at) = body.branch_id {
+        for s in resolve_range(&mut *tx, &[subject.id], body.on_date, body.on_date, None).await? {
+            if s.on_date != body.on_date
+                || s.branch_id == Some(at)
+                || day.iter().any(|b| b.work_shift_id == s.work_shift_id)
+            {
+                continue;
+            }
+            day.push(Block {
+                work_shift_id: s.work_shift_id,
+                times: s.times_edited.then_some((s.start_time, s.end_time)),
+                branch_id: s.branch_id,
+            });
+        }
+    }
     days::replace_day(
         &mut tx,
         org_id,
         subject.id,
         body.on_date,
-        &blocks,
+        &day,
         clean_reason(&body.reason),
         by,
     )
