@@ -1248,6 +1248,7 @@ pub async fn decide_claim(
         .fetch_optional(&mut *tx)
         .await?;
         if won.is_none() {
+            drop(tx);
             return Err(no_claim_waiting(pool, &claims, org_id, *id).await);
         }
         close_claim(&mut tx, *id, "approved", Some(by)).await?;
@@ -1299,6 +1300,7 @@ pub async fn decide_claim(
         .fetch_optional(&mut *tx)
         .await?;
         if won.is_none() {
+            drop(tx);
             return Err(no_claim_waiting(pool, &claims, org_id, *id).await);
         }
         // The shift reopens, but the claimer's declined claim stays theirs.
