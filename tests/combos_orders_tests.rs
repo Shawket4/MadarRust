@@ -455,3 +455,66 @@ async fn a_combo_and_plain_lines_share_one_order(pool: PgPool) {
     }
     let _ = Shop::admin_token;
 }
+
+#[sqlx::test]
+async fn each_part_earns_its_stamp_and_the_header_earns_none(pool: PgPool) {
+    let s = shop(&pool).await;
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    // A stamp card that stamps every item (C7: as if each were bought alone).
+    sqlx::query(
+        "INSERT INTO loyalty_settings \
+            (org_id, branch_id, enabled, mode, earn_piastres_per_point, default_reward_cost, \
+             require_otp, stamp_per_line_item) \
+         VALUES ($1, NULL, true, 'visits', 1000, 10, false, true)",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let member = common::members::seed_loyalty_member(
+        &pool,
+        s.org,
+        "201000000077",
+        "Ali",
+        "Mcombotoken000000001",
+    )
+    .await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure),
+    )
+    .await;
+    let (st, v) = post_order(
+        &app,
+        &s.admin_token(),
+        s.order_body(json!([s.lunch_line(1)])),
+    )
+    .await;
+    assert_eq!(st, 201, "{v:#}");
+    let req = test::TestRequest::post()
+        .uri("/loyalty/award")
+        .insert_header(("Authorization", format!("Bearer {}", s.admin_token())))
+        .set_json(
+            json!({"branch_id": s.branch, "order_id": v["id"], "token": "Mcombotoken000000001"}),
+        )
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let status = resp.status();
+    let body: Value = test::read_body_json(resp).await;
+    assert!(status.is_success(), "{status} {body:#}");
+    let visits: i32 =
+        sqlx::query_scalar("SELECT visits_balance FROM loyalty_customers WHERE id = $1")
+            .bind(member)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        visits, 3,
+        "Burger, Fries, Latte; never the Lunch deal itself"
+    );
+}
