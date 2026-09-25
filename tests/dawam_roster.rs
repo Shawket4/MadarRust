@@ -3698,3 +3698,68 @@ async fn a_roster_edit_clears_the_sweeps_absence_on_the_changed_shift(pool: PgPo
         "a manager's day stays"
     );
 }
+
+/// Minor default M22: one edit, one "your shift changed" notice per person.
+/// A drag to another day reaches the server as two day edits; the second
+/// joins the first (unread, within two minutes) with both dates.
+#[sqlx::test]
+async fn one_edit_tells_each_person_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(15, 0), t(19, 0)).await;
+    let ws = week_start(today() + Duration::days(7));
+    publish(&app, &f, f.br_a, ws).await;
+    let (d1, d2) = (ws + Duration::days(1), ws + Duration::days(3));
+    override_row(&pool, &f, f.a, d1, Some(m)).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The drag: Morning leaves d1 and lands on d2.
+    for (on, shifts) in [(d1, json!([])), (d2, json!([{ "work_shift_id": m }]))] {
+        let (s, body) = done(call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            f.manager(),
+            json!({ "employee_id": f.a, "on_date": on, "shifts": shifts })
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+    }
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_shift_changed'",
+    )
+    .bind(f.a)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["date"], json!(d1));
+    assert_eq!(told[0]["dates"], json!([d1, d2]));
+    // Read, the next edit is a new notice.
+    sqlx::query("UPDATE staff_notifications SET read_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (s, _) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.manager(),
+        json!({ "employee_id": f.a, "on_date": d2, "shifts": [{ "work_shift_id": e }] })
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_shift_changed'",
+    )
+    .bind(f.a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 2);
+}

@@ -586,7 +586,7 @@ pub(crate) async fn mark_changed_and_tell(
     changes: &BTreeSet<(Uuid, NaiveDate)>,
     tell: bool,
 ) -> Result<(), AppError> {
-    let mut told: BTreeSet<Uuid> = BTreeSet::new();
+    let mut to_tell: std::collections::BTreeMap<Uuid, Vec<NaiveDate>> = Default::default();
     for &(employee_id, date) in changes {
         // The shift changed: the sweep's absence on it no longer holds (D4).
         clear_stale_absences(pool, employee_id, date).await?;
@@ -611,16 +611,60 @@ pub(crate) async fn mark_changed_and_tell(
         .bind(date)
         .execute(pool)
         .await?;
-        if tell && told.insert(employee_id) {
-            notify(
-                pool,
-                org_id,
-                employee_id,
-                "staff.n_shift_changed",
-                json!({ "date": date }),
-            )
-            .await;
+        if tell {
+            to_tell.entry(employee_id).or_default().push(date);
         }
+    }
+    for (employee_id, dates) in to_tell {
+        tell_shift_changed(pool, org_id, employee_id, &dates).await?;
+    }
+    Ok(())
+}
+
+/// How long one edit's notices are one notice: a drag to another day or a
+/// block swapped in the day editor reaches the server as two writes.
+const ONE_EDIT_SECONDS: i64 = 120;
+
+/// "Your shift changed", once per person per edit (minor default M22): the
+/// dates of a change made within [`ONE_EDIT_SECONDS`] of an unread notice
+/// join that notice (its `dates`) instead of pushing a second one. `date`
+/// stays the first date for older apps.
+async fn tell_shift_changed(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    dates: &[NaiveDate],
+) -> Result<(), AppError> {
+    let Some(first) = dates.first() else {
+        return Ok(());
+    };
+    let joined: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE staff_notifications n SET args = jsonb_set(n.args, '{dates}', \
+                (SELECT jsonb_agg(DISTINCT d ORDER BY d) FROM ( \
+                     SELECT jsonb_array_elements_text( \
+                                COALESCE(n.args->'dates', jsonb_build_array(n.args->>'date'))) AS d \
+                     UNION SELECT unnest($3::date[])::text) x)) \
+          WHERE n.id = (SELECT id FROM staff_notifications \
+                         WHERE employee_id = $1 AND key = 'staff.n_shift_changed' \
+                           AND read_at IS NULL \
+                           AND created_at > now() - make_interval(secs => $2) \
+                         ORDER BY created_at DESC LIMIT 1) \
+          RETURNING n.id",
+    )
+    .bind(employee_id)
+    .bind(ONE_EDIT_SECONDS as f64)
+    .bind(dates)
+    .fetch_optional(pool)
+    .await?;
+    if joined.is_none() {
+        notify(
+            pool,
+            org_id,
+            employee_id,
+            "staff.n_shift_changed",
+            json!({ "date": first, "dates": dates }),
+        )
+        .await;
     }
     Ok(())
 }
