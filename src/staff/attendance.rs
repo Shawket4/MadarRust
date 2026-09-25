@@ -2621,6 +2621,12 @@ pub struct PresenceRow {
     /// Minutes this person is rostered for today — the denominator of the
     /// labour-vs-plan bar.
     pub scheduled_minutes: i64,
+    /// When a punch for them opens: the next shift of their today (not yet
+    /// ended; else the first) less its check-in window (CL-3). Null when not
+    /// rostered. The dashboard offers Punch from then, as the app does
+    /// (minor default M15).
+    #[sqlx(default)]
+    pub punch_opens_at: Option<DateTime<Utc>>,
 }
 
 /// The whole team's state right now, plus the day's labour against plan.
@@ -2725,6 +2731,7 @@ pub async fn team_presence(
                    l.d,
                    COALESCE(sh.minutes, 0)                        AS scheduled_minutes,
                    sh.due_at                                      AS due_at,
+                   sh.opens_at                                    AS punch_opens_at,
                    -- An approved leave or mission covers their today: the
                    -- sweep excuses the day on the same test (E2E B-TEAM-7).
                    EXISTS (
@@ -2739,8 +2746,14 @@ pub async fn team_presence(
               -- split days, day-scoped blocks and their effective times.
               LEFT JOIN LATERAL (
                   SELECT SUM(EXTRACT(EPOCH FROM (r.end_at - r.start_at)) / 60)::bigint AS minutes,
-                         MIN(r.start_at) AS due_at
+                         MIN(r.start_at) AS due_at,
+                         COALESCE(
+                             MIN(r.start_at - make_interval(mins => GREATEST(ws.checkin_window_minutes, 0)))
+                                 FILTER (WHERE r.end_at > now()),
+                             MIN(r.start_at - make_interval(mins => GREATEST(ws.checkin_window_minutes, 0)))
+                         ) AS opens_at
                     FROM dawam_roster(ARRAY[l.id], l.d, l.d) r
+                    JOIN work_shifts ws ON ws.id = r.work_shift_id
               ) sh ON true
         ),
         today AS (
@@ -2761,7 +2774,7 @@ pub async fn team_presence(
                COALESCE(t.check_out_at, NULL) AS check_out_at,
                COALESCE(t.late_minutes, 0)    AS late_minutes,
                COALESCE(t.worked_minutes, 0)  AS worked_minutes,
-               r.scheduled_minutes,
+               r.scheduled_minutes, r.punch_opens_at,
                CASE
                    WHEN t.status = 'on_leave'                       THEN 'on_leave'
                    WHEN t.check_in_at IS NOT NULL
