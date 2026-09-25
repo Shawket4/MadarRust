@@ -49338,6 +49338,209 @@
         ]
       }
     },
+    "/staff/expense-advances/{id}": {
+      "delete": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Clear an expense advance (a till pay-out's \"expense advance to\" tag, or\na logged one) with a reason: the record goes, a till's cash movement\nstays exactly as it is (AV-10, minor default M39). Owner only.",
+        "operationId": "clear_expense_advance",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Give an expense advance to the person who really received the cash, with\na reason; a till's cash movement stays as it is (minor default M39).\nOwner only.",
+        "operationId": "reassign_expense_advance",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReassignExpenseAdvance"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExpenseAdvance"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/staff/flags": {
       "get": {
         "tags": [
@@ -52683,8 +52886,15 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": ""
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaimDecision"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -54287,7 +54497,7 @@
           {
             "name": "method",
             "in": "query",
-            "description": "`bank` (a transfer file: name, account, amount) · `wallet` (numbers\nand amounts) · `cash`; omitted = everyone, every figure (PAY-8).",
+            "description": "`bank` (a transfer file: name, account, amount) · `wallet` (numbers\nand amounts) · `cash` (the envelope list: name and amount, nobody with\n0 to pay); omitted = everyone, every figure (PAY-8).",
             "required": false,
             "schema": {
               "type": "string"
@@ -63960,6 +64170,20 @@
             ],
             "format": "uuid"
           },
+          "deduction_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The deduction the flag was handled with (a deduct or an unpaid\nexcuse), and its status: `approved`, or `pending` = over the\nmanager's limit, it waits for the owner (minor default M33)."
+          },
+          "deduction_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "detected_at": {
             "type": "string",
             "format": "date-time"
@@ -67864,6 +68088,26 @@
           }
         }
       },
+      "ClaimDecision": {
+        "type": "object",
+        "description": "A claim decision: the labour limits the approved day now breaks (a long\nday, a short rest). A warning, never a block (RU-13, minor default M26).",
+        "required": [
+          "status",
+          "warnings"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`approved` · `rejected`"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LabourWarning"
+            }
+          }
+        }
+      },
       "ClearTableRequest": {
         "type": "object",
         "required": [
@@ -68947,6 +69191,14 @@
           "work_shift_id"
         ],
         "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch whose board sets the pattern: a business-wide block is\nworked there every week (one of the person's branches, else 400\n`EMPLOYEE_NOT_AT_BRANCH`). Omitted = the person's first branch."
+          },
           "day_of_week": {
             "type": [
               "integer",
@@ -71266,7 +71518,8 @@
           "history",
           "totals",
           "paid_count",
-          "missing_salary_count"
+          "missing_salary_count",
+          "unsettled"
         ],
         "properties": {
           "history": {
@@ -71306,6 +71559,13 @@
           "totals": {
             "$ref": "#/components/schemas/PayrollTotals",
             "description": "The run added up by the server (AT-3)."
+          },
+          "unsettled": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UnsettledPeriod"
+            },
+            "description": "Older months that aren't fully paid, oldest first (hunt H2-P1): a\nmonth that rolled over while still a draft, or approved with someone\nunpaid. Each is settled by its id (approve, mark paid, reopen,\nexport); a paid or closed month isn't listed."
           }
         }
       },
@@ -78696,7 +78956,7 @@
               "null"
             ],
             "format": "date",
-            "description": "The month it lands in (AD-1): any day of that month; the first month\nof a recurring line (AD-3). Defaults to today. Must be an open month."
+            "description": "The month it lands in (AD-1): any day of that month; the first month\nof a recurring line (AD-3). Defaults to today, or, when today's month\nis already approved, the first day of the next open month (M27).\nGiven explicitly, it must be in an open month (409 PERIOD_CLOSED)."
           },
           "employee_id": {
             "type": "string",
@@ -83786,6 +84046,14 @@
             "type": "integer",
             "format": "int32"
           },
+          "punch_opens_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When a punch for them opens: the next shift of their today (not yet\nended; else the first) less its check-in window (CL-3). Null when not\nrostered. The dashboard offers Punch from then, as the app does\n(minor default M15)."
+          },
           "scheduled_minutes": {
             "type": "integer",
             "format": "int64",
@@ -86304,6 +86572,26 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "ReassignExpenseAdvance": {
+        "type": "object",
+        "required": [
+          "employee_id"
+        ],
+        "properties": {
+          "employee_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who really received the cash."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (required)."
           }
         }
       },
@@ -88924,6 +89212,14 @@
           "created_at"
         ],
         "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Where a business-wide block is worked (hunt H2-B8b); null = the\nblock's own branch, else the person's first."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -90185,7 +90481,8 @@
           "branches",
           "people",
           "work_shifts",
-          "settings"
+          "settings",
+          "first_open_date"
         ],
         "properties": {
           "adjustment_limit_piastres": {
@@ -90236,6 +90533,11 @@
             "type": "string",
             "format": "uuid",
             "description": "Who is signed in: the employee."
+          },
+          "first_open_date": {
+            "type": "string",
+            "format": "date",
+            "description": "The first day (from my today) not inside an approved or paid month:\nwhere a new bonus or deduction lands by default (\"lands in October's\npay\", minor default M27)."
           },
           "modules": {
             "type": "array",
@@ -90990,6 +91292,14 @@
             ],
             "format": "uuid",
             "description": "The shift a late arrival, early departure or excuse is for (split days)."
+          },
+          "worked_dates": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "For a leave or mission: the days it covers that the person already\nclocked in on. Approving turns those worked days into leave (the\npunches are kept), so the approver is warned first (minor default\nM16). Empty for every other kind."
           }
         }
       },
@@ -94218,6 +94528,52 @@
           },
           "token": {
             "type": "string"
+          }
+        }
+      },
+      "UnsettledPeriod": {
+        "type": "object",
+        "description": "An older month still to settle (hunt H2-P1).",
+        "required": [
+          "period_id",
+          "starts_on",
+          "ends_on",
+          "status",
+          "net_total_piastres",
+          "paid_count",
+          "people"
+        ],
+        "properties": {
+          "ends_on": {
+            "type": "string",
+            "format": "date"
+          },
+          "net_total_piastres": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The month's net pay: live for a draft, the frozen payslips once\napproved."
+          },
+          "paid_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Payslips marked paid (a 'none' mark counts); 0 for a draft."
+          },
+          "people": {
+            "type": "integer",
+            "format": "int64",
+            "description": "People on the month's payroll."
+          },
+          "period_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "starts_on": {
+            "type": "string",
+            "format": "date"
+          },
+          "status": {
+            "type": "string",
+            "description": "`draft` (never approved) · `generated` (approved, someone unpaid)"
           }
         }
       },
