@@ -69,9 +69,12 @@ pub enum AppError {
     ServiceUnavailable(String),
 
     /// Asked for too much, too fast. Distinct from `Conflict` because a client
-    /// should retry this one and only this one.
-    #[error("{0}")]
-    TooManyRequests(String),
+    /// should retry this one and only this one. `code` names the limiter:
+    /// `RATE_LIMITED` for the general and per-address buckets,
+    /// `EXPORT_RATE_LIMITED` for the export gate. One code for all three made
+    /// every ordinary read's 429 look like a throttled export.
+    #[error("{reason}")]
+    TooManyRequests { code: &'static str, reason: String },
 
     /// Too many wrong PINs at this till. Carries the remaining wait in seconds
     /// so the POS can show a live countdown instead of guessing
@@ -164,14 +167,12 @@ impl AppError {
     fn code(&self) -> Option<String> {
         match self {
             AppError::OrgSuspended => Some("ORG_SUSPENDED".to_string()),
-            // The dashboard branches on this to say "wait a moment" rather
-            // than showing a raw error for something that is not a fault.
-            AppError::TooManyRequests(_) => Some("EXPORT_RATE_LIMITED".to_string()),
             AppError::PinThrottled { .. } => Some("PIN_THROTTLED".to_string()),
             AppError::Refused { code, .. }
             | AppError::RefusedWith { code, .. }
             | AppError::Coded { code, .. }
-            | AppError::CodedVars { code, .. } => Some((*code).to_string()),
+            | AppError::CodedVars { code, .. }
+            | AppError::TooManyRequests { code, .. } => Some((*code).to_string()),
             _ => None,
         }
     }
@@ -270,7 +271,7 @@ impl actix_web::ResponseError for AppError {
             }
             AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
-            AppError::TooManyRequests(_) => HttpResponse::TooManyRequests().json(body),
+            AppError::TooManyRequests { .. } => HttpResponse::TooManyRequests().json(body),
             // Retry-After as well as the body field: the header is the standard
             // any HTTP client already understands.
             AppError::PinThrottled { seconds } => HttpResponse::TooManyRequests()

@@ -493,6 +493,7 @@ pub async fn throttle_exports(
             if !allow_export(&key) {
                 return Ok(too_many(
                     req,
+                    "EXPORT_RATE_LIMITED",
                     format!(
                         "That is {} exports in a minute. Give it a moment and try again — \
                          each one reads the whole filtered dataset.",
@@ -509,6 +510,7 @@ pub async fn throttle_exports(
         {
             return Ok(too_many(
                 req,
+                "RATE_LIMITED",
                 "Too many requests just now. This will clear in a moment.".into(),
             ));
         }
@@ -518,14 +520,17 @@ pub async fn throttle_exports(
 
 /// The 429, as a RESPONSE rather than an error: an `Err` from a middleware
 /// passes actix-cors without its headers, so the browser hid it and the
-/// dashboard said "Network error" (E2E B-TEAM-8). Same body and code as
-/// `AppError::TooManyRequests` everywhere else.
+/// dashboard said "Network error" (E2E B-TEAM-8). Same body as
+/// `AppError::TooManyRequests` everywhere else; `code` names the limiter that
+/// refused (`RATE_LIMITED`, `EXPORT_RATE_LIMITED`).
 fn too_many<B>(
     req: actix_web::dev::ServiceRequest,
-    why: String,
+    code: &'static str,
+    reason: String,
 ) -> actix_web::dev::ServiceResponse<actix_web::body::EitherBody<B>> {
     use actix_web::ResponseError;
-    req.into_response(crate::errors::AppError::TooManyRequests(why).error_response())
+    let refusal = crate::errors::AppError::TooManyRequests { code, reason };
+    req.into_response(refusal.error_response())
         .map_into_right_body()
 }
 
@@ -1053,5 +1058,117 @@ mod tests {
         .await;
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(allow(&r).as_deref(), Some(origin), "a route governor's 429");
+    }
+
+    /// Each limiter's 429 names the limiter in its code: the general and
+    /// per-address buckets answer `RATE_LIMITED`, only the export gate
+    /// `EXPORT_RATE_LIMITED`. Every 429 said "export" before, so the staff
+    /// app's ordinary reads (`/staff/me/payslips`, …) came back as a
+    /// throttled export (iOS device checks, 2026-09-25).
+    #[actix_web::test]
+    async fn each_limiter_names_itself_in_the_code() {
+        use crate::auth::jwt::{JwtSecret, create_token};
+        use crate::models::UserRole;
+        use actix_web::{App, HttpResponse, http::StatusCode, test, web};
+        // Small allowances, so each bucket runs dry in a handful of calls and
+        // none refills (a token every 12 s or more) while the test runs.
+        // SAFETY: nextest runs each test in its own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "3");
+            std::env::set_var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE", "5");
+            std::env::set_var("MADAR_EXPORT_MAX_PER_MINUTE", "2");
+        }
+        let secret = JwtSecret("limiter-code-test-secret".into());
+        let person = || {
+            create_token(
+                &secret,
+                uuid::Uuid::new_v4(),
+                None,
+                UserRole::Teller,
+                None,
+                1,
+            )
+            .unwrap()
+        };
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .route("/public/ping", web::get().to(HttpResponse::Ok))
+                .service(
+                    web::scope("/api")
+                        .wrap(crate::auth::middleware::JwtMiddleware)
+                        .route("/ping", web::get().to(HttpResponse::Ok)),
+                ),
+        )
+        .await;
+        let call = |addr: &str, bearer: Option<&str>, export: bool| {
+            let mut req = test::TestRequest::get()
+                .uri("/public/ping")
+                .peer_addr(addr.parse().unwrap());
+            if let Some(b) = bearer {
+                req = req
+                    .uri("/api/ping")
+                    .insert_header(("Authorization", format!("Bearer {b}")));
+            }
+            if export {
+                req = req.insert_header((EXPORT_HEADER, "1"));
+            }
+            req.to_request()
+        };
+        const SLOW_DOWN: &str = "Too many requests just now. This will clear in a moment.";
+
+        // The general bucket: an anonymous caller is keyed by its address, and
+        // only its own bucket is asked.
+        for _ in 0..3 {
+            let r = test::call_service(&app, call("10.7.0.1:4000", None, false)).await;
+            assert!(r.status().is_success());
+        }
+        let r = test::call_service(&app, call("10.7.0.1:4000", None, false)).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value = test::read_body_json(r).await;
+        assert_eq!(body["code"], "RATE_LIMITED", "the general bucket: {body}");
+        assert_eq!(body["error"], SLOW_DOWN);
+
+        // The per-address bucket: alice spends 3 of the address's 5, bob 2
+        // more, and bob's next call is refused although his own bucket still
+        // holds a token. Only the address ceiling can refuse it.
+        let (alice, bob) = (person(), person());
+        for _ in 0..3 {
+            let r = test::call_service(&app, call("10.7.0.2:4000", Some(&alice), false)).await;
+            assert!(r.status().is_success());
+        }
+        for _ in 0..2 {
+            let r = test::call_service(&app, call("10.7.0.2:4000", Some(&bob), false)).await;
+            assert!(r.status().is_success());
+        }
+        let r = test::call_service(&app, call("10.7.0.2:4000", Some(&bob), false)).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value = test::read_body_json(r).await;
+        assert_eq!(
+            body["code"], "RATE_LIMITED",
+            "the per-address bucket: {body}"
+        );
+        assert_eq!(body["error"], SLOW_DOWN);
+
+        // The export gate keeps its own code and sentence.
+        let carol = person();
+        for _ in 0..2 {
+            let r = test::call_service(&app, call("10.7.0.3:4000", Some(&carol), true)).await;
+            assert!(r.status().is_success());
+        }
+        let r = test::call_service(&app, call("10.7.0.3:4000", Some(&carol), true)).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value = test::read_body_json(r).await;
+        assert_eq!(
+            body["code"], "EXPORT_RATE_LIMITED",
+            "the export gate: {body}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("That is 2 exports in a minute.")),
+            "{body}"
+        );
     }
 }
