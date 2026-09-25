@@ -17,7 +17,12 @@ What it does, and why (all of it is recorded in FOODICS_DROP_CLEANUP.md):
   (own price, rendered as chips above the option cards), not as a modifier group.
 * Extras are deduplicated and the spelling fixed.
 * cake (a required upsell on 76 coffees) and Talabat (a delivery surcharge) are
-  DROPPED on the owner's instruction.
+  DROPPED on the owner's instruction. The cake came back on 2026-09-25 in a
+  different shape — an OPTIONAL "Cake" group (English / Marble, 50 EGP each,
+  each deducting its cake) on every drink — hand-modelled on prod like
+  "Red Bull Type": scripts/prod-cleanup/2026-09-25-drops-cake-addon.sql. Keep
+  the Foodics group dropped here; re-importing it would bring back the
+  required 45 EGP version.
 * BREAD, the Turkish coffee choices and the mojito flavours become item-private
   OPTIONALS, the way the matcha drinks carry Honey / Condensed Milk / Vanilla.
 
