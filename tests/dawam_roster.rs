@@ -1064,16 +1064,18 @@ async fn a_swap_moves_one_block_and_keeps_the_rest_of_both_days(pool: PgPool) {
         "Amal keeps her evening"
     );
     assert_eq!(shifts_on(&pool, f.b, d).await, vec![m]);
-    // One decision only.
-    let (s, _) = done(call!(
-        app,
-        "PATCH",
-        format!("/staff/swaps/{id}/decision"),
-        owner,
-        json!({ "approve": true })
-    ))
-    .await;
-    assert_eq!(s, 404);
+    // One decision only: a second is ALREADY_DECIDED (hunt H2-B9).
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/swaps/{id}/decision"),
+            owner,
+            json!({ "approve": true })
+        ),
+        409,
+        "ALREADY_DECIDED"
+    );
     // Told once, by the approval; both days are marked changed.
     let keys = keys_for(&pool, f.a).await;
     assert!(
@@ -1320,15 +1322,18 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
         "told once: {keys:?}"
     );
     assert!(changed(&pool, f.a, d).await);
-    let (s, _) = done(call!(
-        app,
-        "PATCH",
-        format!("/staff/open-shifts/{lunch}/decision"),
-        owner,
-        json!({ "approve": true })
-    ))
-    .await;
-    assert_eq!(s, 404, "one decision only");
+    // One decision only: a second is ALREADY_DECIDED (hunt H2-B9).
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/open-shifts/{lunch}/decision"),
+            owner,
+            json!({ "approve": true })
+        ),
+        409,
+        "ALREADY_DECIDED"
+    );
     // A filled shift can't be cancelled.
     let (s, _) = done(call!(
         app,
@@ -4671,4 +4676,283 @@ async fn a_business_wide_block_set_from_branch_b_is_worked_at_b(pool: PgPool) {
     assert_eq!(s, 204);
     assert_eq!(board(f.br_b, d2).await, vec![(f.a, w)], "the claim is at B");
     assert!(board(f.br_a, d2).await.is_empty());
+}
+
+/// Hunt H2-B9 (AT-13): the refusals a person can hit on claims, swaps, days,
+/// requests and decisions carry a machine `code` (and `vars` where a figure
+/// matters), so the Arabic apps word them instead of showing English.
+#[sqlx::test]
+async fn roster_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 204);
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind, minutes_away) \
+         VALUES ($1, $2, $3, 'left_mid_shift', 30) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let nobody = Uuid::new_v4();
+    let owner = f.owner();
+    let cases: Vec<(&str, String, &str, Value, u16, &str)> = vec![
+        // claims
+        (
+            "PATCH",
+            format!("/staff/open-shifts/{id}/decision"),
+            &owner,
+            json!({ "approve": false }),
+            409,
+            "ALREADY_DECIDED",
+        ),
+        (
+            "PATCH",
+            format!("/staff/open-shifts/{nobody}/decision"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_CLAIM_WAITING",
+        ),
+        (
+            "POST",
+            format!("/staff/open-shifts/{nobody}/claim"),
+            &ta,
+            Value::Null,
+            404,
+            "OPEN_SHIFT_NOT_FOUND",
+        ),
+        (
+            "POST",
+            format!("/staff/open-shifts/{id}/cancel"),
+            &owner,
+            Value::Null,
+            409,
+            "OPEN_SHIFT_CLOSED",
+        ),
+        // swaps
+        (
+            "POST",
+            "/staff/me/swaps".into(),
+            &ta,
+            json!({ "my_date": d, "my_shift_id": l, "peer_id": f.a, "peer_date": d, "peer_shift_id": l }),
+            400,
+            "PICK_A_COLLEAGUE",
+        ),
+        (
+            "POST",
+            "/staff/me/swaps".into(),
+            &ta,
+            json!({ "my_date": d, "my_shift_id": l, "peer_id": nobody, "peer_date": d, "peer_shift_id": l }),
+            404,
+            "EMPLOYEE_NOT_FOUND",
+        ),
+        (
+            "POST",
+            "/staff/me/swaps".into(),
+            &ta,
+            json!({ "my_date": d, "my_shift_id": l, "peer_id": f.b, "peer_date": d, "peer_shift_id": l }),
+            409,
+            "NOT_ROSTERED",
+        ),
+        (
+            "PATCH",
+            format!("/staff/me/swaps/{nobody}"),
+            &ta,
+            json!({ "approve": true }),
+            404,
+            "NO_SWAP_WAITING",
+        ),
+        (
+            "POST",
+            format!("/staff/me/swaps/{nobody}/cancel"),
+            &ta,
+            Value::Null,
+            404,
+            "NO_SWAP_TO_CANCEL",
+        ),
+        (
+            "PATCH",
+            format!("/staff/swaps/{nobody}/decision"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_SWAP_WAITING",
+        ),
+        // ranges
+        (
+            "GET",
+            format!("/staff/me/roster?from={d}&to={}", d + Duration::days(100)),
+            &ta,
+            Value::Null,
+            400,
+            "RANGE_TOO_WIDE",
+        ),
+        (
+            "GET",
+            format!("/staff/me/roster?from={d}&to={}", d - Duration::days(1)),
+            &ta,
+            Value::Null,
+            400,
+            "RANGE_BACKWARDS",
+        ),
+        // days and blocks
+        (
+            "PUT",
+            "/staff/schedules/days".into(),
+            &owner,
+            json!({ "employee_id": f.a, "on_date": d, "shifts": [{ "work_shift_id": l, "start_time": "10:00:00" }] }),
+            400,
+            "TIMES_BOTH_OR_NEITHER",
+        ),
+        (
+            "PUT",
+            "/staff/schedules/overrides".into(),
+            &owner,
+            json!({ "employee_id": f.a, "on_date": d, "work_shift_id": null, "start_time": "10:00:00", "end_time": "12:00:00" }),
+            400,
+            "DAY_OFF_NO_TIMES",
+        ),
+        (
+            "POST",
+            "/staff/schedules/days/move".into(),
+            &owner,
+            json!({ "employee_id": f.a, "to_employee_id": f.a, "on_date": d, "work_shift_id": l }),
+            400,
+            "PICK_SOMEONE_ELSE",
+        ),
+        (
+            "POST",
+            "/staff/work-shifts".into(),
+            &owner,
+            json!({ "name": " ", "start_time": "08:00:00", "end_time": "12:00:00" }),
+            400,
+            "SHIFT_NAME_REQUIRED",
+        ),
+        (
+            "DELETE",
+            format!("/staff/schedules/{nobody}"),
+            &owner,
+            Value::Null,
+            404,
+            "ASSIGNMENT_NOT_FOUND",
+        ),
+        (
+            "PUT",
+            "/staff/me/preferences".into(),
+            &ta,
+            json!({ "pref_time": "night", "cant_work_days": [] }),
+            400,
+            "PREFERENCES_INVALID",
+        ),
+        // requests
+        (
+            "POST",
+            "/staff/me/requests".into(),
+            &ta,
+            json!({ "kind": "nap", "on_date": d }),
+            400,
+            "REQUEST_KIND_UNKNOWN",
+        ),
+        (
+            "POST",
+            "/staff/me/requests".into(),
+            &ta,
+            json!({ "kind": "late_arrival", "on_date": d }),
+            400,
+            "LATE_ARRIVAL_TIME_REQUIRED",
+        ),
+        (
+            "PATCH",
+            format!("/staff/requests/{nobody}/decision"),
+            &owner,
+            json!({ "status": "approved" }),
+            404,
+            "REQUEST_NOT_FOUND",
+        ),
+        (
+            "GET",
+            "/staff/requests?status=maybe".into(),
+            &owner,
+            Value::Null,
+            400,
+            "STATUS_UNKNOWN",
+        ),
+        // decisions on attendance
+        (
+            "PATCH",
+            format!("/staff/attendance/{nobody}/cover"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_COVER_WAITING",
+        ),
+        (
+            "PATCH",
+            format!("/staff/attendance/{nobody}/overtime"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_OVERTIME_WAITING",
+        ),
+        (
+            "PATCH",
+            format!("/staff/flags/{flag}"),
+            &owner,
+            json!({ "action": "deduct" }),
+            400,
+            "AMOUNT_REQUIRED",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (method, uri, token, body, status, code) in cases {
+        let (s, out) = done(call!(app, method, uri, token, body)).await;
+        if s != status || out["code"] != json!(code) {
+            wrong.push(format!(
+                "{method} {uri}: want {status} {code}, got {s} {out}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // A figure the app words: the widest range.
+    let (_, out) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={d}&to={}", d + Duration::days(100)),
+        ta
+    ))
+    .await;
+    assert_eq!(out["vars"]["max_days"], json!(62), "{out}");
+    let (_, out) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(out["vars"]["status"], json!("approved"), "{out}");
 }

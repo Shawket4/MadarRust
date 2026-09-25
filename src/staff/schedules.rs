@@ -523,16 +523,9 @@ pub async fn my_schedule(
     let employee_id = me.employee_id;
     let org_id = me.org_id;
 
-    if query.to < query.from {
-        return Err(AppError::BadRequest("`to` is before `from`".into()));
-    }
     // A phone shows a week or a month; anything larger is a scrape, not a screen.
+    crate::staff::validate_range(query.from, query.to, 62)?;
     let span = (query.to - query.from).num_days();
-    if span > 62 {
-        return Err(AppError::BadRequest(
-            "Range too wide — request 62 days or fewer".into(),
-        ));
-    }
 
     let tz = employee_timezone(pool.get_ref(), org_id, employee_id).await?;
     // Named only when the employee has exactly ONE live branch — the same rule
@@ -608,14 +601,30 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
+/// 400 `SHIFT_SETTING_INVALID` {field}: one of a block's numbers is out of range.
+fn setting_invalid(field: &str, reason: String) -> AppError {
+    crate::staff::coded_vars(
+        400,
+        "SHIFT_SETTING_INVALID",
+        reason,
+        serde_json::json!({ "field": field }),
+    )
+}
+
 fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError> {
     let name = body.name.trim();
     if name.is_empty() {
-        return Err(AppError::BadRequest("Shift name is required".into()));
+        return Err(crate::staff::coded(
+            400,
+            "SHIFT_NAME_REQUIRED",
+            "Shift name is required",
+        ));
     }
     if body.start_time == body.end_time {
-        return Err(AppError::BadRequest(
-            "A shift cannot start and end at the same time".into(),
+        return Err(crate::staff::coded(
+            400,
+            "SHIFT_EMPTY",
+            "A shift cannot start and end at the same time",
         ));
     }
     for (label, value) in [
@@ -627,23 +636,29 @@ fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError
         ),
     ] {
         if value.is_some_and(|v| v < 0) {
-            return Err(AppError::BadRequest(format!("{label} cannot be negative")));
+            return Err(setting_invalid(
+                label,
+                format!("{label} cannot be negative"),
+            ));
         }
     }
-    if body.checkin_window_minutes.is_some_and(|v| v <= 0) {
-        return Err(AppError::BadRequest(
-            "checkin_window_minutes must be positive".into(),
-        ));
-    }
-    if body.half_day_threshold_minutes.is_some_and(|v| v <= 0) {
-        return Err(AppError::BadRequest(
-            "half_day_threshold_minutes must be positive".into(),
-        ));
-    }
-    if body.overtime_multiplier.is_some_and(|v| v <= Decimal::ZERO) {
-        return Err(AppError::BadRequest(
-            "overtime_multiplier must be positive".into(),
-        ));
+    for (label, bad) in [
+        (
+            "checkin_window_minutes",
+            body.checkin_window_minutes.is_some_and(|v| v <= 0),
+        ),
+        (
+            "half_day_threshold_minutes",
+            body.half_day_threshold_minutes.is_some_and(|v| v <= 0),
+        ),
+        (
+            "overtime_multiplier",
+            body.overtime_multiplier.is_some_and(|v| v <= Decimal::ZERO),
+        ),
+    ] {
+        if bad {
+            return Err(setting_invalid(label, format!("{label} must be positive")));
+        }
     }
     for (label, value) in [
         ("ot_day_multiplier", body.ot_day_multiplier.flatten()),
@@ -651,29 +666,36 @@ fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError
     ] {
         // numeric(4,2): above zero, below 100.
         if value.is_some_and(|v| v <= Decimal::ZERO || v >= Decimal::from(100)) {
-            return Err(AppError::BadRequest(format!(
-                "{label} must be above 0 and below 100"
-            )));
+            return Err(setting_invalid(
+                label,
+                format!("{label} must be above 0 and below 100"),
+            ));
         }
     }
     if let Some(days) = &body.valid_days
         && (days.is_empty() || days.iter().any(|d| !(0..=6).contains(d)))
     {
-        return Err(AppError::BadRequest(
-            "valid_days needs at least one day, 0 (Sunday) through 6 (Saturday)".into(),
+        return Err(crate::staff::coded(
+            400,
+            "SHIFT_DAYS_REQUIRED",
+            "valid_days needs at least one day, 0 (Sunday) through 6 (Saturday)",
         ));
     }
     if let Some(times) = &body.day_times {
         let mut seen = BTreeSet::new();
         for t in times {
             if !(0..=6).contains(&t.day_of_week) || !seen.insert(t.day_of_week) {
-                return Err(AppError::BadRequest(
-                    "day_times: one entry per day, 0 (Sunday) through 6 (Saturday)".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "SHIFT_DAY_TIMES_INVALID",
+                    "day_times: one entry per day, 0 (Sunday) through 6 (Saturday)",
                 ));
             }
             if t.start_time == t.end_time {
-                return Err(AppError::BadRequest(
-                    "A shift cannot start and end at the same time".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "SHIFT_EMPTY",
+                    "A shift cannot start and end at the same time",
                 ));
             }
         }
@@ -730,7 +752,7 @@ async fn load_work_shift(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<WorkSh
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Work shift not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "SHIFT_NOT_FOUND", "Work shift not found"))?;
     complete_shifts(pool, org_id, std::slice::from_mut(&mut row)).await?;
     Ok(row)
 }
@@ -856,10 +878,15 @@ pub async fn create_work_shift(
 
 fn refuse_times_off_days(valid_days: &[i16], times: &[DayTime]) -> Result<(), AppError> {
     if let Some(t) = times.iter().find(|t| !valid_days.contains(&t.day_of_week)) {
-        return Err(AppError::BadRequest(format!(
-            "day {} has its own times but isn't one of the block's days",
-            t.day_of_week
-        )));
+        return Err(crate::staff::coded_vars(
+            400,
+            "SHIFT_DAY_TIMES_OFF_DAY",
+            format!(
+                "day {} has its own times but isn't one of the block's days",
+                t.day_of_week
+            ),
+            serde_json::json!({ "day_of_week": t.day_of_week }),
+        ));
     }
     Ok(())
 }
@@ -1080,7 +1107,11 @@ pub async fn delete_work_shift(
         .await?
         .rows_affected();
     if deleted == 0 {
-        return Err(AppError::NotFound("Work shift not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "SHIFT_NOT_FOUND",
+            "Work shift not found",
+        ));
     }
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1151,15 +1182,19 @@ pub async fn create_assignment(
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
     if body.day_of_week.is_some_and(|d| !(0..=6).contains(&d)) {
-        return Err(AppError::BadRequest(
-            "day_of_week must be 0 (Sunday) through 6 (Saturday)".into(),
+        return Err(crate::staff::coded(
+            400,
+            "DAY_OF_WEEK_INVALID",
+            "day_of_week must be 0 (Sunday) through 6 (Saturday)",
         ));
     }
     if let (Some(from), Some(to)) = (body.effective_from, body.effective_to)
         && to < from
     {
-        return Err(AppError::BadRequest(
-            "effective_to is before effective_from".into(),
+        return Err(crate::staff::coded(
+            400,
+            "RANGE_BACKWARDS",
+            "effective_to is before effective_from",
         ));
     }
     let info = days::block_info(
@@ -1248,7 +1283,9 @@ pub async fn delete_assignment(
             .bind(org_id)
             .fetch_optional(pool.get_ref())
             .await?
-            .ok_or_else(|| AppError::NotFound("Assignment not found".into()))?;
+            .ok_or_else(|| {
+                crate::staff::coded(404, "ASSIGNMENT_NOT_FOUND", "Assignment not found")
+            })?;
     let subject = access::subject(pool.get_ref(), org_id, owner).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
@@ -1265,7 +1302,11 @@ pub async fn delete_assignment(
         .await?
         .rows_affected();
     if deleted == 0 {
-        return Err(AppError::NotFound("Assignment not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "ASSIGNMENT_NOT_FOUND",
+            "Assignment not found",
+        ));
     }
     let changes = match horizon {
         Some((a, b)) => days::diff(&before, &days::snapshot(&mut tx, &[owner], a, b).await?),
@@ -1290,8 +1331,10 @@ fn times_of(
             code: "SHIFT_EMPTY",
             reason: "A shift can't start and end at the same time.".into(),
         }),
-        _ => Err(AppError::BadRequest(
-            "Send both start_time and end_time, or neither".into(),
+        _ => Err(crate::staff::coded(
+            400,
+            "TIMES_BOTH_OR_NEITHER",
+            "Send both start_time and end_time, or neither",
         )),
     }
 }
@@ -1414,7 +1457,11 @@ pub async fn put_override(
         .into_iter()
         .collect();
     if body.work_shift_id.is_none() && times.is_some() {
-        return Err(AppError::BadRequest("A day off has no times".into()));
+        return Err(crate::staff::coded(
+            400,
+            "DAY_OFF_NO_TIMES",
+            "A day off has no times",
+        ));
     }
     let by = claims.user_id_safe().ok();
     authorize_blocks(pool, &claims, org_id, &blocks).await?;
@@ -1620,12 +1667,20 @@ pub async fn move_shift(
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     if body.employee_id == body.to_employee_id {
-        return Err(AppError::BadRequest("Pick someone else.".into()));
+        return Err(crate::staff::coded(
+            400,
+            "PICK_SOMEONE_ELSE",
+            "Pick someone else.",
+        ));
     }
     let from = editable_subject(pool, &claims, org_id, body.employee_id).await?;
     let to = editable_subject(pool, &claims, org_id, body.to_employee_id).await?;
     if to.employment_status != "active" {
-        return Err(AppError::NotFound("Employee not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "EMPLOYEE_NOT_FOUND",
+            "Employee not found",
+        ));
     }
     let by = claims.user_id_safe().ok();
     let block_only = Block {
@@ -1728,7 +1783,7 @@ pub async fn delete_override(
     .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?
-    .ok_or_else(|| AppError::NotFound("Override not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "OVERRIDE_NOT_FOUND", "Override not found"))?;
     let (owner, on_date) = row;
     let subject = access::subject(pool.get_ref(), org_id, owner).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
@@ -1741,7 +1796,11 @@ pub async fn delete_override(
         .await?
         .rows_affected();
     if deleted == 0 {
-        return Err(AppError::NotFound("Override not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "OVERRIDE_NOT_FOUND",
+            "Override not found",
+        ));
     }
     days::check_overlaps(&mut tx, owner, on_date, on_date).await?;
     tx.commit().await?;
@@ -1835,7 +1894,7 @@ async fn shift_branch(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<Option<Uu
             .bind(org_id)
             .fetch_optional(pool)
             .await?;
-    row.ok_or_else(|| AppError::NotFound("Work shift not found".into()))
+    row.ok_or_else(|| crate::staff::coded(404, "SHIFT_NOT_FOUND", "Work shift not found"))
 }
 
 /// A branch's shift is its manager's; an org-wide template needs the

@@ -3932,3 +3932,173 @@ async fn an_old_pending_pay_line_is_listed(pool: PgPool) {
     .await;
     assert_eq!(pending.as_array().unwrap().len(), 1);
 }
+
+/// Hunt H2-B9 (AT-13): the pay refusals a manager or the owner can hit carry
+/// a machine `code`, so the Arabic dashboard and app word them.
+#[sqlx::test]
+async fn pay_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let one_off = json_of(call!(
+        app,
+        post,
+        "/staff/adjustments",
+        owner,
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 1_000, "reason": "Tip" })
+    ))
+    .await;
+    let one_off = one_off["id"].as_str().unwrap().to_string();
+    let nobody = Uuid::new_v4();
+    let tomorrow = Utc::now().date_naive() + Duration::days(2);
+    let expense = |over: Value| {
+        let mut body = json!({ "employee_id": f.amal, "amount_piastres": 5_000, "via": "safe", "purpose": "Milk" });
+        for (k, v) in over.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        body
+    };
+    let cases: Vec<(&str, String, Value, u16, &str)> = vec![
+        (
+            "post",
+            "/staff/adjustments".into(),
+            json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 100, "reason": " " }),
+            400,
+            "REASON_REQUIRED",
+        ),
+        (
+            "post",
+            "/staff/adjustments".into(),
+            json!({ "employee_id": f.amal, "kind": "deduction", "percent_of_base": 5, "reason": "x" }),
+            400,
+            "DEDUCTION_IS_AN_AMOUNT",
+        ),
+        (
+            "post",
+            "/staff/adjustments".into(),
+            json!({ "employee_id": f.amal, "kind": "bonus", "reason": "x" }),
+            400,
+            "AMOUNT_OR_PERCENT_REQUIRED",
+        ),
+        (
+            "patch",
+            format!("/staff/adjustments/bonus/{nobody}/decision"),
+            json!({ "approve": true }),
+            404,
+            "ADJUSTMENT_NOT_FOUND",
+        ),
+        (
+            "patch",
+            format!("/staff/adjustments/x/{nobody}/decision"),
+            json!({ "approve": true }),
+            400,
+            "ADJUSTMENT_KIND_INVALID",
+        ),
+        (
+            "post",
+            format!("/staff/adjustments/bonus/{one_off}/stop"),
+            json!({}),
+            400,
+            "REASON_REQUIRED",
+        ),
+        (
+            "post",
+            format!("/staff/adjustments/bonus/{one_off}/stop"),
+            json!({ "reason": "Done" }),
+            409,
+            "NOT_A_RUNNING_LINE",
+        ),
+        (
+            "post",
+            format!("/staff/adjustments/deduction/{one_off}/stop"),
+            json!({ "reason": "Done" }),
+            404,
+            "ADJUSTMENT_NOT_FOUND",
+        ),
+        (
+            "patch",
+            format!("/staff/advances/{nobody}/review"),
+            json!({ "approve": true }),
+            404,
+            "ADVANCE_NOT_FOUND",
+        ),
+        (
+            "post",
+            "/staff/expense-advances".into(),
+            expense(json!({ "via": "till" })),
+            400,
+            "EXPENSE_VIA_INVALID",
+        ),
+        (
+            "post",
+            "/staff/expense-advances".into(),
+            expense(json!({ "amount_piastres": 0 })),
+            400,
+            "AMOUNT_NOT_POSITIVE",
+        ),
+        (
+            "post",
+            "/staff/expense-advances".into(),
+            expense(json!({ "purpose": " " })),
+            400,
+            "PURPOSE_REQUIRED",
+        ),
+        (
+            "post",
+            "/staff/expense-advances".into(),
+            expense(json!({ "given_on": tomorrow })),
+            400,
+            "DATE_IN_FUTURE",
+        ),
+        (
+            "patch",
+            format!(
+                "/staff/payroll/periods/{}/payslips/{}/paid",
+                f.period, f.amal
+            ),
+            json!({ "method": "gold" }),
+            400,
+            "PAY_METHOD_INVALID",
+        ),
+        (
+            "patch",
+            format!("/staff/payroll/periods/{nobody}/payslips/{}/paid", f.amal),
+            json!({ "method": "cash" }),
+            404,
+            "PERIOD_NOT_FOUND",
+        ),
+        (
+            "patch",
+            format!(
+                "/staff/payroll/periods/{}/payslips/{}/paid",
+                f.period, f.amal
+            ),
+            json!({ "method": "cash" }),
+            409,
+            "PAYROLL_NOT_APPROVED",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (method, uri, body, status, code) in cases {
+        let req = authed(
+            match method {
+                "post" => test::TestRequest::post(),
+                _ => test::TestRequest::patch(),
+            }
+            .uri(&uri),
+            &owner,
+        )
+        .set_json(&body)
+        .to_request();
+        let resp = test::call_service(&app, req).await;
+        let s = resp.status().as_u16();
+        let out: Value =
+            serde_json::from_slice(&test::read_body(resp).await).unwrap_or(Value::Null);
+        if s != status || out["code"] != json!(code) {
+            wrong.push(format!(
+                "{method} {uri}: want {status} {code}, got {s} {out}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

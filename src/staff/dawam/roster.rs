@@ -181,13 +181,9 @@ pub struct RosterView {
     pub date_sets: Vec<DateSet>,
 }
 
+/// 400 `RANGE_BACKWARDS`, or `RANGE_TOO_WIDE` {max_days} past 62 days.
 pub(crate) fn check_range(from: NaiveDate, to: NaiveDate) -> Result<(), AppError> {
-    if to < from || (to - from).num_days() > MAX_DAYS {
-        return Err(AppError::BadRequest(format!(
-            "The range must be 0–{MAX_DAYS} days"
-        )));
-    }
-    Ok(())
+    crate::staff::validate_range(from, to, MAX_DAYS)
 }
 
 pub(crate) async fn published_weeks(
@@ -594,8 +590,10 @@ pub async fn my_roster(
     let pool = pool.get_ref();
     let branches = branches_of(pool, employee_id).await?;
     let Some(&home) = branches.first() else {
-        return Err(AppError::BadRequest(
-            "You have no branch yet — ask your manager.".into(),
+        return Err(crate::staff::coded(
+            400,
+            "NO_BRANCH_YET",
+            "You have no branch yet — ask your manager.",
         ));
     };
     let published = published_weeks(pool, &branches, query.from, query.to).await?;
@@ -937,7 +935,11 @@ pub async fn claim_open_shift(
     .fetch_optional(pool)
     .await?;
     let Some((branch_id, shift_id, on_date, status)) = row else {
-        return Err(AppError::NotFound("No open shift here.".into()));
+        return Err(crate::staff::coded(
+            404,
+            "OPEN_SHIFT_NOT_FOUND",
+            "No open shift here.",
+        ));
     };
     if status != "open" {
         return Err(AppError::Refused {
@@ -1053,7 +1055,11 @@ pub async fn withdraw_claim(
     .fetch_optional(pool)
     .await?;
     let Some((branch_id, on_date)) = found else {
-        return Err(AppError::NotFound("No open shift here.".into()));
+        return Err(crate::staff::coded(
+            404,
+            "OPEN_SHIFT_NOT_FOUND",
+            "No open shift here.",
+        ));
     };
     let mut tx = pool.begin().await?;
     let reopened: Option<Uuid> = sqlx::query_scalar(
@@ -1112,6 +1118,75 @@ pub struct DecideRoster {
     pub approve: bool,
 }
 
+/// Why there's no claim to decide on open shift `id` (hunt H2-B9): one
+/// already approved or declined is 409 `ALREADY_DECIDED` {status} (after the
+/// rights at its branch, AT-11); otherwise 404 `NO_CLAIM_WAITING`.
+async fn no_claim_waiting(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    id: Uuid,
+) -> AppError {
+    let found: Result<Option<(Uuid, Option<String>)>, sqlx::Error> = sqlx::query_as(
+        "SELECT o.branch_id, (SELECT c.status FROM staff_open_shift_claims c \
+                               WHERE c.open_shift_id = o.id ORDER BY c.created_at DESC LIMIT 1) \
+           FROM staff_open_shifts o WHERE o.id = $1 AND o.org_id = $2",
+    )
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await;
+    match found {
+        Err(e) => e.into(),
+        Ok(Some((branch, Some(status)))) if status == "approved" || status == "declined" => {
+            match access::require_at(pool, claims, org_id, Cap::HrScheduleEdit, branch).await {
+                Err(e) => e,
+                Ok(_) => super::already_decided(&status),
+            }
+        }
+        Ok(_) => crate::staff::coded(404, "NO_CLAIM_WAITING", "No claim waiting here."),
+    }
+}
+
+/// Why there's no swap to decide on `id` (hunt H2-B9): one already
+/// approved, rejected or cancelled is 409 `ALREADY_DECIDED` {status} (after
+/// both sides' rights, AT-11); otherwise (still with the colleague, or none)
+/// 404 `NO_SWAP_WAITING`.
+async fn no_swap_waiting(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    id: Uuid,
+) -> AppError {
+    let found: Result<Option<(String, Uuid, Uuid)>, sqlx::Error> = sqlx::query_as(
+        "SELECT status, requester_id, peer_id FROM staff_swaps WHERE id = $1 AND org_id = $2",
+    )
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await;
+    match found {
+        Err(e) => e.into(),
+        Ok(Some((status, requester, peer)))
+            if matches!(status.as_str(), "approved" | "rejected" | "cancelled") =>
+        {
+            for who in [requester, peer] {
+                let checked = match access::subject(pool, org_id, who).await {
+                    Ok(subject) => {
+                        access::require_for(pool, claims, Cap::HrScheduleEdit, &subject).await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = checked {
+                    return e;
+                }
+            }
+            super::already_decided(&status)
+        }
+        Ok(_) => crate::staff::coded(404, "NO_SWAP_WAITING", "No swap waiting here."),
+    }
+}
+
 /// Approve a claim: the shift becomes theirs for that date, beside the rest
 /// of their day. Rejecting reopens it. One decision only.
 #[utoipa::path(
@@ -1140,7 +1215,7 @@ pub async fn decide_claim(
     .fetch_optional(pool)
     .await?;
     let Some((branch_id, shift_id, on_date, Some(claimer))) = row else {
-        return Err(AppError::NotFound("No claim waiting here.".into()));
+        return Err(no_claim_waiting(pool, &claims, org_id, *id).await);
     };
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
     let subject = access::subject(pool, org_id, claimer).await?;
@@ -1162,7 +1237,7 @@ pub async fn decide_claim(
         .fetch_optional(&mut *tx)
         .await?;
         if won.is_none() {
-            return Err(AppError::Conflict("That claim was already decided.".into()));
+            return Err(no_claim_waiting(pool, &claims, org_id, *id).await);
         }
         close_claim(&mut tx, *id, "approved", Some(by)).await?;
         // Worked at the branch that posted it (hunt H2-B8).
@@ -1204,7 +1279,7 @@ pub async fn decide_claim(
         .fetch_optional(&mut *tx)
         .await?;
         if won.is_none() {
-            return Err(AppError::Conflict("That claim was already decided.".into()));
+            return Err(no_claim_waiting(pool, &claims, org_id, *id).await);
         }
         // The shift reopens, but the claimer's declined claim stays theirs.
         close_claim(&mut tx, *id, "declined", Some(by)).await?;
@@ -1245,7 +1320,11 @@ pub async fn cancel_open_shift(
     .fetch_optional(pool)
     .await?;
     let Some((branch_id, on_date, _)) = row else {
-        return Err(AppError::NotFound("No open shift here.".into()));
+        return Err(crate::staff::coded(
+            404,
+            "OPEN_SHIFT_NOT_FOUND",
+            "No open shift here.",
+        ));
     };
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
     let by = claims.user_id_safe().ok();
@@ -1260,8 +1339,17 @@ pub async fn cancel_open_shift(
     .fetch_optional(&mut *tx)
     .await?;
     let Some(claimer) = gone else {
-        return Err(AppError::Conflict(
-            "That shift was already filled or cancelled.".into(),
+        drop(tx);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM staff_open_shifts WHERE id = $1")
+                .bind(*id)
+                .fetch_one(pool)
+                .await?;
+        return Err(crate::staff::coded_vars(
+            409,
+            "OPEN_SHIFT_CLOSED",
+            "That shift was already filled or cancelled.",
+            json!({ "status": status }),
         ));
     };
     // A claim waiting on it ends declined, and stays in the claimer's Requests.
@@ -1474,20 +1562,30 @@ pub async fn ask_swap(
     let org_id = me.org_id;
     let pool = pool.get_ref();
     if body.peer_id == employee_id {
-        return Err(AppError::BadRequest("Pick a colleague.".into()));
+        return Err(crate::staff::coded(
+            400,
+            "PICK_A_COLLEAGUE",
+            "Pick a colleague.",
+        ));
     }
     let requester = access::subject(pool, org_id, employee_id).await?;
     let peer = access::subject(pool, org_id, body.peer_id).await?;
     if peer.employment_status != "active" {
-        return Err(AppError::NotFound("Employee not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "EMPLOYEE_NOT_FOUND",
+            "Employee not found",
+        ));
     }
     let mut conn = pool.acquire().await?;
     let mine = rostered_on(&mut conn, employee_id, body.my_date, body.my_shift_id).await?;
     let theirs = rostered_on(&mut conn, body.peer_id, body.peer_date, body.peer_shift_id).await?;
     drop(conn);
     let (Some(mine), Some(theirs)) = (mine, theirs) else {
-        return Err(AppError::Conflict(
-            "Those shifts aren't on the roster.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "NOT_ROSTERED",
+            "Those shifts aren't on the roster.",
         ));
     };
     let now = Utc::now();
@@ -1606,7 +1704,11 @@ pub async fn answer_swap(
     .fetch_optional(pool)
     .await?;
     let Some(requester) = row else {
-        return Err(AppError::NotFound("No swap waiting for you here.".into()));
+        return Err(crate::staff::coded(
+            404,
+            "NO_SWAP_WAITING",
+            "No swap waiting for you here.",
+        ));
     };
     let name = employee_name(pool, employee_id).await;
     notify(
@@ -1665,8 +1767,10 @@ pub async fn cancel_swap(
     .fetch_optional(pool)
     .await?;
     let Some(peer) = peer else {
-        return Err(AppError::NotFound(
-            "No swap of yours to cancel here.".into(),
+        return Err(crate::staff::coded(
+            404,
+            "NO_SWAP_TO_CANCEL",
+            "No swap of yours to cancel here.",
         ));
     };
     let name = employee_name(pool, me.employee_id).await;
@@ -1775,8 +1879,10 @@ pub async fn decide_swap(
     let s = swaps_of(pool, org_id, None, Some("pending"), None, Some(*id))
         .await?
         .into_iter()
-        .find(|s| s.id == *id)
-        .ok_or_else(|| AppError::NotFound("No swap waiting here.".into()))?;
+        .find(|s| s.id == *id);
+    let Some(s) = s else {
+        return Err(no_swap_waiting(pool, &claims, org_id, *id).await);
+    };
     // Both rosters change, so both sides' manager rights count (RO-6).
     let requester = access::subject(pool, org_id, s.requester_id).await?;
     let peer = access::subject(pool, org_id, s.peer_id).await?;
@@ -1833,7 +1939,8 @@ pub async fn decide_swap(
     .fetch_optional(&mut *tx)
     .await?;
     if won.is_none() {
-        return Err(AppError::Conflict("That swap was already decided.".into()));
+        drop(tx);
+        return Err(no_swap_waiting(pool, &claims, org_id, *id).await);
     }
     if body.approve {
         apply_swap(&mut tx, org_id, &s, &requester, &peer, Some(by)).await?;
@@ -1892,7 +1999,11 @@ fn check_preferences(body: &Preferences) -> Result<Vec<i16>, AppError> {
             .as_deref()
             .is_some_and(|n| n.chars().count() > 300)
     {
-        return Err(AppError::BadRequest("Invalid preferences".into()));
+        return Err(crate::staff::coded(
+            400,
+            "PREFERENCES_INVALID",
+            "Invalid preferences",
+        ));
     }
     let mut days = body.cant_work_days.clone();
     days.sort_unstable();

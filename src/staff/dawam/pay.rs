@@ -133,9 +133,9 @@ pub(crate) async fn ensure_period_for(
     .await?;
     match inserted {
         Some(p) => Ok(p),
-        None => existing()
-            .await?
-            .ok_or_else(|| AppError::Conflict("The period could not be opened".into())),
+        None => existing().await?.ok_or_else(|| {
+            crate::staff::coded(409, "PERIOD_NOT_OPENED", "The period could not be opened")
+        }),
     }
 }
 
@@ -244,7 +244,7 @@ async fn advance_room(
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Employee not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "EMPLOYEE_NOT_FOUND", "Employee not found"))?;
     Ok(((cap - outstanding).max(0), cap, outstanding, salary))
 }
 
@@ -314,8 +314,10 @@ pub async fn mark_paid(
     // Paying is part of the payroll run, held for every branch (RO-9).
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
     if !matches!(body.method.as_str(), "cash" | "bank" | "wallet") {
-        return Err(AppError::BadRequest(
-            "method is cash, bank or wallet".into(),
+        return Err(crate::staff::coded(
+            400,
+            "PAY_METHOD_INVALID",
+            "method is cash, bank or wallet",
         ));
     }
     let by = claims.user_id_safe().ok();
@@ -327,10 +329,12 @@ pub async fn mark_paid(
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "PERIOD_NOT_FOUND", "Payroll period not found"))?;
     if status != "generated" && status != "paid" {
-        return Err(AppError::Conflict(
-            "Approve the payroll before paying it.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "PAYROLL_NOT_APPROVED",
+            "Approve the payroll before paying it.",
         ));
     }
     let paid: Option<(Uuid, i64)> = sqlx::query_as(
@@ -345,8 +349,10 @@ pub async fn mark_paid(
     .fetch_optional(&mut *tx)
     .await?;
     let Some((payslip_id, net)) = paid else {
-        return Err(AppError::Conflict(
-            "That payslip is already paid or doesn't exist.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "PAYSLIP_ALREADY_PAID",
+            "That payslip is already paid or doesn't exist.",
         ));
     };
     settle_period_if_all_paid(&mut tx, period_id).await?;
@@ -452,14 +458,18 @@ async fn load_adjustment(pool: &PgPool, id: Uuid) -> Result<Adjustment, AppError
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| AppError::NotFound("Adjustment not found".into()))
+        .ok_or_else(|| crate::staff::coded(404, "ADJUSTMENT_NOT_FOUND", "Adjustment not found"))
 }
 
 fn table_of(kind: &str) -> Result<&'static str, AppError> {
     match kind {
         "bonus" => Ok("payroll_bonuses"),
         "deduction" => Ok("payroll_deductions"),
-        _ => Err(AppError::BadRequest("kind is bonus or deduction".into())),
+        _ => Err(crate::staff::coded(
+            400,
+            "ADJUSTMENT_KIND_INVALID",
+            "kind is bonus or deduction",
+        )),
     }
 }
 
@@ -543,7 +553,11 @@ pub async fn create_adjustment(
     access::require_for(pool, &claims, cap, &subject).await?;
     let reason = body.reason.trim();
     if reason.is_empty() {
-        return Err(AppError::BadRequest("A reason is required".into()));
+        return Err(crate::staff::coded(
+            400,
+            "REASON_REQUIRED",
+            "A reason is required",
+        ));
     }
     let salary: i64 = sqlx::query_scalar(
         "SELECT base_salary_piastres FROM employees WHERE id = $1 AND org_id = $2",
@@ -562,13 +576,17 @@ pub async fn create_adjustment(
         // Only a deduction hears this; a bonus percent outside 1–100 falls
         // through to the range (E2E B-PAY-1).
         (None, Some(_)) if body.kind == "deduction" => {
-            return Err(AppError::BadRequest(
-                "A deduction is an amount, not a percentage".into(),
+            return Err(crate::staff::coded(
+                400,
+                "DEDUCTION_IS_AN_AMOUNT",
+                "A deduction is an amount, not a percentage",
             ));
         }
         _ => {
-            return Err(AppError::BadRequest(
-                "Give a positive amount or a percentage (1–100)".into(),
+            return Err(crate::staff::coded(
+                400,
+                "AMOUNT_OR_PERCENT_REQUIRED",
+                "Give a positive amount or a percentage (1–100)",
             ));
         }
     };
@@ -726,7 +744,11 @@ pub async fn decide_adjustment(
     let (table, cap) = gate_kind(pool, &claims, org_id, &kind).await?;
     let a = load_adjustment(pool, id).await?;
     if a.kind != kind {
-        return Err(AppError::NotFound("Adjustment not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "ADJUSTMENT_NOT_FOUND",
+            "Adjustment not found",
+        ));
     }
     if a.status != "pending" {
         return Err(super::already_decided(&a.status));
@@ -834,7 +856,11 @@ pub async fn stop_adjustment(
     // For a line of someone the caller manages — never "anywhere" (audit B-3).
     let line = load_adjustment(pool, id).await?;
     if line.kind != kind {
-        return Err(AppError::NotFound("Adjustment not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "ADJUSTMENT_NOT_FOUND",
+            "Adjustment not found",
+        ));
     }
     let subject = access::subject(pool, org_id, line.employee_id).await?;
     access::require_for(pool, &claims, cap, &subject).await?;
@@ -845,7 +871,13 @@ pub async fn stop_adjustment(
         .and_then(|b| b.reason.as_deref())
         .map(str::trim)
         .filter(|r| !r.is_empty())
-        .ok_or_else(|| AppError::BadRequest("Stopping a monthly line needs a reason".into()))?;
+        .ok_or_else(|| {
+            crate::staff::coded(
+                400,
+                "REASON_REQUIRED",
+                "Stopping a monthly line needs a reason",
+            )
+        })?;
     // Stop = from next month (owner decision D6, 24 Sep 2026): the month
     // open now keeps the line, and it ends with that month, as the screen
     // says ("Stopped from next month"). Before, it also left the open month.
@@ -872,8 +904,10 @@ pub async fn stop_adjustment(
     .await?
     .rows_affected();
     if n == 0 {
-        return Err(AppError::Conflict(
-            "That isn't a running monthly line.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "NOT_A_RUNNING_LINE",
+            "That isn't a running monthly line.",
         ));
     }
     audit(
@@ -1002,7 +1036,7 @@ pub async fn review_advance(
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Advance not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "ADVANCE_NOT_FOUND", "Advance not found"))?;
     if status != "pending" {
         return Err(super::already_decided(&status));
     }
@@ -1242,16 +1276,26 @@ pub async fn log_expense_advance(
         None => access::decision_branch(pool, &claims, Cap::HrExpenseAdvancesLog, &subject).await?,
     };
     if !matches!(body.via.as_str(), "safe" | "bank") {
-        return Err(AppError::BadRequest(
-            "via is safe or bank — a till pay-out is tagged on the till itself".into(),
+        return Err(crate::staff::coded(
+            400,
+            "EXPENSE_VIA_INVALID",
+            "via is safe or bank — a till pay-out is tagged on the till itself",
         ));
     }
     if body.amount_piastres <= 0 {
-        return Err(AppError::BadRequest("Amount must be positive".into()));
+        return Err(crate::staff::coded(
+            400,
+            "AMOUNT_NOT_POSITIVE",
+            "Amount must be positive",
+        ));
     }
     let purpose = body.purpose.trim();
     if purpose.is_empty() {
-        return Err(AppError::BadRequest("Say what it's for".into()));
+        return Err(crate::staff::coded(
+            400,
+            "PURPOSE_REQUIRED",
+            "Say what it's for",
+        ));
     }
     // The day where the cash changed hands (AT-1).
     let today = match branch {
@@ -1260,8 +1304,10 @@ pub async fn log_expense_advance(
     };
     let given_on = body.given_on.unwrap_or(today);
     if given_on > today {
-        return Err(AppError::BadRequest(
-            "The date can't be in the future".into(),
+        return Err(crate::staff::coded(
+            400,
+            "DATE_IN_FUTURE",
+            "The date can't be in the future",
         ));
     }
     let id: Uuid = sqlx::query_scalar(
