@@ -743,11 +743,11 @@ pub async fn resolve_flag(
             reason: "Someone else has to decide this one.".into(),
         });
     }
-    // Each act on its own right as well (PM-4): confirming a cover is the
-    // cover-confirm right (as on the covers list), signing a phone out is the
-    // staff-edit right (as on the employee). A deduction asks its own below.
+    // Each act on its own right as well (PM-4): anything on a cover's flag is
+    // the cover-confirm right (as on the covers list), signing a phone out is
+    // the staff-edit right (as on the employee). A deduction asks its own below.
     let own = match (body.action.as_str(), kind.as_str()) {
-        ("confirm", "cover") => Some(Cap::HrShiftCoverConfirm),
+        (_, "cover") => Some(Cap::HrShiftCoverConfirm),
         ("revoke", _) => Some(Cap::HrStaffEdit),
         _ => None,
     };
@@ -757,25 +757,72 @@ pub async fn resolve_flag(
             None => access::require_for(pool, &claims, cap, &subject).await?,
         }
     }
-    let date: Option<NaiveDate> = match record_id {
-        Some(r) => {
-            sqlx::query_scalar("SELECT business_date FROM attendance_records WHERE id = $1")
-                .bind(r)
-                .fetch_optional(pool)
-                .await?
-        }
-        None => None,
-    };
-    // Confirming a cover from its flag confirms the COVER, not only the flag
-    // (CV-5: it is paid once a manager confirms it, and it leaves Approvals).
-    // (A cover flag always names its record; one without has no cover to
-    // decide, and only the flag is resolved.)
-    if let (true, Some(record)) = (body.action == "confirm" && kind == "cover", record_id) {
-        decide_cover_record(pool, &claims, org_id, by, record, true).await?;
+    // A cover's flag is settled only by settling the cover (CV-3, CV-5, hunt
+    // H2-B3): ignoring, excusing or deducting it resolved the flag and left
+    // the cover pending for ever.
+    if kind == "cover" && !matches!(body.action.as_str(), "confirm" | "reject") {
+        return Err(AppError::Coded {
+            status: 400,
+            code: "FLAG_COVER_CONFIRM_OR_REJECT",
+            reason: "A cover is confirmed or rejected.".into(),
+        });
     }
+    // Confirming or rejecting a cover from its flag decides the COVER, not
+    // only the flag (CV-5: it is paid once a manager confirms it, and it
+    // leaves Approvals); deciding it resolves its flag. (A cover flag always
+    // names its record; one without has no cover to decide, and only the flag
+    // is resolved below.)
+    if let (true, Some(record)) = (kind == "cover", record_id) {
+        decide_cover_record(pool, &claims, org_id, by, record, body.action == "confirm").await?;
+    } else {
+        let date: Option<NaiveDate> = match record_id {
+            Some(r) => {
+                sqlx::query_scalar("SELECT business_date FROM attendance_records WHERE id = $1")
+                    .bind(r)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            None => None,
+        };
+        settle_flag(
+            pool, &claims, org_id, by, *id, &subject, &kind, record_id, minutes, date, &body,
+        )
+        .await?;
+    }
+    let row: AttendanceFlag = sqlx::query_as(
+        "SELECT f.id, f.employee_id, e.name AS employee_name, f.branch_id, f.attendance_record_id, \
+                f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at \
+           FROM attendance_flags f JOIN employees e ON e.id = f.employee_id WHERE f.id = $1",
+    )
+    .bind(*id)
+    .fetch_one(pool)
+    .await?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
+/// Resolve a flag that isn't a cover's: its resolution and any pay line in
+/// one transaction, the flag claimed first (`resolution IS NULL`) so two
+/// managers at once write one pay line and tell the person once (hunt H2-B3).
+#[allow(clippy::too_many_arguments)]
+async fn settle_flag(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    by: Uuid,
+    id: Uuid,
+    subject: &access::Subject,
+    kind: &str,
+    record_id: Option<Uuid>,
+    minutes: i32,
+    date: Option<NaiveDate>,
+    body: &ResolveFlag,
+) -> Result<(), AppError> {
+    let employee_id = subject.id;
     let (resolution, amount, reason) = match body.action.as_str() {
         "ignore" => ("ignored", 0, ""),
         "confirm" => ("confirmed", 0, ""),
+        // A cover flag with no record: only the flag is settled.
+        "reject" if kind == "cover" => ("rejected", 0, ""),
         "excuse_paid" => ("excused_paid", 0, ""),
         // The exact minute pay, not the rounded suggestion (RU-12).
         "excuse_unpaid" => (
@@ -800,18 +847,15 @@ pub async fn resolve_flag(
                     .unwrap_or("Left mid-shift"),
             )
         }
-        "revoke" if kind == "new_phone" => {
-            super::revoke_devices(pool, employee_id).await?;
-            ("revoked", 0, "")
-        }
+        "revoke" if kind == "new_phone" => ("revoked", 0, ""),
         _ => return Err(AppError::BadRequest("Unknown action".into())),
     };
-    let mut deduction_id: Option<Uuid> = None;
+    // A deduction from a flag is a pay line like any other: nobody deducts
+    // from themselves, and above the manager's limit it waits for the owner
+    // (AD-5, audit B-8). Judged before anything is written.
+    let mut line_status = "approved";
     if amount > 0 {
-        // A deduction from a flag is a pay line like any other: nobody deducts
-        // from themselves, and above the manager's limit it waits for the owner
-        // (AD-5, audit B-8).
-        if subject.is(&claims) {
+        if subject.is(claims) {
             return Err(AppError::Coded {
                 status: 403,
                 code: "OWN_PAY_LINE",
@@ -821,16 +865,36 @@ pub async fn resolve_flag(
         if let Some(d) = date {
             crate::staff::period_lock::assert_open(pool, org_id, d, "this deduction").await?;
         }
-        let at = access::decision_branch(pool, &claims, Cap::HrDeductionsCreate, &subject).await?;
+        let at = access::decision_branch(pool, claims, Cap::HrDeductionsCreate, subject).await?;
         let mut ask = AuthzRequest::of(Cap::HrDeductionsCreate);
         ask.amount = Some(amount);
-        let status = match crate::authz::require::decide_for(pool, by, &ask, at).await? {
+        line_status = match crate::authz::require::decide_for(pool, by, &ask, at).await? {
             Decision::Allow => "approved",
             Decision::NeedsApproval(_) => "pending",
             Decision::Deny(_) => {
                 return Err(crate::authz::require::denied(Cap::HrDeductionsCreate));
             }
         };
+    }
+    let mut tx = pool.begin().await?;
+    let won = sqlx::query(
+        "UPDATE attendance_flags SET resolution = $2, resolved_by = $3, resolved_at = now() \
+          WHERE id = $1 AND resolution IS NULL",
+    )
+    .bind(id)
+    .bind(resolution)
+    .bind(by)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if won == 0 {
+        return Err(AppError::Coded {
+            status: 404,
+            code: "FLAG_HANDLED",
+            reason: "That flag is already handled.".into(),
+        });
+    }
+    if amount > 0 {
         // One name for unpaid excused time (orchestrator decision 2):
         // `excused_unpaid`, never the old `unpaid_excuse`.
         // The server's own words get a code; a manager's typed reason doesn't.
@@ -849,26 +913,35 @@ pub async fn resolve_flag(
         // it collided with the one automatic row per record and source — a
         // second flag on the same shift could not be deducted (409), and the
         // rules' recompute of that record deleted an unpaid excuse made here.
-        deduction_id = Some(
-            sqlx::query_scalar(
-                "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
-                    effective_date, source, attendance_record_id, created_by, status, reason_code) \
-                 VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, NULL, $7, $8, $9) \
-                 RETURNING id",
-            )
-            .bind(org_id)
-            .bind(employee_id)
-            .bind(amount)
-            .bind(reason)
-            .bind(date)
-            .bind(source)
-            .bind(by)
-            .bind(status)
-            .bind(reason_code)
-            .fetch_one(pool)
-            .await?,
-        );
-        if status == "approved" {
+        let deduction_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+                effective_date, source, attendance_record_id, created_by, status, reason_code) \
+             VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, NULL, $7, $8, $9) \
+             RETURNING id",
+        )
+        .bind(org_id)
+        .bind(employee_id)
+        .bind(amount)
+        .bind(reason)
+        .bind(date)
+        .bind(source)
+        .bind(by)
+        .bind(line_status)
+        .bind(reason_code)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE attendance_flags SET deduction_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(deduction_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    if resolution == "revoked" {
+        super::revoke_devices(pool, employee_id).await?;
+    }
+    if amount > 0 {
+        if line_status == "approved" {
             notify(
                 pool,
                 org_id,
@@ -892,25 +965,7 @@ pub async fn resolve_flag(
             }
         }
     }
-    sqlx::query(
-        "UPDATE attendance_flags SET resolution = $2, resolved_by = $3, resolved_at = now(), \
-                deduction_id = $4 WHERE id = $1",
-    )
-    .bind(*id)
-    .bind(resolution)
-    .bind(by)
-    .bind(deduction_id)
-    .execute(pool)
-    .await?;
-    let row: AttendanceFlag = sqlx::query_as(
-        "SELECT f.id, f.employee_id, e.name AS employee_name, f.branch_id, f.attendance_record_id, \
-                f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at \
-           FROM attendance_flags f JOIN employees e ON e.id = f.employee_id WHERE f.id = $1",
-    )
-    .bind(*id)
-    .fetch_one(pool)
-    .await?;
-    Ok(HttpResponse::Ok().json(row))
+    Ok(())
 }
 
 // ── covers ─────────────────────────────────────────────────────────────────
@@ -1216,7 +1271,13 @@ async fn decide_cover_record(
     .await?
     .rows_affected();
     if decided == 0 {
-        return Err(AppError::Conflict("That cover was already decided.".into()));
+        // Decided by someone else since it was read (a race).
+        let now: Option<String> =
+            sqlx::query_scalar("SELECT cover_status FROM attendance_records WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await?;
+        return Err(super::already_decided(&now.unwrap_or_default()));
     }
     // The flag says what was decided (CV-3).
     sqlx::query(
