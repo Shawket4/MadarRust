@@ -2100,3 +2100,152 @@ async fn a_till_expense_advance_says_why_it_is_refused(pool: PgPool) {
         .unwrap();
     assert_eq!(n, 0, "nothing written");
 }
+
+/// Minor default M39 (AV-10): the owner clears or reassigns a till pay-out's
+/// "expense advance to" tag from the dashboard, with a reason; the cash
+/// movement stays as it is. Owner only (OWNER_ONLY), a reason is required
+/// (REASON_REQUIRED), audited, and never in an approved or paid month.
+#[sqlx::test]
+async fn the_owner_clears_or_reassigns_a_till_expense_advance(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .configure(madar_rust::tills::routes::configure)
+            .configure(madar_rust::staff::routes::configure),
+    )
+    .await;
+    let f = seed(&pool).await;
+    let owner = token_for(f.owner, f.org, UserRole::OrgAdmin);
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/branches/{}/open", f.branch),
+        owner,
+        json!({ "id": Uuid::new_v4(), "opening_cash": 100000 })
+    );
+    assert!(resp.status().is_success());
+    let till = json_of(resp).await["id"].as_str().unwrap().to_string();
+    let pay_out = |to: Uuid| json!({ "amount": -1000, "kind": "pay_out", "note": "Milk", "expense_advance_to": to });
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/{till}/cash-movements"),
+        owner,
+        pay_out(f.a)
+    );
+    assert_eq!(resp.status(), 201);
+    let movement = json_of(resp).await["id"].as_str().unwrap().to_string();
+    let tagged: Uuid =
+        sqlx::query_scalar("SELECT id FROM expense_advances WHERE till_movement_id = $1::uuid")
+            .bind(&movement)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Not the owner: the cashier (Amal's account) can't.
+    let teller = token_for(f.a_user, f.org, UserRole::Teller);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/expense-advances/{tagged}"),
+        teller,
+        json!({ "employee_id": f.b, "reason": "Wrong person" })
+    );
+    assert_eq!(resp.status(), 403);
+    assert_eq!(json_of(resp).await["code"], "OWNER_ONLY");
+    // No reason.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/expense-advances/{tagged}"),
+        owner,
+        json!({ "employee_id": f.b })
+    );
+    assert_eq!(resp.status(), 400);
+    assert_eq!(json_of(resp).await["code"], "REASON_REQUIRED");
+    // Reassigned to Bassem, who really took the cash.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/expense-advances/{tagged}"),
+        owner,
+        json!({ "employee_id": f.b, "reason": "Bassem took it" })
+    );
+    assert_eq!(resp.status(), 200);
+    let row = json_of(resp).await;
+    assert_eq!(row["employee_id"], json!(f.b), "{row}");
+    assert_eq!(row["via"], "till");
+    let (reason, details): (Option<String>, Value) = sqlx::query_as(
+        "SELECT reason, details FROM payroll_audit_log WHERE action = 'expense_advance.reassign'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reason.as_deref(), Some("Bassem took it"));
+    assert_eq!(details["from_employee_id"], json!(f.a));
+
+    // Cleared: the tag goes, the cash movement stays.
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/expense-advances/{tagged}"),
+        owner
+    );
+    assert_eq!(resp.status(), 400, "a reason is required");
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/expense-advances/{tagged}?reason=Not%20an%20advance"),
+        owner
+    );
+    assert_eq!(resp.status(), 204);
+    let (tags, movements): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM expense_advances), \
+                (SELECT COUNT(*) FROM till_cash_movements WHERE id = $1::uuid)",
+    )
+    .bind(&movement)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((tags, movements), (0, 1));
+    let cleared: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payroll_audit_log WHERE action = 'expense_advance.clear' \
+            AND reason = 'Not an advance'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cleared, 1);
+
+    // Never in an approved or paid month.
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/{till}/cash-movements"),
+        owner,
+        pay_out(f.a)
+    );
+    assert_eq!(resp.status(), 201);
+    let again: Uuid = sqlx::query_scalar("SELECT id FROM expense_advances")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+         SELECT $1, 'Paid', given_on - 1, given_on + 1, 'paid' FROM expense_advances WHERE id = $2",
+    )
+    .bind(f.org)
+    .bind(again)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let resp = call!(
+        app,
+        delete,
+        format!("/staff/expense-advances/{again}?reason=Late"),
+        owner
+    );
+    assert_eq!(resp.status(), 409);
+    assert_eq!(json_of(resp).await["code"], "PERIOD_CLOSED");
+}

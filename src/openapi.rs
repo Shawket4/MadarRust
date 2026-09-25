@@ -588,6 +588,8 @@ paths(
         crate::staff::dawam::pay::record_advance,
         crate::staff::dawam::pay::log_expense_advance,
         crate::staff::dawam::pay::list_expense_advances,
+        crate::staff::dawam::pay::clear_expense_advance,
+        crate::staff::dawam::pay::reassign_expense_advance,
         crate::staff::dawam::pay::my_expense_advances,
         crate::staff::dawam::pay::my_notifications,
         crate::staff::dawam::pay::read_notifications,

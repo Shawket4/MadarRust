@@ -1425,6 +1425,174 @@ pub async fn my_expense_advances(me: Me, pool: crate::db::Db) -> Result<HttpResp
     Ok(HttpResponse::Ok().json(rows))
 }
 
+/// A correction of an expense advance's tag: why (required, AT-10).
+#[derive(Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct ClearExpenseAdvance {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ReassignExpenseAdvance {
+    /// Who really received the cash.
+    pub employee_id: Uuid,
+    /// Why (required).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The expense advance an owner corrects: the owner's (whoever runs payroll
+/// for every branch, 403 OWNER_ONLY otherwise), with a reason (400
+/// REASON_REQUIRED), and never in an approved or paid month (409
+/// PERIOD_CLOSED, BC-3). Minor default M39.
+async fn expense_for_correction(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    id: Uuid,
+    reason: Option<&str>,
+) -> Result<(ExpenseAdvance, String, Option<Uuid>), AppError> {
+    if !access::can_everywhere(pool, claims, org_id, Cap::HrPayrollRun).await? {
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWNER_ONLY",
+            reason: "Only the owner corrects an expense advance.".into(),
+        });
+    }
+    let row = sqlx::query_as::<_, ExpenseAdvance>(&format!(
+        "{EXP_SELECT} WHERE e.id = $1 AND e.org_id = $2"
+    ))
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Expense advance not found".into()))?;
+    let reason = reason
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| AppError::Coded {
+            status: 400,
+            code: "REASON_REQUIRED",
+            reason: "Say why you're correcting it.".into(),
+        })?
+        .to_string();
+    period_lock::assert_open(pool, org_id, row.given_on, "this expense advance").await?;
+    let movement: Option<Uuid> =
+        sqlx::query_scalar("SELECT till_movement_id FROM expense_advances WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    Ok((row, reason, movement))
+}
+
+/// Clear an expense advance (a till pay-out's "expense advance to" tag, or
+/// a logged one) with a reason: the record goes, a till's cash movement
+/// stays exactly as it is (AV-10, minor default M39). Owner only.
+#[utoipa::path(
+    delete, path = "/staff/expense-advances/{id}", tag = "staff",
+    params(("id" = Uuid, Path), ClearExpenseAdvance),
+    responses((status = 204), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn clear_expense_advance(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    query: web::Query<ClearExpenseAdvance>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = crate::staff::scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    let (row, reason, movement) =
+        expense_for_correction(pool, &claims, org_id, *id, query.reason.as_deref()).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM expense_advances WHERE id = $1 AND org_id = $2")
+        .bind(*id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "expense_advance.clear",
+        "expense_advances",
+        Some(*id),
+        Some(row.employee_id),
+        None,
+        Some(&reason),
+        json!({ "amount_piastres": row.amount_piastres, "via": row.via,
+                "given_on": row.given_on, "till_movement_id": movement,
+                "purpose": row.purpose }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// Give an expense advance to the person who really received the cash, with
+/// a reason; a till's cash movement stays as it is (minor default M39).
+/// Owner only.
+#[utoipa::path(
+    patch, path = "/staff/expense-advances/{id}", tag = "staff",
+    params(("id" = Uuid, Path)), request_body = ReassignExpenseAdvance,
+    responses((status = 200, body = ExpenseAdvance), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn reassign_expense_advance(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    body: web::Json<ReassignExpenseAdvance>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = crate::staff::scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    let (row, reason, movement) =
+        expense_for_correction(pool, &claims, org_id, *id, body.reason.as_deref()).await?;
+    let to = access::subject(pool, org_id, body.employee_id).await?;
+    if to.employment_status != "active" {
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "EMPLOYEE_INACTIVE",
+            reason: "That person isn't an active employee.".into(),
+            vars: json!({ "status": to.employment_status }),
+        });
+    }
+    if to.id == row.employee_id {
+        return Err(AppError::BadRequest("It's already theirs.".into()));
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE expense_advances SET employee_id = $3 WHERE id = $1 AND org_id = $2")
+        .bind(*id)
+        .bind(org_id)
+        .bind(to.id)
+        .execute(&mut *tx)
+        .await?;
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "expense_advance.reassign",
+        "expense_advances",
+        Some(*id),
+        Some(to.id),
+        None,
+        Some(&reason),
+        json!({ "from_employee_id": row.employee_id, "to_employee_id": to.id,
+                "amount_piastres": row.amount_piastres, "via": row.via,
+                "given_on": row.given_on, "till_movement_id": movement }),
+    )
+    .await?;
+    tx.commit().await?;
+    let row = sqlx::query_as::<_, ExpenseAdvance>(&format!("{EXP_SELECT} WHERE e.id = $1"))
+        .bind(*id)
+        .fetch_one(pool)
+        .await?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
 // ── the inbox ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
