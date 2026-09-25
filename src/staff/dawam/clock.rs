@@ -124,14 +124,22 @@ pub fn rebuild(
         }
         at
     };
+    // Coded with the time it rebuilt, so the phone words it in the reader's
+    // language (AT-13, addendum 5); the outbox takes both as final.
     if at > now + Duration::minutes(1) {
-        return Err(AppError::BadRequest(
-            "That punch is dated in the future.".into(),
+        return Err(crate::staff::coded_vars(
+            400,
+            "PUNCH_IN_FUTURE",
+            "That punch is dated in the future.",
+            serde_json::json!({ "at": at }),
         ));
     }
     if at < now - Duration::days(MAX_AGE_DAYS) {
-        return Err(AppError::BadRequest(
-            "That punch is more than a week old; ask your manager to add it.".into(),
+        return Err(crate::staff::coded_vars(
+            400,
+            "PUNCH_TOO_OLD",
+            "That punch is more than a week old; ask your manager to add it.",
+            serde_json::json!({ "at": at, "max_days": MAX_AGE_DAYS }),
         ));
     }
     Ok(Stamped {
@@ -219,12 +227,25 @@ mod tests {
             elapsed_ms: 3 * 3600 * 1000,
             ..s.clone()
         };
-        assert!(rebuild(Some(&fut), now, v).is_err());
+        // Coded with their figures, so the phone words them in its own
+        // language (addendum 5).
+        let code = |r: Result<Stamped, AppError>| match r {
+            Err(AppError::CodedVars {
+                status, code, vars, ..
+            }) => (status, code, vars),
+            other => panic!("not a coded refusal: {:?}", other.map(|s| s.at)),
+        };
+        let (status, c, vars) = code(rebuild(Some(&fut), now, v));
+        assert_eq!((status, c), (400, "PUNCH_IN_FUTURE"));
+        assert!(vars["at"].is_string(), "{vars}");
         let old = OfflineStamp {
             anchor: Some(sign_anchor(&key(), dev, t("2026-09-01T08:00:00Z"))),
             ..s.clone()
         };
-        assert!(rebuild(Some(&old), now, v).is_err());
+        let (status, c, vars) = code(rebuild(Some(&old), now, v));
+        assert_eq!((status, c), (400, "PUNCH_TOO_OLD"));
+        assert_eq!(vars["max_days"], serde_json::json!(MAX_AGE_DAYS));
+        assert!(vars["at"].is_string(), "{vars}");
         assert_eq!(rebuild(None, now, v).unwrap().at, now);
     }
 

@@ -581,6 +581,15 @@ mod tests {
         use crate::auth::jwt::{JwtSecret, create_token};
         use crate::models::UserRole;
         use actix_web::{App, HttpResponse, test, web};
+        // Small allowances, so the ceiling is reached in a few hundred calls
+        // however slow the box: at the defaults (20,000 a minute, 333 a
+        // second back) a loaded run could serve no faster than the refill
+        // and never reach it.
+        // SAFETY: nextest runs each test in its own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "20");
+            std::env::set_var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE", "200");
+        }
         let secret = JwtSecret("address-ceiling-test-secret".into());
         let app = test::init_service(
             App::new()

@@ -2151,6 +2151,14 @@ async fn a_customers_bookings_are_listed_through_the_merge_chain(pool: PgPool) {
 /// is provably the per-card bucket.)
 #[sqlx::test]
 async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
+    // The per-card buckets refill slowly here, so a loaded box can't hand a
+    // token back mid-loop (at the default one a second, the 41st view passed
+    // under the full parallel run). The bursts stay the defaults.
+    // SAFETY: nextest runs each test in its own process; nothing else reads these.
+    unsafe {
+        std::env::set_var("MADAR_RL_CUSTOMERS_BROWSE_TOKEN_MS_PER_REQUEST", "600000");
+        std::env::set_var("MADAR_RL_CUSTOMERS_IDENTITY_TOKEN_MS_PER_REQUEST", "600000");
+    }
     let s = shop(&pool, false).await;
     seed_loyalty_member(&pool, s.org, SARA, "Sara", "tok-lim-1").await;
     seed_loyalty_member(&pool, s.org, "01155566677", "Omar", "tok-lim-2").await;
