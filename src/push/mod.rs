@@ -18,6 +18,7 @@ pub mod words;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use chrono::{Datelike, NaiveDate};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
@@ -146,11 +147,85 @@ fn word(key: &str, ar: bool) -> Option<&'static str> {
         .map(|(_, en, a)| if ar { *a } else { *en })
 }
 
-/// A notification line in the phone's language. `{kind}` resolves through a
-/// `<key>.kind_*` word first (falling back to the raw value); `*amount*`
-/// arguments render as piastres.
+/// The CLDR plural category of a count in the phone's language, as
+/// madar-core's `i18n::plural_of` picks it (its PLURAL FORMS): English `one`
+/// / `other`; Arabic `zero`, `one`, `two`, `few` (3–10), `many` (11–99) and
+/// `other` (100, 101, 102, …), counted on the last two digits.
+fn plural_of(n: i64, ar: bool) -> &'static str {
+    let c = n.unsigned_abs();
+    if !ar {
+        return if c == 1 { "one" } else { "other" };
+    }
+    match (c, c % 100) {
+        (0, _) => "zero",
+        (1, _) => "one",
+        (2, _) => "two",
+        (_, 3..=10) => "few",
+        (_, 11..=99) => "many",
+        _ => "other",
+    }
+}
+
+/// A day as the phone's inbox writes it (madar-core `dawam::notice_text`):
+/// the day of the month and the month's word, "3 Oct" / "3 أكتوبر", Latin
+/// digits; a timestamp by its first ten characters. Not a date: as sent.
+fn day(x: &str, ar: bool) -> String {
+    let d = x.get(..x.len().min(10)).unwrap_or(x);
+    NaiveDate::parse_from_str(d, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| {
+            Some(format!(
+                "{} {}",
+                d.day(),
+                word(&format!("staff.month_{}", d.month()), ar)?
+            ))
+        })
+        .unwrap_or_else(|| x.to_string())
+}
+
+/// An audited month as the inbox writes it: "Aug 2026" / "أغسطس 2026".
+fn month(x: &str, ar: bool) -> String {
+    let d = x.get(..x.len().min(10)).unwrap_or(x);
+    NaiveDate::parse_from_str(d, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| {
+            Some(format!(
+                "{} {}",
+                word(&format!("staff.month_{}", d.month()), ar)?,
+                d.year()
+            ))
+        })
+        .unwrap_or_else(|| x.to_string())
+}
+
+/// A notification line in the phone's language, worded as the phone's inbox
+/// words it (madar-core `dawam::notice_text`). A numeric `count` picks the
+/// phrase's plural form when the words have one (`<key>_one`, `_two`,
+/// `_few`, `_many`, synced from madar-core's i18n), else the key's own
+/// words; `date` and `week_start` read as a day ("3 Oct"), `month` as a
+/// month ("Aug 2026"), `dates` as the days listed, and a shift changed on
+/// several days names them all (`staff.n_shift_changed_days`); `{kind}`
+/// resolves through a `<key>.kind_*` word first (falling back to the raw
+/// value); `*amount*` arguments render as piastres.
 pub fn render(key: &str, args: &Value, ar: bool) -> Option<String> {
-    let mut s = word(key, ar)?.to_string();
+    let days: Vec<String> = args
+        .get("dates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|x| day(x, ar))
+        .collect();
+    let key = if key == "staff.n_shift_changed" && days.len() > 1 {
+        "staff.n_shift_changed_days"
+    } else {
+        key
+    };
+    let form = args
+        .get("count")
+        .and_then(Value::as_i64)
+        .and_then(|n| word(&format!("{key}_{}", plural_of(n, ar)), ar));
+    let mut s = form.or_else(|| word(key, ar))?.to_string();
     for (k, v) in args.as_object().into_iter().flatten() {
         let text = match (k.as_str(), v) {
             (k, Value::Number(n)) if k.contains("amount") => {
@@ -162,6 +237,9 @@ pub fn render(key: &str, args: &Value, ar: bool) -> Option<String> {
                     p.abs() % 100
                 )
             }
+            ("dates", _) => days.join(if ar { "، " } else { ", " }),
+            ("date" | "week_start", Value::String(x)) => day(x, ar),
+            ("month", Value::String(x)) => month(x, ar),
             ("kind", Value::String(kind)) => {
                 let prefix = key.rsplit_once('.').map_or("", |(p, _)| p);
                 word(&format!("{prefix}.kind_{kind}"), ar)
@@ -512,5 +590,181 @@ mod tests {
         ] {
             assert!(word(k, false).is_some() && word(k, true).is_some(), "{k}");
         }
+    }
+
+    /// The count's category, as madar-core's `i18n::plural_of`.
+    #[test]
+    fn a_counts_category_is_the_cores() {
+        let cats = |ar: bool, ns: &[i64]| ns.iter().map(|n| plural_of(*n, ar)).collect::<Vec<_>>();
+        assert_eq!(
+            cats(false, &[0, 1, 2, 5, 11]),
+            ["other", "one", "other", "other", "other"]
+        );
+        assert_eq!(
+            cats(
+                true,
+                &[0, 1, 2, 3, 10, 11, 99, 100, 101, 102, 103, 111, 200]
+            ),
+            [
+                "zero", "one", "two", "few", "few", "many", "many", "other", "other", "other",
+                "few", "many", "other"
+            ]
+        );
+    }
+
+    /// A push with a count reads in that count's form, as the phone's inbox
+    /// does (madar-core i18n PLURAL FORMS): "1 open shift", never "1 open
+    /// shifts"; Arabic its own words for 1, 2, 3–10 and 11–99.
+    #[test]
+    fn a_counted_push_takes_its_form() {
+        let week = |count: i64, ar: bool| {
+            render(
+                "staff.n_open_shifts_week",
+                &json!({ "week_start": "2026-10-03", "count": count, "branch_id": "b1" }),
+                ar,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            week(1, false),
+            "1 open shift in the week of 3 Oct — claim it in Shifts"
+        );
+        assert_eq!(
+            week(4, false),
+            "4 open shifts in the week of 3 Oct — claim one in Shifts"
+        );
+        assert_eq!(
+            week(1, true),
+            "وردية متاحة واحدة في أسبوع 3 أكتوبر — احجزها من الورديات"
+        );
+        assert_eq!(
+            week(2, true),
+            "ورديتين متاحتين في أسبوع 3 أكتوبر — احجز واحدة من الورديات"
+        );
+        assert_eq!(
+            week(4, true),
+            "4 ورديات متاحة في أسبوع 3 أكتوبر — احجز واحدة من الورديات"
+        );
+        assert_eq!(
+            week(12, true),
+            "12 وردية متاحة في أسبوع 3 أكتوبر — احجز واحدة من الورديات"
+        );
+        assert_eq!(
+            week(103, true),
+            "103 ورديات متاحة في أسبوع 3 أكتوبر — احجز واحدة من الورديات",
+            "counted on the last two digits"
+        );
+        // No count, or a key with no forms: its own words.
+        assert_eq!(
+            render(
+                "staff.n_open_shifts_week",
+                &json!({ "week_start": "x" }),
+                false
+            )
+            .unwrap(),
+            "{count} open shifts in the week of x — claim one in Shifts"
+        );
+        assert_eq!(
+            render(
+                "staff.n_paid",
+                &json!({ "method": "cash", "count": 1 }),
+                false
+            )
+            .unwrap(),
+            "Your pay is marked paid (cash)"
+        );
+    }
+
+    /// A push writes its dates as the phone's inbox does (madar-core
+    /// `dawam::notice_text`): "3 Oct" / "3 أكتوبر" with Latin digits, a
+    /// month by its name and year, several changed days named in full; never
+    /// "2026-10-03". Something that isn't a date shows as sent.
+    #[test]
+    fn a_push_writes_its_dates_as_the_inbox_does() {
+        let r = |k: &str, a: Value, ar: bool| render(k, &a, ar).unwrap();
+        let on = json!({ "date": "2026-10-03" });
+        assert_eq!(
+            r("staff.n_open_shift", on.clone(), false),
+            "An open shift on 3 Oct was posted — claim it in Shifts"
+        );
+        assert_eq!(
+            r("staff.n_open_shift", on.clone(), true),
+            "في وردية متاحة يوم 3 أكتوبر — احجزها من الورديات"
+        );
+        assert_eq!(
+            r("staff.n_week_published", on, true),
+            "جدول أسبوع 3 أكتوبر اتنشر"
+        );
+        assert_eq!(
+            r(
+                "staff.n_open_shifts_week",
+                json!({ "week_start": "2026-10-03", "count": 1 }),
+                false
+            ),
+            "1 open shift in the week of 3 Oct — claim it in Shifts"
+        );
+        let hol = json!({ "date": "2026-10-06", "name_en": "Armed Forces Day", "name_ar": "عيد القوات المسلحة" });
+        assert_eq!(
+            r("staff.n_holiday_undecided", hol, false),
+            "Public holiday Armed Forces Day on 6 Oct isn't decided yet"
+        );
+        assert_eq!(
+            r(
+                "staff.n_claim_approved",
+                json!({ "date": "2026-09-29T00:00:00Z" }),
+                false
+            ),
+            "The shift on 29 Sep is yours",
+            "a timestamp: its day"
+        );
+        // Several changed days are all named; one keeps its own words.
+        let days = json!({ "date": "2026-10-03", "dates": ["2026-10-03", "2026-10-05"] });
+        assert_eq!(
+            r("staff.n_shift_changed", days.clone(), false),
+            "Your shifts on 3 Oct, 5 Oct changed"
+        );
+        assert_eq!(
+            r("staff.n_shift_changed", days, true),
+            "ورديّاتك أيام 3 أكتوبر، 5 أكتوبر اتغيرت"
+        );
+        assert_eq!(
+            r(
+                "staff.n_shift_changed",
+                json!({ "date": "2026-10-03", "dates": ["2026-10-03"] }),
+                false
+            ),
+            "Your shift on 3 Oct changed"
+        );
+        let month = json!({ "branch": "Arkan", "month": "2026-08-01" });
+        assert_eq!(
+            r("staff.n_fairness_ready", month.clone(), false),
+            "The night-shift fairness check for Arkan (Aug 2026) is ready"
+        );
+        assert!(r("staff.n_fairness_ready", month, true).contains("(أغسطس 2026)"));
+        assert_eq!(
+            r("staff.n_open_shift", json!({ "date": "soon" }), false),
+            "An open shift on soon was posted — claim it in Shifts"
+        );
+        // Every push that carries a date writes it so, in both languages,
+        // with Latin digits (the Dawam spec, APP-4).
+        let all = json!({ "date": "2026-10-03", "dates": ["2026-10-03", "2026-10-05"],
+                          "week_start": "2026-10-03", "month": "2026-08-01" });
+        let indic = |c: char| ('\u{0660}'..='\u{0669}').contains(&c);
+        let mut dated = 0;
+        for (k, en, _) in words::WORDS {
+            if !["{date}", "{dates}", "{week_start}", "{month}"]
+                .iter()
+                .any(|p| en.contains(p))
+            {
+                continue;
+            }
+            dated += 1;
+            for ar in [false, true] {
+                let out = r(k, all.clone(), ar);
+                assert!(!out.contains("2026-"), "{k} ({ar}): {out}");
+                assert!(!out.chars().any(indic), "{k} ({ar}): {out}");
+            }
+        }
+        assert!(dated >= 15, "dated push keys found: {dated}");
     }
 }
