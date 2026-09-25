@@ -130,13 +130,43 @@ pub async fn otp_request(
     body: web::Json<StaffOtpRequest>,
 ) -> Result<HttpResponse, AppError> {
     let phone = crate::phone::normalize_phone(&body.phone)?;
-    if accounts_for(pool.get_ref(), &phone).await?.is_empty() {
+    let accounts = accounts_for(pool.get_ref(), &phone).await?;
+    if accounts.is_empty() {
+        // Known but not active (suspended or terminated): say so, and send
+        // nothing (minor default M13).
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT e.employment_status FROM employees e \
+               JOIN organizations o ON o.id = e.org_id \
+              WHERE e.phone_key = $1 AND e.app_access AND 'dawam' = ANY(o.modules) \
+              ORDER BY e.updated_at DESC LIMIT 1",
+        )
+        .bind(&phone)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        if let Some(status) = status {
+            return Err(AppError::CodedVars {
+                status: 403,
+                code: "ACCOUNT_NOT_ACTIVE",
+                reason: "Your account isn't active. Ask your manager.".into(),
+                vars: serde_json::json!({ "status": status }),
+            });
+        }
         // RO-1: no self-registration.
         return Err(AppError::Coded {
             status: 404,
             code: "PHONE_NOT_REGISTERED",
             reason: "This number isn't registered with any business. Ask your manager to add you."
                 .into(),
+        });
+    }
+    // Every business the number works at is paused: no WhatsApp is sent
+    // for a code the check would refuse anyway (SA-3, minor default M13).
+    if accounts.iter().all(|a| !a.org_active) {
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "ORG_SUSPENDED",
+            reason: "This business is paused.".into(),
+            vars: serde_json::json!({ "org_name": accounts[0].org_name }),
         });
     }
     let recent: bool = sqlx::query_scalar(
@@ -266,10 +296,12 @@ pub async fn otp_verify(
     }
     .ok_or_else(|| AppError::NotFound("You don't work at that business.".into()))?;
     if !account.org_active {
-        return Err(AppError::Forbidden(format!(
-            "{} is suspended. Sign-in is stopped until it's reactivated.",
-            account.org_name
-        )));
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "ORG_SUSPENDED",
+            reason: "This business is paused.".into(),
+            vars: serde_json::json!({ "org_name": account.org_name }),
+        });
     }
 
     // Deleted on use (RO-2).
