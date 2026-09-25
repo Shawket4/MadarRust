@@ -3963,3 +3963,390 @@ async fn a_salary_nobody_set_is_flagged_and_payroll_waits_for_it(pool: PgPool) {
             .unwrap();
     assert_eq!(before, after);
 }
+
+/// Hunt H2-B2: a second decision on a pay line, an advance or a shift's
+/// overtime is 409 ALREADY_DECIDED with the status it already has, and the
+/// person hears once — also when two decisions land at the same moment
+/// (each UPDATE was guarded on `pending` but its row count was ignored, and
+/// overtime's had no guard at all). Only the winner writes the D8 audit row,
+/// and a rejection says why (D8, REASON_REQUIRED otherwise).
+#[sqlx::test]
+async fn a_second_decision_is_already_decided_and_told_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let (owner, mgr) = (f.owner(), f.mgr());
+    let told = async |key: &str| -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 AND key = $2",
+        )
+        .bind(f.amal)
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let decided = async |resp: actix_web::dev::ServiceResponse, status: &str| {
+        assert_eq!(resp.status(), 409);
+        let body = json_of(resp).await;
+        assert_eq!(body["code"], "ALREADY_DECIDED", "{body}");
+        assert_eq!(body["vars"]["status"], status, "{body}");
+    };
+    let audited = async |action: &str| -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM payroll_audit_log WHERE action = $1")
+            .bind(action)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    // A rejection says why (D8); an approval needs no reason.
+    let decide = |uri: &str, approve: bool| {
+        let body = if approve {
+            json!({ "approve": true })
+        } else {
+            json!({ "approve": false, "reason": "Not this month" })
+        };
+        let req = authed(test::TestRequest::patch().uri(uri), &owner)
+            .set_json(body)
+            .to_request();
+        test::call_service(&app, req)
+    };
+
+    // A 2,000 EGP bonus is over the manager's 1,000: it waits for the owner.
+    let bonus = async || -> String {
+        let row = json_of(call!(
+            app,
+            post,
+            "/staff/adjustments",
+            mgr,
+            json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 200_000, "reason": "Target" })
+        ))
+        .await;
+        assert_eq!(row["status"], "pending", "{row}");
+        format!(
+            "/staff/adjustments/bonus/{}/decision",
+            row["id"].as_str().unwrap()
+        )
+    };
+    let uri = bonus().await;
+    assert_eq!(decide(&uri, true).await.status(), 200);
+    decided(decide(&uri, false).await, "approved").await;
+    assert_eq!(told("staff.n_bonus_added").await, 1);
+    assert_eq!(audited("adjustment.approve").await, 1);
+    assert_eq!(audited("adjustment.reject").await, 0);
+    let uri = bonus().await;
+    let (one, two) = futures::join!(decide(&uri, true), decide(&uri, true));
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 409], "one wins at once");
+    assert_eq!(told("staff.n_bonus_added").await, 2, "told once for it");
+    assert_eq!(
+        audited("adjustment.approve").await,
+        2,
+        "audited once for it"
+    );
+
+    // An advance.
+    let advance = async || -> String {
+        let row = json_of(call!(
+            app,
+            post,
+            "/staff/me/advances",
+            phone_token(&pool, f.amal).await,
+            json!({ "amount_piastres": 50_000, "installments": 2 })
+        ))
+        .await;
+        assert_eq!(row["status"], "pending", "{row}");
+        format!("/staff/advances/{}/review", row["id"].as_str().unwrap())
+    };
+    let uri = advance().await;
+    assert_eq!(decide(&uri, false).await.status(), 200);
+    decided(decide(&uri, true).await, "rejected").await;
+    assert_eq!(told("staff.n_advance_rejected").await, 1);
+    assert_eq!(told("staff.n_advance_approved").await, 0);
+    assert_eq!(audited("advance.decide").await, 1);
+    let uri = advance().await;
+    let (one, two) = futures::join!(decide(&uri, false), decide(&uri, false));
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 409], "one wins at once");
+    assert_eq!(
+        told("staff.n_advance_rejected").await,
+        2,
+        "told once for it"
+    );
+    assert_eq!(audited("advance.decide").await, 2, "audited once for it");
+
+    // A shift's overtime.
+    let overtime = async |on: NaiveDate| -> String {
+        let rec = day(&pool, &f, f.amal, f.a, on, "present", 8, 480, 0, 60).await;
+        format!("/staff/attendance/{rec}/overtime")
+    };
+    let uri = overtime(f.start).await;
+    assert_eq!(decide(&uri, true).await.status(), 200);
+    decided(decide(&uri, false).await, "approved").await;
+    assert_eq!(told("staff.n_overtime_approved").await, 1);
+    assert_eq!(told("staff.n_overtime_rejected").await, 0);
+    assert_eq!(audited("overtime.decide").await, 1);
+    let uri = overtime(f.start + Duration::days(1)).await;
+    let (one, two) = futures::join!(decide(&uri, true), decide(&uri, true));
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 409], "one wins at once");
+    assert_eq!(
+        told("staff.n_overtime_approved").await,
+        2,
+        "told once for it"
+    );
+    assert_eq!(audited("overtime.decide").await, 2, "audited once for it");
+    // A day with no overtime has nothing to decide.
+    let none = day(
+        &pool,
+        &f,
+        f.amal,
+        f.a,
+        f.start + Duration::days(2),
+        "present",
+        8,
+        480,
+        0,
+        0,
+    )
+    .await;
+    let resp = decide(&format!("/staff/attendance/{none}/overtime"), true).await;
+    assert_eq!(resp.status(), 404);
+}
+
+/// Hunt H2-B4 (AV-4): asking for an advance tells the people who may decide
+/// it at the person's branch — as a leave request tells its deciders — and
+/// never the asker. A manager's own ask reaches the owner.
+#[sqlx::test]
+async fn an_advance_ask_tells_its_deciders(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let emp = async |name: &str, user: Uuid, phone: &str, branches: &[Uuid]| -> Uuid {
+        common::employees::employee(
+            &pool,
+            f.org,
+            name,
+            Some(user),
+            Some(phone),
+            true,
+            branches,
+            400_000,
+        )
+        .await
+    };
+    let mgr_emp = emp("Manager", f.mgr, "+201012345601", &[f.a]).await;
+    let owner_emp = emp("Owner", f.owner, "+201012345602", &[]).await;
+    let mgr_b = user(&pool, f.org, "Manager B", "branch_manager").await;
+    assign(&pool, mgr_b, f.b).await;
+    let mgr_b_emp = emp("Manager B", mgr_b, "+201012345603", &[f.b]).await;
+    let told = async || -> Vec<(Uuid, Value)> {
+        let rows: Vec<(Uuid, Value)> = sqlx::query_as(
+            "SELECT employee_id, args FROM staff_notifications WHERE key = 'staff.n_request' \
+              ORDER BY employee_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM staff_notifications")
+            .execute(&pool)
+            .await
+            .unwrap();
+        rows
+    };
+    let ask = async |who: Uuid| {
+        let resp = call!(
+            app,
+            post,
+            "/staff/me/advances",
+            phone_token(&pool, who).await,
+            json!({ "amount_piastres": 50_000, "installments": 2 })
+        );
+        assert_eq!(resp.status(), 201);
+    };
+    let today: NaiveDate = sqlx::query_scalar("SELECT (now() AT TIME ZONE 'UTC')::date")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    ask(f.amal).await;
+    let rows = told().await;
+    let mut who: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let mut want = vec![mgr_emp, owner_emp];
+    who.sort();
+    want.sort();
+    assert_eq!(who, want, "A's deciders, not B's manager nor Amal");
+    assert!(!who.contains(&mgr_b_emp) && !who.contains(&f.amal));
+    assert_eq!(
+        rows[0].1,
+        json!({ "name": "Amal", "kind": "salary_advance", "date": today })
+    );
+    assert_eq!(
+        madar_rust::push::render("staff.n_request", &rows[0].1, false).unwrap(),
+        format!("Amal: new Salary advance request for {today}")
+    );
+
+    // The manager's own ask: someone else decides it.
+    ask(mgr_emp).await;
+    let who: Vec<Uuid> = told().await.into_iter().map(|r| r.0).collect();
+    assert_eq!(who, vec![owner_emp]);
+}
+
+/// Hunt H2-B5: Approvals asks for every pending cover and overtime, however
+/// old — `GET /staff/attendance` needed a date range, so the dashboard's
+/// 35-day window lost older ones. `?cover_status=pending` and
+/// `?overtime_status=pending` need no range; the manager's branches still
+/// bound what they see; any other listing still needs its range.
+#[sqlx::test]
+async fn pending_covers_and_overtime_are_listed_without_a_range(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let long_ago = f.start - Duration::days(70);
+    let old_ot = day(&pool, &f, f.amal, f.a, long_ago, "present", 8, 480, 0, 45).await;
+    let b_ot = day(&pool, &f, f.bassem, f.b, long_ago, "present", 8, 480, 0, 30).await;
+    let done_ot = day(
+        &pool,
+        &f,
+        f.amal,
+        f.a,
+        long_ago + Duration::days(1),
+        "present",
+        8,
+        480,
+        0,
+        20,
+    )
+    .await;
+    sqlx::query("UPDATE attendance_records SET overtime_status = 'approved' WHERE id = $1")
+        .bind(done_ot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cover = day(
+        &pool,
+        &f,
+        f.amal,
+        f.a,
+        long_ago + Duration::days(2),
+        "present",
+        8,
+        480,
+        0,
+        0,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE attendance_records SET covered_employee_id = $2, cover_status = 'pending', \
+                check_in_method = 'cover' WHERE id = $1",
+    )
+    .bind(cover)
+    .bind(f.bassem)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ids = async |uri: &str, token: &str| -> Vec<String> {
+        let resp = call!(app, get, uri, token);
+        assert_eq!(resp.status(), 200, "{uri}");
+        let mut ids: Vec<String> = json_of(resp)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let (owner, mgr) = (f.owner(), f.mgr());
+    assert_eq!(
+        ids("/staff/attendance?overtime_status=pending", &owner).await,
+        sorted(vec![old_ot.to_string(), b_ot.to_string()])
+    );
+    assert_eq!(
+        ids("/staff/attendance?overtime_status=pending", &mgr).await,
+        vec![old_ot.to_string()],
+        "the manager's branch only"
+    );
+    assert_eq!(
+        ids("/staff/attendance?cover_status=pending", &owner).await,
+        vec![cover.to_string()]
+    );
+    // With a range, the filter narrows it.
+    let uri = format!(
+        "/staff/attendance?from={long_ago}&to={}&overtime_status=pending",
+        long_ago + Duration::days(5)
+    );
+    assert_eq!(
+        ids(&uri, &owner).await,
+        sorted(vec![old_ot.to_string(), b_ot.to_string()])
+    );
+    // Anything else still needs its range.
+    for uri in [
+        "/staff/attendance",
+        "/staff/attendance?overtime_status=approved",
+        "/staff/attendance?cover_status=rejected",
+    ] {
+        let resp = call!(app, get, uri, owner);
+        assert_eq!(resp.status(), 400, "{uri}");
+        let body = json_of(resp).await;
+        assert_eq!(body["code"], "RANGE_REQUIRED", "{uri} {body}");
+    }
+    let resp = call!(app, get, "/staff/attendance?overtime_status=soon", owner);
+    assert_eq!(resp.status(), 400);
+}
+
+/// Hunt H2-B6: an old pending pay line stays in the list behind any number
+/// of newer decided ones (the list stopped at the newest 300).
+#[sqlx::test]
+async fn an_old_pending_pay_line_is_listed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, status, created_at) \
+         VALUES ($1, $2, 10000, 'Old', $3, 'pending', now() - INTERVAL '90 days') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, status, created_at) \
+         SELECT $1, $2, 100, 'Line ' || g, $3, 'approved', now() - INTERVAL '1 minute' * g \
+           FROM generate_series(1, 320) g",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rows = json_of(call!(app, get, "/staff/adjustments", f.owner())).await;
+    let rows = rows.as_array().unwrap();
+    assert!(
+        rows.iter().any(|r| r["id"] == json!(old)),
+        "the old pending line is listed ({} rows)",
+        rows.len()
+    );
+    assert_eq!(
+        rows.len(),
+        301,
+        "every pending one, and a page of decided ones"
+    );
+    let pending = json_of(call!(
+        app,
+        get,
+        "/staff/adjustments?status=pending",
+        f.owner()
+    ))
+    .await;
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+}

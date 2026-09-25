@@ -31,6 +31,21 @@ const NIL: &str = "'00000000-0000-0000-0000-000000000000'::uuid";
 pub(crate) struct Block {
     pub work_shift_id: Uuid,
     pub times: Option<(NaiveTime, NaiveTime)>,
+    /// Where a business-wide block is worked that date (hunt H2-B8): the
+    /// board it was set from, or where a claimed, moved or swapped shift was
+    /// worked. Kept only for a business-wide block and one of the person's
+    /// branches; `None` = the person's first branch (or, on a whole-day
+    /// write, what the date already had).
+    pub branch_id: Option<Uuid>,
+}
+
+/// What [`remove_block`] took off a date.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Removed {
+    /// The assignment's own from/to, if it had any.
+    pub times: Option<(NaiveTime, NaiveTime)>,
+    /// Where it was worked.
+    pub branch_id: Option<Uuid>,
 }
 
 /// What a block allows.
@@ -135,14 +150,24 @@ async fn insert_row(
     times: Option<(NaiveTime, NaiveTime)>,
     reason: Option<&str>,
     by: Option<Uuid>,
+    branch: Option<Uuid>,
 ) -> Result<(), AppError> {
+    // The branch is kept only for a business-wide block (a branch's own block
+    // counts at that branch) and only when the person works there.
     sqlx::query(&format!(
         "INSERT INTO staff_schedule_overrides \
-             (org_id, employee_id, on_date, work_shift_id, start_time, end_time, reason, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             (org_id, employee_id, on_date, work_shift_id, start_time, end_time, reason, \
+              created_by, branch_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
+                 (SELECT $9::uuid \
+                   WHERE EXISTS (SELECT 1 FROM work_shifts w \
+                                  WHERE w.id = $4 AND w.branch_id IS NULL) \
+                     AND EXISTS (SELECT 1 FROM employee_branches eb \
+                                  WHERE eb.employee_id = $2 AND eb.branch_id = $9))) \
          ON CONFLICT (employee_id, on_date, COALESCE(work_shift_id, {NIL})) DO UPDATE SET \
              start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time, \
-             reason = EXCLUDED.reason, created_by = EXCLUDED.created_by"
+             reason = EXCLUDED.reason, created_by = EXCLUDED.created_by, \
+             branch_id = EXCLUDED.branch_id"
     ))
     .bind(org_id)
     .bind(employee_id)
@@ -152,6 +177,7 @@ async fn insert_row(
     .bind(times.map(|t| t.1))
     .bind(reason)
     .bind(by)
+    .bind(branch)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -171,7 +197,18 @@ async fn materialise(
     }
     let pattern = resolve_range(&mut *conn, &[employee_id], date, date, None).await?;
     if pattern.is_empty() {
-        insert_row(conn, org_id, employee_id, date, None, None, reason, by).await?;
+        insert_row(
+            conn,
+            org_id,
+            employee_id,
+            date,
+            None,
+            None,
+            reason,
+            by,
+            None,
+        )
+        .await?;
     }
     for s in pattern {
         insert_row(
@@ -183,6 +220,7 @@ async fn materialise(
             None,
             reason,
             by,
+            None,
         )
         .await?;
     }
@@ -199,13 +237,29 @@ pub(crate) async fn replace_day(
     reason: Option<&str>,
     by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2")
-        .bind(employee_id)
-        .bind(date)
-        .execute(&mut *conn)
-        .await?;
+    // Where each block was worked, kept when the write doesn't say (an old
+    // client, a legacy single override).
+    let had: Vec<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2 \
+         RETURNING work_shift_id, branch_id",
+    )
+    .bind(employee_id)
+    .bind(date)
+    .fetch_all(&mut *conn)
+    .await?;
     if blocks.is_empty() {
-        insert_row(conn, org_id, employee_id, date, None, None, reason, by).await?;
+        insert_row(
+            conn,
+            org_id,
+            employee_id,
+            date,
+            None,
+            None,
+            reason,
+            by,
+            None,
+        )
+        .await?;
     }
     let mut seen = BTreeSet::new();
     for b in blocks {
@@ -214,6 +268,10 @@ pub(crate) async fn replace_day(
                 "A block can be on a day only once.".into(),
             ));
         }
+        let kept = had
+            .iter()
+            .find(|(w, _)| *w == Some(b.work_shift_id))
+            .and_then(|(_, at)| *at);
         insert_row(
             conn,
             org_id,
@@ -223,6 +281,7 @@ pub(crate) async fn replace_day(
             b.times,
             reason,
             by,
+            b.branch_id.or(kept),
         )
         .await?;
     }
@@ -273,13 +332,14 @@ pub(crate) async fn add_block(
         block.times,
         reason,
         by,
+        block.branch_id,
     )
     .await
 }
 
 /// Take one block off a date; the rest of the day stays. `None` when the
 /// person wasn't on that block that day (nothing changed); otherwise the
-/// assignment's own times, if it had any.
+/// assignment's own times, if it had any, and where it was worked.
 pub(crate) async fn remove_block(
     conn: &mut PgConnection,
     org_id: Uuid,
@@ -288,7 +348,12 @@ pub(crate) async fn remove_block(
     work_shift_id: Uuid,
     reason: Option<&str>,
     by: Option<Uuid>,
-) -> Result<Option<Option<(NaiveTime, NaiveTime)>>, AppError> {
+) -> Result<Option<Removed>, AppError> {
+    let at = resolve_range(&mut *conn, &[employee_id], date, date, None)
+        .await?
+        .into_iter()
+        .find(|s| s.work_shift_id == work_shift_id)
+        .and_then(|s| s.branch_id);
     materialise(conn, org_id, employee_id, date, reason, by).await?;
     let gone: Option<(Option<NaiveTime>, Option<NaiveTime>)> = sqlx::query_as(
         "DELETE FROM staff_schedule_overrides \
@@ -304,9 +369,23 @@ pub(crate) async fn remove_block(
         return Ok(None);
     };
     if day_rows(conn, employee_id, date).await?.is_empty() {
-        insert_row(conn, org_id, employee_id, date, None, None, reason, by).await?;
+        insert_row(
+            conn,
+            org_id,
+            employee_id,
+            date,
+            None,
+            None,
+            reason,
+            by,
+            None,
+        )
+        .await?;
     }
-    Ok(Some(s.zip(e)))
+    Ok(Some(Removed {
+        times: s.zip(e),
+        branch_id: at,
+    }))
 }
 
 /// This one assignment's own from/to (`None` = back to the block's times).

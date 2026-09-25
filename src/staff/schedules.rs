@@ -296,6 +296,12 @@ pub struct PutDayRequest {
     pub shifts: Vec<DayBlock>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The branch whose board sets the day: a business-wide block is worked
+    /// there (one of the person's branches, else 400
+    /// `EMPLOYEE_NOT_AT_BRANCH`). Omitted = each block stays where the date
+    /// had it (a new one at the person's first branch).
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -1403,6 +1409,7 @@ pub async fn put_override(
         .map(|work_shift_id| Block {
             work_shift_id,
             times,
+            branch_id: None,
         })
         .into_iter()
         .collect();
@@ -1474,11 +1481,23 @@ pub async fn put_day(
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     let subject = editable_subject(pool, &claims, org_id, body.employee_id).await?;
+    // The board it is set from (hunt H2-B8): the person's, and the caller's.
+    if let Some(at) = body.branch_id {
+        if !subject.branches.contains(&at) {
+            return Err(AppError::Coded {
+                status: 400,
+                code: "EMPLOYEE_NOT_AT_BRANCH",
+                reason: format!("{} doesn't work at that branch.", subject.name),
+            });
+        }
+        access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, at).await?;
+    }
     let mut blocks = Vec::with_capacity(body.shifts.len());
     for s in &body.shifts {
         blocks.push(Block {
             work_shift_id: s.work_shift_id,
             times: times_of(s.start_time, s.end_time)?,
+            branch_id: body.branch_id,
         });
     }
     let by = claims.user_id_safe().ok();
@@ -1612,6 +1631,7 @@ pub async fn move_shift(
     let block_only = Block {
         work_shift_id: body.work_shift_id,
         times: None,
+        branch_id: None,
     };
     authorize_blocks(pool, &claims, org_id, &[block_only]).await?;
     let mut tx = pool.begin().await?;
@@ -1625,7 +1645,7 @@ pub async fn move_shift(
         by,
     )
     .await?;
-    let Some(times) = removed else {
+    let Some(removed) = removed else {
         return Err(AppError::Refused {
             code: "NOT_ROSTERED",
             reason: format!("{} isn't on that shift that day.", from.name),
@@ -1646,9 +1666,11 @@ pub async fn move_shift(
             vars: serde_json::json!({ "name": to.name, "shift": on.name, "date": body.on_date }),
         });
     }
+    // Its times, and where it was worked (hunt H2-B8).
     let block = Block {
         work_shift_id: body.work_shift_id,
-        times,
+        times: removed.times,
+        branch_id: removed.branch_id,
     };
     check_blocks(&mut tx, &to, body.on_date, &[block]).await?;
     days::add_block(

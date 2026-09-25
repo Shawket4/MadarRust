@@ -45980,7 +45980,8 @@
           {
             "name": "from",
             "in": "query",
-            "required": true,
+            "description": "Required unless `cover_status` or `overtime_status` is `pending`.",
+            "required": false,
             "schema": {
               "type": "string",
               "format": "date"
@@ -45989,7 +45990,8 @@
           {
             "name": "to",
             "in": "query",
-            "required": true,
+            "description": "Required unless `cover_status` or `overtime_status` is `pending`.",
+            "required": false,
             "schema": {
               "type": "string",
               "format": "date"
@@ -46016,6 +46018,24 @@
           {
             "name": "status",
             "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cover_status",
+            "in": "query",
+            "description": "`pending` · `confirmed` · `rejected`: covers in that state.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "overtime_status",
+            "in": "query",
+            "description": "`pending` · `approved` · `rejected`: overtime in that state.",
             "required": false,
             "schema": {
               "type": "string"
@@ -85652,6 +85672,14 @@
           "shifts"
         ],
         "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch whose board sets the day: a business-wide block is worked\nthere (one of the person's branches, else 400\n`EMPLOYEE_NOT_AT_BRANCH`). Omitted = each block stays where the date\nhad it (a new one at the person's first branch)."
+          },
           "employee_id": {
             "type": "string",
             "format": "uuid"
@@ -87962,7 +87990,7 @@
         "properties": {
           "action": {
             "type": "string",
-            "description": "`ignore` · `excuse_paid` · `excuse_unpaid` · `deduct` · `revoke` (a new\nphone) · `confirm`"
+            "description": "`ignore` · `excuse_paid` · `excuse_unpaid` · `deduct` · `revoke` (a new\nphone) · `confirm`. A cover's flag takes only `confirm` or `reject`,\nwhich decide the cover itself (400 `FLAG_COVER_CONFIRM_OR_REJECT`)."
           },
           "amount_piastres": {
             "type": [
