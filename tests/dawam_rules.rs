@@ -3027,3 +3027,49 @@ async fn a_mission_over_a_worked_day_names_the_worked_day(pool: PgPool) {
     .unwrap();
     assert_eq!(punched, 1);
 }
+
+/// Minor default M17: nobody is told of a request they filed themselves.
+/// The owner filing a leave for Eman isn't notified of it; Eman's managers
+/// are; Eman filing her own isn't told either.
+#[sqlx::test]
+async fn nobody_is_told_of_a_request_they_filed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let told = |who: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 \
+                    AND key = 'staff.n_request'",
+            )
+            .bind(who)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "mission", "on_date": "2026-08-10",
+        "title": "Bank" }),
+    )
+    .await;
+    assert_eq!(told(f.e_owner).await, 0, "the owner filed it");
+    assert_eq!(told(f.e_mgr).await, 1, "Eman's manager hears");
+    assert_eq!(told(f.e).await, 0);
+    // Eman files her own from the app: she isn't told, her managers are.
+    let s = session(&pool, f.e).await;
+    let resp = call!(
+        app,
+        "POST",
+        "/staff/me/requests",
+        format!("{}|{}", s.token, s.device),
+        json!({ "kind": "mission", "on_date": "2026-08-12", "title": "Supplier" })
+    );
+    assert_eq!(resp.status(), 201);
+    assert_eq!(told(f.e).await, 0);
+    assert_eq!(told(f.e_mgr).await, 2);
+    assert_eq!(told(f.e_owner).await, 1, "the owner manages A too");
+}

@@ -1201,26 +1201,30 @@ async fn after_filing(
 
     let name = crate::staff::dawam::employee_name(pool, subject.id).await;
     let args = serde_json::json!({ "name": name, "kind": row.kind, "date": row.on_date });
-    if row.to_owner {
+    // Nobody is told of a request they filed themselves (minor default
+    // M17): neither the person it is for nor a manager filing it for them.
+    let filer: Option<Uuid> = match claims.and_then(|c| c.user_id_safe().ok()) {
+        Some(user) => {
+            sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
+                .bind(user)
+                .bind(org_id)
+                .fetch_optional(pool)
+                .await?
+        }
+        None => None,
+    };
+    let told = |e: &Uuid| *e != subject.id && Some(*e) != filer;
+    let to: Vec<Uuid> = if row.to_owner {
         // A manager's own request waits for someone above them: the owner is
         // told (RQ-5), not the requester's peers.
-        for owner in crate::staff::dawam::owners(pool, org_id).await? {
-            if owner != subject.id {
-                crate::staff::dawam::notify(pool, org_id, owner, "staff.n_request", args.clone())
-                    .await;
-            }
-        }
+        crate::staff::dawam::owners(pool, org_id).await?
     } else {
-        crate::staff::dawam::notify_managers(
-            pool,
-            org_id,
-            subject.home(),
-            Cap::HrLeaveEdit,
-            Some(subject.id),
-            "staff.n_request",
-            args,
-        )
-        .await;
+        crate::staff::dawam::managers_of(pool, org_id, subject.home(), Cap::HrLeaveEdit)
+            .await
+            .unwrap_or_default()
+    };
+    for e in to.iter().filter(|e| told(e)) {
+        crate::staff::dawam::notify(pool, org_id, *e, "staff.n_request", args.clone()).await;
     }
     Ok(row)
 }
