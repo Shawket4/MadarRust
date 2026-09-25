@@ -702,6 +702,13 @@ async fn pull_checksums_equal_projected_sets_for_every_type(pool: PgPool) {
 
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     for ty in ALL_TYPES {
+        // Combos were removed: `bundle` stays a wire type (tills v0.8 count a
+        // full snapshot complete only when it is answered), always empty.
+        if *ty == "bundle" {
+            assert!(full.types.iter().any(|t| t == "bundle"), "{:?}", full.types);
+            assert!(full.data.get("bundle").is_none_or(|v| v.is_empty()));
+            continue;
+        }
         assert!(
             !full.data.get(*ty).is_none_or(|v| v.is_empty()),
             "fixture seeds a live `{ty}`"

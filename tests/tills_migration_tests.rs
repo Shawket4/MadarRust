@@ -199,6 +199,19 @@ async fn migrate_rest(pool: &PgPool) {
     subset(|_| true).run(pool).await.expect("rework migrations");
 }
 
+/// 20261004120000_remove_combos drops the `bundles` table, and the rework's
+/// changefeed migration (20260914090300) names its row type. Once it has run,
+/// the rework can be taken down but not brought up again, so the down → up
+/// round trip is proved on the schema the down script was written for.
+const REMOVE_COMBOS: i64 = 20261004120000;
+
+async fn migrate_rest_before_combos_removal(pool: &PgPool) {
+    subset(|v| v < REMOVE_COMBOS)
+        .run(pool)
+        .await
+        .expect("rework migrations");
+}
+
 /// Old schema + fixture + rework migrations.
 async fn setup(pool: &PgPool) {
     migrate_pre(pool).await;
@@ -728,7 +741,7 @@ async fn down_script_round_trip(pool: PgPool) {
     .await;
     let bindings_before = lines(&pool, "SELECT id::text || till_id FROM shifts ORDER BY id").await;
     let occ_before = lines(&pool, "SELECT id::text || coalesce(started_till_id::text,'-') || coalesce(ended_till_id::text,'-') FROM table_occupancies ORDER BY id").await;
-    migrate_rest(&pool).await;
+    migrate_rest_before_combos_removal(&pool).await;
 
     // psql meta-commands are not SQL; the script is otherwise plain.
     let down: String = DOWN_SQL
@@ -781,7 +794,7 @@ async fn down_script_round_trip(pool: PgPool) {
     );
 
     // up → down → up
-    migrate_rest(&pool).await;
+    migrate_rest_before_combos_removal(&pool).await;
     assert_eq!(lines(&pool, PER_TILL_NEW).await, before);
     let applied: Vec<i64> = sqlx::query_scalar(
         "SELECT version FROM _sqlx_migrations WHERE version BETWEEN 20260914090000 AND 20260915090000 AND version NOT IN (20260914090700, 20260914090800) ORDER BY version",
