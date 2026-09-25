@@ -45,6 +45,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "السلفة بتاعتك اترفضت",
     ),
     (
+        "staff.n_advance_requested",
+        "{name} asked for a salary advance of {amount}",
+        "{name} طلب سلفة {amount}",
+    ),
+    (
         "staff.n_bonus_added",
         "A bonus was added: {reason} ({amount})",
         "اتضافت مكافأة: {reason} ({amount})",
@@ -140,6 +145,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "{name} في الوردية والتتبع مقفول",
     ),
     (
+        "staff.n_holiday_undecided",
+        "Public holiday {name_en} on {date} isn't decided yet",
+        "العطلة الرسمية {name_ar} يوم {date} لسه ما اتقررتش",
+    ),
+    (
         "staff.n_learning_frozen",
         "Roster suggestions at {branch} stopped learning: managers accepted {accepted} of {decided} in 4 weeks",
         "اقتراحات الجدول في {branch} وقفت تتعلم: المديرين قبلوا {accepted} من {decided} في 4 أسابيع",
@@ -163,6 +173,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "staff.n_open_shift_cancelled",
         "The open shift on {date} you claimed was taken back",
         "الوردية المتاحة يوم {date} اللي حجزتها اتلغت",
+    ),
+    (
+        "staff.n_open_shifts_week",
+        "{count} open shifts in the week of {week_start} — claim one in Shifts",
+        "{count} ورديات متاحة في أسبوع {week_start} — احجز واحدة من الورديات",
     ),
     (
         "staff.n_overtime",
@@ -215,9 +230,19 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "طلب {kind} بتاعك ليوم {date} اترفض",
     ),
     (
+        "staff.n_salary_missing",
+        "{by} added {name} without a salary. Set it before approving payroll.",
+        "{by} ضاف {name} من غير مرتب. حدّده قبل ما تعتمد المرتبات.",
+    ),
+    (
         "staff.n_shift_changed",
         "Your shift on {date} changed",
         "ورديتك يوم {date} اتغيرت",
+    ),
+    (
+        "staff.n_shift_changed_days",
+        "Your shifts on {dates} changed",
+        "ورديّاتك أيام {dates} اتغيرت",
     ),
     (
         "staff.n_swap_agreed",
