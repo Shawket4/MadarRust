@@ -427,10 +427,13 @@ async fn confirming_a_cover_flag_needs_the_cover_right(pool: PgPool) {
         "attendance.edit alone does not confirm a cover"
     );
     assert_eq!(resolution(&pool, flag).await, None, "nothing was written");
-    // What attendance.edit does allow still works for him.
-    let resp = call!(app, patch, uri, m, json!({ "action": "ignore" }));
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resolution(&pool, flag).await.as_deref(), Some("ignored"));
+    // Nor anything else on a cover's flag: it is settled only by settling
+    // the cover (hunt H2-B3), which is the cover right's.
+    for action in ["reject", "ignore"] {
+        let resp = call!(app, patch, uri, m, json!({ "action": action }));
+        assert_eq!(resp.status(), 403, "{action}");
+    }
+    assert_eq!(resolution(&pool, flag).await, None, "nothing was written");
 
     // A manager who holds it (the default) confirms.
     let flag = open_flag(&pool, &f, f.b, "cover").await;

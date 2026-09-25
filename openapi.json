@@ -87961,7 +87961,7 @@
         "properties": {
           "action": {
             "type": "string",
-            "description": "`ignore` · `excuse_paid` · `excuse_unpaid` · `deduct` · `revoke` (a new\nphone) · `confirm`"
+            "description": "`ignore` · `excuse_paid` · `excuse_unpaid` · `deduct` · `revoke` (a new\nphone) · `confirm`. A cover's flag takes only `confirm` or `reject`,\nwhich decide the cover itself (400 `FLAG_COVER_CONFIRM_OR_REJECT`)."
           },
           "amount_piastres": {
             "type": [

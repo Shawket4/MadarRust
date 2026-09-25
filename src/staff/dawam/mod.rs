@@ -51,6 +51,18 @@ pub fn week_start(d: NaiveDate) -> NaiveDate {
     d - Duration::days(i64::from(back))
 }
 
+/// A second decision on something already decided — a pay line, an advance,
+/// a shift's overtime (hunt H2-B2): 409 `ALREADY_DECIDED` with the status it
+/// has (`approved`, `rejected`, …), for the client's wording (AT-13).
+pub(crate) fn already_decided(status: &str) -> AppError {
+    AppError::CodedVars {
+        status: 409,
+        code: "ALREADY_DECIDED",
+        reason: format!("This was already decided ({status})."),
+        vars: serde_json::json!({ "status": status }),
+    }
+}
+
 pub(crate) fn hash_token(token: &str) -> String {
     crate::staff::principal::hash_device_token(token)
 }

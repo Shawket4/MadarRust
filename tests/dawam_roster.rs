@@ -2903,18 +2903,21 @@ async fn confirming_a_cover_flag_confirms_the_cover_and_deciding_a_cover_resolve
     assert_eq!(s, 200);
     assert_eq!(status_of(rec4).await.0.as_deref(), Some("rejected"));
 
-    // "Ignore" on a cover flag decides nothing: the cover still waits.
+    // "Ignore" on a cover flag would decide nothing and leave the cover
+    // waiting for ever: refused (hunt H2-B3), the cover and its flag open.
     let (rec3, flag3) = cover(3).await;
-    let (s, _) = done(call!(
-        app,
-        "PATCH",
-        format!("/staff/flags/{flag3}"),
-        f.owner(),
-        json!({ "action": "ignore" })
-    ))
-    .await;
-    assert_eq!(s, 200);
-    assert_eq!(status_of(rec3).await.0.as_deref(), Some("pending"));
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/flags/{flag3}"),
+            f.owner(),
+            json!({ "action": "ignore" })
+        ),
+        400,
+        "FLAG_COVER_CONFIRM_OR_REJECT"
+    );
+    assert_eq!(status_of(rec3).await, (Some("pending".into()), None));
 }
 
 /// Mac E2E R-B1 (SC-8): the manager's approval re-checks what the ask
@@ -4287,4 +4290,162 @@ async fn a_claimer_withdraws_a_waiting_claim(pool: PgPool) {
     ))
     .await;
     assert_eq!(s, 404);
+}
+
+/// A pending cover by Amal of Bassem's Morning `day` days ago, with its flag.
+async fn pending_cover(pool: &PgPool, f: &F, shift: Uuid, day: i64) -> (Uuid, Uuid) {
+    let rec: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
+         business_date, status, check_in_method, covered_employee_id, cover_status) \
+         VALUES ($1, $2, $3, $4, $5, 'present', 'cover', $6, 'pending') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .bind(shift)
+    .bind(today() - Duration::days(day))
+    .bind(f.b)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind) \
+         VALUES ($1, $2, $3, $4, 'cover') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .bind(rec)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (rec, flag)
+}
+
+/// Hunt H2-B3 (CV-3, CV-5): a cover flag is settled only by settling its
+/// cover. Ignore, excuse or deduct resolved the flag and left the cover
+/// pending for ever: now 400 FLAG_COVER_CONFIRM_OR_REJECT, nothing written.
+/// "reject" on the flag rejects the cover, as "confirm" confirms it.
+#[sqlx::test]
+async fn a_cover_flag_is_confirmed_or_rejected_only(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let (rec, flag) = pending_cover(&pool, &f, m, 1).await;
+    for action in ["ignore", "excuse_paid", "excuse_unpaid", "deduct", "revoke"] {
+        refused!(
+            call!(
+                app,
+                "PATCH",
+                format!("/staff/flags/{flag}"),
+                f.owner(),
+                json!({ "action": action, "amount_piastres": 5_000 })
+            ),
+            400,
+            "FLAG_COVER_CONFIRM_OR_REJECT"
+        );
+    }
+    let state = async || -> (Option<String>, Option<String>, i64) {
+        sqlx::query_as(
+            "SELECT a.cover_status, f.resolution, \
+                    (SELECT COUNT(*) FROM payroll_deductions WHERE employee_id = a.employee_id) \
+               FROM attendance_records a \
+               JOIN attendance_flags f ON f.attendance_record_id = a.id AND f.kind = 'cover' \
+              WHERE a.id = $1",
+        )
+        .bind(rec)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        state().await,
+        (Some("pending".into()), None, 0),
+        "nothing written"
+    );
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/flags/{flag}"),
+        f.owner(),
+        json!({ "action": "reject" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["resolution"], json!("rejected"));
+    assert_eq!(
+        state().await,
+        (Some("rejected".into()), Some("rejected".into()), 0)
+    );
+    assert!(
+        keys_for(&pool, f.a)
+            .await
+            .contains(&"staff.n_cover_rejected".to_string())
+    );
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/flags/{flag}"),
+            f.owner(),
+            json!({ "action": "confirm" })
+        ),
+        404,
+        "FLAG_HANDLED"
+    );
+}
+
+/// Hunt H2-B3: a flag is handled once. Two deductions landing at the same
+/// moment wrote two pay lines (the flag's UPDATE had no `resolution IS
+/// NULL` guard); now one wins and the other is FLAG_HANDLED.
+#[sqlx::test]
+async fn a_flag_is_deducted_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind, minutes_away) \
+         VALUES ($1, $2, $3, 'left_mid_shift', 30) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let owner = f.owner();
+    let deduct = || {
+        let req = authed(
+            test::TestRequest::patch().uri(&format!("/staff/flags/{flag}")),
+            &owner,
+        )
+        .set_json(json!({ "action": "deduct", "amount_piastres": 5_000 }))
+        .to_request();
+        test::call_service(&app, req)
+    };
+    let (one, two) = futures::join!(deduct(), deduct());
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 404], "one wins");
+    let lines: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lines, 1, "one pay line");
+    // The D8 audit row is written with the line, so once too.
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payroll_audit_log WHERE action = 'adjustment.create' \
+          AND details->>'flag_id' = $1",
+    )
+    .bind(flag.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1, "audited once");
+    let told = keys_for(&pool, f.a)
+        .await
+        .iter()
+        .filter(|k| *k == "staff.n_deduction_added")
+        .count();
+    assert_eq!(told, 1, "told once");
+    refused!(deduct().await, 404, "FLAG_HANDLED");
 }
