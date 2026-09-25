@@ -1764,6 +1764,8 @@ pub(crate) async fn compute_payslips(
         effective_date: NaiveDate,
         recurring: bool,
         waived: bool,
+        waive_reason: Option<String>,
+        override_reason: Option<String>,
         reason_code: Option<String>,
         reason_vars: Option<serde_json::Value>,
     }
@@ -1785,9 +1787,11 @@ pub(crate) async fn compute_payslips(
         };
         // Only deductions carry the server's reason codes (AT-13).
         let codes = if table == "payroll_deductions" {
-            "reason_code, reason_vars"
+            "reason_code, reason_vars, waive_reason, \
+             CASE WHEN overridden_at IS NOT NULL THEN override_reason END AS override_reason"
         } else {
-            "NULL::text AS reason_code, NULL::jsonb AS reason_vars"
+            "NULL::text AS reason_code, NULL::jsonb AS reason_vars, \
+             NULL::text AS waive_reason, NULL::text AS override_reason"
         };
         let rows: Vec<AdjRow> = sqlx::query_as(&format!(
             // A recurring allowance or deduction counts in every period from
@@ -1861,8 +1865,15 @@ pub(crate) async fn compute_payslips(
                     // person's own words.
                     "reason_code": row.reason_code, "reason_vars": row.reason_vars,
                 });
+                // Why a human changed it, on the payslip (AD-6, minor
+                // default M29): a waiver's reason beside `waived`, an
+                // override's beside the amount it charges now.
+                if let Some(why) = &row.override_reason {
+                    line["override_reason"] = json!(why);
+                }
                 if row.waived {
                     line["waived"] = json!(true);
+                    line["waive_reason"] = json!(row.waive_reason);
                     lines.push(line);
                     continue;
                 }

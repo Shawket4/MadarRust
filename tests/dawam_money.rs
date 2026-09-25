@@ -4035,3 +4035,69 @@ async fn a_pending_overtime_or_cover_in_a_paid_month_can_be_rejected_not_approve
         (Some("rejected"), Some("rejected"))
     );
 }
+
+/// Minor default M29 (AD-6): the payslip says why a line was waived (and
+/// why an overridden one charges what it does), in the preview and in the
+/// approved payslip.
+#[sqlx::test]
+async fn the_payslip_says_why_a_line_was_waived(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let line = |amount: i64, source: &'static str| {
+        let pool = pool.clone();
+        let (org, amal, on) = (f.org, f.amal, f.start);
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+                     effective_date, source) VALUES ($1, $2, $3, 'rule', $4, $5) RETURNING id",
+            )
+            .bind(org)
+            .bind(amal)
+            .bind(amount)
+            .bind(on)
+            .bind(source)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let absence = line(23_077, "absence").await;
+    let late = line(1_000, "late_penalty").await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{absence}/waive"),
+        f.owner(),
+        json!({ "reason": "Hospital visit" })
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{late}/override"),
+        f.owner(),
+        json!({ "amount_piastres": 500, "reason": "Bus strike" })
+    );
+    assert_eq!(resp.status(), 200);
+    let check = |slip: &Value| {
+        let lines = slip["breakdown"]["deductions"].as_array().unwrap().clone();
+        let find = |id: Uuid| {
+            lines
+                .iter()
+                .find(|l| l["id"] == json!(id))
+                .cloned()
+                .unwrap()
+        };
+        let a = find(absence);
+        assert_eq!(a["waived"], true, "{a}");
+        assert_eq!(a["waive_reason"], "Hospital visit", "{a}");
+        let l = find(late);
+        assert_eq!(l["piastres"], 500, "{l}");
+        assert_eq!(l["override_reason"], "Bus strike", "{l}");
+        assert!(l.get("waived").is_none());
+    };
+    check(&slip_of(&app, &f, f.amal).await);
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    check(&slip_of(&app, &f, f.amal).await);
+}
