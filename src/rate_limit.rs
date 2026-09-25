@@ -214,16 +214,27 @@ fn address_of(req: &actix_web::dev::ServiceRequest) -> String {
 /// sign-ins). The bearer is verified here instead — verified, not just decoded,
 /// so a forged token cannot choose whose allowance it spends.
 fn limiter_key(req: &actix_web::dev::ServiceRequest) -> String {
+    let bearer = || {
+        req.headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+    };
+    let secret = || req.app_data::<actix_web::web::Data<crate::auth::jwt::JwtSecret>>();
+    // A staff-app phone is its own device (a verified staff token), as a
+    // signed-in till is its person: keyed by address, every phone on one
+    // shop's Wi-Fi shared one allowance.
+    if let Some(c) = bearer()
+        .zip(secret())
+        .and_then(|(t, s)| crate::staff::principal::verify(s, t).ok())
+    {
+        return format!("staff:{}", c.dev);
+    }
     crate::orgs::handlers::extract_claims(req.request())
         .ok()
         .or_else(|| {
-            let token = req
-                .headers()
-                .get("Authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))?;
-            let secret = req.app_data::<actix_web::web::Data<crate::auth::jwt::JwtSecret>>()?;
-            crate::auth::jwt::verify_token(secret, token).ok()
+            let token = bearer()?;
+            crate::auth::jwt::verify_token(secret()?, token).ok()
         })
         .and_then(|c| c.user_id_safe().ok())
         .map(|id| id.to_string())
@@ -487,6 +498,49 @@ mod tests {
         .unwrap();
         let req = test::TestRequest::get()
             .uri("/api/ping")
+            .insert_header(("Authorization", format!("Bearer {fake}")))
+            .peer_addr("10.0.0.7:5000".parse().unwrap())
+            .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+            .to_srv_request();
+        assert_eq!(limiter_key(&req), "10.0.0.7");
+    }
+
+    /// A staff-app phone is keyed by its own device, like a signed-in till,
+    /// never by the address: every phone on a shop's Wi-Fi (or one mobile
+    /// carrier's NAT) shared ONE allowance, and a few pull-to-refreshes got
+    /// 429 — worded "can't reach the server" (owner, Android, 2026-09-25).
+    #[test]
+    fn a_staff_phone_is_keyed_by_its_device_not_the_address() {
+        use crate::auth::jwt::JwtSecret;
+        use actix_web::{test, web};
+        let secret = JwtSecret("limiter-key-test-secret".into());
+        let device = uuid::Uuid::new_v4();
+        let (token, _) = crate::staff::principal::mint(
+            &secret,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            None,
+            device,
+        )
+        .unwrap();
+        let req = test::TestRequest::get()
+            .uri("/staff/me/context")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .peer_addr("10.0.0.7:5000".parse().unwrap())
+            .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+            .to_srv_request();
+        assert_eq!(limiter_key(&req), format!("staff:{device}"));
+        // A staff token signed with another secret is nobody: the address.
+        let (fake, _) = crate::staff::principal::mint(
+            &JwtSecret("not-the-secret".into()),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            None,
+            device,
+        )
+        .unwrap();
+        let req = test::TestRequest::get()
+            .uri("/staff/me/context")
             .insert_header(("Authorization", format!("Bearer {fake}")))
             .peer_addr("10.0.0.7:5000".parse().unwrap())
             .app_data(web::Data::new(JwtSecret(secret.0.clone())))
