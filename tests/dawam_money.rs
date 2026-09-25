@@ -3570,3 +3570,130 @@ async fn a_manager_sees_within_cap_never_the_cap(pool: PgPool) {
         "That's over the advance cap. Only the owner can approve it."
     );
 }
+
+/// Hunt H2-B2: a second decision on a pay line, an advance or a shift's
+/// overtime is 409 ALREADY_DECIDED with the status it already has, and the
+/// person hears once — also when two decisions land at the same moment
+/// (each UPDATE was guarded on `pending` but its row count was ignored, and
+/// overtime's had no guard at all).
+#[sqlx::test]
+async fn a_second_decision_is_already_decided_and_told_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let (owner, mgr) = (f.owner(), f.mgr());
+    let told = async |key: &str| -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 AND key = $2",
+        )
+        .bind(f.amal)
+        .bind(key)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let decided = async |resp: actix_web::dev::ServiceResponse, status: &str| {
+        assert_eq!(resp.status(), 409);
+        let body = json_of(resp).await;
+        assert_eq!(body["code"], "ALREADY_DECIDED", "{body}");
+        assert_eq!(body["vars"]["status"], status, "{body}");
+    };
+    let decide = |uri: &str, approve: bool| {
+        let req = authed(test::TestRequest::patch().uri(uri), &owner)
+            .set_json(json!({ "approve": approve }))
+            .to_request();
+        test::call_service(&app, req)
+    };
+
+    // A 2,000 EGP bonus is over the manager's 1,000: it waits for the owner.
+    let bonus = async || -> String {
+        let row = json_of(call!(
+            app,
+            post,
+            "/staff/adjustments",
+            mgr,
+            json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 200_000, "reason": "Target" })
+        ))
+        .await;
+        assert_eq!(row["status"], "pending", "{row}");
+        format!(
+            "/staff/adjustments/bonus/{}/decision",
+            row["id"].as_str().unwrap()
+        )
+    };
+    let uri = bonus().await;
+    assert_eq!(decide(&uri, true).await.status(), 200);
+    decided(decide(&uri, false).await, "approved").await;
+    assert_eq!(told("staff.n_bonus_added").await, 1);
+    let uri = bonus().await;
+    let (one, two) = futures::join!(decide(&uri, true), decide(&uri, true));
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 409], "one wins at once");
+    assert_eq!(told("staff.n_bonus_added").await, 2, "told once for it");
+
+    // An advance.
+    let advance = async || -> String {
+        let row = json_of(call!(
+            app,
+            post,
+            "/staff/me/advances",
+            phone_token(&pool, f.amal).await,
+            json!({ "amount_piastres": 50_000, "installments": 2 })
+        ))
+        .await;
+        assert_eq!(row["status"], "pending", "{row}");
+        format!("/staff/advances/{}/review", row["id"].as_str().unwrap())
+    };
+    let uri = advance().await;
+    assert_eq!(decide(&uri, false).await.status(), 200);
+    decided(decide(&uri, true).await, "rejected").await;
+    assert_eq!(told("staff.n_advance_rejected").await, 1);
+    assert_eq!(told("staff.n_advance_approved").await, 0);
+    let uri = advance().await;
+    let (one, two) = futures::join!(decide(&uri, false), decide(&uri, false));
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 409], "one wins at once");
+    assert_eq!(
+        told("staff.n_advance_rejected").await,
+        2,
+        "told once for it"
+    );
+
+    // A shift's overtime.
+    let overtime = async |on: NaiveDate| -> String {
+        let rec = day(&pool, &f, f.amal, f.a, on, "present", 8, 480, 0, 60).await;
+        format!("/staff/attendance/{rec}/overtime")
+    };
+    let uri = overtime(f.start).await;
+    assert_eq!(decide(&uri, true).await.status(), 200);
+    decided(decide(&uri, false).await, "approved").await;
+    assert_eq!(told("staff.n_overtime_approved").await, 1);
+    assert_eq!(told("staff.n_overtime_rejected").await, 0);
+    let uri = overtime(f.start + Duration::days(1)).await;
+    let (one, two) = futures::join!(decide(&uri, true), decide(&uri, true));
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 409], "one wins at once");
+    assert_eq!(
+        told("staff.n_overtime_approved").await,
+        2,
+        "told once for it"
+    );
+    // A day with no overtime has nothing to decide.
+    let none = day(
+        &pool,
+        &f,
+        f.amal,
+        f.a,
+        f.start + Duration::days(2),
+        "present",
+        8,
+        480,
+        0,
+        0,
+    )
+    .await;
+    let resp = decide(&format!("/staff/attendance/{none}/overtime"), true).await;
+    assert_eq!(resp.status(), 404);
+}

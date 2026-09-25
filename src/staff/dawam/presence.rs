@@ -1285,18 +1285,22 @@ pub async fn decide_overtime(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrOvertimeApprove).await?;
-    let row: Option<(Uuid, Uuid, i32, NaiveDate)> = sqlx::query_as(
-        "SELECT a.employee_id, a.branch_id, a.overtime_minutes, a.business_date \
+    let row: Option<(Uuid, Uuid, i32, NaiveDate, Option<String>)> = sqlx::query_as(
+        "SELECT a.employee_id, a.branch_id, a.overtime_minutes, a.business_date, a.overtime_status \
            FROM attendance_records a \
-          WHERE a.id = $1 AND a.org_id = $2 AND a.overtime_status = 'pending'",
+          WHERE a.id = $1 AND a.org_id = $2 AND a.overtime_status IS NOT NULL",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(pool)
     .await?;
-    let Some((employee_id, branch_id, minutes, on_date)) = row else {
+    let Some((employee_id, branch_id, minutes, on_date, status)) = row else {
         return Err(AppError::NotFound("No overtime waiting here.".into()));
     };
+    let status = status.unwrap_or_default();
+    if status != "pending" {
+        return Err(super::already_decided(&status));
+    }
     let subject = access::subject(pool, org_id, employee_id).await?;
     if subject.is(&claims) {
         return Err(AppError::Coded {
@@ -1330,12 +1334,25 @@ pub async fn decide_overtime(
         };
         crate::authz::require::settle(pool, by, &pending, Some(branch_id)).await?;
     }
-    sqlx::query("UPDATE attendance_records SET overtime_status = $2, edited_by = $3 WHERE id = $1")
-        .bind(*id)
-        .bind(if body.approve { "approved" } else { "rejected" })
-        .bind(by)
-        .execute(pool)
-        .await?;
+    let won = sqlx::query(
+        "UPDATE attendance_records SET overtime_status = $2, edited_by = $3 \
+          WHERE id = $1 AND overtime_status = 'pending'",
+    )
+    .bind(*id)
+    .bind(if body.approve { "approved" } else { "rejected" })
+    .bind(by)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if won == 0 {
+        // Decided by someone else since it was read: they told the person.
+        let now: Option<String> =
+            sqlx::query_scalar("SELECT overtime_status FROM attendance_records WHERE id = $1")
+                .bind(*id)
+                .fetch_one(pool)
+                .await?;
+        return Err(super::already_decided(&now.unwrap_or_default()));
+    }
     notify(
         pool,
         org_id,

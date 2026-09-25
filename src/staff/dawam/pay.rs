@@ -718,10 +718,11 @@ pub async fn decide_adjustment(
     let (kind, id) = path.into_inner();
     let (table, cap) = gate_kind(pool, &claims, org_id, &kind).await?;
     let a = load_adjustment(pool, id).await?;
-    if a.status != "pending" || a.kind != kind {
-        return Err(AppError::Conflict(
-            "This line has already been decided".into(),
-        ));
+    if a.kind != kind {
+        return Err(AppError::NotFound("Adjustment not found".into()));
+    }
+    if a.status != "pending" {
+        return Err(super::already_decided(&a.status));
     }
     let subject = access::subject(pool, org_id, a.employee_id).await?;
     access::require_for(pool, &claims, cap, &subject).await?;
@@ -738,7 +739,7 @@ pub async fn decide_adjustment(
         why: crate::authz::Why::NotHeld,
     };
     crate::authz::require::settle(pool, by, &pending, branch).await?;
-    sqlx::query(&format!(
+    let won = sqlx::query(&format!(
         "UPDATE {table} SET status = $3, decided_by = $4, decided_at = now(), updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND status = 'pending'"
     ))
@@ -747,7 +748,14 @@ pub async fn decide_adjustment(
     .bind(if body.approve { "approved" } else { "rejected" })
     .bind(by)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+    if won == 0 {
+        // Decided by someone else since it was read: they told the person.
+        return Err(super::already_decided(
+            &load_adjustment(pool, id).await?.status,
+        ));
+    }
     if body.approve {
         notify(
             pool,
@@ -979,15 +987,18 @@ pub async fn review_advance(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrAdvancesDecide).await?;
-    let (employee_id, asked, inst): (Uuid, i64, i32) = sqlx::query_as(
-        "SELECT employee_id, amount_piastres, installments FROM salary_advances \
-          WHERE id = $1 AND org_id = $2 AND status = 'pending'",
+    let (employee_id, asked, inst, status): (Uuid, i64, i32, String) = sqlx::query_as(
+        "SELECT employee_id, amount_piastres, installments, status FROM salary_advances \
+          WHERE id = $1 AND org_id = $2",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::Conflict("This advance has already been decided".into()))?;
+    .ok_or_else(|| AppError::NotFound("Advance not found".into()))?;
+    if status != "pending" {
+        return Err(super::already_decided(&status));
+    }
     let subject = access::subject(pool, org_id, employee_id).await?;
     if subject.is(&claims) {
         return Err(AppError::Coded {
@@ -1011,7 +1022,7 @@ pub async fn review_advance(
         .map(str::trim)
         .filter(|n| !n.is_empty());
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let won = sqlx::query(
         "UPDATE salary_advances SET status = $3, amount_piastres = $4, remaining_piastres = $4, \
             installments = $5, monthly_installment_piastres = $6, decided_by = $7, \
             decided_at = now(), decision_note = $8, updated_at = now() \
@@ -1026,7 +1037,17 @@ pub async fn review_advance(
     .bind(by)
     .bind(note)
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected();
+    if won == 0 {
+        // Decided by someone else since it was read: they told the person.
+        drop(tx);
+        let now: String = sqlx::query_scalar("SELECT status FROM salary_advances WHERE id = $1")
+            .bind(*id)
+            .fetch_one(pool)
+            .await?;
+        return Err(super::already_decided(&now));
+    }
     audit(
         &mut *tx,
         org_id,
