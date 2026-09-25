@@ -26,7 +26,6 @@ pub mod signin;
 pub mod suggest;
 
 use actix_web::{HttpResponse, web};
-use chrono::{Datelike, Duration, NaiveDate};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -45,11 +44,9 @@ const PUSH_TITLE_KEY: &str = "staff.dawam_by_madar";
 /// The header the staff app sends its device token in (RO-3).
 pub use crate::staff::principal::DEVICE_HEADER;
 
-/// A roster week starts on Saturday.
-pub fn week_start(d: NaiveDate) -> NaiveDate {
-    let back = (d.weekday().num_days_from_sunday() + 1) % 7; // Sat=0 … Fri=6
-    d - Duration::days(i64::from(back))
-}
+/// A roster week starts on Saturday: madar-shared's `madar_time::week_start`,
+/// the one week every report and the staff app use.
+pub use madar_time::week_start;
 
 pub(crate) fn hash_token(token: &str) -> String {
     crate::staff::principal::hash_device_token(token)
@@ -315,6 +312,7 @@ pub async fn revoke_for_user(pool: &PgPool, user_id: Uuid) -> Result<u64, AppErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, NaiveDate};
 
     #[test]
     fn weeks_start_on_saturday() {

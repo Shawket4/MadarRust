@@ -51,7 +51,8 @@ pub(crate) async fn mark_tracking_off(
 
 /// At or under this, the employee is told to charge and silence reads "phone
 /// likely died" (CL-12).
-pub(crate) const LOW_BATTERY: i16 = 15;
+/// madar-shared's (`madar_dawam::presence::LOW_BATTERY`), the staff app's too.
+pub(crate) const LOW_BATTERY: i16 = madar_dawam::presence::LOW_BATTERY;
 
 /// Opens a flag once per shift and kind, and tells the managers — once, when
 /// it opens (audit 03 bug 3): a later ping only updates the minutes away.

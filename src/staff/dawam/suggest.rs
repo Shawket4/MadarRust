@@ -199,33 +199,21 @@ struct Proposal {
 
 impl Problem {
     fn slot(&self, date: NaiveDate, shift: usize) -> Option<Slot> {
-        use chrono::TimeZone;
         let w = &self.shifts[shift];
         if !w.valid_on(date) {
             return None;
         }
         let (start, end) = w.times_on(date);
-        let end_date = if end <= start {
-            date + Duration::days(1)
-        } else {
-            date
-        };
+        // Placed as the roster resolver's SQL places a shift (madar-shared's
+        // `madar_dawam::shift::instants`, DW1): overnight on the next date, a
+        // time in the spring gap moved forward by it, a time that happens
+        // twice the later one. `.earliest()` dropped the slot in the gap and
+        // put it an hour early in the autumn.
+        let (start, end) = madar_dawam::shift::instants(self.tz, date, start, end)?;
         Some(Slot {
             date,
             shift,
-            span: engine::Span {
-                date,
-                start: self
-                    .tz
-                    .from_local_datetime(&date.and_time(start))
-                    .earliest()?
-                    .with_timezone(&Utc),
-                end: self
-                    .tz
-                    .from_local_datetime(&end_date.and_time(end))
-                    .earliest()?
-                    .with_timezone(&Utc),
-            },
+            span: engine::Span { date, start, end },
         })
     }
 

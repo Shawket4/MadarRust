@@ -336,13 +336,12 @@ pub fn settle_net(
 }
 
 /// A percentage of a salary, in piastres: `salary × percent ÷ 100`, rounded
-/// half away from zero (AT-2 — never banker's rounding).
+/// half away from zero (AT-2 — never banker's rounding). The rule is
+/// madar-shared's (`madar_dawam::pay::percent_of_salary`, DW3), the staff
+/// app's too; the SQL twins (`dawam_advance_cap`, an adjustment's
+/// `value_piastres`) are pinned to it by `tests/dawam_shared_rules_tests.rs`.
 pub fn percent_of_salary(base_salary_piastres: i64, percent: Decimal) -> i64 {
-    round_piastres(
-        Decimal::from(base_salary_piastres.max(0)) * percent.max(Decimal::ZERO)
-            / Decimal::from(100),
-    )
-    .max(0)
+    madar_dawam::pay::percent_of_salary(base_salary_piastres, percent)
 }
 
 /// Minutes of pay at the plain rate, exact (a repeating decimal, usually):
