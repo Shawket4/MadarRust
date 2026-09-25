@@ -15,6 +15,7 @@ pub mod auth;
 pub mod authz;
 pub mod bookings;
 pub mod boot_config;
+pub mod branch_plan;
 pub mod branches;
 pub mod bundles;
 pub mod cache;

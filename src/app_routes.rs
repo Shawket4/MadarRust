@@ -7,7 +7,7 @@ use actix_web::web;
 use sqlx::PgPool;
 
 use crate::{
-    ai, analytics, auth, bookings, branches, bundles, costing, customers, delivery, devices,
+    ai, analytics, auth, bookings, branch_plan, branches, bundles, costing, customers, delivery, devices,
     discounts, insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs,
     payment_methods, permissions, purchasing, push, qr_card, realtime, recipes, refunds, reports,
     reservations, staff, stocktakes, sync, tickets, tills, uploads, users,
@@ -39,6 +39,7 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
     .configure(bookings::routes::configure)
     .configure(realtime::routes::configure)
     .configure(kitchen::routes::configure)
+    .configure(branch_plan::routes::configure)
     .configure(tickets::routes::configure)
     .configure(stocktakes::routes::configure)
     .configure(crate::assets::routes::configure)

@@ -5401,6 +5401,294 @@
         ]
       }
     },
+    "/branch-plan": {
+      "get": {
+        "tags": [
+          "branch_plan"
+        ],
+        "operationId": "get_plan",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchPlanView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "branch_plan"
+        ],
+        "operationId": "save_plan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavePlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved; the plan as now stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchPlanView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/branch-plan/versions": {
+      "get": {
+        "tags": [
+          "branch_plan"
+        ],
+        "operationId": "list_versions",
+        "parameters": [
+          {
+            "name": "branch_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The last 20 saved plans, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PlanVersionView"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/branches": {
       "get": {
         "tags": [
@@ -62562,6 +62850,14 @@
           },
           "org_name": {
             "type": "string"
+          },
+          "slot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch-plan slot this device now fills, when the code was made for one."
           }
         }
       },
@@ -62612,6 +62908,14 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "slot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch-plan slot this code fills, when it was made from the\nbranch builder. The device that uses it takes the slot."
           },
           "state": {
             "$ref": "#/components/schemas/ActivationCodeState"
@@ -65845,6 +66149,95 @@
           }
         }
       },
+      "BranchPlan": {
+        "type": "object",
+        "properties": {
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanDevice"
+            }
+          },
+          "printers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanPrinter"
+            }
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanSection"
+            }
+          },
+          "till_prints_kitchen": {
+            "type": "boolean",
+            "description": "Case 1 (till only): the till's receipt printer also prints kitchen chits."
+          }
+        }
+      },
+      "BranchPlanView": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "version",
+          "saved",
+          "plan",
+          "routing_mode",
+          "devices",
+          "categories",
+          "open_items",
+          "item_overrides"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanCategory"
+            }
+          },
+          "devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanRegisteredDevice"
+            }
+          },
+          "item_overrides": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SectionCount"
+            },
+            "description": "Items routed to a section one by one, bypassing their category."
+          },
+          "open_items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SectionCount"
+            },
+            "description": "Kitchen items not yet bumped, per section. A section with any can't be\nremoved (spec KS-9, CH-4)."
+          },
+          "plan": {
+            "$ref": "#/components/schemas/BranchPlan"
+          },
+          "routing_mode": {
+            "type": "string",
+            "description": "The branch's kitchen routing mode as stored now."
+          },
+          "saved": {
+            "type": "boolean",
+            "description": "False until the plan is first saved. Until then it is assembled from the\nbranch's existing stations, printers and registered devices."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Bumped by every save; send it back as `expected_version`."
+          }
+        }
+      },
       "BranchRules": {
         "type": "object",
         "description": "A branch and which of its rules it overrides.",
@@ -68829,6 +69222,14 @@
               "null"
             ],
             "description": "A name for the tablet it is meant for (\"Front counter\")."
+          },
+          "slot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A slot of the branch plan (`GET /branch-plan`). The code takes the\nslot's kind and name, and the device that uses it fills the slot."
           }
         }
       },
@@ -83318,6 +83719,268 @@
           }
         }
       },
+      "PlanCategory": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "name_translations"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {}
+        }
+      },
+      "PlanDevice": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "x",
+          "y"
+        ],
+        "properties": {
+          "device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The registered install filling this slot, if any."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`pos` | `waiter` | `kitchen`"
+          },
+          "name": {
+            "type": "string"
+          },
+          "receipt_printer_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a POS or waiter device: the receipt printer its receipts go to."
+          },
+          "x": {
+            "type": "number",
+            "format": "double"
+          },
+          "y": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "PlanPrinter": {
+        "type": "object",
+        "required": [
+          "id",
+          "role",
+          "name",
+          "connection",
+          "paper_mm",
+          "x",
+          "y"
+        ],
+        "properties": {
+          "brand": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PrinterBrand"
+              }
+            ]
+          },
+          "connection": {
+            "type": "string",
+            "description": "`network` | `usb` | `bluetooth`"
+          },
+          "host_device_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a USB or Bluetooth printer: the device slot it is plugged into."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "paper_mm": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "role": {
+            "type": "string",
+            "description": "`receipt` | `kitchen`"
+          },
+          "x": {
+            "type": "number",
+            "format": "double"
+          },
+          "y": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "PlanRegisteredDevice": {
+        "type": "object",
+        "description": "A registered install at the branch, for showing which slot it fills and\nwhen it was last heard from.",
+        "required": [
+          "id",
+          "code",
+          "kind",
+          "last_seen_at"
+        ],
+        "properties": {
+          "app_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`pos` | `kds` | `waiter`"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PlanSection": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "is_default",
+          "x",
+          "y"
+        ],
+        "properties": {
+          "category_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "printer_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Kitchen printers this section prints on."
+          },
+          "screen_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Kitchen screens (device slots of kind `kitchen`) this section shows on."
+          },
+          "x": {
+            "type": "number",
+            "format": "double"
+          },
+          "y": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "PlanVersionView": {
+        "type": "object",
+        "required": [
+          "version",
+          "saved_at",
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/BranchPlan"
+          },
+          "saved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "saved_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "PoLeadTimeReport": {
         "type": "object",
         "required": [
@@ -88866,6 +89529,28 @@
           }
         }
       },
+      "SavePlanRequest": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "expected_version",
+          "plan"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The `version` the plan was loaded at. A save over a newer version is\nrefused (`PLAN_CHANGED`), so two people editing one branch never\nsilently overwrite each other."
+          },
+          "plan": {
+            "$ref": "#/components/schemas/BranchPlan"
+          }
+        }
+      },
       "ScanResult": {
         "type": "object",
         "description": "What the teller's scan screen shows.",
@@ -89127,6 +89812,24 @@
               "format": "uuid"
             },
             "description": "Seat the party on these tables instead (a walk-in took theirs, or the\nhost prefers another). Omit to keep the claim."
+          }
+        }
+      },
+      "SectionCount": {
+        "type": "object",
+        "description": "A count per section: open kitchen items, or items routed there one by one.",
+        "required": [
+          "section_id",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "section_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
@@ -97090,6 +97793,10 @@
     {
       "name": "kitchen",
       "description": "Kitchen Display System: stations, category→station routing, routing mode, the KDS feed, and per-line bump."
+    },
+    {
+      "name": "branch_plan",
+      "description": "The branch plan: device slots, printers and kitchen sections, how they connect, and their canvas positions. Read and saved whole."
     },
     {
       "name": "open_tickets",
