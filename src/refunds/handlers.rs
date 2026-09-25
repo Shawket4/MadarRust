@@ -335,7 +335,6 @@ pub async fn create_refund_inner(
     // The lines' cross-checks (item on this order, quantity within what was
     // sold, cumulative across refunds) are the trigger's; only what can be
     // said of the request alone is said here, in words rather than a CHECK.
-    let mut lines_total: i64 = 0;
     for line in &body.lines {
         if line.quantity <= 0 {
             return Err(AppError::BadRequest(
@@ -347,13 +346,6 @@ pub async fn create_refund_inner(
                 "A refund line cannot carry a negative amount".into(),
             ));
         }
-        lines_total += i64::from(line.amount);
-    }
-    if lines_total > i64::from(body.amount) {
-        return Err(AppError::BadRequest(format!(
-            "The lines add up to {lines_total}, more than the {} being refunded",
-            body.amount
-        )));
     }
 
     let order = fetch_refundable_order(pool.get_ref(), body.order_id, Some(actor.org_id)).await?;
@@ -361,6 +353,18 @@ pub async fn create_refund_inner(
         return Err(AppError::BadRequest(
             "This order was voided — a voided sale has no money to return".into(),
         ));
+    }
+
+    // C13: a combo is refunded as a whole. A line naming its header is
+    // expanded into the header (no money) and every part at k/n; a line
+    // naming a part is refused.
+    let lines = expand_combo_lines(pool.get_ref(), order.id, &body.lines).await?;
+    let lines_total: i64 = lines.iter().map(|l| i64::from(l.amount)).sum();
+    if lines_total > i64::from(body.amount) {
+        return Err(AppError::BadRequest(format!(
+            "The lines add up to {lines_total}, more than the {} being refunded",
+            body.amount
+        )));
     }
 
     // The org's vocabulary, and whether the word meant cash TODAY. Snapshotted
@@ -489,7 +493,7 @@ pub async fn create_refund_inner(
         Err(e) => return Err(e.into()),
     };
 
-    for line in &body.lines {
+    for line in &lines {
         sqlx::query(
             "INSERT INTO order_refund_lines (org_id, refund_id, order_item_id, quantity, amount) \
              VALUES ($1, $2, $3, $4, $5)",
@@ -512,7 +516,7 @@ pub async fn create_refund_inner(
         order.id,
         order.branch_id,
         refund_id,
-        &body.lines,
+        &lines,
         completes,
         actor.teller_id,
     )
@@ -521,14 +525,9 @@ pub async fn create_refund_inner(
     // A refunded REWARD gives its points back, in proportion to the reward
     // units returned (`loyalty::redeem::restore_on_refund` states the rule).
     // The earn clawback stays the trigger's; this writes only reverse_redeem.
-    let restored = crate::loyalty::redeem::restore_on_refund(
-        &mut tx,
-        order.id,
-        &body.lines,
-        actor.teller_id,
-        note,
-    )
-    .await?;
+    let restored =
+        crate::loyalty::redeem::restore_on_refund(&mut tx, order.id, &lines, actor.teller_id, note)
+            .await?;
 
     // Read back inside the transaction: the status the AFTER INSERT trigger
     // may just have flipped is what the till should print.
@@ -538,6 +537,96 @@ pub async fn create_refund_inner(
         crate::loyalty::wallet::push_update(pool.get_ref(), member);
     }
     Ok(HttpResponse::Created().json(issued))
+}
+
+/// A combo is refunded as a whole (C13, COMBOS_CONTRACT.md §3.2).
+///
+/// - A line naming a combo's HEADER with `quantity` k (of the header's n)
+///   becomes the header line itself (k units, amount 0: a header carries no
+///   money) and one line per part at k/n of its units and of its money — its
+///   `line_total` plus its add-ons. Parts are priced per combo unit, so k/n of
+///   each is exact; a figure that does not divide is refused rather than
+///   rounded. Whatever amount the request put on the header line is replaced.
+/// - A line naming a PART is `409 COMBO_WHOLE_ONLY`.
+///
+/// Every other line passes through unchanged.
+async fn expand_combo_lines(
+    pool: &PgPool,
+    order_id: Uuid,
+    lines: &[RefundLineInput],
+) -> Result<Vec<RefundLineInput>, AppError> {
+    if lines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<Uuid> = lines.iter().map(|l| l.order_item_id).collect();
+    let kinds: Vec<(Uuid, String, Option<Uuid>, i32)> = sqlx::query_as(
+        "SELECT id, line_kind, combo_line_id, quantity FROM order_items \
+          WHERE order_id = $1 AND id = ANY($2)",
+    )
+    .bind(order_id)
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    if kinds.iter().all(|k| k.1 == "item") {
+        return Ok(lines.to_vec());
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    for l in lines {
+        let Some((id, kind, header, n)) = kinds.iter().find(|k| k.0 == l.order_item_id) else {
+            out.push(l.clone());
+            continue;
+        };
+        match kind.as_str() {
+            "combo_part" => {
+                return Err(crate::combos::codes::refuse(
+                    "COMBO_WHOLE_ONLY",
+                    serde_json::json!({"combo_line_id": header}),
+                ));
+            }
+            "combo" => {
+                let k = l.quantity;
+                let n = *n;
+                if n <= 0 || k > n {
+                    return Err(AppError::BadRequest(format!(
+                        "This combo line sold {n}; a refund can return at most that many"
+                    )));
+                }
+                // The header: its units, no money.
+                out.push(RefundLineInput {
+                    order_item_id: *id,
+                    quantity: k,
+                    amount: 0,
+                });
+                let parts: Vec<(Uuid, i32, i64)> = sqlx::query_as(
+                    "SELECT i.id, i.quantity, \
+                            (i.line_total + COALESCE((SELECT SUM(a.line_total) FROM order_item_addons a \
+                                                       WHERE a.order_item_id = i.id), 0))::bigint \
+                       FROM order_items i WHERE i.combo_line_id = $1 ORDER BY i.id",
+                )
+                .bind(id)
+                .fetch_all(pool)
+                .await?;
+                for (part, qty, money) in parts {
+                    let (kn, n64) = (i64::from(k), i64::from(n));
+                    let units = i64::from(qty) * kn;
+                    let amount = money * kn;
+                    if units % n64 != 0 || amount % n64 != 0 {
+                        return Err(crate::combos::codes::refuse(
+                            "COMBO_WHOLE_ONLY",
+                            serde_json::json!({"combo_line_id": id}),
+                        ));
+                    }
+                    out.push(RefundLineInput {
+                        order_item_id: part,
+                        quantity: (units / n64) as i32,
+                        amount: (amount / n64) as i32,
+                    });
+                }
+            }
+            _ => out.push(l.clone()),
+        }
+    }
+    Ok(out)
 }
 
 /// Which drawer the money leaves. Named by the request, or — live only — the

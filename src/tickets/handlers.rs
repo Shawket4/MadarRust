@@ -79,6 +79,26 @@ fn client_prices(actor: &ActingContext) -> crate::orders::handlers::ClientPrices
     }
 }
 
+/// Where a ticket's lines are sold: `qr` when the org's guest principal (a
+/// customer at the table) fired them, the till's channel otherwise. Decides
+/// whether a combo switched off for QR is refused.
+async fn ticket_channel(
+    pool: &sqlx::PgPool,
+    actor: &ActingContext,
+) -> Result<madar_catalog::combo::Channel, AppError> {
+    let guest: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT is_guest_principal FROM users WHERE id = $1), false)",
+    )
+    .bind(actor.teller_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(if guest {
+        madar_catalog::combo::Channel::Qr
+    } else {
+        madar_catalog::combo::Channel::Pos
+    })
+}
+
 /// The literal a cashier sends as `discount_type` to settle WITHOUT the
 /// waiter's discount. Absent means inherit it; anything else overrides it.
 pub const DISCOUNT_NONE: &str = "none";
@@ -485,9 +505,11 @@ pub(crate) async fn create_open_ticket_inner(
     // one connection per request, never a second one while `tx` is held.
     let lines = super::resolve_ticket_lines(
         pool.get_ref(),
+        actor.org_id,
         body.branch_id,
         &body.items,
         client_prices(&actor),
+        ticket_channel(pool.get_ref(), &actor).await?,
     )
     .await?;
 
@@ -688,9 +710,11 @@ pub(crate) async fn add_round_inner(
     let label = table_label(pool.get_ref(), table_id).await?;
     let lines = super::resolve_ticket_lines(
         pool.get_ref(),
+        actor.org_id,
         branch_id,
         &body.items,
         client_prices(&actor),
+        ticket_channel(pool.get_ref(), &actor).await?,
     )
     .await?;
     let mut tx = pool.get_ref().begin().await?;
@@ -1734,6 +1758,13 @@ pub async fn settle_open_ticket_inner(
         frozen_policy: super::frozen_policy(f_tax_rate, f_tax_inclusive, f_sc_rate, f_sc_taxable),
         service_waived_by: body.waive_service_charge.then_some(actor.teller_id),
         service_waived_at: body.settled_at,
+        qr_deals: sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE(opened_via = 'qr_table', false) FROM open_tickets WHERE id = $1",
+        )
+        .bind(*id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .unwrap_or(false),
     };
     create_order_inner(
         pool.clone(),

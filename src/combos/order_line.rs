@@ -311,6 +311,9 @@ pub struct Sale {
     pub prices: ClientPrices,
     /// Refuse a bad line (live, public) rather than flag it (replay, settle).
     pub strict: bool,
+    /// Judge the channel, branch and windows. A ticket's settle does not:
+    /// its lines were judged when they were fired.
+    pub judge_availability: bool,
 }
 
 impl Sale {
@@ -478,7 +481,9 @@ pub async fn resolve(
         branch_id: Some(&branch),
         now: &ctx.now,
     };
-    if let Err(why) = mc::available(&view, &at, |c| ctx.choice_available(c)) {
+    if !sale.judge_availability {
+        // Judged at fire.
+    } else if let Err(why) = mc::available(&view, &at, |c| ctx.choice_available(c)) {
         if sale.public() {
             return Err(refuse(
                 "COMBO_UNAVAILABLE",
@@ -518,7 +523,7 @@ pub async fn resolve(
             }
             invalid = true;
         }
-        if !ctx.item_on(p.menu_item_id) {
+        if sale.judge_availability && !ctx.item_on(p.menu_item_id) {
             if sale.public() {
                 let item = f.map(|f| f.name.clone()).unwrap_or_default();
                 return Err(refuse(

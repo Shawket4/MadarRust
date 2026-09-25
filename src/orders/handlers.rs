@@ -1628,6 +1628,9 @@ pub(crate) struct SettledTicket {
     pub service_waived_by: Option<Uuid>,
     /// When they did (the till's clock on a replay).
     pub service_waived_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The bill was opened from the table's QR code: the best deals apply
+    /// by themselves at the settle, as the customer's page showed (§11.2).
+    pub qr_deals: bool,
 }
 
 /// The floor-side of a settle, done in the ORDER's transaction and reported
@@ -1884,7 +1887,7 @@ pub(crate) async fn create_order_inner(
         body.branch_id,
         &body.items,
         body.created_at.unwrap_or_else(Utc::now),
-        !body.deals.is_empty(),
+        !body.deals.is_empty() || ticket.as_ref().is_some_and(|t| t.qr_deals),
     )
     .await?;
     // Flags the combo and deal lines raise, written after the commit.
@@ -2021,6 +2024,8 @@ pub(crate) async fn create_order_inner(
                 // Live at the till: refused. Replay and a ticket's settle
                 // (the bill as fired): recorded and flagged.
                 strict: prices == ClientPrices::Ignore,
+                // A ticket's lines were judged when they were fired.
+                judge_availability: ticket.is_none(),
             };
             let mut line = ol::resolve(pool.get_ref(), &mut catalog, ctx, item_input, sale).await?;
             let (_, expected) = ol::settle_flags(&mut line);
@@ -2202,7 +2207,8 @@ pub(crate) async fn create_order_inner(
     // Priced over the plain lines' units, then taken off those lines BEFORE
     // the bill: tax, service and the order discount see the net.
     let mut priced_deals: Vec<crate::deals::order::PricedDeal> = Vec::new();
-    if !body.deals.is_empty()
+    let qr_deals = ticket.as_ref().is_some_and(|t| t.qr_deals) && body.deals.is_empty();
+    if (!body.deals.is_empty() || qr_deals)
         && let Some(ctx) = &combo_ctx
     {
         let mut lines: Vec<crate::deals::order::PlainLine> = Vec::new();
@@ -2221,21 +2227,37 @@ pub(crate) async fn create_order_inner(
                 quantity: r.quantity,
             });
         }
-        let may_apply =
-            crate::authz::require::effective(pool.get_ref(), actor.teller_id, Some(body.branch_id))
-                .await?
-                .can(crate::authz::Cap::OrdersDealsApply);
-        let mut conn = pool.get_ref().acquire().await?;
-        let (deals, flags) = crate::deals::order::price_applied(
-            &mut conn,
-            ctx,
-            &body.deals,
-            &lines,
-            actor.replay,
-            may_apply,
-        )
-        .await?;
-        drop(conn);
+        let (deals, flags) = if qr_deals {
+            // A QR table's bill: the server picks the deals, as the page
+            // quoted them; nobody applies anything.
+            let mut conn = pool.get_ref().acquire().await?;
+            let deals = crate::deals::order::auto(
+                &mut conn,
+                ctx,
+                madar_catalog::combo::Channel::Qr,
+                &lines,
+            )
+            .await?;
+            (deals, Vec::new())
+        } else {
+            let may_apply = crate::authz::require::effective(
+                pool.get_ref(),
+                actor.teller_id,
+                Some(body.branch_id),
+            )
+            .await?
+            .can(crate::authz::Cap::OrdersDealsApply);
+            let mut conn = pool.get_ref().acquire().await?;
+            crate::deals::order::price_applied(
+                &mut conn,
+                ctx,
+                &body.deals,
+                &lines,
+                actor.replay,
+                may_apply,
+            )
+            .await?
+        };
         combo_flags.extend(flags);
         for d in &deals {
             for (i, _, cut, server_cut) in &d.lines {

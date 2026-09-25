@@ -616,6 +616,16 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                 }
             }
             let mut items = crate::orders::handlers::fetch_orders_items_full_batch_on(&mut *conn, ids).await?;
+            // The deals applied to each sale (combos module; additive).
+            let mut deals = crate::deals::order::of_orders(&mut *conn, ids).await?;
+            for (id, v) in out.iter_mut() {
+                if let Value::Object(m) = v {
+                    m.insert(
+                        "deals".into(),
+                        serde_json::to_value(deals.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([])),
+                    );
+                }
+            }
             for (id, v) in out.iter_mut() {
                 let mut lines = serde_json::to_value(items.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([]));
                 for key in ["deductions_snapshot", "line_cost", "unit_cost", "cost_missing", "cost", "quantity_deducted",
