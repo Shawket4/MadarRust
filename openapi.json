@@ -78271,6 +78271,61 @@
           }
         }
       },
+      "MyClaim": {
+        "type": "object",
+        "description": "One of my claims on an open shift, and how it ended (SC-9, S-162): a\nrequest like any other, so it stays in my Requests once decided.",
+        "required": [
+          "id",
+          "open_shift_id",
+          "branch_id",
+          "on_date",
+          "work_shift_id",
+          "shift_name",
+          "status",
+          "claimed_at"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "claimed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it was decided or withdrawn; null while pending, and on a claim\ndecided before the server kept this history."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "on_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "open_shift_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "shift_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending` · `approved` · `declined` · `withdrawn`. A shift the\nmanager took back while the claim waited is `declined`."
+          },
+          "work_shift_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "MyRosterView": {
         "type": "object",
         "required": [
@@ -78279,6 +78334,7 @@
           "shifts",
           "unpublished_weeks",
           "open_shifts",
+          "my_claims",
           "swaps",
           "team",
           "cant_work_days",
@@ -78295,6 +78351,13 @@
           "from": {
             "type": "string",
             "format": "date"
+          },
+          "my_claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MyClaim"
+            },
+            "description": "My claims on open shifts, decided ones included: those on dates in\nrange, and every pending one wherever it falls (SC-9, S-162)."
           },
           "open_shifts": {
             "type": "array",
