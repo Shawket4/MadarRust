@@ -2126,14 +2126,12 @@ pub async fn generate_period(
     let mut grand_total = 0i64;
 
     for slip in &computed {
-        // A payslip with nothing on it — no pay, no lines — is marked paid by
-        // the run itself, so it never blocks the month reaching Paid (PAY-7).
-        let empty = slip.net_piastres == 0
-            && slip.base_piastres == 0
-            && slip.overtime_piastres == 0
-            && slip.bonuses_piastres == 0
-            && slip.deductions_piastres == 0
-            && slip.advance_installment_piastres == 0;
+        // Nothing to pay — a payslip that nets to 0, whatever its lines (a
+        // joiner whose carried debt ate the month, PAY-12) — is marked paid
+        // by the run itself ("Nothing to pay"), so it never blocks the month
+        // reaching Paid (PAY-7, minor default M28). The carried amount still
+        // shows on the payslip.
+        let empty = slip.net_piastres == 0;
         let payslip_id: Uuid = sqlx::query_scalar(
             "INSERT INTO payslips (
                  org_id, payroll_period_id, employee_id, base_salary_piastres, worked_days,

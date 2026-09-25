@@ -2145,6 +2145,22 @@ async fn deductions_past_earnings_carry_to_the_next_month_and_are_named(pool: Pg
         50_000,
         "the advance stays owed"
     );
+    // Minor default M28 (PAY-12): a payslip that nets to 0 settles itself
+    // as "Nothing to pay", its carried amount still on it; one with pay
+    // waits to be marked paid.
+    let settled: Vec<(Uuid, Option<String>, bool, i64)> = sqlx::query_as(
+        "SELECT employee_id, paid_method, paid_at IS NOT NULL, carry_out_piastres FROM payslips \
+          WHERE payroll_period_id = $1 ORDER BY net_piastres",
+    )
+    .bind(f.period)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let of = |who: Uuid| settled.iter().find(|r| r.0 == who).cloned().unwrap();
+    assert_eq!(of(f.amal).1.as_deref(), Some("none"));
+    assert!(of(f.amal).2);
+    assert_eq!(of(f.amal).3, 100_000);
+    assert!(!of(f.bassem).2, "Bassem is owed his pay");
     // Next month carries it in as its first deduction.
     let next_start = f.end + Duration::days(1);
     let next_end = (next_start + Duration::days(32)).with_day(1).unwrap() - Duration::days(1);
