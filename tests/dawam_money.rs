@@ -4221,3 +4221,57 @@ async fn a_flag_deduction_over_the_limit_says_it_waits_for_the_owner(pool: PgPoo
     .await;
     assert!(row["deduction_status"].is_null(), "{row}");
 }
+
+/// Minor default M37: asking for a salary advance tells whoever decides it
+/// (the branch's managers who decide advances, and the owner), as other
+/// requests do; never the asker.
+#[sqlx::test]
+async fn an_advance_request_tells_the_managers_and_the_owner(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let mgr_e =
+        common::employees::employee(&pool, f.org, "Mgr", Some(f.mgr), None, false, &[f.a], 0).await;
+    let owner_e =
+        common::employees::employee(&pool, f.org, "Owner", Some(f.owner), None, false, &[], 0)
+            .await;
+    let asked = json_of(call!(
+        app,
+        post,
+        "/staff/me/advances",
+        phone_token(&pool, f.amal).await,
+        json!({ "amount_piastres": 40_000, "installments": 2 })
+    ))
+    .await;
+    let told = |who: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+                    AND key = 'staff.n_advance_requested'",
+            )
+            .bind(who)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for who in [mgr_e, owner_e] {
+        let got = told(who).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["name"], "Amal");
+        assert_eq!(got[0]["amount"], 40_000);
+        assert_eq!(got[0]["advance_id"], asked["id"]);
+    }
+    assert!(told(f.amal).await.is_empty(), "never the asker");
+    // Bassem's branch (B) has no advance decider but the owner.
+    json_of(call!(
+        app,
+        post,
+        "/staff/me/advances",
+        phone_token(&pool, f.bassem).await,
+        json!({ "amount_piastres": 10_000, "installments": 1 })
+    ))
+    .await;
+    assert_eq!(told(mgr_e).await.len(), 1, "not the manager of A");
+    assert_eq!(told(owner_e).await.len(), 2);
+}

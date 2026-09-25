@@ -1076,6 +1076,33 @@ pub async fn create_my_advance(
     body: web::Json<CreateAdvanceRequest>,
 ) -> Result<HttpResponse, AppError> {
     let row = insert_advance(pool.get_ref(), me.org_id, me.employee_id, &body, me.user_id).await?;
+    // Whoever decides it hears, as for every other request (minor default
+    // M37): the branch's advance deciders and the owners, never the asker.
+    let pool = pool.get_ref();
+    let home = access::branches_of(pool, me.employee_id)
+        .await?
+        .first()
+        .copied();
+    let mut to = crate::staff::dawam::managers_of(pool, me.org_id, home, Cap::HrAdvancesDecide)
+        .await
+        .unwrap_or_default();
+    for o in crate::staff::dawam::owners(pool, me.org_id).await? {
+        if !to.contains(&o) {
+            to.push(o);
+        }
+    }
+    let args = json!({ "name": row.employee_name, "amount": row.amount_piastres,
+                       "advance_id": row.id });
+    for e in to.into_iter().filter(|e| *e != me.employee_id) {
+        crate::staff::dawam::notify(
+            pool,
+            me.org_id,
+            e,
+            "staff.n_advance_requested",
+            args.clone(),
+        )
+        .await;
+    }
     Ok(HttpResponse::Created().json(row))
 }
 
