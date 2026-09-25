@@ -415,6 +415,31 @@ pub struct AttendanceQuery {
     pub status: Option<String>,
 }
 
+/// `GET /staff/attendance`: a date range, or — for Approvals — every
+/// pending cover or overtime however old (hunt H2-B5).
+#[derive(Deserialize, IntoParams, Debug)]
+#[into_params(parameter_in = Query)]
+pub struct AttendanceListQuery {
+    /// Required unless `cover_status` or `overtime_status` is `pending`.
+    #[serde(default)]
+    pub from: Option<NaiveDate>,
+    /// Required unless `cover_status` or `overtime_status` is `pending`.
+    #[serde(default)]
+    pub to: Option<NaiveDate>,
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
+    #[serde(default)]
+    pub employee_id: Option<Uuid>,
+    #[serde(default)]
+    pub status: Option<String>,
+    /// `pending` · `confirmed` · `rejected`: covers in that state.
+    #[serde(default)]
+    pub cover_status: Option<String>,
+    /// `pending` · `approved` · `rejected`: overtime in that state.
+    #[serde(default)]
+    pub overtime_status: Option<String>,
+}
+
 #[derive(Deserialize, IntoParams, Debug)]
 #[into_params(parameter_in = Query)]
 pub struct RangeQuery {
@@ -2506,14 +2531,14 @@ pub(crate) async fn load_record(
 
 #[utoipa::path(
     get, path = "/staff/attendance", tag = "staff",
-    params(AttendanceQuery),
+    params(AttendanceListQuery),
     responses((status = 200, description = "Attendance records", body = Vec<AttendanceRecord>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_attendance(
     req: HttpRequest,
     pool: crate::db::Db,
-    query: web::Query<AttendanceQuery>,
+    query: web::Query<AttendanceListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
@@ -2526,26 +2551,64 @@ pub async fn list_attendance(
         query.branch_id,
     )
     .await?;
-    validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
     if let Some(status) = query.status.as_deref() {
         AttendanceStatus::parse(status)?;
     }
+    let check = |value: Option<&str>, allowed: &[&str], field: &str| match value {
+        Some(v) if !allowed.contains(&v) => Err(AppError::BadRequest(format!(
+            "{field} is one of {}",
+            allowed.join(", ")
+        ))),
+        _ => Ok(()),
+    };
+    check(
+        query.cover_status.as_deref(),
+        &["pending", "confirmed", "rejected"],
+        "cover_status",
+    )?;
+    check(
+        query.overtime_status.as_deref(),
+        &["pending", "approved", "rejected"],
+        "overtime_status",
+    )?;
+    // Pending items are few and must all reach Approvals, however old; any
+    // other listing is a window.
+    let pending = query.cover_status.as_deref() == Some("pending")
+        || query.overtime_status.as_deref() == Some("pending");
+    let (from, to) = match (query.from, query.to) {
+        (Some(from), Some(to)) => {
+            validate_range(from, to, MAX_RANGE_DAYS)?;
+            (Some(from), Some(to))
+        }
+        (None, None) if pending => (None, None),
+        _ => {
+            return Err(AppError::Coded {
+                status: 400,
+                code: "RANGE_REQUIRED",
+                reason: "Pick a date range (from and to).".into(),
+            });
+        }
+    };
 
     let rows = sqlx::query_as::<_, AttendanceRecord>(&format!(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
           WHERE a.org_id = $1 \
-            AND a.business_date BETWEEN $2 AND $3 \
+            AND ($2::date IS NULL OR a.business_date BETWEEN $2 AND $3) \
             AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4)) \
             AND ($5::uuid IS NULL OR a.employee_id = $5) \
             AND ($6::text IS NULL OR a.status = $6) \
+            AND ($7::text IS NULL OR a.cover_status = $7) \
+            AND ($8::text IS NULL OR a.overtime_status = $8) \
           ORDER BY a.business_date DESC, lower(emp.name)"
     ))
     .bind(org_id)
-    .bind(query.from)
-    .bind(query.to)
+    .bind(from)
+    .bind(to)
     .bind(scope.as_deref())
     .bind(query.employee_id)
     .bind(query.status.as_deref())
+    .bind(query.cover_status.as_deref())
+    .bind(query.overtime_status.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
