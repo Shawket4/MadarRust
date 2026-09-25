@@ -3800,7 +3800,7 @@ async fn a_decided_claim_stays_in_the_claimers_requests(pool: PgPool) {
         json!({ "approve": false })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
     let declined = my_claims(&app, &tb, from, to).await;
     assert_eq!(declined.len(), 1, "{declined:?}");
     assert_eq!(declined[0]["status"], json!("declined"));
@@ -3850,7 +3850,7 @@ async fn a_decided_claim_stays_in_the_claimers_requests(pool: PgPool) {
         json!({ "approve": true })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200);
     let approved = my_claims(&app, &ta, from, to).await;
     assert_eq!(approved.len(), 1, "{approved:?}");
     assert_eq!(approved[0]["status"], json!("approved"));
@@ -4108,7 +4108,8 @@ async fn the_poster_is_not_told_of_their_own_open_shift(pool: PgPool) {
     publish(&app, &f, f.br_a, d).await;
     let told = async || -> Vec<Uuid> {
         let mut who: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT employee_id FROM staff_notifications WHERE key = 'staff.n_open_shift'",
+            "SELECT employee_id FROM staff_notifications \
+              WHERE key IN ('staff.n_open_shift', 'staff.n_open_shifts_week')",
         )
         .fetch_all(&pool)
         .await
@@ -4309,7 +4310,7 @@ async fn a_claimer_withdraws_a_waiting_claim(pool: PgPool) {
         json!({ "approve": true })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
     refused!(withdraw(&ta).await, 409, "CLAIM_ALREADY_DECIDED");
     let (s, _) = done(call!(
         app,
@@ -4707,7 +4708,7 @@ async fn a_business_wide_block_set_from_branch_b_is_worked_at_b(pool: PgPool) {
         json!({ "approve": true })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
     assert_eq!(board(f.br_b, d2).await, vec![(f.a, w)], "the claim is at B");
     assert!(board(f.br_a, d2).await.is_empty());
 }
@@ -4740,7 +4741,7 @@ async fn roster_refusals_carry_codes(pool: PgPool) {
         json!({ "approve": true })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
     let flag: Uuid = sqlx::query_scalar(
         "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind, minutes_away) \
          VALUES ($1, $2, $3, 'left_mid_shift', 30) RETURNING id",
