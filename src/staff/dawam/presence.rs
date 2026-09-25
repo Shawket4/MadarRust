@@ -681,7 +681,8 @@ pub(crate) fn nearest_five_pounds(piastres: Decimal) -> i64 {
 #[derive(Deserialize, ToSchema)]
 pub struct ResolveFlag {
     /// `ignore` · `excuse_paid` · `excuse_unpaid` · `deduct` · `revoke` (a new
-    /// phone) · `confirm`
+    /// phone) · `confirm`. A cover's flag takes only `confirm` or `reject`,
+    /// which decide the cover itself (400 `FLAG_COVER_CONFIRM_OR_REJECT`).
     pub action: String,
     /// For `deduct`: the amount the manager typed (CL-7).
     #[serde(default)]
