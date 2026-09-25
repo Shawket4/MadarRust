@@ -1444,13 +1444,16 @@ pub async fn decide_suggestion(
                 pattern_changes = days::diff(&before, &after);
             }
         } else {
+            // Worked where the suggesting branch's board put it, or where the
+            // shift it moves was worked (hunt H2-B8).
             let block = Block {
                 work_shift_id: s.work_shift_id,
                 times: None,
+                branch_id: Some(body.branch_id),
             };
-            let mut times = None;
+            let mut taken = None;
             if let Some(f) = &from {
-                times = days::remove_block(
+                taken = days::remove_block(
                     &mut tx,
                     org_id,
                     f.id,
@@ -1463,9 +1466,17 @@ pub async fn decide_suggestion(
                 .ok_or_else(|| AppError::Refused {
                     code: "SUGGESTION_STALE",
                     reason: "That shift moved since — refresh the suggestions.".into(),
-                })?;
+                })
+                .map(Some)?;
             }
-            let block = Block { times, ..block };
+            let block = match taken {
+                Some(t) => Block {
+                    times: t.times,
+                    branch_id: t.branch_id.or(block.branch_id),
+                    ..block
+                },
+                None => block,
+            };
             days::validate_block(&mut tx, &to, s.date, &block).await?;
             days::add_block(
                 &mut tx,

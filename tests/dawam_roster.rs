@@ -4534,3 +4534,141 @@ async fn an_old_pending_swap_is_listed_and_decided(pool: PgPool) {
         105
     );
 }
+
+/// Hunt H2-B8 (SC-5, RO-6): a business-wide block put on a two-branch
+/// person's day from branch B's board is worked at B — it landed on their
+/// first branch A's roster and vanished from B's board. The day records
+/// the branch it was set from (`PutDayRequest.branch_id`) for a
+/// business-wide block; a claim, a move or a swap carries where the shift
+/// was worked; an old client that sends no branch keeps what the day had.
+#[sqlx::test]
+async fn a_business_wide_block_set_from_branch_b_is_worked_at_b(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Amal works at A (first) and B.
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let w = block(&pool, &f, None, "Wide", t(9, 0), t(13, 0)).await;
+    let own = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let d = today() + Duration::days(3);
+    let board = async |branch: Uuid, on: NaiveDate| -> Vec<(Uuid, Uuid)> {
+        let (s, body) = done(call!(
+            app,
+            "GET",
+            format!("/staff/roster?branch_id={branch}&from={on}&to={on}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+        body["shifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["employee_id"].as_str().unwrap().parse().unwrap(),
+                    s["work_shift_id"].as_str().unwrap().parse().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let put = async |body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", f.owner(), body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": w }, { "work_shift_id": own }] }),
+    )
+    .await;
+    assert_eq!(board(f.br_b, d).await, vec![(f.a, w)], "on B's board");
+    assert_eq!(
+        board(f.br_a, d).await,
+        vec![(f.a, own)],
+        "A keeps its own block"
+    );
+    // An old client sends no branch: the day keeps where each block is.
+    put(json!({ "employee_id": f.a, "on_date": d,
+                "shifts": [{ "work_shift_id": w, "start_time": "09:30:00", "end_time": "13:00:00" },
+                           { "work_shift_id": own }] }))
+    .await;
+    assert_eq!(board(f.br_b, d).await, vec![(f.a, w)], "still B's");
+    // Not one of Amal's branches; and not the A manager's to set at B.
+    let br_c = branch(&pool, f.org, "C").await;
+    refused!(
+        call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            f.owner(),
+            json!({ "employee_id": f.a, "on_date": d, "branch_id": br_c,
+                    "shifts": [{ "work_shift_id": w }] })
+        ),
+        400,
+        "EMPLOYEE_NOT_AT_BRANCH"
+    );
+    let (s, _) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.manager(),
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": w }] })
+    ))
+    .await;
+    assert_eq!(s, 403, "the A manager can't set a day at B");
+
+    // Moved to Xavier (B only), it stays at B.
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules/days/move",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d, "work_shift_id": w, "to_employee_id": f.x })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(board(f.br_b, d).await, vec![(f.x, w)], "moved, still at B");
+
+    // An open shift on the business-wide block posted at B: claimed and
+    // approved, it is worked at B.
+    let d2 = d + Duration::days(1);
+    publish(&app, &f, f.br_b, d2).await;
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/open-shifts",
+        f.owner(),
+        json!({ "branch_id": f.br_b, "work_shift_id": w, "on_date": d2 })
+    ))
+    .await;
+    assert_eq!(s, 201, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        phone_token(&pool, f.a).await
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 204);
+    assert_eq!(board(f.br_b, d2).await, vec![(f.a, w)], "the claim is at B");
+    assert!(board(f.br_a, d2).await.is_empty());
+}

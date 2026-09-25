@@ -960,6 +960,7 @@ pub async fn claim_open_shift(
         let block = Block {
             work_shift_id: shift_id,
             times: None,
+            branch_id: Some(branch_id),
         };
         days::validate_block(&mut tx, &subject, on_date, &block).await?;
         let already = resolve_range(&mut *tx, &[employee_id], on_date, on_date, None)
@@ -1164,9 +1165,11 @@ pub async fn decide_claim(
             return Err(AppError::Conflict("That claim was already decided.".into()));
         }
         close_claim(&mut tx, *id, "approved", Some(by)).await?;
+        // Worked at the branch that posted it (hunt H2-B8).
         let block = Block {
             work_shift_id: shift_id,
             times: None,
+            branch_id: Some(branch_id),
         };
         days::validate_block(&mut tx, &subject, on_date, &block).await?;
         days::add_block(
@@ -1404,13 +1407,16 @@ async fn apply_swap(
             reason: "Those shifts aren't on the roster any more.".into(),
         });
     };
+    // Each shift keeps its times and where it was worked (hunt H2-B8).
     let to_requester = Block {
         work_shift_id: s.peer_shift_id,
-        times: theirs,
+        times: theirs.times,
+        branch_id: theirs.branch_id,
     };
     let to_peer = Block {
         work_shift_id: s.requester_shift_id,
-        times: mine,
+        times: mine.times,
+        branch_id: mine.branch_id,
     };
     days::validate_block(conn, requester, s.peer_date, &to_requester).await?;
     days::validate_block(conn, peer, s.requester_date, &to_peer).await?;
