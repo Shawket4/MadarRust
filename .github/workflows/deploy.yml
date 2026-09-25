@@ -301,3 +301,20 @@ jobs:
             exit 1
           }
           SCRIPT
+
+  # A tagged deploy that reached production gets a GitHub Release page, like the
+  # apps and the dashboard (notes generated from the commits since the last tag).
+  release:
+    name: GitHub Release
+    needs: deploy
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "Madar backend $GITHUB_REF_NAME" --generate-notes --verify-tag
