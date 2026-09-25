@@ -41477,7 +41477,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Automatic payroll deductions a manager overrode or waived, by type and by issuer",
+            "description": "Automatic payroll deductions a manager overrode or waived, by type and by issuer, with `history`: every waive, unwaive and override event (who, when, why)",
             "content": {
               "application/json": {
                 "schema": {
@@ -63001,6 +63001,27 @@
             ],
             "format": "uuid"
           },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "decided_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who decided a line that waited for the owner, when, and why (a\nrejection always says why, D8)."
+          },
+          "decision_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "effective_date": {
             "type": "string",
             "format": "date",
@@ -64429,6 +64450,16 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "history": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/DeductionOverrideEvent"
+            },
+            "description": "Deduction overrides audit only: every waive, unwaive and override\nevent with who, when and why, newest first (at most 500) — the\nhistory, so a waiver later undone still shows (owner decision D8,\nAT-10). Additive."
           },
           "to": {
             "type": [
@@ -68161,6 +68192,10 @@
             "type": "integer",
             "format": "int64"
           },
+          "salary_missing": {
+            "type": "boolean",
+            "description": "On payroll with no salary set (owner decision D9): everything prices\nat 0, and approval is refused (409 SALARY_MISSING) until the owner\nsets it or marks them not on payroll."
+          },
           "worked_days": {
             "type": "number",
             "format": "double"
@@ -68249,6 +68284,7 @@
           "name",
           "role",
           "branch_ids",
+          "salary_set",
           "advance_within_cap",
           "pay_method",
           "cant_work_days"
@@ -68272,7 +68308,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Only for people whose pay the caller may see."
+            "description": "Only for people whose pay the caller may see (null too when no\nsalary is set: `salary_set`)."
           },
           "branch_ids": {
             "type": "array",
@@ -68345,6 +68381,10 @@
           "role": {
             "type": "string",
             "description": "`owner` · `manager` · `employee` (from the linked account; an employee\nwith no account is `employee`)."
+          },
+          "salary_set": {
+            "type": "boolean",
+            "description": "A salary is on file (D9); false = \"not set\". Never hidden."
           },
           "user_id": {
             "type": [
@@ -71108,7 +71148,8 @@
           "payslips",
           "history",
           "totals",
-          "paid_count"
+          "paid_count",
+          "missing_salary_count"
         ],
         "properties": {
           "history": {
@@ -71117,6 +71158,11 @@
               "$ref": "#/components/schemas/PayrollPeriod"
             },
             "description": "Earlier periods, newest first."
+          },
+          "missing_salary_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "People on payroll with no salary set (D9): the preview rows with\n`salary_missing`; approval is refused until it is 0."
           },
           "paid_count": {
             "type": "integer",
@@ -71622,6 +71668,13 @@
         "properties": {
           "approve": {
             "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why. Required to reject (400 `REASON_REQUIRED`, D8); optional to\napprove."
           }
         }
       },
@@ -71776,6 +71829,96 @@
           },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "DeductionOverrideEvent": {
+        "type": "object",
+        "description": "One waive, unwaive or override of a payroll deduction, from the money\naudit log (D8).",
+        "required": [
+          "deduction_id",
+          "action",
+          "at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`waive` · `unwaive` · `override`"
+          },
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "actor_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "amount_after_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "amount_before_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "What the line charged before and after this event (a waiver: after\n0; undoing one: before 0)."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deduction_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "effective_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "The line itself: its day, what made it (`absence`, `late_penalty`,\n…) and its rule's reason code. Null if the line is gone."
+          },
+          "employee_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -73394,6 +73537,7 @@
           "name",
           "app_access",
           "employment_status",
+          "salary_set",
           "pay_method",
           "on_payroll",
           "advance_within_cap",
@@ -73425,7 +73569,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "`None` when the caller may not read this person's pay — see the module docs."
+            "description": "`None` when the caller may not read this person's pay — see the module\ndocs — or when no salary is set (`salary_set` tells the two apart)."
           },
           "branch_ids": {
             "type": "array",
@@ -73595,6 +73739,10 @@
               "null"
             ],
             "description": "The linked user's POS role; null for an unlinked employee."
+          },
+          "salary_set": {
+            "type": "boolean",
+            "description": "A salary is on file (owner decision D9): false = \"not set\" (someone a\nmanager added or imported), shown as \"—\" and flagged by payroll.\nNever hidden: it says nothing about the amount."
           },
           "termination_date": {
             "type": [
@@ -82417,6 +82565,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "missing_salary_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "People on payroll with no salary set (D9); approval waits for them."
+          },
           "net_piastres": {
             "type": "integer",
             "format": "int64"
@@ -87919,6 +88072,13 @@
             "format": "int32"
           },
           "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (kept as the decision note). Required to reject: `note` or\n`reason`, `reason` wins (400 `REASON_REQUIRED`, D8)."
+          },
+          "reason": {
             "type": [
               "string",
               "null"
