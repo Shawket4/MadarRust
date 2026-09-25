@@ -4275,3 +4275,69 @@ async fn an_advance_request_tells_the_managers_and_the_owner(pool: PgPool) {
     assert_eq!(told(mgr_e).await.len(), 1, "not the manager of A");
     assert_eq!(told(owner_e).await.len(), 2);
 }
+
+/// Minor default M27: a new bonus or deduction with no date lands in the
+/// first open month: after an early approval, next month's pay instead of a
+/// refusal. The app's context says which day that is. A date given in the
+/// approved month is still refused.
+#[sqlx::test]
+async fn a_new_pay_line_lands_in_the_first_open_month(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    assert_eq!(generate(&app, &f).await.status(), 200, "approved early");
+    let next = f.end + Duration::days(1);
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        f.mgr(),
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 10_000,
+                "reason": "Help at inventory" })
+    );
+    assert_eq!(resp.status(), 201);
+    let line = json_of(resp).await;
+    assert_eq!(line["effective_date"], json!(next), "{line}");
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        f.mgr(),
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 10_000,
+                "reason": "x", "effective_date": f.start })
+    );
+    assert_eq!(resp.status(), 409);
+    assert_eq!(json_of(resp).await["code"], "PERIOD_CLOSED");
+    let mgr_e = common::employees::employee(
+        &pool,
+        f.org,
+        "Mgr",
+        Some(f.mgr),
+        Some("+201012345670"),
+        true,
+        &[f.a],
+        0,
+    )
+    .await;
+    let ctx = json_of(call!(
+        app,
+        get,
+        "/staff/me/context",
+        phone_token(&pool, mgr_e).await
+    ))
+    .await;
+    assert_eq!(ctx["first_open_date"], json!(next), "{ctx}");
+    // Reopened, today's month is open again.
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    let ctx = json_of(call!(
+        app,
+        get,
+        "/staff/me/context",
+        phone_token(&pool, mgr_e).await
+    ))
+    .await;
+    let today: NaiveDate = sqlx::query_scalar("SELECT (now() AT TIME ZONE 'UTC')::date")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ctx["first_open_date"], json!(today));
+}

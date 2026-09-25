@@ -516,7 +516,9 @@ pub struct NewAdjustment {
     pub percent_of_base: Option<Decimal>,
     pub reason: String,
     /// The month it lands in (AD-1): any day of that month; the first month
-    /// of a recurring line (AD-3). Defaults to today. Must be an open month.
+    /// of a recurring line (AD-3). Defaults to today, or, when today's month
+    /// is already approved, the first day of the next open month (M27).
+    /// Given explicitly, it must be in an open month (409 PERIOD_CLOSED).
     #[serde(default)]
     pub effective_date: Option<NaiveDate>,
     /// Every month until stopped (AD-3).
@@ -587,8 +589,13 @@ pub async fn create_adjustment(
         }
     };
     // The person's own day, not the server's or the first branch's (AT-1).
+    // Not given: the first open month (after an early approval, next
+    // month's pay; minor default M27). Given in a closed month: refused.
     let today = today_for_employee(pool, org_id, body.employee_id).await?;
-    let effective_date = body.effective_date.unwrap_or(today);
+    let effective_date = match body.effective_date {
+        Some(d) => d,
+        None => period_lock::first_open_day(pool, org_id, today).await?,
+    };
     // Once a month is approved, fixes go into the next month (AD-10).
     period_lock::assert_open(pool, org_id, effective_date, "a pay line").await?;
 
