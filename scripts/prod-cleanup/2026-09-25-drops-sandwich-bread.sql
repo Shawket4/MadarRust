@@ -16,21 +16,23 @@
 --   * The shop's inventory ALREADY holds the two breads, from the Foodics
 --     stock list: "Brown Ciabatta" / خبز شباتة بني (-5: the retired
 --     "brown bread" item's sales) and "White Ciabatta" / خبز شباتة أبيض
---     (never used). This script uses them rather than adding look-alikes.
+--     (never used). This script uses them — renamed, not duplicated.
 --   * Each of the three sandwiches carries a private "Options" group holding
 --     one OPTIONAL "Brown Bread" / خبز أسمر at +30 EGP, with no recipe (so
 --     brown was charged but plain "Bread" was deducted). Never sold.
 --
 -- WHAT IT DOES (idempotent; a second run changes nothing):
---   1. Makes sure both bread ingredients exist (by name; created as pcs in
---      Bread's category only if missing — on prod they already exist).
+--   1. RENAMES the two ciabatta stock rows (owner, 2026-09-25), pinned by id:
+--      "Brown Ciabatta" -> "Brown Bread" / خبز أسمر, "White Ciabatta" ->
+--      "White Bread" / خبز أبيض (the Arabic lives in `description`). Skipped
+--      when already set. Their stock and movement history stay as they are.
 --   2. ONE shared group "Bread" / "الخبز": legacy_addon_type 'bread', effect
 --      'adds', single, REQUIRED, exactly 1 (min 1, max 1) — built like
 --      "Red Bull Type".
 --   3. Two options, legacy_source 'addon', no default (the teller must pick,
 --      as with Red Bull): White Bread / خبز أبيض +0 (sort 0) and Brown Bread /
 --      خبز أسمر +:brown_price piastres (sort 1; default 3000 = today's +30).
---   4. Each option deducts 1 pcs of its bread — the quantity every sandwich
+--   4. Each option deducts 1 pcs of its bread row — the quantity every sandwich
 --      used for "Bread" (a guard refuses to run if any sandwich used another).
 --   5. Attaches the group to the three sandwiches as a SLOT with both options
 --      listed, FIRST (sort 0; the item's other links move down one).
@@ -92,14 +94,18 @@ INSERT INTO bread_old_optionals VALUES
   ('d6bdd35b-7292-4825-ac7f-7f3fa0bf1bcf', '4b22696d-2090-47f2-9471-a31e69272e99', 'b4dbbb89-ab3f-4893-be05-0f2e38ab62cd');
 
 -- The two options and the stock row each deducts.
+-- The two options, and the stock row each deducts: pinned by id, renamed
+-- from the Foodics name to the option's own name.
 CREATE TEMP TABLE bread_spec (
   name text PRIMARY KEY, ar text NOT NULL, price int NOT NULL, sort int NOT NULL,
+  ingredient_id uuid NOT NULL, ingredient_old_name text NOT NULL,
   ingredient text NOT NULL, ingredient_ar text NOT NULL
 ) ON COMMIT DROP;
 INSERT INTO bread_spec VALUES
-  ('White Bread', 'خبز أبيض', 0, 0, 'White Ciabatta', 'خبز شباتة أبيض'),
+  ('White Bread', 'خبز أبيض', 0, 0,
+   '7bbdd969-4df3-465a-abfa-4e6a3506781b', 'White Ciabatta', 'White Bread', 'خبز أبيض'),
   ('Brown Bread', 'خبز أسمر', current_setting('bread.brown_price')::int, 1,
-   'Brown Ciabatta', 'خبز شباتة بني');
+   '3e5eb338-9cbf-4fbe-adc0-75f92f22b765', 'Brown Ciabatta', 'Brown Bread', 'خبز أسمر');
 
 CREATE TEMP TABLE bread_log (step text PRIMARY KEY, n int NOT NULL) ON COMMIT DROP;
 CREATE TEMP TABLE bread_removed_lines ON COMMIT DROP AS
@@ -126,14 +132,20 @@ BEGIN
                   WHERE i.org_id = o AND i.name = b.name AND i.unit::text = 'pcs') THEN
     RAISE EXCEPTION 'guard: the old Bread ingredient is missing or renamed';
   END IF;
-  -- Each option must map to at most one live row, in pcs.
+  -- Each bread row: live, in pcs, and still under its Foodics name or
+  -- already renamed; and no OTHER live row holds the new name.
   FOR r IN SELECT * FROM bread_spec LOOP
-    SELECT count(*) INTO n FROM org_ingredients i
-     WHERE i.org_id = o AND i.name = r.ingredient AND i.deleted_at IS NULL;
-    IF n > 1 THEN RAISE EXCEPTION 'guard: % live rows named %', n, r.ingredient; END IF;
-    IF EXISTS (SELECT 1 FROM org_ingredients i WHERE i.org_id = o AND i.name = r.ingredient
-                 AND i.deleted_at IS NULL AND i.unit::text <> 'pcs') THEN
-      RAISE EXCEPTION 'guard: % is not counted in pcs', r.ingredient;
+    IF NOT EXISTS (SELECT 1 FROM org_ingredients i
+                    WHERE i.id = r.ingredient_id AND i.org_id = o AND i.deleted_at IS NULL
+                      AND i.is_active AND i.unit::text = 'pcs'
+                      AND i.name IN (r.ingredient_old_name, r.ingredient)) THEN
+      RAISE EXCEPTION 'guard: stock row % is not a live pcs "%"/"%"',
+        r.ingredient_id, r.ingredient_old_name, r.ingredient;
+    END IF;
+    IF EXISTS (SELECT 1 FROM org_ingredients i
+                WHERE i.org_id = o AND i.deleted_at IS NULL AND i.name = r.ingredient
+                  AND i.id <> r.ingredient_id) THEN
+      RAISE EXCEPTION 'guard: another live stock row is already named "%"', r.ingredient;
     END IF;
   END LOOP;
   -- One shared quantity is only right if every sandwich used the same.
@@ -164,16 +176,18 @@ BEGIN
   END IF;
 END $$;
 
--- ── 1. The two bread ingredients (created only if missing) ─────────────────
-WITH ins AS (
-  INSERT INTO org_ingredients (org_id, name, unit, description, category_id)
-  SELECT :'org'::uuid, s.ingredient, 'pcs', s.ingredient_ar, old.category_id
+-- ── 1. Rename the two ciabatta rows (skipped when already set) ─────────────
+CREATE TEMP TABLE bread_renames ON COMMIT DROP AS
+SELECT i.id, i.name AS old_name, i.description AS old_ar
+  FROM org_ingredients i JOIN bread_spec s ON s.ingredient_id = i.id
+ WHERE i.name IS DISTINCT FROM s.ingredient OR i.description IS DISTINCT FROM s.ingredient_ar;
+WITH upd AS (
+  UPDATE org_ingredients i SET name = s.ingredient, description = s.ingredient_ar
     FROM bread_spec s
-    CROSS JOIN (SELECT i.category_id FROM org_ingredients i JOIN bread_old b ON b.id = i.id) old
-   WHERE NOT EXISTS (SELECT 1 FROM org_ingredients i WHERE i.org_id = :'org'::uuid
-                       AND i.name = s.ingredient AND i.deleted_at IS NULL)
-  RETURNING id)
-INSERT INTO bread_log SELECT '1 bread ingredients created', count(*) FROM ins;
+   WHERE i.id = s.ingredient_id
+     AND (i.name IS DISTINCT FROM s.ingredient OR i.description IS DISTINCT FROM s.ingredient_ar)
+  RETURNING i.id)
+INSERT INTO bread_log SELECT '1 bread stock rows renamed', count(*) FROM upd;
 
 -- ── 2. The group ───────────────────────────────────────────────────────────
 WITH ins AS (
@@ -209,8 +223,7 @@ WITH ins AS (
   SELECT 'modifier_option', o.id, i.id, 1, 'pcs'
     FROM bread_spec s
     JOIN modifier_options o ON o.group_id = :'bread_group'::uuid AND o.name = s.name
-    JOIN org_ingredients i ON i.org_id = :'org'::uuid AND i.name = s.ingredient
-                          AND i.deleted_at IS NULL
+    JOIN org_ingredients i ON i.id = s.ingredient_id
    WHERE NOT EXISTS (SELECT 1 FROM recipe_lines x
                       WHERE x.owner_type = 'modifier_option' AND x.owner_id = o.id)
   ON CONFLICT DO NOTHING
@@ -310,7 +323,8 @@ BEGIN
                             AND mo.legacy_source = 'addon'
     JOIN addon_item_ingredients a ON a.addon_item_id = mo.id
     JOIN org_ingredients i ON i.id = a.org_ingredient_id
-   WHERE i.name = s.ingredient AND i.is_active AND a.quantity_used = 1 AND a.ingredient_unit = 'pcs';
+   WHERE i.id = s.ingredient_id AND i.name = s.ingredient AND i.description = s.ingredient_ar
+     AND i.is_active AND a.quantity_used = 1 AND a.ingredient_unit = 'pcs';
   IF n <> 2 THEN RAISE EXCEPTION 'verify: % correct bread option lines in addon_item_ingredients, want 2', n; END IF;
   SELECT count(*) INTO n FROM recipe_lines rl JOIN modifier_options mo ON mo.id = rl.owner_id
    WHERE rl.owner_type = 'modifier_option' AND mo.group_id = g;
@@ -381,6 +395,10 @@ SELECT m.name, string_agg(i.name || ' ' || rl.quantity || rl.unit, ', ' ORDER BY
   JOIN org_ingredients i ON i.id = rl.ingredient_id
  GROUP BY m.name ORDER BY m.name;
 
+\echo '== Stock rows renamed by this run =='
+SELECT r.old_name, r.old_ar, i.name AS new_name, i.description AS new_ar
+  FROM bread_renames r JOIN org_ingredients i ON i.id = r.id ORDER BY i.name;
+
 \echo '== Bread stock rows (book stock is never rewritten by this script) =='
 SELECT i.name, i.description AS ar, i.unit, i.is_active,
        coalesce(bs.on_hand, 0) AS on_hand,
@@ -388,7 +406,7 @@ SELECT i.name, i.description AS ar, i.unit, i.is_active,
   FROM org_ingredients i
   LEFT JOIN branch_stock bs ON bs.org_ingredient_id = i.id
  WHERE i.org_id = :'org'::uuid
-   AND (i.id IN (SELECT id FROM bread_old) OR i.name IN (SELECT ingredient FROM bread_spec))
+   AND (i.id IN (SELECT id FROM bread_old) OR i.id IN (SELECT ingredient_id FROM bread_spec))
  ORDER BY i.name;
 
 \if :apply
