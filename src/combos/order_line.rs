@@ -288,7 +288,7 @@ pub async fn load_ctx(
 }
 
 /// A resolved combo line.
-pub struct ComboLine {
+pub(crate) struct ComboLine {
     /// The header, then the parts in slot order.
     pub header: ResolvedItem,
     pub parts: Vec<ResolvedItem>,
@@ -306,7 +306,7 @@ pub struct ComboLine {
 
 /// Where the combo is sold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sale {
+pub(crate) struct Sale {
     pub channel: Channel,
     pub prices: ClientPrices,
     /// Refuse a bad line (live, public) rather than flag it (replay, settle).
@@ -445,7 +445,7 @@ fn relaxed(view: &mc::ComboView, picks: &[mc::PickIn]) -> mc::ComboView {
 }
 
 /// Resolve one combo line (`input.menu_item_id` is a combo of `ctx`).
-pub async fn resolve(
+pub(crate) async fn resolve(
     pool: &PgPool,
     catalog: &mut Catalog,
     ctx: &ComboCtx,
@@ -705,7 +705,7 @@ pub async fn resolve(
 /// the server's, or the line was forced, the header and every part are
 /// `price_flagged` and `menu.combos:price_mismatch` is added (once) to `flags`
 /// when the figures themselves differ. Returns (charged, expected) totals.
-pub fn settle_flags(line: &mut ComboLine) -> (i32, i32) {
+pub(crate) fn settle_flags(line: &mut ComboLine) -> (i32, i32) {
     let mut charged = 0;
     let mut expected = 0;
     let mut differs = line.header.combo.unit_price != Some(line.quote.price as i32);

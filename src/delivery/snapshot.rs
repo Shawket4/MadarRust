@@ -1290,7 +1290,7 @@ pub async fn apply_snapshot(
                     .collect(),
             })
             .collect();
-        crate::deals::order::insert(&mut **tx, org_id, order.id, &priced, &row_of).await?;
+        crate::deals::order::insert(tx, org_id, order.id, &priced, &row_of).await?;
     }
 
     Ok((order, warnings))

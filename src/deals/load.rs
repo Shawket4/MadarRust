@@ -53,6 +53,7 @@ pub async fn load_rules(
     }
     let rule_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
 
+    #[allow(clippy::type_complexity)]
     let items: Vec<(Uuid, String, Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query_as(
         "SELECT deal_rule_id, role, menu_item_id, category_id, size_label FROM deal_rule_items \
           WHERE deal_rule_id = ANY($1) ORDER BY deal_rule_id, role, sort, id",
