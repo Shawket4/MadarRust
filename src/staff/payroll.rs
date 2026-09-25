@@ -504,8 +504,10 @@ async fn delete_adjustment(
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, cap, &subject).await?;
     if source != "manual" {
-        return Err(AppError::Conflict(
-            "A rule-made line is never deleted: waive or override it, with a reason.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "RULE_LINE_NOT_DELETED",
+            "A rule-made line is never deleted: waive or override it, with a reason.",
         ));
     }
     period_lock::assert_open(pool.get_ref(), org_id, effective_date, "a pay line").await?;
@@ -679,8 +681,10 @@ pub async fn override_deduction(
     }
     // A waived line is final (AD-8): no override brings it back or changes it.
     if waived {
-        return Err(AppError::Conflict(
-            "This deduction was waived — a waiver is final.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "WAIVER_FINAL",
+            "This deduction was waived — a waiver is final.",
         ));
     }
     // Raising a deduction is adding one: the increase is judged against the
@@ -865,7 +869,11 @@ pub async fn unwaive_deduction(
         ));
     }
     if !waived {
-        return Err(AppError::Conflict("This deduction is not waived.".into()));
+        return Err(crate::staff::coded(
+            409,
+            "NOT_WAIVED",
+            "This deduction is not waived.",
+        ));
     }
     let mut tx = pool.begin().await?;
     // Who took the waiver back, when and why stay on the row (AT-7, AT-10).
@@ -1180,8 +1188,10 @@ pub async fn create_period(
     .fetch_one(pool.get_ref())
     .await?;
     if overlaps {
-        return Err(AppError::Conflict(
-            "That span overlaps a period that already exists.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "PERIOD_OVERLAPS",
+            "That span overlaps a period that already exists.",
         ));
     }
 
@@ -1268,8 +1278,10 @@ pub async fn set_period_status(
             .fetch_one(&mut *tx)
             .await?;
             if any_paid {
-                return Err(AppError::Conflict(
-                    "Someone has already been paid — this payroll can't be reopened.".into(),
+                return Err(crate::staff::coded(
+                    409,
+                    "PAYROLL_PAID_NO_REOPEN",
+                    "Someone has already been paid — this payroll can't be reopened.",
                 ));
             }
             let dropped = sqlx::query("DELETE FROM payslips WHERE payroll_period_id = $1")
@@ -1322,19 +1334,26 @@ pub async fn set_period_status(
             .await?;
         }
         (_, "generated") => {
-            return Err(AppError::Conflict(
-                "Approve a month with POST …/generate; it freezes the payslips.".into(),
+            return Err(crate::staff::coded(
+                409,
+                "APPROVE_WITH_GENERATE",
+                "Approve a month with POST …/generate; it freezes the payslips.",
             ));
         }
         (_, "paid") => {
-            return Err(AppError::Conflict(
-                "A month is Paid when every payslip is marked paid — never by hand (PAY-7).".into(),
+            return Err(crate::staff::coded(
+                409,
+                "PAID_BY_PAYSLIPS",
+                "A month is Paid when every payslip is marked paid — never by hand (PAY-7).",
             ));
         }
         (cur, target) => {
-            return Err(AppError::Conflict(format!(
-                "A {cur} period cannot move to {target}"
-            )));
+            return Err(crate::staff::coded_vars(
+                409,
+                "PERIOD_STATUS_MOVE",
+                format!("A {cur} period cannot move to {target}"),
+                json!({ "from": cur, "to": target }),
+            ));
         }
     }
     let row = sqlx::query_as::<_, PayrollPeriod>(&format!(
@@ -1378,9 +1397,14 @@ pub async fn delete_period(
     .await?
     .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
     if status != "draft" {
-        return Err(AppError::Conflict(format!(
-            "A {status} period cannot be deleted — reopen it first (only before anyone is paid)"
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PERIOD_NOT_DRAFT_DELETE",
+            format!(
+                "A {status} period cannot be deleted — reopen it first (only before anyone is paid)"
+            ),
+            json!({ "status": status }),
+        ));
     }
     // Any payslips a draft still holds cascade away, and their collections'
     // trigger gives the advances back.
@@ -2107,10 +2131,15 @@ pub async fn generate_period(
     .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
 
     if period.status != "draft" {
-        return Err(AppError::Conflict(format!(
-            "A {} period is frozen — reopen it (before anyone is paid) to approve it again",
-            period.status
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PERIOD_FROZEN",
+            format!(
+                "A {} period is frozen — reopen it (before anyone is paid) to approve it again",
+                period.status
+            ),
+            json!({ "status": period.status }),
+        ));
     }
     // A draft never holds payslips after a reopen; clear any older leftovers
     // (their collections cascade and the ledger refunds them).
@@ -2367,8 +2396,10 @@ pub async fn export_period_csv(
             .await?
             .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
     if period.1 == "draft" {
-        return Err(AppError::Conflict(
-            "Generate the period before exporting it".into(),
+        return Err(crate::staff::coded(
+            409,
+            "PERIOD_NOT_GENERATED",
+            "Approve the period before exporting it",
         ));
     }
 

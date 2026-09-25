@@ -3036,8 +3036,10 @@ pub async fn create_manual_record(
     .await?;
 
     let Some(id) = inserted else {
-        return Err(AppError::Conflict(
-            "This employee already has a record for that day and shift — correct it instead".into(),
+        return Err(crate::staff::coded(
+            409,
+            "RECORD_EXISTS",
+            "This employee already has a record for that day and shift — correct it instead",
         ));
     };
 

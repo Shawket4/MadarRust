@@ -4990,3 +4990,117 @@ async fn an_older_month_not_fully_paid_is_listed_and_settled_by_id(pool: PgPool)
     // The current month itself is never in `unsettled`.
     assert_eq!(cur["period"]["id"], json!(f.period));
 }
+
+/// Minor default M43 (AT-13): the payroll refusals that still read
+/// "Conflict: …" carry a code (and their figures), so the dashboard and the
+/// app word them in the reader's language, and the English has no prefix.
+#[sqlx::test]
+async fn payroll_conflicts_carry_codes_without_a_prefix(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let refused = async |resp: actix_web::dev::ServiceResponse, code: &str| -> Value {
+        assert_eq!(resp.status(), 409, "{code}");
+        let out = json_of(resp).await;
+        assert_eq!(out["code"], json!(code), "{out}");
+        assert!(
+            !out["error"].as_str().unwrap().starts_with("Conflict"),
+            "{out}"
+        );
+        out["vars"].clone()
+    };
+    // A rule-made line: never deleted; not waived, so no unwaive; once
+    // waived, no override.
+    let rule: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, source, status) \
+         VALUES ($1, $2, 1000, 'Late', $3, 'late_penalty', 'approved') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let del = format!("/staff/payroll/deductions/{rule}");
+    refused(
+        call!(app, delete, del, owner.clone()),
+        "RULE_LINE_NOT_DELETED",
+    )
+    .await;
+    let unwaive = format!("/staff/payroll/deductions/{rule}/unwaive");
+    refused(
+        call!(app, patch, unwaive, owner.clone(), json!({ "reason": "x" })),
+        "NOT_WAIVED",
+    )
+    .await;
+    let waive = format!("/staff/payroll/deductions/{rule}/waive");
+    let resp = call!(
+        app,
+        patch,
+        waive,
+        owner.clone(),
+        json!({ "reason": "Sick" })
+    );
+    assert_eq!(resp.status(), 200);
+    let ov = format!("/staff/payroll/deductions/{rule}/override");
+    refused(
+        call!(
+            app,
+            patch,
+            ov,
+            owner.clone(),
+            json!({ "amount_piastres": 5, "reason": "x" })
+        ),
+        "WAIVER_FINAL",
+    )
+    .await;
+
+    // Periods.
+    let resp = call!(
+        app,
+        post,
+        "/staff/payroll/periods",
+        owner.clone(),
+        json!({ "name": "Again", "start_date": f.start, "end_date": f.end })
+    );
+    refused(resp, "PERIOD_OVERLAPS").await;
+    let p = f.period;
+    let status = async |to: &str| {
+        call!(
+            app,
+            patch,
+            format!("/staff/payroll/periods/{p}/status"),
+            owner.clone(),
+            json!({ "status": to, "reason": "x" })
+        )
+    };
+    let export = format!("/staff/payroll/periods/{p}/export.csv?method=bank");
+    refused(
+        call!(app, get, export, owner.clone()),
+        "PERIOD_NOT_GENERATED",
+    )
+    .await;
+    refused(status("generated").await, "APPROVE_WITH_GENERATE").await;
+    refused(status("paid").await, "PAID_BY_PAYSLIPS").await;
+    let vars = refused(status("closed").await, "PERIOD_STATUS_MOVE").await;
+    assert_eq!(vars, json!({ "from": "draft", "to": "closed" }));
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let vars = refused(generate(&app, &f).await, "PERIOD_FROZEN").await;
+    assert_eq!(vars, json!({ "status": "generated" }));
+    let vars = refused(
+        call!(
+            app,
+            delete,
+            format!("/staff/payroll/periods/{p}"),
+            owner.clone()
+        ),
+        "PERIOD_NOT_DRAFT_DELETE",
+    )
+    .await;
+    assert_eq!(vars, json!({ "status": "generated" }));
+    let paid = format!("/staff/payroll/periods/{p}/payslips/{}/paid", f.amal);
+    let resp = call!(app, patch, paid, owner.clone(), json!({ "method": "cash" }));
+    assert_eq!(resp.status(), 200);
+    refused(status("draft").await, "PAYROLL_PAID_NO_REOPEN").await;
+}
