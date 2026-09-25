@@ -125,6 +125,18 @@ impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         match e {
             sqlx::Error::RowNotFound => AppError::NotFound("Resource not found".into()),
+            // The combos module's guard triggers raise their contract code
+            // first in the message (a check violation); the API checks first,
+            // so this is the backstop's wording for every other write path
+            // (the studio's sizes, a recipe line, a choice group on a combo).
+            other if combo_guard(&other).is_some() => {
+                let (status, code, reason) = combo_guard(&other).expect("checked");
+                AppError::Coded {
+                    status,
+                    code,
+                    reason: reason.into(),
+                }
+            }
             // The database refuses these on its own (Dawam RQ-9, RQ-11), so two
             // requests sent at once can't both land; say why in words.
             other => match other.as_database_error().and_then(|d| d.constraint()) {
@@ -145,6 +157,45 @@ impl From<sqlx::Error> for AppError {
             },
         }
     }
+}
+
+/// A combos guard trigger's refusal (`migrations/20261005100000_combos.sql`):
+/// its code, HTTP status and English sentence.
+fn combo_guard(e: &sqlx::Error) -> Option<(u16, &'static str, &'static str)> {
+    let d = e.as_database_error()?;
+    if d.code().as_deref() != Some("23514") {
+        return None;
+    }
+    let msg = d.message();
+    const GUARDS: &[(&str, u16, &str)] = &[
+        ("COMBO_NESTED", 400, "A combo can't contain another combo."),
+        (
+            "COMBO_NO_RECIPE",
+            409,
+            "A combo has no recipe of its own; each item uses its own.",
+        ),
+        (
+            "COMBO_KIND_LOCKED",
+            409,
+            "This item has sales; its type can't change.",
+        ),
+        (
+            "MEAL_TARGET_INVALID",
+            400,
+            "That combo has no slot for this item.",
+        ),
+        ("COMBO_SLOT_INVALID", 400, "Check the combo's slots."),
+        (
+            "COMBO_CHOICE_NOT_ALLOWED",
+            400,
+            "That item can't be chosen here.",
+        ),
+        ("DEAL_INVALID", 400, "Check the deal."),
+    ];
+    GUARDS.iter().find_map(|(code, status, reason)| {
+        msg.starts_with(&format!("{code}:"))
+            .then_some((*status, *code, *reason))
+    })
 }
 
 impl AppError {

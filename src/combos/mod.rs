@@ -4,6 +4,7 @@
 //! [`crate::reports::bundles`].
 
 pub mod handlers;
+pub mod load;
 pub mod routes;
 pub mod types;
 
