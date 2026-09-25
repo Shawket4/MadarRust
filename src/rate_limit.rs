@@ -57,6 +57,217 @@ impl KeyExtractor for PathToken {
     }
 }
 
+// ── Per-route limiters ───────────────────────────────────────────────────────
+
+/// One per-route governor's defaults: `burst` requests at once, then one more
+/// every `ms_per_request`. Each is overridable with
+/// `MADAR_RL_<AREA>_<LIMITER>_BURST` and `MADAR_RL_<AREA>_<LIMITER>_MS_PER_REQUEST`.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteLimitDef {
+    pub area: &'static str,
+    pub limiter: &'static str,
+    pub burst: u32,
+    pub ms_per_request: u64,
+    /// What it guards (the `.env.example` line).
+    pub guards: &'static str,
+}
+
+/// Every per-route governor in the backend, in one place, so the routes, the
+/// tests and the docs read the same numbers. The owner doubled every
+/// allowance on 2026-09-25 (burst ×2, refill twice as fast) and wanted each
+/// one set from the environment.
+pub const ROUTE_LIMITS: &[RouteLimitDef] = &[
+    RouteLimitDef {
+        area: "AUTH",
+        limiter: "LOGIN",
+        burst: 120,
+        ms_per_request: 500,
+        guards: "per IP: password/PIN login, staff OTP request + verify, staff session refresh",
+    },
+    RouteLimitDef {
+        area: "AUTH",
+        limiter: "ACTIVATION",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: device activation codes and branch resolution",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: opening the order-now page from a card",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "IDENTITY",
+        burst: 10,
+        ms_per_request: 3_000,
+        guards: "per IP: changing who an order-now profile belongs to",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "BROWSE_TOKEN",
+        burst: 40,
+        ms_per_request: 1_000,
+        guards: "per card token: opening the order-now page",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "IDENTITY_TOKEN",
+        burst: 6,
+        ms_per_request: 60_000,
+        guards: "per card token: replace/combine identity",
+    },
+    RouteLimitDef {
+        area: "LOYALTY",
+        limiter: "BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: loyalty join pages and cards",
+    },
+    RouteLimitDef {
+        area: "LOYALTY",
+        limiter: "JOIN",
+        burst: 10,
+        ms_per_request: 3_000,
+        guards: "per IP: loyalty sign-up",
+    },
+    RouteLimitDef {
+        area: "DEMO",
+        limiter: "REQUEST",
+        burst: 10,
+        ms_per_request: 15_000,
+        guards: "per IP: the public demo request form",
+    },
+    RouteLimitDef {
+        area: "TICKETS",
+        limiter: "TABLE_BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: a table's QR menu",
+    },
+    RouteLimitDef {
+        area: "TICKETS",
+        limiter: "TABLE_INTAKE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: orders placed from a table's QR",
+    },
+    RouteLimitDef {
+        area: "INTEGRATIONS",
+        limiter: "PARTNER",
+        burst: 60,
+        ms_per_request: 1_000,
+        guards: "per IP: the password-authenticated partner analytics API",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: the public delivery menu",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "QUOTE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: delivery quotes",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "OTP",
+        burst: 6,
+        ms_per_request: 15_000,
+        guards: "per IP: delivery OTP send and verify",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "INTAKE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: delivery order intake",
+    },
+    RouteLimitDef {
+        area: "BOOKINGS",
+        limiter: "BROWSE",
+        burst: 120,
+        ms_per_request: 500,
+        guards: "per IP: public booking pages and availability",
+    },
+    RouteLimitDef {
+        area: "BOOKINGS",
+        limiter: "WRITE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: creating or changing a public booking",
+    },
+];
+
+/// A route governor's numbers after the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteLimit {
+    pub burst: u32,
+    pub ms_per_request: u64,
+}
+
+/// `MADAR_RL_<AREA>_<LIMITER>_BURST` / `_MS_PER_REQUEST`, else the defaults.
+/// A missing, unparsable or out-of-range value falls back, as the global
+/// helpers do.
+pub fn route_limit(area: &str, limiter: &str, default_burst: u32, default_ms: u64) -> RouteLimit {
+    let var = |what: &str| std::env::var(format!("MADAR_RL_{area}_{limiter}_{what}")).ok();
+    RouteLimit {
+        burst: var("BURST")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|n| (1..=1_000_000).contains(n))
+            .unwrap_or(default_burst),
+        ms_per_request: var("MS_PER_REQUEST")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| (1..=86_400_000).contains(n))
+            .unwrap_or(default_ms),
+    }
+}
+
+/// The numbers of a limiter in [`ROUTE_LIMITS`], after the environment.
+pub fn limit_of(area: &str, limiter: &str) -> RouteLimit {
+    let d = ROUTE_LIMITS
+        .iter()
+        .find(|d| d.area == area && d.limiter == limiter)
+        .unwrap_or_else(|| panic!("rate limiter {area}/{limiter} is not in ROUTE_LIMITS"));
+    route_limit(area, limiter, d.burst, d.ms_per_request)
+}
+
+/// One governor config from `(area, limiter, default_burst, default_ms)`.
+pub fn governor<K: KeyExtractor>(
+    key: K,
+    area: &str,
+    limiter: &str,
+    default_burst: u32,
+    default_ms: u64,
+) -> actix_governor::GovernorConfig<K, actix_governor::governor::middleware::NoOpMiddleware> {
+    let l = route_limit(area, limiter, default_burst, default_ms);
+    actix_governor::GovernorConfigBuilder::default()
+        .key_extractor(key)
+        .milliseconds_per_request(l.ms_per_request)
+        .burst_size(l.burst)
+        .finish()
+        .unwrap_or_else(|| panic!("invalid rate limiter {area}/{limiter}: {l:?}"))
+}
+
+/// The governor for a limiter listed in [`ROUTE_LIMITS`]: what every route uses.
+pub fn route_governor<K: KeyExtractor>(
+    key: K,
+    area: &str,
+    limiter: &str,
+) -> actix_governor::GovernorConfig<K, actix_governor::governor::middleware::NoOpMiddleware> {
+    let d = ROUTE_LIMITS
+        .iter()
+        .find(|d| d.area == area && d.limiter == limiter)
+        .unwrap_or_else(|| panic!("rate limiter {area}/{limiter} is not in ROUTE_LIMITS"));
+    governor(key, area, limiter, d.burst, d.ms_per_request)
+}
+
 // ── Exports ──────────────────────────────────────────────────────────────────
 
 /// The header a client sets on a read it is making in order to EXPORT.
@@ -73,8 +284,9 @@ impl KeyExtractor for PathToken {
 /// other control instead.
 pub const EXPORT_HEADER: &str = "X-Madar-Export";
 
-/// Exports per user per window.
-const EXPORT_MAX: usize = 5;
+/// Exports per user per window (`MADAR_EXPORT_MAX_PER_MINUTE`; doubled from
+/// 5 on the owner's request, 2026-09-25).
+const EXPORT_MAX: usize = 10;
 const EXPORT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn export_max() -> usize {
@@ -122,7 +334,10 @@ fn allow_export(key: &str) -> bool {
 /// this is here to stop a runaway client from taking the box down, not to pace
 /// anyone's honest use of the dashboard. A page that fires forty queries on
 /// load is a page we wrote, and it should not be punished for it.
-const GLOBAL_PER_MINUTE: f64 = 200.0;
+///
+/// `MADAR_RATE_LIMIT_PER_MINUTE`; doubled from 200 on the owner's request
+/// (2026-09-25).
+const GLOBAL_PER_MINUTE: f64 = 400.0;
 
 fn global_per_minute() -> f64 {
     std::env::var("MADAR_RATE_LIMIT_PER_MINUTE")
@@ -153,7 +368,10 @@ static BUCKETS: std::sync::LazyLock<
 /// actually catches a runaway client, and it is per account, so raising the
 /// address ceiling does not loosen it: fifty honest tills each stay inside
 /// their own 200, and one broken tablet is still stopped on its own.
-const PER_ADDRESS_PER_MINUTE: f64 = 10_000.0;
+///
+/// `MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE`; doubled from 10,000 on the
+/// owner's request (2026-09-25).
+const PER_ADDRESS_PER_MINUTE: f64 = 20_000.0;
 
 fn per_address_per_minute() -> f64 {
     std::env::var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE")
@@ -377,15 +595,16 @@ mod tests {
         .await;
         let per_person = global_per_minute() as usize;
         let ceiling = per_address_per_minute() as usize;
-        // Enough extra accounts that the bucket's refill during a slow run
-        // (~167 a second at 10,000 a minute) cannot cover them: with only +2
-        // (400 requests) a run slower than ~2.4 s — a loaded CI box — let
-        // every request through and failed "did not multiply".
-        let accounts = ceiling / per_person + 10;
         let mut ok = 0usize;
-        let mut paced = 0usize;
         let started = std::time::Instant::now();
-        for _ in 0..accounts {
+        // New accounts at one address until a FRESH account's very first
+        // request is refused: its own bucket is full, so only the address
+        // ceiling can refuse it. Stopping on that event rather than after a
+        // fixed number of accounts keeps the test independent of how fast the
+        // box runs (a fixed count failed under the full parallel run, when
+        // the address bucket's refill covered the margin).
+        let mut refused_fresh = false;
+        for _ in 0..(ceiling / per_person) * 4 + 10 {
             let token = create_token(
                 &secret,
                 uuid::Uuid::new_v4(),
@@ -395,29 +614,35 @@ mod tests {
                 1,
             )
             .unwrap();
-            for _ in 0..per_person {
+            for n in 0..per_person {
                 let req = test::TestRequest::get()
                     .uri("/api/ping")
                     .insert_header(("Authorization", format!("Bearer {token}")))
                     .peer_addr("10.9.9.9:5000".parse().unwrap())
                     .to_request();
-                match test::try_call_service(&app, req).await {
-                    Ok(r) if r.status().is_success() => ok += 1,
+                let status = match test::try_call_service(&app, req).await {
+                    Ok(r) => r.status(),
                     // The 429 is a response (B-TEAM-8), so it can carry CORS.
-                    Ok(r) => {
-                        assert_eq!(r.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS);
-                        paced += 1;
-                    }
-                    Err(e) => {
-                        assert_eq!(
-                            e.error_response().status(),
-                            actix_web::http::StatusCode::TOO_MANY_REQUESTS
-                        );
-                        paced += 1;
-                    }
+                    Err(e) => e.error_response().status(),
+                };
+                if status.is_success() {
+                    ok += 1;
+                    continue;
                 }
+                assert_eq!(status, actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+                if n == 0 {
+                    refused_fresh = true;
+                }
+                break;
+            }
+            if refused_fresh {
+                break;
             }
         }
+        assert!(
+            refused_fresh,
+            "a fresh account at a full address is refused: the accounts did not multiply the allowance"
+        );
         // The address bucket refills continuously while the loop runs.
         let refilled =
             (started.elapsed().as_secs_f64() * per_address_per_minute() / 60.0).ceil() as usize;
@@ -426,14 +651,9 @@ mod tests {
             "{ok} requests passed one address, ceiling {ceiling} (+{refilled} refilled)"
         );
         assert!(
-            ok < accounts * per_person,
-            "the accounts did not multiply the allowance"
-        );
-        assert!(
             ok >= ceiling - 1,
             "the ceiling is reached, not undercut ({ok})"
         );
-        assert!(paced > 0);
     }
 
     /// Two people at one address each get their own allowance, through the
@@ -548,6 +768,143 @@ mod tests {
         assert_eq!(limiter_key(&req), "10.0.0.7");
     }
 
+    /// The owner's request (2026-09-25): every allowance doubled.
+    #[test]
+    fn the_defaults_are_the_doubled_allowances() {
+        assert_eq!(GLOBAL_PER_MINUTE, 400.0);
+        assert_eq!(PER_ADDRESS_PER_MINUTE, 20_000.0);
+        assert_eq!(EXPORT_MAX, 10);
+        // (area, limiter, burst before, seconds per request before)
+        let before: &[(&str, &str, u32, u64)] = &[
+            ("AUTH", "LOGIN", 60, 1),
+            ("AUTH", "ACTIVATION", 10, 6),
+            ("CUSTOMERS", "BROWSE", 30, 1),
+            ("CUSTOMERS", "IDENTITY", 5, 6),
+            ("CUSTOMERS", "BROWSE_TOKEN", 20, 2),
+            ("CUSTOMERS", "IDENTITY_TOKEN", 3, 120),
+            ("LOYALTY", "BROWSE", 30, 1),
+            ("LOYALTY", "JOIN", 5, 6),
+            ("DEMO", "REQUEST", 5, 30),
+            ("TICKETS", "TABLE_BROWSE", 30, 1),
+            ("TICKETS", "TABLE_INTAKE", 10, 6),
+            ("INTEGRATIONS", "PARTNER", 30, 2),
+            ("DELIVERY", "BROWSE", 30, 1),
+            ("DELIVERY", "QUOTE", 10, 6),
+            ("DELIVERY", "OTP", 3, 30),
+            ("DELIVERY", "INTAKE", 10, 6),
+            ("BOOKINGS", "BROWSE", 60, 1),
+            ("BOOKINGS", "WRITE", 10, 6),
+        ];
+        assert_eq!(before.len(), ROUTE_LIMITS.len(), "every limiter is listed");
+        for (area, limiter, burst, secs) in before {
+            let d = ROUTE_LIMITS
+                .iter()
+                .find(|d| d.area == *area && d.limiter == *limiter)
+                .unwrap_or_else(|| panic!("{area}/{limiter}"));
+            assert_eq!(d.burst, burst * 2, "{area}/{limiter} burst");
+            assert_eq!(d.ms_per_request, secs * 1000 / 2, "{area}/{limiter} refill");
+        }
+    }
+
+    /// Every variable is documented in `.env.example` with its default.
+    #[test]
+    fn every_limit_is_documented_with_its_default() {
+        let doc = include_str!("../.env.example");
+        let mut want = vec![
+            format!("MADAR_RATE_LIMIT_PER_MINUTE={GLOBAL_PER_MINUTE}"),
+            format!("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE={PER_ADDRESS_PER_MINUTE}"),
+            format!("MADAR_EXPORT_MAX_PER_MINUTE={EXPORT_MAX}"),
+        ];
+        for d in ROUTE_LIMITS {
+            want.push(format!(
+                "MADAR_RL_{}_{}_BURST={}",
+                d.area, d.limiter, d.burst
+            ));
+            want.push(format!(
+                "MADAR_RL_{}_{}_MS_PER_REQUEST={}",
+                d.area, d.limiter, d.ms_per_request
+            ));
+        }
+        for w in want {
+            assert!(doc.contains(&w), ".env.example lacks {w}");
+        }
+    }
+
+    /// Each limiter is set from the environment; a garbage value falls back.
+    /// (nextest runs each test in its own process, so these variables reach
+    /// no other test.)
+    #[test]
+    fn every_limit_is_read_from_the_environment() {
+        // SAFETY: this test's own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "33");
+            std::env::set_var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE", "4444");
+            std::env::set_var("MADAR_EXPORT_MAX_PER_MINUTE", "3");
+            std::env::set_var("MADAR_RL_DELIVERY_OTP_BURST", "2");
+            std::env::set_var("MADAR_RL_DELIVERY_OTP_MS_PER_REQUEST", "90000");
+            std::env::set_var("MADAR_RL_BOOKINGS_WRITE_BURST", "lots");
+            std::env::set_var("MADAR_RL_BOOKINGS_WRITE_MS_PER_REQUEST", "0");
+        }
+        assert_eq!(global_per_minute(), 33.0);
+        assert_eq!(per_address_per_minute(), 4444.0);
+        assert_eq!(export_max(), 3);
+        assert_eq!(
+            limit_of("DELIVERY", "OTP"),
+            RouteLimit {
+                burst: 2,
+                ms_per_request: 90_000
+            }
+        );
+        assert_eq!(
+            limit_of("BOOKINGS", "WRITE"),
+            RouteLimit {
+                burst: 20,
+                ms_per_request: 3_000
+            },
+            "garbage falls back to the default"
+        );
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "not a number");
+            std::env::set_var("MADAR_EXPORT_MAX_PER_MINUTE", "-1");
+        }
+        assert_eq!(global_per_minute(), GLOBAL_PER_MINUTE);
+        assert_eq!(export_max(), EXPORT_MAX);
+    }
+
+    /// An override reaches a real route governor: a burst of 2 on the delivery
+    /// OTP limiter refuses the third call from one address.
+    #[actix_web::test]
+    async fn a_route_governor_takes_its_numbers_from_the_environment() {
+        use actix_web::{App, HttpResponse, test, web};
+        // SAFETY: this test's own process; nothing else reads it.
+        unsafe {
+            std::env::set_var("MADAR_RL_DELIVERY_OTP_BURST", "2");
+        }
+        let gov = route_governor(PeerIpOrLocalhost, "DELIVERY", "OTP");
+        let app = test::init_service(
+            App::new().service(
+                web::resource("/otp")
+                    .wrap(actix_governor::Governor::new(&gov))
+                    .route(web::post().to(HttpResponse::Ok)),
+            ),
+        )
+        .await;
+        let call = || {
+            test::TestRequest::post()
+                .uri("/otp")
+                .peer_addr("10.1.2.3:5000".parse().unwrap())
+                .to_request()
+        };
+        for _ in 0..2 {
+            assert!(test::call_service(&app, call()).await.status().is_success());
+        }
+        let third = match test::try_call_service(&app, call()).await {
+            Ok(r) => r.status(),
+            Err(e) => e.error_response().status(),
+        };
+        assert_eq!(third, actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
     #[test]
     fn the_bucket_refills_rather_than_opening_on_the_minute() {
         // A fixed window has a cliff — the same request that worked a second
@@ -560,8 +917,11 @@ mod tests {
         }
         assert!(!take_token(key), "the bucket is empty");
 
-        // A third of a second later there is one token, not a whole window's.
-        BUCKETS.lock().unwrap().get_mut(key).unwrap().1 -= std::time::Duration::from_millis(400);
+        // One and a half tokens' time later there is one token, not a whole
+        // window's.
+        let token_ms = 60_000.0 / per_minute;
+        BUCKETS.lock().unwrap().get_mut(key).unwrap().1 -=
+            std::time::Duration::from_millis((token_ms * 1.5) as u64);
         assert!(take_token(key), "one token has come back");
         assert!(!take_token(key), "and only one");
     }

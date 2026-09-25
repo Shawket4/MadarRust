@@ -2,7 +2,7 @@
 //! customer endpoints are unauthenticated and each carries its own per-IP rate
 //! limiter (quote + OTP + intake are tightly bounded — they hit OSRM/WhatsApp).
 
-use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_governor::Governor;
 use actix_web::{middleware::Condition, web};
 
 use crate::auth::middleware::JwtMiddleware;
@@ -11,34 +11,14 @@ use crate::qr_card::handlers as qr_handlers;
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    // Browsing: ~60 req/min sustained, burst 30 (matches the public menu).
-    let browse_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(30)
-        .finish()
-        .expect("Invalid delivery browse rate limiter");
-    // Quote hits OSRM: ~10/min per IP.
-    let quote_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(10)
-        .finish()
-        .expect("Invalid delivery quote rate limiter");
-    // OTP send: very tight — ~1 per 30s, burst 3.
-    let otp_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(30)
-        .burst_size(3)
-        .finish()
-        .expect("Invalid delivery otp rate limiter");
-    // Intake: ~10/min per IP, burst 10.
-    let intake_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(10)
-        .finish()
-        .expect("Invalid delivery intake rate limiter");
+    // Browsing: ~120 req/min sustained, burst 60 (matches the public menu).
+    let browse_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "DELIVERY", "BROWSE");
+    // Quote hits OSRM: ~20/min per IP.
+    let quote_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "DELIVERY", "QUOTE");
+    // OTP send: very tight — ~1 per 15s, burst 6.
+    let otp_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "DELIVERY", "OTP");
+    // Intake: ~20/min per IP, burst 20.
+    let intake_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "DELIVERY", "INTAKE");
     // Disabled wholesale by MADAR_DISABLE_RATE_LIMIT for local API fuzzing.
     let limited = rate_limiting_enabled();
 

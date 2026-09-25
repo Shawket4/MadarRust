@@ -4,7 +4,7 @@
 //! card endpoints are unauthenticated and each carries its own per-IP limiter,
 //! matching how `delivery::routes` treats the public ordering endpoints.
 
-use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_governor::Governor;
 use actix_web::{middleware::Condition, web};
 
 use crate::auth::middleware::JwtMiddleware;
@@ -12,22 +12,12 @@ use crate::loyalty::{award, handlers, public, settings};
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    // Reading a join page or a card: ~60/min sustained, burst 30 — the same
+    // Reading a join page or a card: ~120/min sustained, burst 60 — the same
     // budget the public menu gets.
-    let browse_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(30)
-        .finish()
-        .expect("Invalid loyalty browse rate limiter");
-    // Signing up writes a member row and may issue a pass: ~10/min, burst 5.
+    let browse_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "LOYALTY", "BROWSE");
+    // Signing up writes a member row and may issue a pass: ~20/min, burst 10.
     // Tighter than browsing because it is the only public write here.
-    let join_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(5)
-        .finish()
-        .expect("Invalid loyalty join rate limiter");
+    let join_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "LOYALTY", "JOIN");
     let limited = rate_limiting_enabled();
 
     cfg

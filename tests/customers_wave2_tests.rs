@@ -2147,7 +2147,7 @@ async fn a_customers_bookings_are_listed_through_the_merge_chain(pool: PgPool) {
 /// Design §4.2: a card has its own budget whatever address asks, and the
 /// identity endpoints share a much tighter one. (The test client has no peer
 /// address, so every request is "127.0.0.1" to the per-IP limiter: the counts
-/// below stay under ITS bursts — 30 browse, 5 identity — so that what refuses
+/// below stay under ITS bursts (rate_limit::ROUTE_LIMITS) so that what refuses
 /// is provably the per-card bucket.)
 #[sqlx::test]
 async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
@@ -2162,12 +2162,19 @@ async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
                               "new_phone_device_token": "x", "other_phone": "01222333444",
                               "other_device_token": "x" }))
     };
-    // Three tries on one card — spread over BOTH identity endpoints — and the
-    // fourth is refused before it reaches the handler.
-    for (i, which) in ["replace-identity", "combine", "replace-identity"]
-        .into_iter()
-        .enumerate()
-    {
+    // A card's tries — spread over BOTH identity endpoints — and the next is
+    // refused before it reaches the handler.
+    let card = madar_rust::rate_limit::limit_of("CUSTOMERS", "IDENTITY_TOKEN").burst;
+    assert!(
+        card < madar_rust::rate_limit::limit_of("CUSTOMERS", "IDENTITY").burst,
+        "the card's bucket is the tighter one"
+    );
+    for i in 0..card {
+        let which = if i % 2 == 0 {
+            "replace-identity"
+        } else {
+            "combine"
+        };
         let (st, _) = send(&app, identity("tok-lim-1", which)).await;
         assert_ne!(st, StatusCode::TOO_MANY_REQUESTS, "try {i}");
     }
@@ -2178,12 +2185,14 @@ async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
         "the card's bucket is empty"
     );
     // The same address, ANOTHER card: not refused — so it was the card's
-    // bucket, not the address's (whose burst of five has one left).
+    // bucket, not the address's (whose burst is larger).
     let (st, _) = send(&app, identity("tok-lim-2", "replace-identity")).await;
     assert_ne!(st, StatusCode::TOO_MANY_REQUESTS);
 
-    // Browsing: twenty a burst per card, under the address's thirty.
-    for i in 0..20 {
+    // Browsing: the card's burst, under the address's.
+    let card = madar_rust::rate_limit::limit_of("CUSTOMERS", "BROWSE_TOKEN").burst;
+    assert!(card < madar_rust::rate_limit::limit_of("CUSTOMERS", "BROWSE").burst);
+    for i in 0..card {
         let (st, _) = send(
             &app,
             test::TestRequest::get().uri("/public/order-now/tok-lim-1"),

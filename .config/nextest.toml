@@ -19,11 +19,3 @@ final-status-level = "slow"
 [profile.ci]
 slow-timeout = { period = "60s", terminate-after = 5 }
 fail-fast = false
-
-# The limiter's address-ceiling test paces itself against the wall clock and
-# failed once under a full-workspace load (17 s vs 2.3 s alone, FOLLOWUPS
-# 2026-09-25). One retry, so a loaded box doesn't fail the gate; a real
-# regression still fails twice.
-[[profile.default.overrides]]
-filter = 'test(many_accounts_share_one_address_ceiling)'
-retries = 1

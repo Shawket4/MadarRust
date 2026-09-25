@@ -1,4 +1,4 @@
-use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_governor::Governor;
 use actix_web::{middleware::Condition, web};
 
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
@@ -34,18 +34,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     // bound one script could fill a restaurant with orders faster than anyone
     // could void them. Ten a minute is far more than a table of six sending
     // rounds and far less than an attack.
-    let table_browse = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(30)
-        .finish()
-        .expect("Invalid table browse rate limiter");
-    let table_intake = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(10)
-        .finish()
-        .expect("Invalid table intake rate limiter");
+    let table_browse =
+        crate::rate_limit::route_governor(PeerIpOrLocalhost, "TICKETS", "TABLE_BROWSE");
+    let table_intake =
+        crate::rate_limit::route_governor(PeerIpOrLocalhost, "TICKETS", "TABLE_INTAKE");
     let limited = rate_limiting_enabled();
     cfg.service(
         web::resource("/public/tables/{id}")

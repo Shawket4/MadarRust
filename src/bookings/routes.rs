@@ -1,6 +1,6 @@
 //! `/bookings/*` (host, JWT) and `/public/…booking…` (guest, rate-limited).
 
-use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_governor::Governor;
 use actix_web::middleware::Condition;
 use actix_web::web;
 
@@ -9,20 +9,10 @@ use crate::auth::middleware::JwtMiddleware;
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    // Browse (info / slots / manage page): ~60/min per IP.
-    let browse_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(60)
-        .finish()
-        .expect("Invalid bookings browse rate limiter");
-    // Writes (book / change / cancel): ~10/min per IP.
-    let write_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(10)
-        .finish()
-        .expect("Invalid bookings write rate limiter");
+    // Browse (info / slots / manage page): ~120/min per IP.
+    let browse_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "BOOKINGS", "BROWSE");
+    // Writes (book / change / cancel): ~20/min per IP.
+    let write_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "BOOKINGS", "WRITE");
     let limited = rate_limiting_enabled();
 
     cfg.service(
