@@ -622,7 +622,8 @@ async fn a_claimed_open_shift_is_the_claimers_once_approved(pool: PgPool) {
             json!({ "approve": true })
         )
         .status(),
-        204
+        200,
+        "the decision and its labour warnings (M26)"
     );
 
     let view = json_of(call!(
@@ -2048,16 +2049,20 @@ async fn a_till_expense_advance_says_why_it_is_refused(pool: PgPool) {
     );
     assert!(resp.status().is_success(), "{}", resp.status());
     let till = json_of(resp).await["id"].as_str().unwrap().to_string();
-    let pay_out = |to: Uuid| {
-        json!({ "amount": -1000, "kind": "pay_out", "note": "Milk", "expense_advance_to": to })
-    };
+    let pay_out = |to: Uuid| json!({ "amount": -1000, "kind": "pay_out", "note": "Milk", "expense_advance_to": to });
     // Dawam off.
     sqlx::query("UPDATE organizations SET modules = '{pos}' WHERE id = $1")
         .bind(f.org)
         .execute(&pool)
         .await
         .unwrap();
-    let resp = call!(app, post, format!("/tills/{till}/cash-movements"), owner, pay_out(f.a));
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/{till}/cash-movements"),
+        owner,
+        pay_out(f.a)
+    );
     assert_eq!(resp.status(), 403);
     assert_eq!(json_of(resp).await["code"], "MODULE_OFF");
     // Dawam on: someone not active.
@@ -2071,7 +2076,13 @@ async fn a_till_expense_advance_says_why_it_is_refused(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let resp = call!(app, post, format!("/tills/{till}/cash-movements"), owner, pay_out(f.a));
+    let resp = call!(
+        app,
+        post,
+        format!("/tills/{till}/cash-movements"),
+        owner,
+        pay_out(f.a)
+    );
     assert_eq!(resp.status(), 403);
     assert_eq!(json_of(resp).await["code"], "EMPLOYEE_INACTIVE");
     // Someone unknown.

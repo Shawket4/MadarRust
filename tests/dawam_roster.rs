@@ -1300,7 +1300,7 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
     ))
     .await;
     assert_eq!(s, 200, "{body}");
-    let (s, _) = done(call!(
+    let (s, body) = done(call!(
         app,
         "PATCH",
         format!("/staff/open-shifts/{lunch}/decision"),
@@ -1308,7 +1308,25 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
         json!({ "approve": true })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["status"], "approved");
+    // Minor default M26 (RU-13): 4 + 3 + 4 hours is past the 8-hour day,
+    // and 08:00–21:00 past the 10-hour presence cap: warned, not blocked.
+    let warned: Vec<(String, i64, i64)> = body["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["date"] == json!(d))
+        .map(|w| {
+            (
+                w["kind"].as_str().unwrap().to_string(),
+                w["minutes"].as_i64().unwrap(),
+                w["limit_minutes"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(warned.contains(&("day_hours".into(), 660, 480)), "{body}");
+    assert!(warned.contains(&("presence".into(), 780, 600)), "{body}");
     assert_eq!(shifts_on(&pool, f.a, d).await, vec![m, l, e]);
     let keys = keys_for(&pool, f.a).await;
     assert!(

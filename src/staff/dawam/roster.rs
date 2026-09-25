@@ -866,12 +866,21 @@ pub struct DecideRoster {
     pub approve: bool,
 }
 
+/// A claim decision: the labour limits the approved day now breaks (a long
+/// day, a short rest). A warning, never a block (RU-13, minor default M26).
+#[derive(Serialize, ToSchema)]
+pub struct ClaimDecision {
+    /// `approved` · `rejected`
+    pub status: String,
+    pub warnings: Vec<engine::LabourWarning>,
+}
+
 /// Approve a claim: the shift becomes theirs for that date, beside the rest
 /// of their day. Rejecting reopens it. One decision only.
 #[utoipa::path(
     patch, path = "/staff/open-shifts/{id}/decision", tag = "staff", request_body = DecideRoster,
     params(("id" = Uuid, Path)),
-    responses((status = 204), AppErrorResponse),
+    responses((status = 200, body = ClaimDecision), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn decide_claim(
@@ -946,6 +955,15 @@ pub async fn decide_claim(
             json!({ "date": on_date }),
         )
         .await;
+        // The day as it now stands against the labour limits: approving a
+        // claim onto a full day warns, like any roster edit (RU-13).
+        let warnings = crate::staff::schedules::day_view(pool, org_id, claimer, on_date)
+            .await?
+            .warnings;
+        return Ok(HttpResponse::Ok().json(ClaimDecision {
+            status: "approved".into(),
+            warnings,
+        }));
     } else {
         let won: Option<Uuid> = sqlx::query_scalar(
             "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL \
@@ -967,7 +985,10 @@ pub async fn decide_claim(
         )
         .await;
     }
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::Ok().json(ClaimDecision {
+        status: "rejected".into(),
+        warnings: Vec::new(),
+    }))
 }
 
 /// Take an open shift back (open or claimed, never filled). A claimer hears.
