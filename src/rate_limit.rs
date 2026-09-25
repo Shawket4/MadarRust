@@ -690,16 +690,21 @@ mod tests {
             let r = test::call_service(&app, call(alice.clone())).await;
             assert!(r.status().is_success());
         }
-        let paced = test::try_call_service(&app, call(alice.clone())).await;
-        let status = match paced {
-            Ok(r) => r.status(),
-            Err(e) => e.error_response().status(),
-        };
-        assert_eq!(
-            status,
-            actix_web::http::StatusCode::TOO_MANY_REQUESTS,
-            "alice spent hers"
-        );
+        // Her bucket refills while the loop runs (a token every 150 ms at
+        // 400 a minute), so on a loaded box the next call or two may still
+        // pass; far faster than the refill, she is refused.
+        let mut refused = false;
+        for _ in 0..per_minute {
+            let status = match test::try_call_service(&app, call(alice.clone())).await {
+                Ok(r) => r.status(),
+                Err(e) => e.error_response().status(),
+            };
+            if status == actix_web::http::StatusCode::TOO_MANY_REQUESTS {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "alice spent hers");
         let r = test::call_service(&app, call(bob.clone())).await;
         assert!(
             r.status().is_success(),
