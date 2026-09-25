@@ -4136,3 +4136,88 @@ async fn the_payslip_says_why_a_line_was_waived(pool: PgPool) {
     assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
     check(&slip_of(&app, &f, f.amal).await);
 }
+
+/// Minor default M33: a deduction made from a flag that is over the
+/// manager's limit waits for the owner, and the flag says so
+/// (`deduction_status: pending`) instead of just "handled".
+#[sqlx::test]
+async fn a_flag_deduction_over_the_limit_says_it_waits_for_the_owner(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "UPDATE org_role_grants g SET limits = '{\"max_amount\": 20000}'::jsonb \
+           FROM org_roles r WHERE r.id = g.org_role_id AND r.org_id = $1 \
+            AND r.kind::text = 'branch_manager' AND g.capability_id = 245",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SELECT authz_bump_epoch($1)")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rec = day(&pool, &f, f.amal, f.a, f.start, "present", 9, 480, 0, 0).await;
+    let flag = |minutes: i32| {
+        let pool = pool.clone();
+        let (org, amal, a) = (f.org, f.amal, f.a);
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO attendance_flags (org_id, employee_id, branch_id, \
+                     attendance_record_id, kind, minutes_away) \
+                 VALUES ($1, $2, $3, $4, 'left_mid_shift', $5) RETURNING id",
+            )
+            .bind(org)
+            .bind(amal)
+            .bind(a)
+            .bind(rec)
+            .bind(minutes)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let over = flag(60).await;
+    let row = json_of(call!(
+        app,
+        patch,
+        format!("/staff/flags/{over}"),
+        f.mgr(),
+        json!({ "action": "deduct", "amount_piastres": 50_000 })
+    ))
+    .await;
+    assert_eq!(row["resolution"], "deducted", "{row}");
+    assert_eq!(
+        row["deduction_status"], "pending",
+        "waits for the owner: {row}"
+    );
+    assert!(row["deduction_id"].is_string());
+    // Resolved within the limit it counts at once.
+    sqlx::query("UPDATE attendance_flags SET resolution = 'ignored' WHERE id = $1")
+        .bind(over)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let within = flag(20).await;
+    let row = json_of(call!(
+        app,
+        patch,
+        format!("/staff/flags/{within}"),
+        f.mgr(),
+        json!({ "action": "deduct", "amount_piastres": 10_000 })
+    ))
+    .await;
+    assert_eq!(row["deduction_status"], "approved", "{row}");
+    // Ignoring deducts nothing.
+    let ignored = flag(15).await;
+    let row = json_of(call!(
+        app,
+        patch,
+        format!("/staff/flags/{ignored}"),
+        f.mgr(),
+        json!({ "action": "ignore" })
+    ))
+    .await;
+    assert!(row["deduction_status"].is_null(), "{row}");
+}
