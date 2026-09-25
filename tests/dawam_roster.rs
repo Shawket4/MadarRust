@@ -5109,3 +5109,214 @@ async fn an_undecided_holiday_a_week_away_is_brought_to_the_owner_once(pool: PgP
     .unwrap();
     assert_eq!(staff, 0, "only whoever decides");
 }
+
+/// Hunt H2-B8b (SC-5, RO-6): a business-wide PATTERN for a two-branch
+/// person, set from branch B's board, is worked at B every week — it
+/// resolved to their first branch A. `POST /staff/schedules` takes the
+/// board's `branch_id`; a day edit on such a date keeps it at B.
+#[sqlx::test]
+async fn a_business_wide_pattern_set_from_branch_b_is_worked_at_b(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let w = block(&pool, &f, None, "Wide", t(9, 0), t(13, 0)).await;
+    let d = today() + Duration::days(3);
+    let board = async |branch: Uuid, on: NaiveDate| -> Vec<(Uuid, Uuid)> {
+        let (s, body) = done(call!(
+            app,
+            "GET",
+            format!("/staff/roster?branch_id={branch}&from={on}&to={on}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+        body["shifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["employee_id"].as_str().unwrap().parse().unwrap(),
+                    s["work_shift_id"].as_str().unwrap().parse().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let (s, row) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules",
+        f.owner(),
+        json!({ "employee_id": f.a, "work_shift_id": w, "day_of_week": dow(d),
+                "effective_from": today(), "branch_id": f.br_b })
+    ))
+    .await;
+    assert_eq!(s, 201, "{row}");
+    assert_eq!(row["branch_id"], json!(f.br_b), "{row}");
+    for week in [0, 7, 14] {
+        let on = d + Duration::days(week);
+        assert_eq!(board(f.br_b, on).await, vec![(f.a, w)], "B's, week +{week}");
+        assert!(board(f.br_a, on).await.is_empty(), "not A's, week +{week}");
+    }
+    // A day edit on that date keeps the pattern's block at B.
+    let (s, body) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days/times",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d, "work_shift_id": w,
+                "start_time": "09:30:00", "end_time": "13:00:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(
+        board(f.br_b, d).await,
+        vec![(f.a, w)],
+        "still B's after an edit"
+    );
+    // Not one of Amal's branches; not the A manager's to set at B.
+    let br_c = branch(&pool, f.org, "C").await;
+    refused!(
+        call!(
+            app,
+            "POST",
+            "/staff/schedules",
+            f.owner(),
+            json!({ "employee_id": f.a, "work_shift_id": w, "branch_id": br_c })
+        ),
+        400,
+        "EMPLOYEE_NOT_AT_BRANCH"
+    );
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules",
+        f.manager(),
+        json!({ "employee_id": f.a, "work_shift_id": w, "branch_id": f.br_b })
+    ))
+    .await;
+    assert_eq!(s, 403);
+    // The list says where each row is worked.
+    let (s, rows) = done(call!(
+        app,
+        "GET",
+        format!("/staff/schedules?employee_id={}", f.a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{rows}");
+    assert_eq!(rows[0]["branch_id"], json!(f.br_b), "{rows}");
+}
+
+/// Hunt H2-D15 [data loss] (SC-5): the boards send only the viewed branch's
+/// blocks, and `PUT /staff/schedules/days` replaced the WHOLE date — a
+/// two-branch person's shift at the other branch vanished. With
+/// `branch_id` the PUT replaces only the blocks worked at that branch.
+#[sqlx::test]
+async fn a_day_put_from_one_branch_keeps_the_other_branchs_blocks(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let a_late = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(7, 0), t(10, 0)).await;
+    let b_noon = block(&pool, &f, Some(f.br_b), "B noon", t(11, 0), t(14, 0)).await;
+    let wide = block(&pool, &f, None, "Wide", t(15, 0), t(17, 0)).await;
+    let d = today() + Duration::days(3);
+    let put = async |body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", f.owner(), body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    // A's board sets the day: A late (own times) and the business-wide
+    // block at A; B's board adds its morning.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a,
+                "shifts": [{ "work_shift_id": a_late, "start_time": "18:30:00", "end_time": "22:00:00" },
+                           { "work_shift_id": wide }] }))
+    .await;
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] }),
+    )
+    .await;
+    let mut want = vec![b_morning, wide, a_late];
+    assert_eq!(shifts_on(&pool, f.a, d).await, want, "B added, A's kept");
+    // B clears its part: A's blocks stay, with A late's own times.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b, "shifts": [] })).await;
+    want = vec![wide, a_late];
+    assert_eq!(
+        shifts_on(&pool, f.a, d).await,
+        want,
+        "a PUT from B with [] keeps A's"
+    );
+    let times: (NaiveTime, bool) = sqlx::query_as(
+        "SELECT start_local, times_edited FROM dawam_roster(ARRAY[$1]::uuid[], $2, $2) \
+          WHERE work_shift_id = $3",
+    )
+    .bind(f.a)
+    .bind(d)
+    .bind(a_late)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(times, (t(18, 30), true), "A late keeps its own times");
+    // B sets a new block: A's still kept.
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_noon }] }),
+    )
+    .await;
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_noon, wide, a_late]);
+    // B may take the business-wide block over by naming it.
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_noon }, { "work_shift_id": wide }] }),
+    )
+    .await;
+    let at: Uuid = sqlx::query_scalar(
+        "SELECT branch_id FROM dawam_roster(ARRAY[$1]::uuid[], $2, $2) WHERE work_shift_id = $3",
+    )
+    .bind(f.a)
+    .bind(d)
+    .bind(wide)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(at, f.br_b);
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_noon, wide, a_late]);
+    // A clears its part and B its own: a day off.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a, "shifts": [] })).await;
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_noon, wide]);
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b, "shifts": [] })).await;
+    assert!(shifts_on(&pool, f.a, d).await.is_empty(), "a day off");
+
+    // A date on the pattern: A's pattern block stays when B sets its part.
+    pattern(&pool, &f, f.a, a_late, None).await;
+    let d2 = d + Duration::days(1);
+    put(
+        json!({ "employee_id": f.a, "on_date": d2, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] }),
+    )
+    .await;
+    assert_eq!(shifts_on(&pool, f.a, d2).await, vec![b_morning, a_late]);
+    // An old client (no branch) still sets the whole date.
+    put(json!({ "employee_id": f.a, "on_date": d2, "shifts": [{ "work_shift_id": b_morning }] }))
+        .await;
+    assert_eq!(shifts_on(&pool, f.a, d2).await, vec![b_morning]);
+}

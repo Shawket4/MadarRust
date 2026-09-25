@@ -210,6 +210,7 @@ async fn materialise(
         )
         .await?;
     }
+    // Each block where the pattern has it worked (hunt H2-B8b).
     for s in pattern {
         insert_row(
             conn,
@@ -220,7 +221,7 @@ async fn materialise(
             None,
             reason,
             by,
-            None,
+            s.branch_id,
         )
         .await?;
     }
