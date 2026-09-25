@@ -166,7 +166,9 @@ async fn load_order(
         reward_units: i32,
     }
     let line_rows: Vec<LineRow> = sqlx::query_as(
-        "SELECT menu_item_id, quantity, reward_units FROM order_items WHERE order_id = $1",
+        // C7: a combo's parts earn as their items; its header earns nothing.
+        "SELECT menu_item_id, quantity, reward_units FROM order_items \
+          WHERE order_id = $1 AND line_kind <> 'combo'",
     )
     .bind(r.id)
     .fetch_all(pool)
@@ -282,8 +284,8 @@ pub async fn award_inner(
     // Which items collect, at the ORDER's branch. Empty = all of them, which is
     // every programme that has not narrowed itself, and is why this costs a
     // query and changes nothing for almost everyone.
-    let eligible = crate::loyalty::settings::eligible_item_ids(pool, order.org_id, order.branch_id)
-        .await?;
+    let eligible =
+        crate::loyalty::settings::eligible_item_ids(pool, order.org_id, order.branch_id).await?;
 
     let mut tx = pool.begin().await?;
     let points = model::award_for_order(

@@ -167,23 +167,79 @@ async fn addon(pool: &PgPool, s: &Shop, line: Uuid, qty: i32) {
 /// A header + its three parts for `n` lunch combos; returns (header, burger, fries, latte).
 async fn lunch(pool: &PgPool, s: &Shop, o: Uuid, n: i32) -> (Uuid, Uuid, Uuid, Uuid) {
     let h = line(
-        pool, o, s.combo, "Lunch deal", "combo", None, None, None, n, 0, 0, 0, 0, 0, 0,
+        pool,
+        o,
+        s.combo,
+        "Lunch deal",
+        "combo",
+        None,
+        None,
+        None,
+        n,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
         Some(15000),
     )
     .await;
     let b = line(
-        pool, o, s.burger, "Burger", "combo_part", Some(h), Some((s.slot_main, "Main")),
-        Some("one_size"), n, 12000, 8571 * n, 0, 8571 * n, 1000 * i64::from(n), 0, None,
+        pool,
+        o,
+        s.burger,
+        "Burger",
+        "combo_part",
+        Some(h),
+        Some((s.slot_main, "Main")),
+        Some("one_size"),
+        n,
+        12000,
+        8571 * n,
+        0,
+        8571 * n,
+        1000 * i64::from(n),
+        0,
+        None,
     )
     .await;
     let f = line(
-        pool, o, s.fries, "Fries", "combo_part", Some(h), Some((s.slot_side, "Side")),
-        Some("one_size"), n, 4000, 2858 * n, 0, 2858 * n, 500 * i64::from(n), 0, None,
+        pool,
+        o,
+        s.fries,
+        "Fries",
+        "combo_part",
+        Some(h),
+        Some((s.slot_side, "Side")),
+        Some("one_size"),
+        n,
+        4000,
+        2858 * n,
+        0,
+        2858 * n,
+        500 * i64::from(n),
+        0,
+        None,
     )
     .await;
     let l = line(
-        pool, o, s.latte, "Latte", "combo_part", Some(h), Some((s.slot_drink, "Drink")),
-        Some("Large"), n, 6000, 3571 * n, 1000 * n, 4571 * n, 1400 * i64::from(n), 0, None,
+        pool,
+        o,
+        s.latte,
+        "Latte",
+        "combo_part",
+        Some(h),
+        Some((s.slot_drink, "Drink")),
+        Some("Large"),
+        n,
+        6000,
+        3571 * n,
+        1000 * n,
+        4571 * n,
+        1400 * i64::from(n),
+        0,
+        None,
     )
     .await;
     addon(pool, s, l, n).await;
@@ -227,20 +283,62 @@ async fn seed(pool: &PgPool) -> Seeded {
     // B: a Burger alone.
     let o = order(pool, &s, 2, "completed", 12000).await;
     line(
-        pool, o, s.burger, "Burger", "item", None, None, Some("one_size"), 1, 12000, 0, 0, 12000,
-        1000, 0, None,
+        pool,
+        o,
+        s.burger,
+        "Burger",
+        "item",
+        None,
+        None,
+        Some("one_size"),
+        1,
+        12000,
+        0,
+        0,
+        12000,
+        1000,
+        0,
+        None,
     )
     .await;
     // C: two croissants in a deal, and a cookie.
     let o = order(pool, &s, 3, "completed", 13000).await;
     let cr = line(
-        pool, o, s.croissant, "Croissant", "item", None, None, Some("one_size"), 2, 5500, 0, 0, 9000,
-        400, 2000, None,
+        pool,
+        o,
+        s.croissant,
+        "Croissant",
+        "item",
+        None,
+        None,
+        Some("one_size"),
+        2,
+        5500,
+        0,
+        0,
+        9000,
+        400,
+        2000,
+        None,
     )
     .await;
     line(
-        pool, o, s.cookie, "Cookie", "item", None, None, Some("one_size"), 1, 4000, 0, 0, 4000, 100,
-        0, None,
+        pool,
+        o,
+        s.cookie,
+        "Cookie",
+        "item",
+        None,
+        None,
+        Some("one_size"),
+        1,
+        4000,
+        0,
+        0,
+        4000,
+        100,
+        0,
+        None,
     )
     .await;
     let rule: Uuid = sqlx::query_scalar(
@@ -273,11 +371,12 @@ async fn seed(pool: &PgPool) -> Seeded {
     let o = order(pool, &s, 4, "voided", 17500).await;
     lunch(pool, &s, o, 1).await;
 
-    let today: String =
-        sqlx::query_scalar("SELECT to_char((now() AT TIME ZONE 'Africa/Cairo')::date, 'YYYY-MM-DD')")
-            .fetch_one(pool)
-            .await
-            .unwrap();
+    let today: String = sqlx::query_scalar(
+        "SELECT to_char((now() AT TIME ZONE 'Africa/Cairo')::date, 'YYYY-MM-DD')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
     Seeded { s, today }
 }
 
@@ -291,13 +390,16 @@ fn row<'a>(report: &'a Value, kind: &str) -> &'a Value {
 }
 
 #[sqlx::test]
-#[ignore = "lane2 handover: the Bundles report and the line_kind filters are not implemented yet"]
+
 async fn the_bundles_report_is_hand_computed(pool: PgPool) {
     let Seeded { s, today } = seed(&pool).await;
     let app = app!(pool);
     let (st, r) = get(
         &app,
-        &format!("/reports/bundles?from={today}&to={today}&branch_id={}", s.branch),
+        &format!(
+            "/reports/bundles?from={today}&to={today}&branch_id={}",
+            s.branch
+        ),
         &s.admin_token(),
     )
     .await;
@@ -373,7 +475,7 @@ async fn the_bundles_report_is_hand_computed(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "lane2 handover: the Bundles report and the line_kind filters are not implemented yet"]
+
 async fn the_mix_counts_each_slot_s_picks_net_of_refunds(pool: PgPool) {
     let Seeded { s, today } = seed(&pool).await;
     let app = app!(pool);
@@ -409,12 +511,15 @@ async fn the_mix_counts_each_slot_s_picks_net_of_refunds(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "lane2 handover: the Bundles report and the line_kind filters are not implemented yet"]
+
 async fn a_teller_cannot_read_the_bundles_report(pool: PgPool) {
     let Seeded { s, today } = seed(&pool).await;
     let app = app!(pool);
     for uri in [
-        format!("/reports/bundles?from={today}&to={today}&branch_id={}", s.branch),
+        format!(
+            "/reports/bundles?from={today}&to={today}&branch_id={}",
+            s.branch
+        ),
         format!(
             "/reports/bundles/combos/{}/mix?from={today}&to={today}&branch_id={}",
             s.combo, s.branch
@@ -442,7 +547,7 @@ async fn a_teller_cannot_read_the_bundles_report(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "lane2 handover: the Bundles report and the line_kind filters are not implemented yet"]
+
 async fn item_reports_count_parts_as_their_items_and_never_the_header(pool: PgPool) {
     let Seeded { s, today } = seed(&pool).await;
     let app = app!(pool);
@@ -478,8 +583,14 @@ async fn item_reports_count_parts_as_their_items_and_never_the_header(pool: PgPo
     .await;
     assert_eq!(st, 200, "{rows}");
     let rows = rows.as_array().unwrap();
-    assert!(rows.iter().all(|i| i["item_id"] != json!(s.combo)), "{rows:?}");
-    let b = rows.iter().find(|i| i["item_id"] == json!(s.burger)).unwrap();
+    assert!(
+        rows.iter().all(|i| i["item_id"] != json!(s.combo)),
+        "{rows:?}"
+    );
+    let b = rows
+        .iter()
+        .find(|i| i["item_id"] == json!(s.burger))
+        .unwrap();
     assert_eq!(b["total_qty"], 3);
 
     // POS metrics' top items.
@@ -494,8 +605,14 @@ async fn item_reports_count_parts_as_their_items_and_never_the_header(pool: PgPo
     .await;
     assert_eq!(st, 200, "{m}");
     let top = m["top_items"].as_array().unwrap();
-    assert!(top.iter().all(|i| i["item_id"] != json!(s.combo)), "{top:?}");
-    let b = top.iter().find(|i| i["item_id"] == json!(s.burger)).unwrap();
+    assert!(
+        top.iter().all(|i| i["item_id"] != json!(s.combo)),
+        "{top:?}"
+    );
+    let b = top
+        .iter()
+        .find(|i| i["item_id"] == json!(s.burger))
+        .unwrap();
     assert_eq!(b["quantity"], 3);
 
     // The insights margin ledger: the combo is not a SKU with zero sales.

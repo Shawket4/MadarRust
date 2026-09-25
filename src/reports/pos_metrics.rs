@@ -215,6 +215,7 @@ pub async fn compute(
            FROM order_items oi
            JOIN orders o ON o.id = oi.order_id
           WHERE o.branch_id = $1 AND o.{sold} AND o.created_at >= $2 AND o.created_at < $3
+            AND oi.line_kind <> 'combo'
           GROUP BY oi.menu_item_id, oi.item_name
           ORDER BY quantity DESC, revenue DESC, oi.item_name COLLATE \"C\"
           LIMIT $4"

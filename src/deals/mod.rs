@@ -5,5 +5,6 @@
 
 pub mod handlers;
 pub mod load;
+pub mod order;
 pub mod public;
 pub mod types;

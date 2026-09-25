@@ -341,7 +341,13 @@ pub async fn shop(pool: &PgPool) -> Shop {
     let cola = item(pool, org, drinks, "Cola", 3000).await;
     let croissant = item(pool, org, bakery, "Croissant", 5500).await;
     let cookie = item(pool, org, bakery, "Cookie", 4000).await;
-    for (i, g) in [(burger, 10), (fries, 5), (cola, 1), (croissant, 2), (cookie, 1)] {
+    for (i, g) in [
+        (burger, 10),
+        (fries, 5),
+        (cola, 1),
+        (croissant, 2),
+        (cookie, 1),
+    ] {
         recipe(pool, i, beans, None, g).await;
     }
     recipe(pool, latte, beans, Some("Regular"), 10).await;
@@ -363,7 +369,17 @@ pub async fn shop(pool: &PgPool) -> Shop {
     let slot_drink = slot(pool, org, combo, "Drink", 2, 1, 1, Some(latte)).await;
     choice(pool, org, slot_main, Some(burger), None, 0, None, 0).await;
     choice(pool, org, slot_side, Some(fries), None, 0, None, 0).await;
-    choice(pool, org, slot_drink, Some(latte), None, 0, Some("Regular"), 0).await;
+    choice(
+        pool,
+        org,
+        slot_drink,
+        Some(latte),
+        None,
+        0,
+        Some("Regular"),
+        0,
+    )
+    .await;
     choice(pool, org, slot_drink, None, Some(drinks), 0, None, 1).await;
 
     Shop {

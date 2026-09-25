@@ -79,9 +79,9 @@ impl ComboDef {
 
 pub fn is_fixed(slots: &[ComboSlot]) -> bool {
     !slots.is_empty()
-        && slots.iter().all(|s| {
-            s.min == s.max && s.choices.len() == 1 && s.choices[0].menu_item_id.is_some()
-        })
+        && slots
+            .iter()
+            .all(|s| s.min == s.max && s.choices.len() == 1 && s.choices[0].menu_item_id.is_some())
 }
 
 pub fn slot_view(s: &ComboSlot) -> madar_catalog::combo::SlotView {
@@ -134,7 +134,8 @@ pub async fn local_now(
     org_id: Uuid,
     branch_id: Option<Uuid>,
 ) -> Result<madar_catalog::sale_window::LocalNow, AppError> {
-    let name = crate::tz::scope_tz_name(&mut *conn, branch_id.unwrap_or(Uuid::nil()), org_id).await?;
+    let name =
+        crate::tz::scope_tz_name(&mut *conn, branch_id.unwrap_or(Uuid::nil()), org_id).await?;
     let tz = crate::tz::parse(&name);
     let now = Utc::now().with_timezone(&tz);
     Ok(madar_catalog::sale_window::LocalNow::new(
@@ -186,7 +187,8 @@ pub async fn load_combos(
     }
     let combo_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
     let mut slots = slots_of(&mut *conn, &combo_ids).await?;
-    let mut windows = crate::deals::load::windows_of(&mut *conn, "combo_item_id", &combo_ids).await?;
+    let mut windows =
+        crate::deals::load::windows_of(&mut *conn, "combo_item_id", &combo_ids).await?;
     Ok(rows
         .into_iter()
         .map(

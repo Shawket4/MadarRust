@@ -3,8 +3,11 @@
 //! row. Deals live in [`crate::deals`]; the Bundles report in
 //! [`crate::reports::bundles`].
 
+pub mod codes;
+pub mod economics;
 pub mod handlers;
 pub mod load;
+pub mod order_line;
 pub mod routes;
 pub mod types;
 

@@ -503,11 +503,12 @@ pub(crate) async fn load_public_menu(
         .collect();
 
     #[allow(clippy::type_complexity)]
-    let item_rows: Vec<(Uuid, Option<Uuid>, String, serde_json::Value, Option<String>, Option<String>, i32)> =
+    let item_rows: Vec<(Uuid, Option<Uuid>, String, serde_json::Value, Option<String>, Option<String>, i32, String)> =
         sqlx::query_as(
             r#"SELECT mi.id, mi.category_id, mi.name, mi.name_translations, mi.description,
                       COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = mi.image_group_id AND a.variant = 'full' LIMIT 1), mi.image_url) AS image_url,
-                      COALESCE(bcmo.price_override, bmo.price_override, mi.base_price) AS price
+                      COALESCE(bcmo.price_override, bmo.price_override, mi.base_price) AS price,
+                      mi.kind
                FROM menu_items mi
                LEFT JOIN branch_menu_overrides bmo
                       ON bmo.menu_item_id = mi.id AND bmo.branch_id = $1
@@ -574,11 +575,33 @@ pub(crate) async fn load_public_menu(
     let mut modifier_groups_by_item =
         load_modifier_groups(pool, &item_ids, branch_id, channel).await?;
 
+    // Combos (§2.5) and deals (§11.2) on this channel: `None` is the QR
+    // table menu, a delivery channel is the online storefront.
+    let sale_channel = if channel.is_some() {
+        madar_catalog::combo::Channel::Online
+    } else {
+        madar_catalog::combo::Channel::Qr
+    };
+    let (mut combos, meals, deals) = public_combos_and_deals(
+        pool,
+        org_id,
+        branch_id,
+        sale_channel,
+        &item_rows,
+        &sizes_by_item,
+    )
+    .await?;
+
+    let shown: std::collections::HashSet<Uuid> = combos.keys().copied().collect();
     let items: Vec<DeliveryMenuItem> = item_rows
         .into_iter()
+        .filter(|r| r.7 != "combo" || shown.contains(&r.0))
         .map(
-            |(id, category_id, name, name_translations, description, image_url, price)| {
+            |(id, category_id, name, name_translations, description, image_url, price, kind)| {
                 DeliveryMenuItem {
+                    combo: combos.remove(&id),
+                    meal: meals.get(&id).copied(),
+                    kind,
                     sizes: sizes_by_item.remove(&id).unwrap_or_default(),
                     optionals: optionals_by_item.remove(&id).unwrap_or_default(),
                     default_milk_addon_id: default_milk_by_item.remove(&id),
@@ -591,9 +614,6 @@ pub(crate) async fn load_public_menu(
                     description,
                     image_url: public_image_url(org_id, image_url),
                     price,
-                    kind: "item".into(),
-                    meal: None,
-                    combo: None,
                 }
             },
         )
@@ -604,8 +624,209 @@ pub(crate) async fn load_public_menu(
         items,
         addons,
         discount,
-        deals: Vec::new(),
+        deals,
     })
+}
+
+#[allow(clippy::type_complexity)]
+type PublicItemRow = (
+    Uuid,
+    Option<Uuid>,
+    String,
+    serde_json::Value,
+    Option<String>,
+    Option<String>,
+    i32,
+    String,
+);
+
+/// The combos a public menu shows (only those on sale on `channel` at the
+/// branch now, their category choices expanded to the items this menu
+/// offers), the "make it a meal" links into them, and the deals on offer.
+#[allow(clippy::type_complexity)]
+async fn public_combos_and_deals(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    channel: madar_catalog::combo::Channel,
+    rows: &[PublicItemRow],
+    sizes: &std::collections::HashMap<Uuid, Vec<DeliveryMenuSize>>,
+) -> Result<
+    (
+        std::collections::HashMap<Uuid, crate::combos::types::PublicCombo>,
+        std::collections::HashMap<Uuid, crate::combos::types::MealLink>,
+        Vec<crate::deals::types::DealRule>,
+    ),
+    AppError,
+> {
+    use crate::combos::types::{PublicCombo, PublicComboChoice, PublicComboSize, PublicComboSlot};
+    use std::collections::{HashMap, HashSet};
+
+    let mut conn = pool.acquire().await?;
+    let sell = crate::deals::load::channels_at(&mut conn, org_id, Some(branch_id)).await?;
+    let sell_c = crate::combos::economics::sell_of(sell);
+    if !sell_c.get(channel) {
+        return Ok((HashMap::new(), HashMap::new(), Vec::new()));
+    }
+    let now = crate::combos::load::local_now(&mut conn, org_id, Some(branch_id)).await?;
+    let b = branch_id.to_string();
+
+    // Deals on offer now at this branch.
+    let deals: Vec<crate::deals::types::DealRule> =
+        crate::deals::load::load_rules(&mut conn, org_id, None)
+            .await?
+            .into_iter()
+            .map(|r| crate::deals::load::for_branch(r, branch_id, sell))
+            .filter(|r| {
+                r.is_active
+                    && madar_catalog::sale_window::open(
+                        &r.windows
+                            .iter()
+                            .map(crate::combos::load::window_view)
+                            .collect::<Vec<_>>(),
+                        Some(&b),
+                        &now,
+                    )
+            })
+            .collect();
+
+    let combo_ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|r| r.7 == "combo")
+        .map(|r| r.0)
+        .collect();
+    if combo_ids.is_empty() {
+        return Ok((HashMap::new(), HashMap::new(), deals));
+    }
+    let row_of: HashMap<Uuid, &PublicItemRow> = rows.iter().map(|r| (r.0, r)).collect();
+    // What this menu sells: its kind=item rows.
+    let on_menu: HashSet<Uuid> = rows.iter().filter(|r| r.7 == "item").map(|r| r.0).collect();
+    let defs = crate::combos::load::load_combos(&mut conn, org_id, Some(&combo_ids)).await?;
+    let cats: Vec<Uuid> = defs
+        .iter()
+        .flat_map(|d| {
+            d.slots
+                .iter()
+                .flat_map(|s| s.choices.iter().filter_map(|c| c.category_id))
+        })
+        .collect();
+    let members = crate::combos::load::category_members(&mut conn, org_id, &cats).await?;
+
+    let mut out = HashMap::new();
+    for def in &defs {
+        let Some(row) = row_of.get(&def.id) else {
+            continue;
+        };
+        let view = def.view(i64::from(row.6), Some(branch_id));
+        let at = madar_catalog::combo::Availability {
+            channel,
+            sell: &sell_c,
+            branch_enabled: true,
+            branch_id: Some(&b),
+            now: &now,
+        };
+        let admits = |c: &madar_catalog::combo::ChoiceView| {
+            let parse = |s: &Option<String>| s.as_deref().and_then(|v| v.parse::<Uuid>().ok());
+            if let Some(i) = parse(&c.menu_item_id) {
+                return on_menu.contains(&i);
+            }
+            parse(&c.category_id)
+                .and_then(|cat| members.get(&cat))
+                .is_some_and(|ms| ms.iter().any(|m| on_menu.contains(m)))
+        };
+        if madar_catalog::combo::available(&view, &at, admits).is_err() {
+            continue;
+        }
+        let slots = def
+            .slots
+            .iter()
+            .map(|s| {
+                let mut seen = HashSet::new();
+                let mut choices = Vec::new();
+                for c in &s.choices {
+                    let items: Vec<Uuid> = match (c.menu_item_id, c.category_id) {
+                        (Some(i), _) => vec![i],
+                        (None, Some(cat)) => members.get(&cat).cloned().unwrap_or_default(),
+                        _ => vec![],
+                    };
+                    for item in items {
+                        if !on_menu.contains(&item) || !seen.insert(item) {
+                            continue;
+                        }
+                        let r = row_of[&item];
+                        let own: Vec<(String, i32)> = match sizes.get(&item) {
+                            Some(zs) if !zs.is_empty() => {
+                                zs.iter().map(|z| (z.label.clone(), z.price)).collect()
+                            }
+                            _ => vec![("one_size".to_string(), r.6)],
+                        };
+                        let included = c.included_size_label.clone().unwrap_or_else(|| {
+                            own.iter()
+                                .min_by_key(|(_, p)| *p)
+                                .map(|(l, _)| l.clone())
+                                .unwrap_or_else(|| "one_size".into())
+                        });
+                        let base = own
+                            .iter()
+                            .find(|(l, _)| *l == included)
+                            .map(|(_, p)| *p)
+                            .unwrap_or(r.6);
+                        let sizes = own
+                            .iter()
+                            .map(|(label, price)| PublicComboSize {
+                                extra: if *label == included {
+                                    0
+                                } else if let Some(z) =
+                                    c.size_surcharges.iter().find(|z| z.size_label == *label)
+                                {
+                                    z.surcharge
+                                } else {
+                                    (price - base).max(0)
+                                },
+                                label: label.clone(),
+                                price: *price,
+                            })
+                            .collect();
+                        choices.push(PublicComboChoice {
+                            menu_item_id: item,
+                            name: r.2.clone(),
+                            name_translations: r.3.clone(),
+                            image_url: public_image_url(org_id, r.5.clone()),
+                            base_price: base,
+                            included_size_label: included,
+                            sizes,
+                            surcharge: c.surcharge,
+                        });
+                    }
+                }
+                PublicComboSlot {
+                    id: s.id,
+                    name: s.name.clone(),
+                    name_translations: s.name_translations.clone(),
+                    sort: s.sort,
+                    min: s.min,
+                    max: s.max,
+                    default_item_id: s.default_item_id,
+                    default_size_label: s.default_size_label.clone(),
+                    choices,
+                }
+            })
+            .collect();
+        out.insert(
+            def.id,
+            PublicCombo {
+                is_fixed: def.is_fixed(),
+                slots,
+            },
+        );
+    }
+
+    let meals = crate::combos::load::meal_links(&mut conn, org_id)
+        .await?
+        .into_iter()
+        .filter(|(item, m)| on_menu.contains(item) && out.contains_key(&m.combo_id))
+        .collect();
+    Ok((out, meals, deals))
 }
 
 /// Load the org-wide global addon catalog (the POS model: one catalog for every

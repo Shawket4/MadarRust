@@ -612,6 +612,7 @@ pub async fn branch_sales(
               FROM order_items oi
               JOIN orders o3 ON o3.id = oi.order_id
               WHERE o3.branch_id = ANY($1) AND o3.status NOT IN ('voided', 'refunded')
+                AND oi.line_kind <> 'combo'
                 AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
                 AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
                 AND ($4::uuid[] IS NULL OR oi.menu_item_id != ALL($4::uuid[]))
@@ -665,6 +666,7 @@ pub async fn branch_sales(
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
+          AND oi.line_kind <> 'combo'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY oi.menu_item_id, oi.item_name
@@ -705,6 +707,7 @@ pub async fn branch_sales(
         LEFT JOIN menu_items m ON m.id  = oi.menu_item_id
         LEFT JOIN categories c ON c.id = m.category_id
         WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
+          AND oi.line_kind <> 'combo'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY
@@ -1006,6 +1009,7 @@ pub async fn branch_sales_timeseries(
             FROM order_items oi3
             JOIN orders o3 ON o3.id = oi3.order_id
             WHERE o3.branch_id = ANY($1)
+              AND oi3.line_kind <> 'combo'
               AND o3.status NOT IN ('voided', 'refunded')
               AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
@@ -1154,6 +1158,7 @@ pub async fn branch_sales_peak_hours(
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
             WHERE o.branch_id = ANY($1)
+              AND oi.line_kind <> 'combo'
               AND o.status NOT IN ('voided', 'refunded')
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -1311,6 +1316,7 @@ pub async fn branch_sales_peak_days(
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
             WHERE o.branch_id = ANY($1)
+              AND oi.line_kind <> 'combo'
               AND o.status NOT IN ('voided', 'refunded')
               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
@@ -1480,7 +1486,7 @@ pub async fn branch_waiter_stats(
         JOIN users w ON w.id = o.waiter_id
         LEFT JOIN LATERAL (
             SELECT SUM(oi.quantity)::bigint AS qty
-            FROM order_items oi WHERE oi.order_id = o.id
+            FROM order_items oi WHERE oi.order_id = o.id AND oi.line_kind <> 'combo'
         ) iq ON true
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
         WHERE o.waiter_id IS NOT NULL
@@ -2997,6 +3003,7 @@ pub async fn branch_combined_item_sales(
         WHERE o.branch_id = ANY($1)
           AND o.status NOT IN ('voided', 'refunded')
           AND oi.menu_item_id IS NOT NULL
+          AND oi.line_kind <> 'combo'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY oi.menu_item_id, oi.item_name

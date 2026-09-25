@@ -370,7 +370,7 @@ const ORDERS_JOINS: &[Join] = &[
         sql: "LEFT JOIN LATERAL (SELECT COALESCE(SUM(oi.quantity),0) AS units, \
               COUNT(oi.id) AS lines, SUM(oi.line_cost) AS cost, \
               bool_or(oi.line_cost IS NULL) AS cost_missing \
-              FROM order_items oi WHERE oi.order_id = o.id) it ON true",
+              FROM order_items oi WHERE oi.order_id = o.id AND oi.line_kind <> 'combo') it ON true",
     },
     // Money returned against the order. One row per order (the view groups by
     // order_id), so it cannot fan out either. `refunded_amount` is NULL for an
@@ -2119,7 +2119,8 @@ pub const DATASETS: &[Dataset] = &[
         branch_col: "o.branch_id",
         time_col: "o.created_at",
         time_is_date: false,
-        base_pred: "",
+        // A combo's header carries no money; its parts count as their items.
+        base_pred: "AND oi.line_kind <> 'combo'",
         joins: ITEM_JOINS,
         dims: ITEM_DIMS,
         measures: ITEM_MEASURES,
