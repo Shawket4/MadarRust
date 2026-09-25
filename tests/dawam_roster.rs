@@ -4123,3 +4123,70 @@ async fn the_poster_is_not_told_of_their_own_open_shift(pool: PgPool) {
     assert_eq!(s, 204, "{body}");
     assert_eq!(told().await, others, "Karim published it");
 }
+
+/// Hunt B-H1-4 (SC-9): an open shift carries when it was claimed — the app
+/// stamped claims with its refresh time, so each looked newest. Null while
+/// open; the claim's own time on every view of it.
+#[sqlx::test]
+async fn an_open_shift_says_when_it_was_claimed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let (from, to) = (today(), today() + Duration::days(13));
+    let queue = async || -> Value {
+        let (s, body) = done(call!(
+            app,
+            "GET",
+            format!("/staff/open-shifts?from={from}&to={to}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+        body[0].clone()
+    };
+    assert!(queue().await["claimed_at"].is_null(), "open: not claimed");
+    let tb = phone_token(&pool, f.b).await;
+    let (s, claimed) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200, "{claimed}");
+    let at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT claimed_at FROM staff_open_shifts WHERE id = $1::uuid")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let parse = |v: &Value| -> DateTime<Utc> {
+        v.as_str()
+            .unwrap_or_else(|| panic!("no claimed_at: {v}"))
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(parse(&claimed["claimed_at"]), at, "the claim's answer");
+    assert_eq!(
+        parse(&queue().await["claimed_at"]),
+        at,
+        "the manager's queue"
+    );
+    let (s, mine) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={from}&to={to}"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200, "{mine}");
+    assert_eq!(
+        parse(&mine["open_shifts"][0]["claimed_at"]),
+        at,
+        "my roster"
+    );
+    assert_eq!(parse(&mine["my_claims"][0]["claimed_at"]), at, "my claims");
+}

@@ -90,6 +90,9 @@ pub struct OpenShift {
     pub claimed_by: Option<Uuid>,
     #[sqlx(default)]
     pub claimed_by_name: Option<String>,
+    /// When the live claim was made; null while open.
+    #[sqlx(default)]
+    pub claimed_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
     pub start_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
@@ -341,7 +344,7 @@ pub(crate) async fn open_shifts_at(
 ) -> Result<Vec<OpenShift>, AppError> {
     let mut rows: Vec<OpenShift> = sqlx::query_as(
         "SELECT o.id, o.branch_id, o.work_shift_id, ws.name AS shift_name, o.on_date, o.status, \
-                o.claimed_by, e.name AS claimed_by_name, \
+                o.claimed_by, e.name AS claimed_by_name, o.claimed_at, \
                 (o.on_date + COALESCE(dt.start_time, ws.start_time)) \
                     AT TIME ZONE COALESCE(b.timezone::text, org.timezone::text, 'Africa/Cairo') \
                     AS start_at, \
