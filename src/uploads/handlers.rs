@@ -103,12 +103,6 @@ async fn upload_for(
             AssetPurpose::CategoryPhoto,
             "Category",
         ),
-        AssetTable::Bundles => (
-            "menu_items",
-            "SELECT org_id, image_url FROM bundles WHERE id = $1",
-            AssetPurpose::BundlePhoto,
-            "Bundle",
-        ),
         _ => return Err(AppError::BadRequest("unsupported upload target".into())),
     };
     check_permission(pool.get_ref(), &claims, resource, "update").await?;
@@ -177,24 +171,6 @@ pub async fn upload_category_image(
     upload_for(req, pool, AssetTable::Categories, *id, payload).await
 }
 
-#[utoipa::path(
-    post,
-    path = "/uploads/bundles/{bundle_id}",
-    tag = "uploads",
-    params(("bundle_id" = Uuid, Path, description = "Bundle ID")),
-    request_body(content = UploadImageMultipart, content_type = "multipart/form-data"),
-    responses((status = 200, description = "Image accepted for processing", body = UploadResponse), AppErrorResponse),
-    security(("bearer_jwt" = []))
-)]
-pub async fn upload_bundle_image(
-    req: HttpRequest,
-    pool: crate::db::Db,
-    id: web::Path<Uuid>,
-    payload: Multipart,
-) -> Result<HttpResponse, AppError> {
-    upload_for(req, pool, AssetTable::Bundles, *id, payload).await
-}
-
 /// A URL saved into an image field by a JSON handler: our own legacy upload
 /// path → staged from the uploads dir (org-scoped); an external https URL →
 /// fetched by the worker (SSRF-guarded). Anything else is ignored.
@@ -210,7 +186,6 @@ pub async fn stage_image_url(
     let purpose = match table {
         AssetTable::MenuItems => AssetPurpose::MenuItemPhoto,
         AssetTable::Categories => AssetPurpose::CategoryPhoto,
-        AssetTable::Bundles => AssetPurpose::BundlePhoto,
         _ => return Ok(None),
     };
     let store = crate::assets::AssetStore::from_env();

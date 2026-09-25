@@ -50,6 +50,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::get().to(public::table_menu)),
     )
     .service(
+        web::resource("/public/tables/{id}/cart-quote")
+            .wrap(Condition::new(limited, Governor::new(&table_browse)))
+            .route(web::post().to(crate::deals::public::table_cart_quote)),
+    )
+    .service(
         web::resource("/public/table-orders")
             .wrap(Condition::new(limited, Governor::new(&table_intake)))
             .route(web::post().to(public::create_table_order)),

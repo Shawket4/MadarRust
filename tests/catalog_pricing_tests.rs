@@ -5,7 +5,7 @@
 //! differently (discovery M4 / M5: an explicit `swaps` group, two options
 //! sharing the recipe's ingredient, a multi-select swap pick, a size the item
 //! no longer sells, a branch's item price) and the ordinary ones (sizes,
-//! defaults, add-ons, optional fields, bundle components).
+//! defaults, add-ons, optional fields, an item's options priced alone).
 //!
 //! `server_capture.json` is what the server's order path — `catalog_unit_price`
 //! and `resolve_menu_item_configuration` — answered for every case BEFORE the
@@ -111,9 +111,6 @@ const M_RETIRED: Uuid = id(0x76);
 const O_HOT: Uuid = id(0x80);
 const O_CREAM: Uuid = id(0x81);
 const O_OFF: Uuid = id(0x82);
-
-// Bundle.
-pub const B_BREAKFAST: Uuid = id(0x90);
 
 async fn exec(pool: &PgPool, sql: &str) {
     for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
@@ -913,24 +910,15 @@ pub async fn seed(pool: &PgPool) {
         .await
         .unwrap();
     tx.commit().await.unwrap();
-
-    // A breakfast bundle: two lattes and a croissant.
-    exec(
-        pool,
-        &format!(
-            "INSERT INTO bundles (id, org_id, name, price, status) VALUES ('{B_BREAKFAST}', '{ORG}', 'Breakfast', 5000, 'active'); \
-             INSERT INTO bundle_components (bundle_id, item_id, quantity, position) VALUES \
-             ('{B_BREAKFAST}', '{M_LATTE}', 2, 0), ('{B_BREAKFAST}', '{M_CROISSANT}', 1, 1)"
-        ),
-    )
-    .await;
 }
 
 /// One priced line of the fixture.
 pub struct Case {
     pub name: &'static str,
     pub item: Uuid,
-    /// `line` (a menu-item line) or `component` (a bundle component).
+    /// Always `line` (a menu-item line). The `component` cases (a combo's
+    /// components priced without their size) left with madar-shared v0.5.0;
+    /// the field stays so no vector's shape moves.
     pub part: &'static str,
     pub size: Option<&'static str>,
     pub options: Vec<(Uuid, i32)>,
@@ -951,19 +939,6 @@ fn case(
         size,
         options: options.to_vec(),
         optionals: optionals.to_vec(),
-    }
-}
-
-fn component(
-    name: &'static str,
-    item: Uuid,
-    size: Option<&'static str>,
-    options: &[(Uuid, i32)],
-    optionals: &[Uuid],
-) -> Case {
-    Case {
-        part: "component",
-        ..case(name, item, size, options, optionals)
     }
 }
 
@@ -1238,29 +1213,6 @@ pub fn cases() -> Vec<Case> {
             ],
             &[O_HOT, O_CREAM],
         ),
-        // Bundle components: the options only.
-        component(
-            "component_latte_small_oat_shot",
-            M_LATTE,
-            s,
-            &[(A_OAT, 1), (A_SHOT, 1)],
-            &[],
-        ),
-        component(
-            "component_latte_no_size_barista",
-            M_LATTE,
-            None,
-            &[(A_BARISTA_WHOLE, 1)],
-            &[],
-        ),
-        component("component_croissant", M_CROISSANT, None, &[], &[]),
-        component(
-            "component_retired_is_still_resolved",
-            M_RETIRED,
-            Some("Regular"),
-            &[(A_SHOT, 1)],
-            &[],
-        ),
     ]
 }
 
@@ -1356,18 +1308,6 @@ fn bills() -> Vec<(&'static str, Value)> {
                 line(M_LATTE, Some("Large"), 1, &[], &[O_CREAM]),
             ]),
         ),
-        (
-            "bundle_with_component_options",
-            json!([{
-                "bundle_id": B_BREAKFAST, "quantity": 2,
-                "bundle_components": [
-                    {"item_id": M_LATTE, "quantity": 2, "size_label": "Small",
-                     "addons": [{"addon_item_id": A_OAT, "quantity": 1}, {"addon_item_id": A_SHOT, "quantity": 1}],
-                     "optional_field_ids": []},
-                    {"item_id": M_CROISSANT, "quantity": 1, "addons": [], "optional_field_ids": []}
-                ]
-            }]),
-        ),
     ]
 }
 
@@ -1422,13 +1362,6 @@ fn booked(order: &Value) -> Value {
                         "addons": i["addons"].as_array().map(|a| a.iter().map(|x| json!({
                             "id": x["addon_item_id"], "unit_price": x["unit_price"],
                             "quantity": x["quantity"], "line_total": x["line_total"],
-                        })).collect::<Vec<_>>()),
-                        "bundle_components": i["bundle_components"].as_array().map(|a| a.iter().map(|c| json!({
-                            "item_id": c["item_id"], "quantity": c["quantity"],
-                            "addons": c["addons"].as_array().map(|a| a.iter().map(|x| json!({
-                                "id": x["addon_item_id"], "unit_price": x["unit_price"],
-                                "quantity": x["quantity"], "line_total": x["line_total"],
-                            })).collect::<Vec<_>>()),
                         })).collect::<Vec<_>>()),
                     })
                 })
@@ -1641,10 +1574,6 @@ fn as_captured(c: &Case, out: &madar_catalog::vectors::Expected) -> Value {
             let (a, o, at, ot) = options(&l.options);
             json!({"unit_price": l.unit_price, "addons": a, "optionals": o, "addon_line": at, "optional_line": ot})
         }
-        Expected::Component(p) => {
-            let (a, o, at, ot) = options(p);
-            json!({"unit_price": null, "addons": a, "optionals": o, "addon_line": at, "optional_line": ot})
-        }
         Expected::Error(madar_catalog::PriceError::UnknownOption { id }) => {
             json!({"error": format!("Not found: Addon {id} not found")})
         }
@@ -1838,15 +1767,15 @@ async fn the_legacy_default_milk_is_pinned_as_it_was(pool: PgPool) {
 
 /// M6: the lines madar-catalog prices, through madar-money's bill assembly
 /// (the staff comp off the line first, then tax on the rest), are the bill the
-/// server books — a staff drink with swaps, a swap line and a bundle whose
-/// components carry options, on one order. The comp itself is the server's
+/// server books — a staff drink with swaps, a swap line and a line of two
+/// with options, on one order. The comp itself is the server's
 /// (`madar_money::staff_comp`, pinned by its own vectors); what this checks is
 /// that the prices it is taken from, and the bill around it, are the shared
 /// rule's.
 #[sqlx::test]
 async fn the_shared_prices_make_the_servers_bill(pool: PgPool) {
     use madar_money::bill::{BillDiscount, BillLine, price_bill};
-    use madar_money::line::{charged_subtotal, component_surcharge};
+    use madar_money::line::charged_subtotal;
     seed(&pool).await;
     sqlx::query(
         "INSERT INTO staff_pool_settings (org_id, branch_id, enabled, daily_allowance, eligible_item_ids) \
@@ -1875,14 +1804,13 @@ async fn the_shared_prices_make_the_servers_bill(pool: PgPool) {
         &[O_CREAM],
     );
     let tea = case("tea", M_TEA, Some("Cup"), &[(A_GREEN, 1)], &[]);
-    let comp_latte = case(
-        "c_latte",
+    let small_latte = case(
+        "small_latte",
         M_LATTE,
         Some("Small"),
         &[(A_BARISTA_WHOLE, 1), (A_SHOT, 1)],
         &[],
     );
-    let comp_croissant = case("c_croissant", M_CROISSANT, None, &[], &[]);
     let wire = |c: &Case| {
         c.options
             .iter()
@@ -1894,56 +1822,44 @@ async fn the_shared_prices_make_the_servers_bill(pool: PgPool) {
          "optional_field_ids": latte.optionals,
          "staff_drink": {"id": id(0xa1), "note": "Mona, on shift"}},
         {"menu_item_id": M_TEA, "size_label": "Cup", "quantity": 3, "addons": wire(&tea)},
-        {"bundle_id": B_BREAKFAST, "quantity": 2, "bundle_components": [
-            {"item_id": M_LATTE, "quantity": 2, "size_label": "Small", "addons": wire(&comp_latte), "optional_field_ids": []},
-            {"item_id": M_CROISSANT, "quantity": 1, "addons": [], "optional_field_ids": []}
-        ]},
+        {"menu_item_id": M_LATTE, "size_label": "Small", "quantity": 2, "addons": wire(&small_latte)},
     ]);
     let (status, order) = ring(&pool, &items, json!({})).await;
     assert_eq!(status, 201, "{order}");
 
     let mut catalog = madar_rust::orders::catalog_view::Catalog::new(Some(BRANCH));
     catalog
-        .ensure_on(&pool, &[M_LATTE, M_TEA, M_CROISSANT], &fixture_options())
+        .ensure_on(&pool, &[M_LATTE, M_TEA], &fixture_options())
         .await
         .unwrap();
     let price =
         |c: &Case| madar_catalog::price_line(&catalog.view(c.item), &selection_of(c)).unwrap();
-    let extras = |c: &Case| {
-        let p = madar_catalog::price_options(&catalog.view(c.item), &selection_of(c)).unwrap();
-        p.option_total + p.optional_total
-    };
     let booked = order["items"].as_array().unwrap();
     let comp_of = |i: usize| i64::from(booked[i]["staff_comp_minor"].as_i64().unwrap() as i32);
     assert!(comp_of(0) > 0, "the latte is a staff drink: {}", booked[0]);
 
     let lines = [
         BillLine {
-            charged: charged_subtotal(price(&latte).per_unit(), 1, 0),
+            charged: charged_subtotal(price(&latte).per_unit(), 1),
             per_unit: price(&latte).per_unit(),
             reward_units: 0,
             staff_comp: comp_of(0),
         },
         BillLine {
-            charged: charged_subtotal(price(&tea).per_unit(), 3, 0),
+            charged: charged_subtotal(price(&tea).per_unit(), 3),
             per_unit: price(&tea).per_unit(),
             reward_units: 0,
             staff_comp: 0,
         },
         BillLine {
-            charged: charged_subtotal(
-                5000,
-                2,
-                component_surcharge(extras(&comp_latte), 2, 2)
-                    + component_surcharge(extras(&comp_croissant), 1, 2),
-            ),
-            per_unit: 5000,
+            charged: charged_subtotal(price(&small_latte).per_unit(), 2),
+            per_unit: price(&small_latte).per_unit(),
             reward_units: 0,
             staff_comp: 0,
         },
     ];
     // The rows the server stored carry the shared rule's prices.
-    for (i, c) in [(0, &latte), (1, &tea)] {
+    for (i, c) in [(0, &latte), (1, &tea), (2, &small_latte)] {
         let p = price(c);
         assert_eq!(booked[i]["unit_price"], json!(p.unit_price), "line {i}");
         let stored: Vec<(Value, Value, Value)> = booked[i]["addons"]

@@ -43,7 +43,7 @@ const PURGE_STMTS: &[&str] = &[
     "DELETE FROM user_branch_assignments WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
     "DELETE FROM branches WHERE org_id = $1",
     "DELETE FROM users WHERE org_id = $1",
-    // Finally the org (cascades org_payment_methods, bundles, modifier_groups →
+    // Finally the org (cascades org_payment_methods, modifier_groups →
     // modifier_options, catalog_revision). Guarded so a non-demo org can never
     // be removed here even if mis-called.
     "DELETE FROM organizations WHERE id = $1 AND is_demo",

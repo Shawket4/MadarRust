@@ -44,7 +44,7 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
 - **OpenAPI Export**: `cargo run --bin export-openapi`
 - **Reprice order cost snapshots at current recipes & ingredient costs** (operator-only, never exposed over HTTP):
   `cargo run --bin backfill-cost-snapshots -- (--org <uuid> | --branch <uuid>) [--dry-run]`
-  Rewrites `order_items.unit_cost/line_cost` + addon/optional/bundle-component costs as if each
+  Rewrites `order_items.unit_cost/line_cost` + addon/optional costs as if each
   line were ordered today (current recipe/addon rollups × quantities — mirrors the menu-engineering
   `cost_basis=current` view). Always `--dry-run` first.
 
@@ -187,7 +187,8 @@ Each feature module owns its routes, handlers and tests together.
   (role × resource × action, seeded by `permissions::seeder`).
 - **Selling** — `orders`, `tickets` (waiter open tickets), `held_orders` (POS parked
   carts + table occupancy + transfer waitlist), `tills`, `shifts`, `payment_methods`,
-  `discounts`, `bundles`.
+  `discounts`. (Combos/bundles were removed 2026-09-25; `src/bundles` is only
+  the old-till `GET /bundles` empty-page stub.)
 - **Catalog & cost** — `menu`, `menu_unification`, `recipes`, `costing`, `units`,
   `inventory`, `purchasing`, `stocktakes`.
 - **Floor** — `reservations` (`floor.rs` = sections + table geometry + live status;

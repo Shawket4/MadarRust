@@ -62,7 +62,7 @@ const ORDER_SELECT: &str =
 /// Aggregate columns hydrating [OrderSummary] (by name, via `FromRow`). Used by
 /// both the list and export summary queries; assumes `orders o` is LEFT JOINed
 /// to `delivery_orders d` (for the channel split). `exclude_idx`, when set, is
-/// the bind position of a uuid[] of menu_item/bundle ids left out of the
+/// the bind position of a uuid[] of menu_item ids left out of the
 /// `line_items` count ONLY — every money/count aggregate stays authoritative.
 ///
 /// Money here is scoped by [`SOLD`], the SAME predicate the sales and shift
@@ -71,7 +71,7 @@ const ORDER_SELECT: &str =
 /// this strip disagree with every other screen for the same day.
 fn order_summary_cols(exclude_idx: Option<i32>) -> String {
     let exclude = exclude_idx
-        .map(|i| format!(" AND COALESCE(oi.menu_item_id, oi.bundle_id) != ALL(${i}::uuid[])"))
+        .map(|i| format!(" AND oi.menu_item_id != ALL(${i}::uuid[])"))
         .unwrap_or_default();
     let sold = SOLD;
     format!(
@@ -89,7 +89,7 @@ fn order_summary_cols(exclude_idx: Option<i32>) -> String {
      COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
      COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN o.total_amount ELSE 0 END), 0) AS outside_revenue,
      COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees,
-     COALESCE(SUM(CASE WHEN o.{sold} THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id{exclude}) ELSE 0 END), 0)::bigint AS line_items"
+     COALESCE(SUM(CASE WHEN o.{sold} THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id AND oi.line_kind <> 'combo'{exclude}) ELSE 0 END), 0)::bigint AS line_items"
     )
 }
 
@@ -376,13 +376,23 @@ pub struct OrderItem {
     pub line_total: i32,
     pub notes: Option<String>,
     pub deductions_snapshot: serde_json::Value,
+    /// COMPAT STUB, always `null`: combos/bundles were removed (2026-09-25),
+    /// but POS v0.5–v0.6 decode every line with these keys present (the
+    /// legacy golden responses pin them), so the keys stay on the wire. Not in
+    /// the OpenAPI document; no column behind them.
+    #[sqlx(skip)]
+    #[serde(default)]
+    #[schema(ignore)]
     pub bundle_id: Option<Uuid>,
+    /// COMPAT STUB, always `null`; see `bundle_id`.
+    #[sqlx(skip)]
+    #[serde(default)]
+    #[schema(ignore)]
     pub bundle_unit_price: Option<i32>,
-    /// Full line COGS in piastres (recipe + addons + optionals + components).
+    /// Full line COGS in piastres (recipe + addons + optionals).
     /// `null` ⟺ unknown.
     pub line_cost: Option<i64>,
-    /// Recipe-only cost per unit in piastres (incl. swaps). `null` ⟺ unknown
-    /// or bundle line.
+    /// Recipe-only cost per unit in piastres (incl. swaps). `null` ⟺ unknown.
     pub unit_cost: Option<i64>,
     /// True when any cost component could not be resolved.
     pub cost_missing: bool,
@@ -410,6 +420,45 @@ pub struct OrderItem {
     #[sqlx(default)]
     #[serde(default)]
     pub staff_drink_id: Option<Uuid>,
+    /// Combos (additive). `item` = a plain line; `combo` = a combo's HEADER
+    /// (its `menu_item_id` is the combo; it carries no money: `unit_price` and
+    /// `line_total` are 0, P is in `combo_unit_price`); `combo_part` = one
+    /// chosen item of a combo, a real line of that item whose `line_total` is
+    /// `combo_share + combo_surcharge` and whose `unit_price` stays the item's
+    /// normal price at its size. Lines come header first, then its parts in
+    /// slot order.
+    #[sqlx(default)]
+    #[serde(default = "crate::combos::types::item_kind")]
+    pub line_kind: String,
+    /// A part: its header's `id`.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_line_id: Option<Uuid>,
+    /// A part: the slot it filled (soft: the slot may be gone since).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_slot_id: Option<Uuid>,
+    /// A part: the slot's name at the sale.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_slot_name: Option<String>,
+    /// A header: P per combo unit, as charged.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_unit_price: Option<i32>,
+    /// A part: its share of the combo price, whole line.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_share: i32,
+    /// A part: its choice and size surcharges, whole line.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub combo_surcharge: i32,
+    /// A plain line: what an applied deal took off it, already out of
+    /// `line_total` (print it as a line discount, never subtract it again).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub deal_minor: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -477,6 +526,9 @@ pub struct OrderFull {
     /// the order is flagged. The till shows this sentence to the teller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loyalty_redemption_refused: Option<String>,
+    /// The deals applied to this sale (combos module). Additive.
+    #[serde(default)]
+    pub deals: Vec<crate::deals::types::OrderDeal>,
 }
 
 /// Customer-facing delivery context attached to a finalized delivery order's
@@ -505,52 +557,16 @@ pub struct OrderDeliveryInfo {
     pub payment_method_hint: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
-pub struct OrderBundleComponentAddon {
-    pub id: Uuid,
-    pub order_line_id: Uuid,
-    pub component_item_id: Uuid,
-    pub addon_item_id: Uuid,
-    pub addon_name: String,
-    #[schema(value_type = Object)]
-    pub name_translations: serde_json::Value,
-    pub unit_price: i32,
-    pub quantity: i32,
-    pub line_total: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
-pub struct OrderBundleComponentOptional {
-    pub id: Uuid,
-    pub order_line_id: Uuid,
-    pub component_item_id: Uuid,
-    pub optional_field_id: Option<Uuid>,
-    pub field_name: String,
-    #[schema(value_type = Object)]
-    pub name_translations: serde_json::Value,
-    pub price: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct OrderBundleComponentFull {
-    pub item_id: Uuid,
-    pub item_name: String,
-    #[schema(value_type = Object)]
-    pub name_translations: serde_json::Value,
-    pub quantity: i32,
-    pub size_label: Option<String>,
-    pub addons: Vec<OrderBundleComponentAddon>,
-    pub optionals: Vec<OrderBundleComponentOptional>,
-}
-
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct OrderItemFull {
     #[serde(flatten)]
     pub item: OrderItem,
     pub addons: Vec<OrderItemAddon>,
     pub optionals: Vec<OrderItemOptional>,
-    #[serde(default)]
-    pub bundle_components: Vec<OrderBundleComponentFull>,
+    /// COMPAT STUB, always `[]`; see [`OrderItem::bundle_id`].
+    #[serde(default, skip_deserializing)]
+    #[schema(ignore)]
+    pub bundle_components: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -566,7 +582,13 @@ pub use crate::orders::component_resolve::AddonInput;
 pub struct OrderItemInput {
     #[serde(default)]
     pub menu_item_id: Option<Uuid>,
-    #[serde(default)]
+    /// COMPAT STUB: combos/bundles were removed (2026-09-25). Old tills still
+    /// send `bundle_id: null` / `bundle_components: []` on every line and an
+    /// open ticket echoes its stored input back to them, so the keys are
+    /// written (always `null` / `[]`) and whatever arrives in them is ignored.
+    /// A line with no `menu_item_id` is refused. Not in the OpenAPI document.
+    #[serde(default, skip_deserializing)]
+    #[schema(ignore)]
     pub bundle_id: Option<Uuid>,
     #[serde(default)]
     pub size_label: Option<String>,
@@ -575,8 +597,10 @@ pub struct OrderItemInput {
     pub addons: Vec<AddonInput>,
     #[serde(default)]
     pub optional_field_ids: Vec<Uuid>,
-    #[serde(default)]
-    pub bundle_components: Vec<crate::orders::component_resolve::BundleComponentInput>,
+    /// COMPAT STUB, always `[]`; see `bundle_id`.
+    #[serde(default, skip_deserializing)]
+    #[schema(ignore)]
+    pub bundle_components: Vec<serde_json::Value>,
     #[serde(default)]
     pub notes: Option<String>,
     /// What the customer was actually charged, in piastres.
@@ -592,9 +616,15 @@ pub struct OrderItemInput {
     /// comped, extras still charged. Needs `orders.staff_drink.record`. The
     /// server prices the comp; see `docs/staff-drink-comp-contract.md`.
     /// Additive — a client that omits it rings an ordinary paid line. Not
-    /// carried by a bundle line (`item_not_eligible`) nor by a ticket's line.
+    /// carried by a ticket's line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staff_drink: Option<crate::staff_pool::order_line::StaffDrinkLine>,
+    /// A line naming a combo item (`kind=combo`) carries its picks here; see
+    /// COMBOS_CONTRACT.md §3.1. On replay `unit_price` is P as the till
+    /// charged it and each pick's `share`/`surcharge` are per combo unit.
+    /// Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo: Option<crate::combos::types::ComboInput>,
 }
 
 #[derive(Deserialize, Serialize, Default, ToSchema)]
@@ -714,6 +744,10 @@ pub struct CreateOrderRequest {
     /// a sale is never refused over its customer.
     #[serde(default)]
     pub customer_id: Option<Uuid>,
+    /// Deals the teller applied (combos module, C8). Each names order lines
+    /// by index and the units it takes. Needs `orders.deals.apply`. Additive.
+    #[serde(default)]
+    pub deals: Vec<crate::deals::types::DealApplicationInput>,
 }
 
 /// One reward applied to one line of the cart.
@@ -776,11 +810,11 @@ pub struct ListOrdersQuery {
     /// Filter delivery orders by channel: "in_mall" or "outside".
     pub channel: Option<String>,
     /// When true, each order in `data` embeds its full line items
-    /// (addons/optionals/bundle components) — the response shape becomes
+    /// (addons/optionals) — the response shape becomes
     /// [PaginatedOrdersFull]. Lets offline-first clients cache complete
     /// orders in one round trip instead of fetching each order separately.
     pub include_items: Option<bool>,
-    /// Comma-separated menu_item/bundle UUIDs left out of the summary's
+    /// Comma-separated menu_item UUIDs left out of the summary's
     /// `line_items` count (units sold) — e.g. water bottles or service
     /// pseudo-items that inflate it. Affects ONLY that KPI: revenue, order
     /// counts, and the order rows themselves are untouched.
@@ -897,14 +931,14 @@ use crate::orders::cost_math::{InventoryDeduction, summarize_line_costs};
 
 // ── One cart line, resolved and priced ────────────────────────
 //
-// The catalog lookups, the branch overrides, the addon/optional/bundle
+// The catalog lookups, the branch overrides, the addon/optional
 // arithmetic and the inventory deductions for ONE line of a cart. This is
 // the single pricing path: the till's checkout (`create_order_inner`) walks
 // it per line, and so does a waiter's fire (`tickets::resolve_ticket_lines`),
 // so the bill printed at the table and the order settled from it can no
 // longer disagree about what a line costs. They used to: the ticket priced
 // a line as `(unit + addons) × qty` and the settle then charged the
-// optionals and bundle surcharges the bill had never shown.
+// optionals the bill had never shown.
 
 pub(crate) struct ResolvedOptional {
     pub(crate) optional_field_id: Uuid,
@@ -917,21 +951,10 @@ pub(crate) struct ResolvedOptional {
     pub(crate) quantity_used: Option<f64>,
 }
 
-#[allow(dead_code)]
-pub(crate) struct ResolvedBundleComponent {
-    pub(crate) item_id: Uuid,
-    pub(crate) item_name: String,
-    pub(crate) name_translations: serde_json::Value,
-    pub(crate) quantity: i32,
-    pub(crate) size_label: Option<String>,
-    pub(crate) addons: Vec<ResolvedAddon>,
-    pub(crate) optionals: Vec<ResolvedOptional>,
-}
-
 pub(crate) struct ResolvedItem {
     /// The catalog + branch-override unit price — what the server expected.
     pub(crate) expected_unit_price: i32,
-    /// Catalog addon total per unit (0 for a bundle), kept for the price flag.
+    /// Catalog addon total per unit, kept for the price flag.
     pub(crate) expected_addon_per_unit: i32,
     /// This branch has the item turned off. Flagged, never rejected.
     pub(crate) branch_disabled: bool,
@@ -956,13 +979,15 @@ pub(crate) struct ResolvedItem {
     pub(crate) addons: Vec<ResolvedAddon>,
     pub(crate) optionals: Vec<ResolvedOptional>,
     pub(crate) deductions: Vec<InventoryDeduction>,
-    pub(crate) bundle_id: Option<Uuid>,
-    pub(crate) bundle_unit_price: Option<i32>,
-    pub(crate) bundle_components: Vec<ResolvedBundleComponent>,
-    pub(crate) component_surcharge: i32,
     /// The line is a staff drink: its comp, priced. Like the reward fields,
     /// not the resolver's business — the caller sets it.
     pub(crate) staff: Option<crate::staff_pool::order_line::LineComp>,
+    /// Combos: the line's kind and, for a header or a part, its figures.
+    /// Default: a plain line.
+    pub(crate) combo: crate::combos::order_line::LineCombo,
+    /// What an applied deal took off this line (a plain line only). Comes
+    /// off `line_total` and the bill line, before tax.
+    pub(crate) deal_minor: i32,
 }
 
 pub(crate) struct ResolvedAddon {
@@ -980,12 +1005,8 @@ pub(crate) struct ResolvedAddon {
 }
 
 impl ResolvedItem {
-    /// The line's add-ons as madar-shared's line rule reads them. Empty for a
-    /// bundle, whose component add-ons are inside `component_surcharge`.
+    /// The line's add-ons as madar-shared's line rule reads them.
     fn line_addons(&self) -> Vec<madar_money::line::Addon> {
-        if self.bundle_id.is_some() {
-            return Vec::new();
-        }
         self.addons
             .iter()
             .map(|a| madar_money::line::Addon {
@@ -995,11 +1016,8 @@ impl ResolvedItem {
             .collect()
     }
 
-    /// The line's optional-field prices; empty for a bundle for the same reason.
+    /// The line's optional-field prices.
     fn line_optionals(&self) -> Vec<i64> {
-        if self.bundle_id.is_some() {
-            return Vec::new();
-        }
         self.optionals.iter().map(|o| i64::from(o.price)).collect()
     }
 
@@ -1016,26 +1034,61 @@ impl ResolvedItem {
             + madar_money::line::extras_per_unit(&self.line_addons(), &self.line_optionals()) as i32
     }
 
-    /// The line as charged, before any reward: per-unit × quantity plus the
-    /// bundle component surcharge. THE figure a bill line shows. The rule is
-    /// madar-shared's (`madar_money::line`), the till's too.
+    /// The line as charged, before any reward: per-unit × quantity. THE
+    /// figure a bill line shows. The rule is madar-shared's
+    /// (`madar_money::line`), the till's too.
     pub(crate) fn charged_subtotal(&self) -> i32 {
-        madar_money::line::charged_subtotal(
-            i64::from(self.charged_per_unit()),
-            i64::from(self.quantity),
-            i64::from(self.component_surcharge),
-        ) as i32
+        use crate::combos::order_line::LineKind;
+        match self.combo.kind {
+            // A header carries no money: its parts do.
+            LineKind::Header => 0,
+            // A part: its share of P and its surcharges, plus its own add-ons
+            // and optional fields at their normal prices (C10).
+            LineKind::Part => {
+                self.combo.share
+                    + self.combo.surcharge
+                    + madar_money::line::extras_per_unit(
+                        &self.line_addons(),
+                        &self.line_optionals(),
+                    ) as i32
+                        * self.quantity
+            }
+            LineKind::Item => madar_money::line::charged_subtotal(
+                i64::from(self.charged_per_unit()),
+                i64::from(self.quantity),
+            ) as i32,
+        }
+    }
+
+    /// What the stored `line_total` column holds before a reward or a staff
+    /// comp: a header 0, a part its share plus surcharge, a plain line its
+    /// unit price × quantity less what a deal took off.
+    pub(crate) fn base_line_total(&self) -> i32 {
+        use crate::combos::order_line::LineKind;
+        match self.combo.kind {
+            LineKind::Header => 0,
+            LineKind::Part => self.combo.share + self.combo.surcharge,
+            LineKind::Item => self.unit_price * self.quantity - self.deal_minor,
+        }
     }
 
     /// The same line at catalog + branch-override prices — what the server
     /// expected. Used only to flag a deviation, never to overrule the till.
-    fn expected_subtotal(&self) -> i32 {
+    pub(crate) fn expected_subtotal(&self) -> i32 {
+        use crate::combos::order_line::LineKind;
+        match self.combo.kind {
+            LineKind::Header => return 0,
+            LineKind::Part => {
+                return self.combo.expected
+                    + (self.expected_addon_per_unit + self.optional_per_unit()) * self.quantity;
+            }
+            LineKind::Item => {}
+        }
         madar_money::line::charged_subtotal(
             i64::from(
                 self.expected_unit_price + self.expected_addon_per_unit + self.optional_per_unit(),
             ),
             i64::from(self.quantity),
-            i64::from(self.component_surcharge),
         ) as i32
     }
 
@@ -1075,8 +1128,8 @@ pub(crate) enum ClientPrices {
     AsCharged,
 }
 
-/// Every menu item and add-on the lines name — bundle components the till
-/// configured included — so one [`Catalog`] load serves a whole order.
+/// Every menu item and add-on the lines name, so one [`Catalog`] load serves
+/// a whole order.
 ///
 /// [`Catalog`]: crate::orders::catalog_view::Catalog
 pub(crate) fn catalog_ids_of(items: &[OrderItemInput]) -> (Vec<Uuid>, Vec<Uuid>) {
@@ -1085,10 +1138,6 @@ pub(crate) fn catalog_ids_of(items: &[OrderItemInput]) -> (Vec<Uuid>, Vec<Uuid>)
     for it in items {
         menu.extend(it.menu_item_id);
         options.extend(it.addons.iter().map(|a| a.addon_item_id));
-        for c in &it.bundle_components {
-            menu.push(c.item_id);
-            options.extend(c.addons.iter().map(|a| a.addon_item_id));
-        }
     }
     (menu, options)
 }
@@ -1102,16 +1151,11 @@ pub(crate) fn catalog_ids_of(items: &[OrderItemInput]) -> (Vec<Uuid>, Vec<Uuid>)
 /// business: `is_reward` / `reward_covered` / `price_flagged` come back
 /// zeroed and the caller sets them once it knows the whole cart.
 ///
-/// `order_time` is when the sale happened (a bundle's availability window is
-/// judged against it) — the order's `created_at`, or now for a fire.
 /// `catalog` is shared by every line of an order: loaded in batches, and
 /// whatever a line needs that is not loaded yet is loaded here.
 pub(crate) async fn resolve_order_line_in(
     pool: &PgPool,
     catalog: &mut crate::orders::catalog_view::Catalog,
-    org_id: Uuid,
-    branch_id: Uuid,
-    order_time: chrono::DateTime<Utc>,
     item_input: &OrderItemInput,
     prices: ClientPrices,
 ) -> Result<ResolvedItem, AppError> {
@@ -1122,272 +1166,20 @@ pub(crate) async fn resolve_order_line_in(
     let mut deductions: Vec<InventoryDeduction> = Vec::new();
     let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
     let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
-    let mut bundle_components = Vec::new();
 
-    let mut component_surcharge: i32 = 0;
     // Note: `unit_price` returned here is the EXPECTED (catalog + branch override)
     // price; the client's charged price is overlaid after this block.
-    // `expected_addon_per_unit` is the catalog addon total per single item unit
-    // (0 for bundles, whose surcharge is computed separately); `branch_disabled`
-    // is true when this branch has the item turned off (flagged, not rejected).
+    // `expected_addon_per_unit` is the catalog addon total per single item unit;
+    // `branch_disabled` is true when this branch has the item turned off
+    // (flagged, not rejected).
     let (
         resolved_menu_item_id,
         item_name,
         name_translations,
         unit_price,
-        bundle_id,
-        bundle_unit_price,
         expected_addon_per_unit,
         branch_disabled,
-    ) = if let Some(b_id) = item_input.bundle_id {
-        // ── 1. Resolve Bundle ─────────────────────────────
-        let bundle: (Uuid, String, i32, String) = sqlx::query_as(
-            "SELECT id, name, price, status::text FROM bundles WHERE id = $1 AND org_id = $2",
-        )
-        .bind(b_id)
-        .bind(org_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound(format!("Bundle {} not found", b_id)))?;
-
-        if bundle.3 != "active" {
-            return Err(AppError::BadRequest(format!(
-                "Bundle {} is not active",
-                bundle.1
-            )));
-        }
-
-        // Branch availability
-        let available_in_branch: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
-                SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1 AND branch_id = $2
-             ) OR NOT EXISTS(
-                SELECT 1 FROM bundle_branch_availability WHERE bundle_id = $1
-             )",
-        )
-        .bind(bundle.0)
-        .bind(branch_id)
-        .fetch_one(pool)
-        .await?;
-
-        if !available_in_branch {
-            return Err(AppError::BadRequest(format!(
-                "Bundle {} is not available in branch {}",
-                bundle.1, branch_id
-            )));
-        }
-
-        // Date / Time window validation
-        let branch_tz: String = sqlx::query_scalar(
-            "SELECT COALESCE(b.timezone, o.timezone)::text
-             FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
-        )
-        .bind(branch_id)
-        .fetch_one(pool)
-        .await?;
-
-        let local_dt_rows: Option<(chrono::NaiveDate, chrono::NaiveTime)> = sqlx::query_as(
-            "SELECT ($1::timestamptz AT TIME ZONE $2)::date, ($1::timestamptz AT TIME ZONE $2)::time"
-        )
-        .bind(order_time)
-        .bind(&branch_tz)
-        .fetch_optional(pool)
-        .await?;
-
-        if let Some((local_date, local_time)) = local_dt_rows {
-            let bundle_limits: (Option<chrono::NaiveDate>, Option<chrono::NaiveDate>, Option<chrono::NaiveTime>, Option<chrono::NaiveTime>) = sqlx::query_as(
-                "SELECT available_from_date, available_until_date, available_from_time, available_until_time \
-                 FROM bundles WHERE id = $1"
-            )
-            .bind(bundle.0)
-            .fetch_one(pool)
-            .await?;
-
-            if let Some(from_d) = bundle_limits.0
-                && local_date < from_d
-            {
-                return Err(AppError::BadRequest(format!(
-                    "Bundle {} is not yet available",
-                    bundle.1
-                )));
-            }
-            if let Some(until_d) = bundle_limits.1
-                && local_date > until_d
-            {
-                return Err(AppError::BadRequest(format!(
-                    "Bundle {} availability has expired",
-                    bundle.1
-                )));
-            }
-            if let Some(from_t) = bundle_limits.2
-                && local_time < from_t
-            {
-                return Err(AppError::BadRequest(format!(
-                    "Bundle {} is not available at this hour",
-                    bundle.1
-                )));
-            }
-            if let Some(until_t) = bundle_limits.3
-                && local_time > until_t
-            {
-                return Err(AppError::BadRequest(format!(
-                    "Bundle {} is not available at this hour",
-                    bundle.1
-                )));
-            }
-        }
-
-        // Resolve components (client snapshot or catalog defaults)
-        let components: Vec<(Uuid, i32, String, serde_json::Value)> = sqlx::query_as(
-            "SELECT bc.item_id, bc.quantity, mi.name, mi.name_translations \
-             FROM bundle_components bc \
-             JOIN menu_items mi ON mi.id = bc.item_id \
-             WHERE bc.bundle_id = $1 \
-             ORDER BY bc.position ASC",
-        )
-        .bind(bundle.0)
-        .fetch_all(pool)
-        .await?;
-
-        if components.is_empty() {
-            return Err(AppError::BadRequest(format!(
-                "Bundle {} has no components",
-                bundle.1
-            )));
-        }
-
-        let catalog_map: std::collections::HashMap<Uuid, (i32, String, serde_json::Value)> =
-            components
-                .iter()
-                .map(|(id, qty, name, tr)| (*id, (*qty, name.clone(), tr.clone())))
-                .collect();
-
-        let component_inputs: Vec<crate::orders::component_resolve::BundleComponentInput> =
-            if item_input.bundle_components.is_empty() {
-                components
-                    .iter()
-                    .map(
-                        |(id, qty, _, _)| crate::orders::component_resolve::BundleComponentInput {
-                            item_id: *id,
-                            quantity: *qty,
-                            size_label: None,
-                            addons: vec![],
-                            optional_field_ids: vec![],
-                        },
-                    )
-                    .collect()
-            } else {
-                item_input.bundle_components.clone()
-            };
-
-        {
-            let comp_items: Vec<Uuid> = component_inputs.iter().map(|c| c.item_id).collect();
-            let comp_options: Vec<Uuid> = component_inputs
-                .iter()
-                .flat_map(|c| c.addons.iter().map(|a| a.addon_item_id))
-                .collect();
-            catalog.ensure_on(pool, &comp_items, &comp_options).await?;
-        }
-        for comp_in in component_inputs {
-            let Some((catalog_qty, item_name, name_translations)) =
-                catalog_map.get(&comp_in.item_id)
-            else {
-                return Err(AppError::BadRequest(format!(
-                    "Item {} is not a component of bundle {}",
-                    comp_in.item_id, bundle.1
-                )));
-            };
-            if comp_in.quantity != *catalog_qty {
-                return Err(AppError::BadRequest(format!(
-                    "Invalid quantity for component {} in bundle {}",
-                    item_name, bundle.1
-                )));
-            }
-
-            let line_qty = comp_in.quantity * item_input.quantity;
-            let config = crate::orders::component_resolve::resolve_loaded(
-                catalog,
-                comp_in.item_id,
-                comp_in.size_label.clone(),
-                line_qty,
-                &comp_in.addons,
-                &comp_in.optional_field_ids,
-            )?;
-
-            // Per component unit, per bundle: madar-shared's rule (M3), the till's too.
-            component_surcharge += madar_money::line::component_surcharge(
-                i64::from(config.addon_line + config.optional_line),
-                i64::from(comp_in.quantity),
-                i64::from(item_input.quantity),
-            ) as i32;
-
-            for d in config.deductions {
-                deductions.push(InventoryDeduction {
-                    org_ingredient_id: d.org_ingredient_id,
-                    ingredient_name: d.ingredient_name,
-                    unit: d.unit,
-                    quantity: d.quantity,
-                    source: format!("bundle_component:{}", item_name),
-                    category: d.category,
-                    addon_item_id: d.addon_item_id,
-                    optional_field_id: d.optional_field_id,
-                    component_item_id: Some(comp_in.item_id),
-                    cost_per_unit: None,
-                    line_cost: None,
-                });
-            }
-
-            let comp_addons: Vec<ResolvedAddon> = config
-                .addons
-                .into_iter()
-                .map(|a| ResolvedAddon {
-                    addon_item_id: a.addon_item_id,
-                    addon_name: a.addon_name,
-                    name_translations: a.name_translations,
-                    unit_price: a.unit_price,
-                    quantity: a.quantity,
-                    has_ingredients: true, // component-level costing rolls up via deductions
-                    is_swap: false,
-                })
-                .collect();
-
-            let comp_optionals: Vec<ResolvedOptional> = config
-                .optionals
-                .into_iter()
-                .map(|o| ResolvedOptional {
-                    optional_field_id: o.optional_field_id,
-                    field_name: o.field_name,
-                    name_translations: o.name_translations,
-                    price: o.price,
-                    org_ingredient_id: o.org_ingredient_id,
-                    ingredient_name: o.ingredient_name,
-                    ingredient_unit: o.ingredient_unit,
-                    quantity_used: o.quantity_used,
-                })
-                .collect();
-
-            bundle_components.push(ResolvedBundleComponent {
-                item_id: comp_in.item_id,
-                item_name: item_name.clone(),
-                name_translations: name_translations.clone(),
-                quantity: comp_in.quantity,
-                size_label: comp_in.size_label.clone(),
-                addons: comp_addons,
-                optionals: comp_optionals,
-            });
-        }
-
-        (
-            None,
-            bundle.1,
-            serde_json::json!({}),
-            bundle.2,
-            Some(bundle.0),
-            Some(bundle.2),
-            0,
-            false,
-        )
-    } else if let Some(m_item_id) = item_input.menu_item_id {
+    ) = if let Some(m_item_id) = item_input.menu_item_id {
         // ── 2. Resolve Menu Item ──────────────────────────
         // Pull the branch override alongside the catalog row: the branch layer can
         // replace the price (price_override, piastres) and/or disable the item at
@@ -1399,9 +1191,9 @@ pub(crate) async fn resolve_order_line_in(
             catalog_unit_price_loaded(catalog, m_item_id, item_input.size_label.as_deref())?;
 
         // Resolve recipe + addons (incl. milk/coffee swaps) + optionals via the
-        // SHARED resolver that bundle components also use, so the deduction +
-        // swap rules live in exactly one place. Map its output into the
-        // order-line structs (which additionally carry cost fields).
+        // shared resolver, so the deduction + swap rules live in exactly one
+        // place. Map its output into the order-line structs (which additionally
+        // carry cost fields).
         let config = crate::orders::component_resolve::resolve_loaded(
             catalog,
             m_item_id,
@@ -1420,7 +1212,6 @@ pub(crate) async fn resolve_order_line_in(
                 category: d.category,
                 addon_item_id: d.addon_item_id,
                 optional_field_id: d.optional_field_id,
-                component_item_id: None,
                 cost_per_unit: None,
                 line_cost: None,
             });
@@ -1488,14 +1279,12 @@ pub(crate) async fn resolve_order_line_in(
             item_name,
             name_translations,
             unit_price,
-            None,
-            None,
             expected_addon_per_unit,
             branch_disabled,
         )
     } else {
         return Err(AppError::BadRequest(
-            "Each line item must have either menu_item_id or bundle_id".into(),
+            "Each line item must have a menu_item_id".into(),
         ));
     };
 
@@ -1530,11 +1319,9 @@ pub(crate) async fn resolve_order_line_in(
         addons: resolved_addons,
         optionals: resolved_optionals,
         deductions,
-        bundle_id,
-        bundle_unit_price,
-        bundle_components,
-        component_surcharge,
         staff: None,
+        combo: Default::default(),
+        deal_minor: 0,
     })
 }
 
@@ -1841,6 +1628,9 @@ pub(crate) struct SettledTicket {
     pub service_waived_by: Option<Uuid>,
     /// When they did (the till's clock on a replay).
     pub service_waived_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The bill was opened from the table's QR code: the best deals apply
+    /// by themselves at the settle, as the customer's page showed (§11.2).
+    pub qr_deals: bool,
 }
 
 /// The floor-side of a settle, done in the ORDER's transaction and reported
@@ -1888,6 +1678,7 @@ pub(crate) async fn create_order_inner(
         let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
         return Ok(HttpResponse::Ok().json(OrderFull {
             loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?,
+            deals: deals_of(pool.get_ref(), existing.id).await?,
             order: existing,
             items,
             warnings: Vec::new(),
@@ -2087,6 +1878,65 @@ pub(crate) async fn create_order_inner(
         .and_then(|t| t.service_waived_by.map(|by| (by, t.service_waived_at)));
     let policy = branch_policy.for_sale(channel, service_waiver.is_some());
 
+    // ── Combos and deals ────────────────────────────────────────────────────
+    // What the order's combo lines (and, when deals are applied, its plain
+    // lines) are resolved against. `None` for a sale with neither: one query.
+    let combo_ctx = crate::combos::order_line::load_ctx(
+        pool.get_ref(),
+        org_id,
+        body.branch_id,
+        &body.items,
+        body.created_at.unwrap_or_else(Utc::now),
+        !body.deals.is_empty() || ticket.as_ref().is_some_and(|t| t.qr_deals),
+    )
+    .await?;
+    // Flags the combo and deal lines raise, written after the commit.
+    let mut combo_flags: Vec<String> = Vec::new();
+    if let Some(ctx) = &combo_ctx {
+        // C15: a staff drink is never part of a combo. Live, said; on replay
+        // the comp is stripped and the line rung as paid.
+        for (i, it) in body.items.iter_mut().enumerate() {
+            if ctx.is_combo(it.menu_item_id) && it.staff_drink.is_some() {
+                if !actor.replay {
+                    return Err(crate::combos::codes::refuse(
+                        "STAFF_DRINK_IN_COMBO",
+                        serde_json::json!({"line_index": i}),
+                    ));
+                }
+                it.staff_drink = None;
+                combo_flags.push("orders.staff_drink.record:item_not_eligible".into());
+            }
+        }
+        // C7: no reward inside a combo. Live, said; on replay the reward is
+        // dropped (the line stays paid) and flagged.
+        let in_combo = |r: &LoyaltyRedemptionInput| {
+            r.item_index
+                .and_then(|i| body.items.get(i))
+                .is_some_and(|it| ctx.is_combo(it.menu_item_id))
+        };
+        if body.loyalty_redemptions.iter().any(in_combo) {
+            if !actor.replay {
+                let idx = body
+                    .loyalty_redemptions
+                    .iter()
+                    .find(|r| in_combo(r))
+                    .and_then(|r| r.item_index);
+                return Err(crate::combos::codes::refuse(
+                    "REWARD_IN_COMBO",
+                    serde_json::json!({"line_index": idx}),
+                ));
+            }
+            let kept: Vec<LoyaltyRedemptionInput> = body
+                .loyalty_redemptions
+                .iter()
+                .filter(|r| !in_combo(r))
+                .cloned()
+                .collect();
+            body.loyalty_redemptions = kept;
+            combo_flags.push("loyalty.redeem:in_combo".into());
+        }
+    }
+
     // ── Loyalty redemptions ─────────────────────────────────────────────────
     // Resolved BEFORE pricing: a reward changes what is owed, so a redemption
     // that cannot be honoured must fail the sale outright rather than leave a
@@ -2157,17 +2007,54 @@ pub(crate) async fn create_order_inner(
             .ensure_on(pool.get_ref(), &menu_ids, &option_ids)
             .await?;
     }
+    // Which input line each resolved row came from (a combo line gives a
+    // header and its parts), and where each plain line's bill line sits.
+    let mut row_input: Vec<usize> = Vec::new();
+    let mut plain_bill: std::collections::HashMap<usize, usize> = Default::default();
+    let mut plain_row: std::collections::HashMap<usize, usize> = Default::default();
     for (line_index, item_input) in body.items.iter().enumerate() {
-        let mut resolved = resolve_order_line_in(
-            pool.get_ref(),
-            &mut catalog,
-            org_id,
-            body.branch_id,
-            order_time,
-            item_input,
-            prices,
-        )
-        .await?;
+        if let Some(ctx) = combo_ctx
+            .as_ref()
+            .filter(|c| c.is_combo(item_input.menu_item_id))
+        {
+            use crate::combos::order_line as ol;
+            let sale = ol::Sale {
+                channel: madar_catalog::combo::Channel::Pos,
+                prices,
+                // Live at the till: refused. Replay and a ticket's settle
+                // (the bill as fired): recorded and flagged.
+                strict: prices == ClientPrices::Ignore,
+                // A ticket's lines were judged when they were fired.
+                judge_availability: ticket.is_none(),
+            };
+            let mut line = ol::resolve(pool.get_ref(), &mut catalog, ctx, item_input, sale).await?;
+            let (_, expected) = ol::settle_flags(&mut line);
+            combo_flags.append(&mut line.flags);
+            expected_subtotal += expected;
+            row_input.push(line_index);
+            resolved_items.push(line.header);
+            for part in line.parts {
+                let charged = part.charged_subtotal();
+                if charged < 0 {
+                    return Err(AppError::BadRequest(format!(
+                        "Line {} of this order comes to {} — a line can never be less than zero.",
+                        line_index + 1,
+                        charged
+                    )));
+                }
+                bill_lines.push(madar_money::bill::BillLine {
+                    charged: i64::from(charged),
+                    per_unit: i64::from(charged / part.quantity.max(1)),
+                    reward_units: 0,
+                    staff_comp: 0,
+                });
+                row_input.push(line_index);
+                resolved_items.push(part);
+            }
+            continue;
+        }
+        let mut resolved =
+            resolve_order_line_in(pool.get_ref(), &mut catalog, item_input, prices).await?;
         let charged_line_subtotal = resolved.charged_subtotal();
         let expected_line_subtotal = resolved.expected_subtotal();
 
@@ -2229,8 +2116,8 @@ pub(crate) async fn create_order_inner(
                         .collect();
                     (input, resolved.unit_price * resolved.quantity, addon_lines)
                 }
-                // A bundle, which only a replay can bring this far: the
-                // server's verdict is that nothing of it is free.
+                // A line with no menu item (the resolver refuses one, so
+                // this is defensive): nothing of it is free.
                 None => (
                     crate::staff_pool::comp::CompInput {
                         eligible: false,
@@ -2308,7 +2195,92 @@ pub(crate) async fn create_order_inner(
         resolved.staff = staff_line;
 
         expected_subtotal += expected_line_subtotal;
+        if !is_reward_line && resolved.staff.is_none() {
+            plain_bill.insert(line_index, bill_lines.len() - 1);
+            plain_row.insert(line_index, resolved_items.len());
+        }
+        row_input.push(line_index);
         resolved_items.push(resolved);
+    }
+
+    // ── Deals the teller applied (C8) ───────────────────────────────────────
+    // Priced over the plain lines' units, then taken off those lines BEFORE
+    // the bill: tax, service and the order discount see the net.
+    let mut priced_deals: Vec<crate::deals::order::PricedDeal> = Vec::new();
+    let qr_deals = ticket.as_ref().is_some_and(|t| t.qr_deals) && body.deals.is_empty();
+    if (!body.deals.is_empty() || qr_deals)
+        && let Some(ctx) = &combo_ctx
+    {
+        let mut lines: Vec<crate::deals::order::PlainLine> = Vec::new();
+        let mut idx: Vec<usize> = plain_row.keys().copied().collect();
+        idx.sort();
+        for i in idx {
+            let r = &resolved_items[plain_row[&i]];
+            let Some(item) = r.menu_item_id else { continue };
+            lines.push(crate::deals::order::PlainLine {
+                input_index: i,
+                menu_item_id: item,
+                category_id: ctx.category_of(item),
+                size_label: r.size_label.clone(),
+                unit_price: r.unit_price,
+                expected_unit_price: r.expected_unit_price,
+                quantity: r.quantity,
+            });
+        }
+        let (deals, flags) = if qr_deals {
+            // A QR table's bill: the server picks the deals, as the page
+            // quoted them; nobody applies anything.
+            let mut conn = pool.get_ref().acquire().await?;
+            let deals = crate::deals::order::auto(
+                &mut conn,
+                ctx,
+                madar_catalog::combo::Channel::Qr,
+                &lines,
+            )
+            .await?;
+            (deals, Vec::new())
+        } else {
+            let may_apply = crate::authz::require::effective(
+                pool.get_ref(),
+                actor.teller_id,
+                Some(body.branch_id),
+            )
+            .await?
+            .can(crate::authz::Cap::OrdersDealsApply);
+            let mut conn = pool.get_ref().acquire().await?;
+            crate::deals::order::price_applied(
+                &mut conn,
+                ctx,
+                &body.deals,
+                &lines,
+                actor.replay,
+                may_apply,
+            )
+            .await?
+        };
+        combo_flags.extend(flags);
+        for d in &deals {
+            for (i, _, cut, server_cut) in &d.lines {
+                let (Some(&row), Some(&bl)) = (plain_row.get(i), plain_bill.get(i)) else {
+                    continue;
+                };
+                let r = &mut resolved_items[row];
+                r.deal_minor += cut;
+                if cut != server_cut {
+                    r.price_flagged = true;
+                }
+                bill_lines[bl].charged -= i64::from(*cut);
+                expected_subtotal -= server_cut;
+                if bill_lines[bl].charged < 0 {
+                    return Err(AppError::BadRequest(format!(
+                        "The deal {} takes more off line {} than it costs.",
+                        d.name,
+                        i + 1
+                    )));
+                }
+            }
+        }
+        priced_deals = deals;
     }
 
     // The order's discount RULE, read as every bill reads one (madar-shared's
@@ -2894,12 +2866,12 @@ pub(crate) async fn create_order_inner(
             if let Some(key) = body.idempotency_key
                 && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
+                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, deals: deals_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
                 }
             if let Some(order_ref) = &body.order_ref
                 && let Some(existing) = fetch_order_by_order_ref(pool.get_ref(), order_ref, actor.org_id).await? {
                     let items = fetch_order_items_full(pool.get_ref(), existing.id).await?;
-                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
+                    return Ok(HttpResponse::Ok().json(OrderFull { loyalty_redemption_refused: redemption_refused_of(pool.get_ref(), existing.id).await?, deals: deals_of(pool.get_ref(), existing.id).await?, order: existing, items, warnings: Vec::new(), delivery: None }));
                 }
             return Err(AppError::Conflict("Duplicate order".into()));
         }
@@ -3124,8 +3096,12 @@ pub(crate) async fn create_order_inner(
     } else {
         resolved_items
             .iter()
+            // A combo's header is never fired: each part goes to its own
+            // station, tagged with the combo (C12).
+            .filter(|ri| ri.combo.kind != crate::combos::order_line::LineKind::Header)
             .map(|ri| {
                 crate::kitchen::KitchenLine {
+                    combo: ri.combo.tag.clone(),
                     menu_item_id: ri.menu_item_id,
                     name: ri.item_name.clone(),
                     qty: ri.quantity,
@@ -3147,15 +3123,17 @@ pub(crate) async fn create_order_inner(
     let mut staff_flags: Vec<String> = Vec::new();
     let mut staff_day_locked = false;
 
-    for resolved in resolved_items {
+    // The stored row of each input line (a combo line: its header), for the
+    // rewards and the deals that name lines by index.
+    let mut row_of_input: std::collections::HashMap<usize, Uuid> = Default::default();
+    for (row_index, resolved) in resolved_items.into_iter().enumerate() {
+        let input_index = row_input[row_index];
+        let is_header = resolved.combo.kind == crate::combos::order_line::LineKind::Header;
         // The SIZE part of a staff comp comes off the line itself; the part a
         // required pick earned comes off that pick's row below. `unit_price`
         // stays the normal price, so a receipt can show both.
         let staff_base = resolved.staff.as_ref().map_or(0, |l| l.applied_base);
-        let line_total = (resolved.unit_price * resolved.quantity + resolved.component_surcharge
-            - staff_base
-            - resolved.reward_covered)
-            .max(0);
+        let line_total = (resolved.base_line_total() - staff_base - resolved.reward_covered).max(0);
         let snapshot = serde_json::to_value(&resolved.deductions)
             .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()));
 
@@ -3163,26 +3141,34 @@ pub(crate) async fn create_order_inner(
             .addons
             .iter()
             .any(|a| !a.is_swap && !a.has_ingredients);
-        let costs = summarize_line_costs(
-            &resolved.deductions,
-            resolved.quantity,
-            resolved.bundle_id.is_some(),
-            has_uncosted_addon,
-        );
+        let costs = if is_header {
+            // A header costs nothing of its own: its parts carry the cost.
+            crate::orders::cost_math::LineCostSummary {
+                line_cost: Some(0),
+                unit_cost: Some(0),
+                cost_missing: false,
+            }
+        } else {
+            summarize_line_costs(&resolved.deductions, resolved.quantity, has_uncosted_addon)
+        };
 
         let order_item = sqlx::query_as::<_, OrderItem>(
             r#"INSERT INTO order_items
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
-                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
+                 line_cost, unit_cost, cost_missing,
                  price_flagged, is_reward, reward_units, reward_covered,
-                 staff_comp_minor, staff_drink_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                       $20, $21)
+                 staff_comp_minor, staff_drink_id,
+                 id, line_kind, combo_line_id, combo_slot_id, combo_slot_name,
+                 combo_unit_price, combo_share, combo_surcharge, deal_minor)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                       $18, $19, COALESCE($20, gen_random_uuid()), $21, $22, $23, $24, $25, $26, $27, $28)
                RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
-                         bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing,
-                         is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id"#,
+                         line_cost, unit_cost, cost_missing,
+                         is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id,
+                         line_kind, combo_line_id, combo_slot_id, combo_slot_name,
+                         combo_unit_price, combo_share, combo_surcharge, deal_minor"#,
         )
         .bind(order.id)
         .bind(resolved.menu_item_id)
@@ -3194,8 +3180,6 @@ pub(crate) async fn create_order_inner(
         .bind(line_total)
         .bind(&resolved.notes)
         .bind(snapshot)
-        .bind(resolved.bundle_id)
-        .bind(resolved.bundle_unit_price)
         .bind(costs.line_cost)
         .bind(costs.unit_cost)
         .bind(costs.cost_missing)
@@ -3205,8 +3189,18 @@ pub(crate) async fn create_order_inner(
         .bind(resolved.reward_covered)
         .bind(resolved.staff.as_ref().map_or(0, |l| l.applied))
         .bind(resolved.staff.as_ref().map(|l| l.drink.id))
+        .bind(resolved.combo.id)
+        .bind(resolved.combo.kind.as_str())
+        .bind(resolved.combo.header_id)
+        .bind(resolved.combo.slot_id)
+        .bind(&resolved.combo.slot_name)
+        .bind(resolved.combo.unit_price)
+        .bind(resolved.combo.share)
+        .bind(resolved.combo.surcharge)
+        .bind(resolved.deal_minor)
         .fetch_one(&mut *tx)
         .await?;
+        row_of_input.entry(input_index).or_insert(order_item.id);
 
         // The staff drink's own row, in the sale's transaction: the comp and
         // the record of it commit together or not at all.
@@ -3244,86 +3238,6 @@ pub(crate) async fn create_order_inner(
                 ));
             }
             staff_flags.extend(recorded.flags);
-        }
-
-        if let Some(_b_id) = resolved.bundle_id {
-            for comp in &resolved.bundle_components {
-                // Per-component cost: every enriched deduction attributed to
-                // this component. None when any entry is unknown or the
-                // component contributed no deductions (no recipe).
-                let comp_entries: Vec<&InventoryDeduction> = resolved
-                    .deductions
-                    .iter()
-                    .filter(|d| d.component_item_id == Some(comp.item_id))
-                    .collect();
-                let comp_cost: Option<i64> = if comp_entries.is_empty()
-                    || comp_entries.iter().any(|d| d.cost_per_unit.is_none())
-                {
-                    None
-                } else {
-                    let cost: f64 = comp_entries
-                        .iter()
-                        .map(|d| d.cost_per_unit.unwrap() * d.quantity)
-                        .sum();
-                    Some(cost.round() as i64)
-                };
-
-                sqlx::query(
-                    "INSERT INTO order_line_bundle_components \
-                        (order_line_id, item_id, quantity, size_label, name_translations, line_cost) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                )
-                .bind(order_item.id)
-                .bind(comp.item_id)
-                .bind(comp.quantity)
-                .bind(&comp.size_label)
-                .bind(&comp.name_translations)
-                .bind(comp_cost)
-                .execute(&mut *tx)
-                .await?;
-
-                for addon in &comp.addons {
-                    let addon_line =
-                        addon.unit_price * addon.quantity * comp.quantity * resolved.quantity;
-                    sqlx::query(
-                        "INSERT INTO order_line_bundle_component_addons \
-                            (order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
-                             unit_price, quantity, line_total) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                    )
-                    .bind(order_item.id)
-                    .bind(comp.item_id)
-                    .bind(addon.addon_item_id)
-                    .bind(&addon.addon_name)
-                    .bind(&addon.name_translations)
-                    .bind(addon.unit_price)
-                    .bind(addon.quantity)
-                    .bind(addon_line)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-
-                for opt in &comp.optionals {
-                    sqlx::query(
-                        "INSERT INTO order_line_bundle_component_optionals \
-                            (order_line_id, component_item_id, optional_field_id, field_name, name_translations, \
-                             price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted) \
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-                    )
-                    .bind(order_item.id)
-                    .bind(comp.item_id)
-                    .bind(opt.optional_field_id)
-                    .bind(&opt.field_name)
-                    .bind(&opt.name_translations)
-                    .bind(opt.price)
-                    .bind(opt.org_ingredient_id)
-                    .bind(&opt.ingredient_name)
-                    .bind(&opt.ingredient_unit)
-                    .bind(opt.quantity_used)
-                    .execute(&mut *tx)
-                    .await?;
-                }
-            }
         }
 
         // Addons
@@ -3490,7 +3404,19 @@ pub(crate) async fn create_order_inner(
 
     // Record what the rewards spent, inside the order's own transaction: a free
     // coffee and the ledger row that paid for it commit together or not at all.
-    let item_ids: Vec<Uuid> = order_items_full.iter().map(|i| i.item.id).collect();
+    // By input index: a reward names the line the till sent, and a combo
+    // line (never a reward) stored as several rows.
+    let item_ids: Vec<Uuid> = (0..body.items.len())
+        .map(|i| row_of_input.get(&i).copied().unwrap_or_default())
+        .collect();
+    let order_deals = crate::deals::order::insert(
+        &mut tx,
+        actor.org_id,
+        order.id,
+        &priced_deals,
+        &row_of_input,
+    )
+    .await?;
     let redemption_refused = crate::loyalty::redeem::record(
         &mut tx,
         &redemption_plan,
@@ -3534,6 +3460,22 @@ pub(crate) async fn create_order_inner(
     order.payment_legs = legs.0;
 
     tx.commit().await?;
+    // The combo and deal flags (§2.7): replayed or live, the sale stands and
+    // the owner is told what the server would have priced differently.
+    combo_flags.dedup();
+    if !combo_flags.is_empty() {
+        crate::sync::handlers::record_replay_flags(
+            pool.get_ref(),
+            actor.org_id,
+            Some(shift_branch_id),
+            "CreateOrder",
+            actor.teller_id,
+            &combo_flags,
+            created_at,
+            Some(order.id),
+        )
+        .await;
+    }
     // Accept and flag (§4.4.5): the sale is on the books, now the owner is told
     // what about its staff drinks the server would have decided differently.
     if actor.replay && !staff_flags.is_empty() {
@@ -3574,6 +3516,7 @@ pub(crate) async fn create_order_inner(
         warnings,
         delivery: None,
         loyalty_redemption_refused: redemption_refused,
+        deals: order_deals,
     }))
 }
 
@@ -3777,16 +3720,22 @@ pub async fn list_orders(
     if query.include_items.unwrap_or(false) {
         let ids: Vec<Uuid> = data.iter().map(|o| o.id).collect();
         let mut items_map = fetch_orders_items_full_batch(pool.get_ref(), &ids).await?;
+        let mut deals_map = {
+            let mut conn = pool.get_ref().acquire().await?;
+            crate::deals::order::of_orders(&mut conn, &ids).await?
+        };
         let data: Vec<OrderFull> = data
             .into_iter()
             .map(|order| {
                 let items = items_map.remove(&order.id).unwrap_or_default();
+                let deals = deals_map.remove(&order.id).unwrap_or_default();
                 OrderFull {
                     order,
                     items,
                     warnings: Vec::new(),
                     delivery: None,
                     loyalty_redemption_refused: None,
+                    deals,
                 }
             })
             .collect();
@@ -3835,13 +3784,27 @@ pub async fn get_order(
         None => None,
     };
     let loyalty_redemption_refused = redemption_refused_of(pool.get_ref(), order.id).await?;
+    let deals = deals_of(pool.get_ref(), order.id).await?;
     Ok(HttpResponse::Ok().json(OrderFull {
         order,
         items,
         warnings: Vec::new(),
         delivery,
         loyalty_redemption_refused,
+        deals,
     }))
+}
+
+/// The deals applied to one order (`OrderFull.deals`).
+pub(crate) async fn deals_of(
+    pool: &PgPool,
+    order_id: Uuid,
+) -> Result<Vec<crate::deals::types::OrderDeal>, AppError> {
+    let mut conn = pool.acquire().await?;
+    Ok(crate::deals::order::of_orders(&mut conn, &[order_id])
+        .await?
+        .remove(&order_id)
+        .unwrap_or_default())
 }
 
 /// Why a replayed sale's rewards were recorded without points, if they were.
@@ -4459,9 +4422,12 @@ async fn fetch_order_items_full(
     let items = sqlx::query_as::<_, OrderItem>(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
-                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
-                is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id \
-         FROM order_items WHERE order_id = $1 ORDER BY id",
+                line_cost, unit_cost, cost_missing, \
+                is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id, \
+                line_kind, combo_line_id, combo_slot_id, combo_slot_name, \
+                combo_unit_price, combo_share, combo_surcharge, deal_minor \
+         FROM order_items WHERE order_id = $1 \
+         ORDER BY COALESCE(combo_line_id, id), combo_line_id IS NOT NULL, id",
     )
     .bind(order_id)
     .fetch_all(pool)
@@ -4487,66 +4453,11 @@ async fn fetch_order_items_full(
         .fetch_all(pool)
         .await?;
 
-        let bundle_components = if item.bundle_id.is_some() {
-            let comps: Vec<(Uuid, i32, Option<String>, serde_json::Value)> = sqlx::query_as(
-                "SELECT item_id, quantity, size_label, name_translations \
-                 FROM order_line_bundle_components WHERE order_line_id = $1",
-            )
-            .bind(item.id)
-            .fetch_all(pool)
-            .await?;
-
-            let mut out = Vec::new();
-            for (comp_item_id, qty, size_label, name_translations) in comps {
-                let item_name: String =
-                    sqlx::query_scalar("SELECT name FROM menu_items WHERE id = $1")
-                        .bind(comp_item_id)
-                        .fetch_one(pool)
-                        .await?;
-
-                let comp_addons = sqlx::query_as::<_, OrderBundleComponentAddon>(
-                    "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
-                            unit_price, quantity, line_total \
-                     FROM order_line_bundle_component_addons \
-                     WHERE order_line_id = $1 AND component_item_id = $2 \
-                     ORDER BY id",
-                )
-                .bind(item.id)
-                .bind(comp_item_id)
-                .fetch_all(pool)
-                .await?;
-
-                let comp_optionals = sqlx::query_as::<_, OrderBundleComponentOptional>(
-                    "SELECT id, order_line_id, component_item_id, optional_field_id, field_name, name_translations, price \
-                     FROM order_line_bundle_component_optionals \
-                     WHERE order_line_id = $1 AND component_item_id = $2 \
-                     ORDER BY id",
-                )
-                .bind(item.id)
-                .bind(comp_item_id)
-                .fetch_all(pool)
-                .await?;
-
-                out.push(OrderBundleComponentFull {
-                    item_id: comp_item_id,
-                    item_name,
-                    name_translations,
-                    quantity: qty,
-                    size_label,
-                    addons: comp_addons,
-                    optionals: comp_optionals,
-                });
-            }
-            out
-        } else {
-            vec![]
-        };
-
         result.push(OrderItemFull {
             item,
             addons,
             optionals,
-            bundle_components,
+            bundle_components: vec![],
         });
     }
     Ok(result)
@@ -4562,7 +4473,7 @@ async fn fetch_orders_items_full_batch(
     fetch_orders_items_full_batch_on(&mut conn, order_ids).await
 }
 
-/// Every line of `order_ids` with its modifiers and bundle components, on ONE
+/// Every line of `order_ids` with its modifiers, on ONE
 /// connection (the changefeed pull hydrates orders inside its snapshot
 /// transaction and must never take a second pooled connection).
 pub(crate) async fn fetch_orders_items_full_batch_on(
@@ -4579,9 +4490,12 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
     let items = sqlx::query_as::<_, OrderItem>(
         "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
                 unit_price, quantity, line_total, notes, deductions_snapshot, \
-                bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, \
-                is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id \
-         FROM order_items WHERE order_id = ANY($1) ORDER BY id",
+                line_cost, unit_cost, cost_missing, \
+                is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id, \
+                line_kind, combo_line_id, combo_slot_id, combo_slot_name, \
+                combo_unit_price, combo_share, combo_surcharge, deal_minor \
+         FROM order_items WHERE order_id = ANY($1) \
+         ORDER BY COALESCE(combo_line_id, id), combo_line_id IS NOT NULL, id",
     )
     .bind(order_ids)
     .fetch_all(&mut *conn)
@@ -4618,93 +4532,11 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
             .push(o);
     }
 
-    // ── Bundle components (only for bundle lines) ────────────────────────────
-    let bundle_line_ids: Vec<Uuid> = items
-        .iter()
-        .filter(|i| i.bundle_id.is_some())
-        .map(|i| i.id)
-        .collect();
-
-    let mut comps_by_line: HashMap<Uuid, Vec<OrderBundleComponentFull>> = HashMap::new();
-    if !bundle_line_ids.is_empty() {
-        let comp_rows: Vec<(Uuid, Uuid, i32, Option<String>, serde_json::Value)> = sqlx::query_as(
-            "SELECT order_line_id, item_id, quantity, size_label, name_translations \
-                 FROM order_line_bundle_components WHERE order_line_id = ANY($1)",
-        )
-        .bind(&bundle_line_ids)
-        .fetch_all(&mut *conn)
-        .await?;
-
-        let comp_item_ids: Vec<Uuid> = comp_rows.iter().map(|r| r.1).collect();
-        let mut item_names: HashMap<Uuid, String> = HashMap::new();
-        if !comp_item_ids.is_empty() {
-            let name_rows: Vec<(Uuid, String)> =
-                sqlx::query_as("SELECT id, name FROM menu_items WHERE id = ANY($1)")
-                    .bind(&comp_item_ids)
-                    .fetch_all(&mut *conn)
-                    .await?;
-            item_names.extend(name_rows);
-        }
-
-        let mut comp_addons: HashMap<(Uuid, Uuid), Vec<OrderBundleComponentAddon>> = HashMap::new();
-        for a in sqlx::query_as::<_, OrderBundleComponentAddon>(
-            "SELECT id, order_line_id, component_item_id, addon_item_id, addon_name, name_translations, \
-                    unit_price, quantity, line_total \
-             FROM order_line_bundle_component_addons \
-             WHERE order_line_id = ANY($1) ORDER BY id",
-        )
-        .bind(&bundle_line_ids)
-        .fetch_all(&mut *conn)
-        .await?
-        {
-            comp_addons
-                .entry((a.order_line_id, a.component_item_id))
-                .or_default()
-                .push(a);
-        }
-
-        let mut comp_optionals: HashMap<(Uuid, Uuid), Vec<OrderBundleComponentOptional>> =
-            HashMap::new();
-        for o in sqlx::query_as::<_, OrderBundleComponentOptional>(
-            "SELECT id, order_line_id, component_item_id, optional_field_id, field_name, name_translations, price \
-             FROM order_line_bundle_component_optionals \
-             WHERE order_line_id = ANY($1) ORDER BY id",
-        )
-        .bind(&bundle_line_ids)
-        .fetch_all(&mut *conn)
-        .await?
-        {
-            comp_optionals
-                .entry((o.order_line_id, o.component_item_id))
-                .or_default()
-                .push(o);
-        }
-
-        for (line_id, comp_item_id, qty, size_label, name_translations) in comp_rows {
-            comps_by_line
-                .entry(line_id)
-                .or_default()
-                .push(OrderBundleComponentFull {
-                    item_id: comp_item_id,
-                    item_name: item_names.get(&comp_item_id).cloned().unwrap_or_default(),
-                    name_translations,
-                    quantity: qty,
-                    size_label,
-                    addons: comp_addons
-                        .remove(&(line_id, comp_item_id))
-                        .unwrap_or_default(),
-                    optionals: comp_optionals
-                        .remove(&(line_id, comp_item_id))
-                        .unwrap_or_default(),
-                });
-        }
-    }
-
     for item in items {
         let full = OrderItemFull {
             addons: addons_by_item.remove(&item.id).unwrap_or_default(),
             optionals: optionals_by_item.remove(&item.id).unwrap_or_default(),
-            bundle_components: comps_by_line.remove(&item.id).unwrap_or_default(),
+            bundle_components: vec![],
             item,
         };
         by_order.entry(full.item.order_id).or_default().push(full);

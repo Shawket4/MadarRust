@@ -522,6 +522,65 @@ pub(crate) struct StoredTicketLine {
     pub qty: i32,
     pub unit_price: i32,
     pub line_total: i32,
+    /// A combo line (C12): its parts as the kitchen fires them, each to its
+    /// own station, tagged with the combo. `unit_price` is then P and
+    /// `line_total` the combo with its surcharges and add-ons. Absent on a
+    /// plain line (old readers ignore it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo: Option<TicketCombo>,
+}
+
+/// A combo line's kitchen parts, frozen at fire.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct TicketCombo {
+    #[serde(default)]
+    pub name_translations: serde_json::Value,
+    pub parts: Vec<TicketComboPart>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct TicketComboPart {
+    pub menu_item_id: Option<Uuid>,
+    pub name: String,
+    pub slot_name: Option<String>,
+    pub size_label: Option<String>,
+    pub modifiers: Vec<String>,
+    pub qty: i32,
+    pub notes: Option<String>,
+    pub line_total: i32,
+}
+
+/// The kitchen lines of one bill line: itself, or a combo's parts (the
+/// header never fires), each tagged with the combo and the bill line.
+fn to_kitchen_lines(l: &StoredTicketLine, bill_line: Uuid) -> Vec<KitchenLine> {
+    match &l.combo {
+        None => {
+            let mut k = to_kitchen_line(l);
+            k.open_ticket_item_id = Some(bill_line);
+            vec![k]
+        }
+        Some(c) => {
+            let tag = crate::combos::types::KitchenComboTag {
+                line_id: bill_line,
+                name: l.name.clone(),
+                name_translations: c.name_translations.clone(),
+            };
+            c.parts
+                .iter()
+                .map(|p| KitchenLine {
+                    combo: Some(tag.clone()),
+                    menu_item_id: p.menu_item_id,
+                    name: p.name.clone(),
+                    qty: p.qty,
+                    size_label: p.size_label.clone(),
+                    modifiers: p.modifiers.clone(),
+                    notes: p.notes.clone(),
+                    kitchen_item_id: None,
+                    open_ticket_item_id: Some(bill_line),
+                })
+                .collect()
+        }
+    }
 }
 
 fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
@@ -536,6 +595,7 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     KitchenLine {
+        combo: None,
         menu_item_id,
         name: l.name.clone(),
         qty: l.qty,
@@ -551,7 +611,7 @@ fn to_kitchen_line(l: &StoredTicketLine) -> KitchenLine {
 ///
 /// The SAME per-line resolution the till's checkout uses
 /// (`orders::handlers::resolve_order_line_in`), so a line on the bill is priced
-/// with its optionals and bundle surcharges exactly as the settle will charge
+/// with its optionals exactly as the settle will charge
 /// it. Pricing stays client-authoritative — a `unit_price` the client sent is
 /// kept — and the resolved prices are written back into the stored input so
 /// the settle replays THIS bill rather than repricing against a later catalog.
@@ -563,8 +623,10 @@ pub(crate) async fn resolve_ticket_lines(
     branch_id: Uuid,
     items: &[OrderItemInput],
     prices: crate::orders::handlers::ClientPrices,
+    // `Qr` for a guest at a table (a combo off that channel is refused),
+    // `Pos` for a waiter.
+    channel: madar_catalog::combo::Channel,
 ) -> Result<Vec<StoredTicketLine>, AppError> {
-    let fired_at = Utc::now();
     let mut out = Vec::with_capacity(items.len());
     // The round's items and add-ons in one batched load (madar-catalog's view).
     let mut catalog = crate::orders::catalog_view::Catalog::new(Some(branch_id));
@@ -572,7 +634,55 @@ pub(crate) async fn resolve_ticket_lines(
         let (menu_ids, option_ids) = crate::orders::handlers::catalog_ids_of(items);
         catalog.ensure_on(pool, &menu_ids, &option_ids).await?;
     }
+    let combo_ctx =
+        crate::combos::order_line::load_ctx(pool, org_id, branch_id, items, Utc::now(), false)
+            .await?;
     for it in items {
+        if let Some(ctx) = combo_ctx.as_ref().filter(|c| c.is_combo(it.menu_item_id)) {
+            use crate::combos::order_line as ol;
+            if it.staff_drink.is_some() && prices == crate::orders::handlers::ClientPrices::Ignore {
+                return Err(crate::combos::codes::refuse(
+                    "STAFF_DRINK_IN_COMBO",
+                    serde_json::json!({}),
+                ));
+            }
+            let sale = ol::Sale {
+                channel,
+                prices,
+                strict: prices == crate::orders::handlers::ClientPrices::Ignore,
+                judge_availability: true,
+            };
+            let mut line = ol::resolve(pool, &mut catalog, ctx, it, sale).await?;
+            let (charged, _) = ol::settle_flags(&mut line);
+            let parts = line
+                .parts
+                .iter()
+                .map(|p| TicketComboPart {
+                    menu_item_id: p.menu_item_id,
+                    name: p.item_name.clone(),
+                    slot_name: p.combo.slot_name.clone(),
+                    size_label: p.size_label.clone(),
+                    modifiers: p.kitchen_modifiers(),
+                    qty: p.quantity,
+                    notes: p.notes.clone(),
+                    line_total: p.charged_subtotal(),
+                })
+                .collect();
+            out.push(StoredTicketLine {
+                input: serde_json::to_value(&line.frozen).unwrap_or(serde_json::Value::Null),
+                name: line.header.item_name.clone(),
+                size_label: None,
+                modifiers: Vec::new(),
+                qty: it.quantity,
+                unit_price: line.header.combo.unit_price.unwrap_or(0),
+                line_total: charged,
+                combo: Some(TicketCombo {
+                    name_translations: line.header.name_translations.clone(),
+                    parts,
+                }),
+            });
+            continue;
+        }
         // A STAFF DRINK IS A COUNTER SALE. A table's bill is priced when each
         // round is fired and settled hours later, under a frozen policy; the
         // pool is counted per business day at the moment of sale. The two
@@ -586,22 +696,17 @@ pub(crate) async fn resolve_ticket_lines(
                 reason: "A staff drink is rung at the till, not on a table's bill".into(),
             });
         }
-        let resolved =
-            resolve_order_line_in(pool, &mut catalog, org_id, branch_id, fired_at, it, prices)
-                .await?;
+        let resolved = resolve_order_line_in(pool, &mut catalog, it, prices).await?;
 
         let mut frozen = it.clone();
         if frozen.staff_drink.take().is_some() {
             tracing::warn!(%branch_id, "a replayed ticket line named the staff pool; rung as a paid line");
         }
         frozen.unit_price = Some(resolved.unit_price);
-        // Bundle-component addons are server-priced through the surcharge and
-        // the resolver ignores a client price for them; a plain item's addons
-        // are overlaid one-to-one in input order, which is how they resolve.
-        if frozen.bundle_id.is_none() {
-            for (a, r) in frozen.addons.iter_mut().zip(resolved.addons.iter()) {
-                a.unit_price = Some(r.unit_price);
-            }
+        // The addons are overlaid one-to-one in input order, which is how
+        // they resolve.
+        for (a, r) in frozen.addons.iter_mut().zip(resolved.addons.iter()) {
+            a.unit_price = Some(r.unit_price);
         }
 
         out.push(StoredTicketLine {
@@ -612,6 +717,7 @@ pub(crate) async fn resolve_ticket_lines(
             qty: it.quantity,
             unit_price: resolved.unit_price,
             line_total: resolved.charged_subtotal(),
+            combo: None,
         });
     }
     Ok(out)
@@ -693,14 +799,14 @@ pub(crate) async fn fire_round(
     // projection + a later bump reconcile on sync). No key (a non-client fire) → the
     // server generates ids as before.
     let kitchen_ticket_id = round_idem.map(crate::kitchen::derive_kitchen_ticket_id);
-    let mut klines: Vec<KitchenLine> = lines.iter().map(to_kitchen_line).collect();
-    // Same order, same loop, same list — the nth kitchen line IS the nth bill
-    // line here. It stops being true inside `emit_kitchen_ticket`, which drops
-    // unrouted lines in `kds` mode, which is why the link is carried on the row
-    // rather than recomputed from a position later.
-    for (kl, id) in klines.iter_mut().zip(bill_line_ids.iter()) {
-        kl.open_ticket_item_id = Some(*id);
-    }
+    // Each bill line's kitchen lines (a combo's parts), linked to the bill
+    // line on the row rather than by a position: `emit_kitchen_ticket` drops
+    // unrouted lines in `kds` mode, and a combo fires several.
+    let mut klines: Vec<KitchenLine> = lines
+        .iter()
+        .zip(bill_line_ids.iter())
+        .flat_map(|(l, id)| to_kitchen_lines(l, *id))
+        .collect();
     if let Some(kt) = kitchen_ticket_id {
         for (i, kl) in klines.iter_mut().enumerate() {
             kl.kitchen_item_id = Some(crate::kitchen::derive_kitchen_item_id(kt, i));

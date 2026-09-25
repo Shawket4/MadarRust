@@ -9,10 +9,10 @@ use uuid::Uuid;
 use madar_rust::auth::jwt::JwtSecret;
 use madar_rust::models::UserRole;
 use madar_rust::reports::handlers::{
-    AddonSalesRow, BranchComparison, BranchSalesReport, BranchStockReport, BundleSalesRow,
-    CategorySales, CombinedItemSalesRow, ConsumptionRow, DeductionLogRow, InventoryValuationReport,
-    ItemSales, LowStockRow, OrgComparisonReport, PeakHourPoint, ShiftSummary, ShrinkageRow,
-    StockRow, TellerStats, TimeseriesPoint, WaiterStatsReport, WasteReportRow,
+    AddonSalesRow, BranchComparison, BranchSalesReport, BranchStockReport, CategorySales,
+    CombinedItemSalesRow, ConsumptionRow, DeductionLogRow, InventoryValuationReport, ItemSales,
+    LowStockRow, OrgComparisonReport, PeakHourPoint, ShiftSummary, ShrinkageRow, StockRow,
+    TellerStats, TimeseriesPoint, WaiterStatsReport, WasteReportRow,
 };
 use madar_rust::reports::handlers::{
     ChannelBreakdownRow, MaterialCostTrendRow, PeakDayPoint, PoLeadTimeReport, SupplierSpendRow,
@@ -739,47 +739,6 @@ async fn test_branch_addon_sales(pool: PgPool) {
 }
 
 #[sqlx::test]
-async fn test_branch_bundle_sales(pool: PgPool) {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(pool.clone()))
-            .app_data(web::Data::new(get_secret()))
-            .configure(|cfg| routes::configure(cfg, web::Data::new(pool.clone()))),
-    )
-    .await;
-
-    let org_id = seed_org(&pool).await;
-    let branch_id = seed_branch(&pool, org_id).await;
-    let user_id = seed_user(&pool, org_id, "org_admin").await;
-    let token = generate_org_admin_token(user_id, org_id);
-    let shift_id = seed_shift(&pool, branch_id, user_id).await;
-
-    grant_permission(&pool, "org_admin", "orders", "read").await;
-
-    let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
-
-    let bundle_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO bundles (id, org_id, name, description, price) VALUES ($1, $2, 'Lunch Deal', 'x', 400)")
-        .bind(bundle_id).bind(org_id).execute(&pool).await.unwrap();
-
-    sqlx::query("INSERT INTO order_items (id, order_id, bundle_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, $3, 'Lunch Deal', 1, 400, 400)")
-        .bind(Uuid::new_v4()).bind(order_id).bind(bundle_id).execute(&pool).await.unwrap();
-
-    let req = test::TestRequest::get()
-        .uri(&format!("/reports/branches/{}/bundles", branch_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert!(resp.status().is_success());
-
-    let bundles: Vec<BundleSalesRow> = test::read_body_json(resp).await;
-    assert_eq!(bundles.len(), 1);
-    assert_eq!(bundles[0].bundle_name, "Lunch Deal");
-    assert_eq!(bundles[0].quantity_sold, 1);
-    assert_eq!(bundles[0].revenue, 400);
-}
-
-#[sqlx::test]
 async fn test_branch_combined_item_sales(pool: PgPool) {
     let app = test::init_service(
         App::new()
@@ -814,22 +773,11 @@ async fn test_branch_combined_item_sales(pool: PgPool) {
     sqlx::query("INSERT INTO menu_item_price_epochs (id, menu_item_id, price, effective_from) VALUES ($1, $2, 500, now())")
         .bind(Uuid::new_v4()).bind(recipe_id).execute(&pool).await.unwrap();
 
-    let bundle_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO bundles (id, org_id, name, description, price) VALUES ($1, $2, 'Lunch Deal', 'x', 400)")
-        .bind(bundle_id).bind(org_id).execute(&pool).await.unwrap();
-
-    sqlx::query("INSERT INTO bundle_price_epochs (id, bundle_id, price, effective_from) VALUES ($1, $2, 400, now())")
-        .bind(Uuid::new_v4()).bind(bundle_id).execute(&pool).await.unwrap();
-
     sqlx::query("INSERT INTO order_items (id, order_id, menu_item_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, $3, 'Burger', 2, 500, 1000)")
         .bind(Uuid::new_v4()).bind(order_id).bind(recipe_id).execute(&pool).await.unwrap();
 
-    let order_item_bundle_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO order_items (id, order_id, bundle_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, $3, 'Lunch Deal', 1, 400, 400)")
-        .bind(order_item_bundle_id).bind(order_id).bind(bundle_id).execute(&pool).await.unwrap();
-
-    sqlx::query("INSERT INTO order_line_bundle_components (order_line_id, item_id, quantity) VALUES ($1, $2, 1)")
-        .bind(order_item_bundle_id).bind(recipe_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO order_items (id, order_id, menu_item_id, item_name, quantity, unit_price, line_total) VALUES ($1, $2, $3, 'Burger', 1, 500, 500)")
+        .bind(Uuid::new_v4()).bind(order_id).bind(recipe_id).execute(&pool).await.unwrap();
 
     let req = test::TestRequest::get()
         .uri(&format!("/reports/branches/{}/items-combined", branch_id))
@@ -842,8 +790,9 @@ async fn test_branch_combined_item_sales(pool: PgPool) {
     assert_eq!(combined.len(), 1);
 
     let recipe_sale = combined.iter().find(|c| c.item_name == "Burger").unwrap();
-    assert_eq!(recipe_sale.standalone_qty, 2);
-    assert_eq!(recipe_sale.bundle_qty, 1);
+    assert_eq!(recipe_sale.item_id, recipe_id);
+    // Combos are gone: every unit sold is a standalone unit.
+    assert_eq!(recipe_sale.standalone_qty, 3);
     assert_eq!(recipe_sale.total_qty, 3);
 }
 // ──────────────────────────────────────────────────────────────
@@ -1791,10 +1740,6 @@ fn status_predicates_are_unified() {
         (
             "insights/handlers.rs",
             include_str!("../src/insights/handlers.rs"),
-        ),
-        (
-            "bundles/handlers.rs",
-            include_str!("../src/bundles/handlers.rs"),
         ),
         (
             "integrations/handlers.rs",

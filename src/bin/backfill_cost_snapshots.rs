@@ -31,8 +31,8 @@ OPTIONS:
     --branch <uuid>   Reprice this branch only
     --dry-run         Compute and print the summary, then roll back
 
-This REWRITES financial history (order_items.unit_cost/line_cost, addon,
-optional, and bundle-component costs) as if each line were ordered TODAY:
+This REWRITES financial history (order_items.unit_cost/line_cost, addon
+and optional costs) as if each line were ordered TODAY:
 current recipes and addon ingredients at current catalog costs. Lines whose
 item/addon cannot be costed today become cost_missing. Run --dry-run first.";
 
@@ -131,10 +131,6 @@ async fn main() -> ExitCode {
     println!(
         "Optional rows updated:    {}",
         summary.optional_rows_updated
-    );
-    println!(
-        "Bundle components updated:{}",
-        summary.bundle_component_rows_updated
     );
     println!(
         "Σ line_cost:              {} -> {}",

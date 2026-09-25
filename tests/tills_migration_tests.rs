@@ -199,6 +199,19 @@ async fn migrate_rest(pool: &PgPool) {
     subset(|_| true).run(pool).await.expect("rework migrations");
 }
 
+/// 20261004120000_remove_combos drops the `bundles` table, and the rework's
+/// changefeed migration (20260914090300) names its row type. Once it has run,
+/// the rework can be taken down but not brought up again, so the down → up
+/// round trip is proved on the schema the down script was written for.
+const REMOVE_COMBOS: i64 = 20261004120000;
+
+async fn migrate_rest_before_combos_removal(pool: &PgPool) {
+    subset(|v| v < REMOVE_COMBOS)
+        .run(pool)
+        .await
+        .expect("rework migrations");
+}
+
 /// Old schema + fixture + rework migrations.
 async fn setup(pool: &PgPool) {
     migrate_pre(pool).await;
@@ -486,6 +499,33 @@ async fn schema_has_no_stray_shift_identifiers(pool: PgPool) {
     assert!(stray.is_empty(), "stray shift identifiers: {stray:?}");
 }
 
+/// Combos were removed (20261004120000_remove_combos): no table, column,
+/// constraint, trigger, function, type or policy of theirs is left. The asset
+/// pipeline's own "bundles" (base tarballs: `asset_bundles`,
+/// `asset_bundle_dirty`, `asset_mark_org_dirty`) are a different thing, and
+/// `sync_types()` still lists the wire type `bundle` that old tills ask for.
+#[sqlx::test(migrations = false)]
+async fn schema_has_no_combo_identifiers(pool: PgPool) {
+    let (pool, _fresh) = fresh(&pool).await;
+    setup(&pool).await;
+    let stray = lines(&pool, r"
+        SELECT k || ':' || name FROM (
+          SELECT 'rel' k, relname::text name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE nspname = 'public' AND relname ~ 'bundle'
+          UNION ALL SELECT 'col', c.relname || '.' || a.attname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE nspname = 'public' AND a.attnum > 0 AND NOT a.attisdropped AND a.attname ~ 'bundle'
+          UNION ALL SELECT 'con', conname::text FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE nspname = 'public' AND conname ~ 'bundle'
+          UNION ALL SELECT 'trg', tgname::text FROM pg_trigger WHERE tgname ~ 'bundle'
+          UNION ALL SELECT 'fn', proname::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                     WHERE nspname = 'public' AND (proname ~ 'bundle' OR regexp_replace(p.prosrc, 'asset_bundle\w*', '', 'g') ~ 'bundles|bundle_')
+          UNION ALL SELECT 'type', typname::text FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE nspname = 'public' AND typname ~ 'bundle'
+          UNION ALL SELECT 'policy', tablename || '.' || policyname FROM pg_policies WHERE schemaname = 'public' AND tablename ~ 'bundle'
+          UNION ALL SELECT 'view', viewname::text FROM pg_views WHERE schemaname = 'public' AND definition ~ 'bundle'
+        ) x
+        WHERE name !~ 'asset_bundle' AND name <> 'asset_mark_org_dirty'
+        ORDER BY 1").await;
+    assert!(stray.is_empty(), "combo identifiers left: {stray:?}");
+}
+
 #[sqlx::test(migrations = false)]
 async fn two_open_tills_same_teller_allowed(pool: PgPool) {
     let (pool, _fresh) = fresh(&pool).await;
@@ -701,7 +741,7 @@ async fn down_script_round_trip(pool: PgPool) {
     .await;
     let bindings_before = lines(&pool, "SELECT id::text || till_id FROM shifts ORDER BY id").await;
     let occ_before = lines(&pool, "SELECT id::text || coalesce(started_till_id::text,'-') || coalesce(ended_till_id::text,'-') FROM table_occupancies ORDER BY id").await;
-    migrate_rest(&pool).await;
+    migrate_rest_before_combos_removal(&pool).await;
 
     // psql meta-commands are not SQL; the script is otherwise plain.
     let down: String = DOWN_SQL
@@ -754,7 +794,7 @@ async fn down_script_round_trip(pool: PgPool) {
     );
 
     // up → down → up
-    migrate_rest(&pool).await;
+    migrate_rest_before_combos_removal(&pool).await;
     assert_eq!(lines(&pool, PER_TILL_NEW).await, before);
     let applied: Vec<i64> = sqlx::query_scalar(
         "SELECT version FROM _sqlx_migrations WHERE version BETWEEN 20260914090000 AND 20260915090000 AND version NOT IN (20260914090700, 20260914090800) ORDER BY version",
@@ -1123,6 +1163,7 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
         include_str!("../migrations/20260921020000_till_spot_views.sql"),
         include_str!("../migrations/20260922030000_staff_drinks_pool.sql"),
         include_str!("../migrations/20260925030000_customers_shared_key.sql"),
+        include_str!("../migrations/20261005100000_combos.sql"),
     ]
     .iter()
     .flat_map(|sql| {
@@ -1141,6 +1182,36 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
     })
     .collect();
     assert!(header.len() > 40, "header parsed: {header:?}");
+    // Source tables a later migration dropped (its `-- SOURCE TABLES REMOVED`
+    // block): the combos tables (20261004120000_remove_combos).
+    let removed: Vec<String> = [include_str!(
+        "../migrations/20261004120000_remove_combos.sql"
+    )]
+    .iter()
+    .flat_map(|sql| {
+        sql.lines()
+            .skip_while(|l| !l.starts_with("-- SOURCE TABLES REMOVED"))
+            .skip(2)
+            .take_while(|l| l.contains("->"))
+            .map(|l| {
+                l.trim_start_matches("--")
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    })
+    .collect();
+    assert_eq!(
+        removed,
+        ["bundles", "bundle_components", "bundle_branch_availability"],
+        "removed-tables block parsed"
+    );
+    let header: Vec<String> = header
+        .into_iter()
+        .filter(|t| !removed.contains(t))
+        .collect();
     let mut registry = lines(
         &pool,
         "SELECT source_table FROM sync_source_tables() ORDER BY 1",

@@ -25,9 +25,7 @@
 //!   but not delivered, so the frozen plan is deducted from stock and logged as a
 //!   `waste` movement.
 //!
-//! Bundles are intentionally not supported in delivery carts yet (the public
-//! page only offers à-la-carte items); intake rejects bundle lines. Money is
-//! integer piastres throughout.
+//! Money is integer piastres throughout.
 
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::ToPrimitive;
@@ -55,6 +53,9 @@ pub struct CartLineInput {
     pub optional_field_ids: Vec<Uuid>,
     #[serde(default)]
     pub notes: Option<String>,
+    /// A combo line's picks (§3.1); the server prices every part. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combo: Option<crate::combos::types::ComboInput>,
 }
 
 // ── Frozen snapshot shapes (serialised into delivery_orders.cart) ──
@@ -100,12 +101,85 @@ pub struct SnapshotLine {
     pub line_cost: Option<i64>,
     pub unit_cost: Option<i64>,
     pub cost_missing: bool,
+    /// Combos (additive; absent on a snapshot frozen before them): `item`, a
+    /// combo's `combo` header (no money) or one of its `combo_part`s. The
+    /// header comes first, then its parts in slot order.
+    #[serde(default = "crate::combos::types::item_kind")]
+    pub line_kind: String,
+    /// The row id the order line takes at finalize (a header's parts point
+    /// at it). `None` on a plain line: the database mints one.
+    #[serde(default)]
+    pub id: Option<Uuid>,
+    #[serde(default)]
+    pub combo_line_id: Option<Uuid>,
+    #[serde(default)]
+    pub combo_slot_id: Option<Uuid>,
+    #[serde(default)]
+    pub combo_slot_name: Option<String>,
+    /// A header: P per combo unit.
+    #[serde(default)]
+    pub combo_unit_price: Option<i32>,
+    /// A part: its share of P and its surcharges, whole line (its
+    /// `line_total` is their sum; its add-ons and optionals are extra).
+    #[serde(default)]
+    pub combo_share: i32,
+    #[serde(default)]
+    pub combo_surcharge: i32,
+    /// A plain line: what an applied deal took off `line_total`.
+    #[serde(default)]
+    pub deal_minor: i32,
+    /// A part: the kitchen's combo tag (C12).
+    #[serde(default)]
+    pub combo: Option<crate::combos::types::KitchenComboTag>,
+}
+
+impl SnapshotLine {
+    /// What the line adds to the subtotal: a part's add-ons and optionals are
+    /// on top of its `line_total`; every other line's `line_total` already
+    /// holds them.
+    pub fn charged(&self) -> i32 {
+        if self.line_kind == "combo_part" {
+            let extras: i32 = self
+                .addons
+                .iter()
+                .map(|a| a.unit_price * a.quantity)
+                .sum::<i32>()
+                + self.optionals.iter().map(|o| o.price).sum::<i32>();
+            self.line_total + extras * self.quantity
+        } else {
+            self.line_total
+        }
+    }
+}
+
+/// A deal the server applied at intake (owner answer §11.2), booked at
+/// finalize as `order_deals`.
+#[derive(Serialize, Deserialize, Clone, ToSchema)]
+pub struct SnapshotDeal {
+    pub deal_rule_id: Uuid,
+    pub name: String,
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
+    pub times: i32,
+    pub discount: i32,
+    /// (index into `lines`, units, the cut off that line).
+    pub lines: Vec<SnapshotDealLine>,
+}
+
+#[derive(Serialize, Deserialize, Clone, ToSchema)]
+pub struct SnapshotDealLine {
+    pub line_index: usize,
+    pub units: i32,
+    pub discount: i32,
 }
 
 /// The priced line snapshot stored in `delivery_orders.cart`.
 #[derive(Serialize, Deserialize, Clone, ToSchema)]
 pub struct CartSnapshot {
     pub lines: Vec<SnapshotLine>,
+    /// The deals applied at intake (additive).
+    #[serde(default)]
+    pub deals: Vec<SnapshotDeal>,
 }
 
 /// One frozen inventory deduction. Stored (as a flat list) in
@@ -130,15 +204,18 @@ pub struct SnapshotDeduction {
 pub struct ResolvedCart {
     pub snapshot: CartSnapshot,
     pub deductions: Vec<SnapshotDeduction>,
-    /// Sum of line totals (items + addons + optionals), pre-tax, pre-fee.
+    /// Sum of line totals (items + addons + optionals), pre-tax, pre-fee,
+    /// after the deals.
     pub subtotal: i32,
+    /// The same cart as the public cart quote shows it, line by input line.
+    pub quote: crate::deals::types::CartQuote,
 }
 
 // ── Intake: resolve + freeze ──────────────────────────────────
 
 /// Server-price and freeze a cart for a branch + channel. Rejects unknown,
 /// deleted, or channel/branch-disabled items (the public menu would not have
-/// offered them). Bundles are not supported yet.
+/// offered them).
 pub async fn resolve_cart(
     pool: &PgPool,
     org_id: Uuid,
@@ -148,6 +225,95 @@ pub async fn resolve_cart(
     // joins bind `NULL::delivery_channel` and never match, so pricing/availability
     // fall back to the org→branch layer — exactly the dine-in behaviour.
     channel: Option<&str>,
+    lines: &[CartLineInput],
+    at: DateTime<Utc>,
+) -> Result<ResolvedCart, AppError> {
+    let sale = if channel.is_some() {
+        madar_catalog::combo::Channel::Online
+    } else {
+        madar_catalog::combo::Channel::Pos
+    };
+    resolve_cart_as(pool, org_id, branch_id, channel, sale, lines, at).await
+}
+
+/// The cart as an order line the shared resolvers read.
+fn as_input(line: &CartLineInput) -> crate::orders::handlers::OrderItemInput {
+    crate::orders::handlers::OrderItemInput {
+        menu_item_id: Some(line.menu_item_id),
+        size_label: line.size_label.clone(),
+        quantity: line.quantity,
+        addons: line
+            .addons
+            .iter()
+            .map(|a| AddonInput {
+                unit_price: None,
+                ..a.clone()
+            })
+            .collect(),
+        optional_field_ids: line.optional_field_ids.clone(),
+        notes: line.notes.clone(),
+        combo: line.combo.clone(),
+        ..Default::default()
+    }
+}
+
+/// Stamp each deduction with its ingredient's cost at `at`.
+async fn enrich_costs(
+    pool: &PgPool,
+    branch_id: Uuid,
+    deductions: &mut [SnapshotDeduction],
+    at: DateTime<Utc>,
+) -> Result<(), AppError> {
+    let ids: Vec<Uuid> = deductions
+        .iter()
+        .filter_map(|d| d.org_ingredient_id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let costs = crate::costing::ingredient_costs_at(pool, branch_id, &ids, at).await?;
+    for d in deductions {
+        let c = d
+            .org_ingredient_id
+            .and_then(|id| costs.get(&id))
+            .and_then(|c| c.to_f64());
+        d.cost_per_unit = c;
+        d.line_cost = c.map(|c| (d.quantity * c).round() as i64);
+    }
+    Ok(())
+}
+
+/// A delivery sub-channel switch-off of `item` (`None`: no override).
+async fn channel_off(
+    pool: &PgPool,
+    branch_id: Uuid,
+    channel: Option<&str>,
+    item: Uuid,
+) -> Result<bool, AppError> {
+    let Some(ch) = channel else {
+        return Ok(false);
+    };
+    let off: Option<Option<bool>> = sqlx::query_scalar(
+        "SELECT is_available FROM branch_channel_menu_overrides \
+          WHERE branch_id = $1 AND menu_item_id = $2 AND channel = $3::delivery_channel",
+    )
+    .bind(branch_id)
+    .bind(item)
+    .bind(ch)
+    .fetch_optional(pool)
+    .await?;
+    Ok(off.flatten() == Some(false))
+}
+
+/// [`resolve_cart`] for a sale channel: `Online` (the storefront, with its
+/// delivery sub-channel), `Qr` (a table's cart quote, dine-in prices) or
+/// `Pos`. Combos are priced by `combos::order_line` (a public channel refuses
+/// an unavailable one); on a public channel the best deals are applied.
+pub async fn resolve_cart_as(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    channel: Option<&str>,
+    sale_channel: madar_catalog::combo::Channel,
     lines: &[CartLineInput],
     at: DateTime<Utc>,
 ) -> Result<ResolvedCart, AppError> {
@@ -167,8 +333,51 @@ pub async fn resolve_cart(
     let mut snapshot_lines: Vec<SnapshotLine> = Vec::new();
     let mut all_deductions: Vec<SnapshotDeduction> = Vec::new();
     let mut subtotal: i32 = 0;
+    let mut quoted: Vec<crate::deals::types::QuotedLine> = Vec::with_capacity(lines.len());
+    // Plain lines a deal may take: (snapshot index, input index).
+    let mut plain: Vec<(usize, usize)> = Vec::new();
+    let inputs: Vec<crate::orders::handlers::OrderItemInput> = lines.iter().map(as_input).collect();
+    let ctx = crate::combos::order_line::load_ctx(pool, org_id, branch_id, &inputs, at, true)
+        .await?
+        .ok_or(AppError::Internal)?;
+    let mut catalog = crate::orders::catalog_view::Catalog::new(Some(branch_id));
 
     for (idx, line) in lines.iter().enumerate() {
+        if ctx.is_combo(Some(line.menu_item_id)) {
+            if line.quantity <= 0 || line.quantity > MAX_LINE_QTY {
+                return Err(AppError::BadRequest(format!(
+                    "Item quantity must be between 1 and {MAX_LINE_QTY}"
+                )));
+            }
+            let (charged, q) = resolve_combo_line(
+                pool,
+                &mut catalog,
+                &ctx,
+                branch_id,
+                channel,
+                sale_channel,
+                line,
+                &inputs[idx],
+                at,
+                &mut snapshot_lines,
+                &mut all_deductions,
+            )
+            .await?;
+            subtotal = subtotal
+                .checked_add(charged)
+                .ok_or_else(|| AppError::BadRequest("Order total is too large".into()))?;
+            quoted.push(crate::deals::types::QuotedLine {
+                index: idx as i32,
+                quantity: line.quantity,
+                unit_price: 0,
+                line_total: charged,
+                deal_minor: 0,
+                combo: Some(q),
+            });
+            continue;
+        }
+        let idx_in = idx;
+        let idx = snapshot_lines.len();
         if line.quantity <= 0 || line.quantity > MAX_LINE_QTY {
             return Err(AppError::BadRequest(format!(
                 "Item quantity must be between 1 and {MAX_LINE_QTY}"
@@ -290,21 +499,7 @@ pub async fn resolve_cart(
             })
             .collect();
 
-        let ids: Vec<Uuid> = line_deductions
-            .iter()
-            .filter_map(|d| d.org_ingredient_id)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        let costs = crate::costing::ingredient_costs_at(pool, branch_id, &ids, at).await?;
-        for d in &mut line_deductions {
-            let c = d
-                .org_ingredient_id
-                .and_then(|id| costs.get(&id))
-                .and_then(|c| c.to_f64());
-            d.cost_per_unit = c;
-            d.line_cost = c.map(|c| (d.quantity * c).round() as i64);
-        }
+        enrich_costs(pool, branch_id, &mut line_deductions, at).await?;
 
         let (line_cost, unit_cost, cost_missing) =
             rollup_line_cost(&line_deductions, line.quantity);
@@ -412,17 +607,304 @@ pub async fn resolve_cart(
             line_cost,
             unit_cost,
             cost_missing,
+            line_kind: "item".into(),
+            id: None,
+            combo_line_id: None,
+            combo_slot_id: None,
+            combo_slot_name: None,
+            combo_unit_price: None,
+            combo_share: 0,
+            combo_surcharge: 0,
+            deal_minor: 0,
+            combo: None,
         });
         all_deductions.extend(line_deductions);
+        quoted.push(crate::deals::types::QuotedLine {
+            index: idx_in as i32,
+            quantity: line.quantity,
+            unit_price,
+            line_total,
+            deal_minor: 0,
+            combo: None,
+        });
+        plain.push((idx, idx_in));
     }
+    let items_total = subtotal;
+
+    // ── Deals (owner answer §11.2): on QR and online checkout the server
+    // applies the best ones itself, off the plain lines before tax. ──
+    let mut deals: Vec<SnapshotDeal> = Vec::new();
+    let mut quoted_deals: Vec<crate::deals::types::QuotedDeal> = Vec::new();
+    if sale_channel != madar_catalog::combo::Channel::Pos && !plain.is_empty() {
+        let plain_lines: Vec<crate::deals::order::PlainLine> = plain
+            .iter()
+            .map(|&(sidx, _)| {
+                let l = &snapshot_lines[sidx];
+                crate::deals::order::PlainLine {
+                    input_index: sidx,
+                    menu_item_id: l.menu_item_id,
+                    category_id: ctx.category_of(l.menu_item_id),
+                    size_label: l.size_label.clone(),
+                    unit_price: l.unit_price,
+                    expected_unit_price: l.unit_price,
+                    quantity: l.quantity,
+                }
+            })
+            .collect();
+        let mut conn = pool.acquire().await?;
+        let apps = crate::deals::order::auto(&mut conn, &ctx, sale_channel, &plain_lines).await?;
+        drop(conn);
+        for app in apps {
+            let mut snap_lines = Vec::with_capacity(app.lines.len());
+            let mut quote_lines = Vec::with_capacity(app.lines.len());
+            for &(sidx, units, cut, _) in &app.lines {
+                let l = &mut snapshot_lines[sidx];
+                l.deal_minor += cut;
+                l.line_total -= cut;
+                subtotal -= cut;
+                let input = plain.iter().find(|p| p.0 == sidx).map_or(0, |p| p.1);
+                if let Some(q) = quoted.iter_mut().find(|q| q.index == input as i32) {
+                    q.deal_minor += cut;
+                }
+                snap_lines.push(SnapshotDealLine {
+                    line_index: sidx,
+                    units,
+                    discount: cut,
+                });
+                quote_lines.push(crate::deals::types::DealLineInput {
+                    line_index: input as i32,
+                    units,
+                });
+            }
+            quoted_deals.push(crate::deals::types::QuotedDeal {
+                deal_rule_id: app.rule_id,
+                name: app.name.clone(),
+                name_translations: app.name_translations.clone(),
+                times: app.times,
+                discount: app.discount,
+                lines: quote_lines,
+            });
+            deals.push(SnapshotDeal {
+                deal_rule_id: app.rule_id,
+                name: app.name,
+                name_translations: app.name_translations,
+                times: app.times,
+                discount: app.discount,
+                lines: snap_lines,
+            });
+        }
+    }
+    let deal_discount = items_total - subtotal;
 
     Ok(ResolvedCart {
         snapshot: CartSnapshot {
             lines: snapshot_lines,
+            deals,
         },
         deductions: all_deductions,
         subtotal,
+        quote: crate::deals::types::CartQuote {
+            lines: quoted,
+            items_total,
+            deals: quoted_deals,
+            deal_discount,
+            total_after_deals: subtotal,
+        },
     })
+}
+
+/// A combo line of the cart: its header and parts appended to `out` (their
+/// deductions to `deductions`, costed at `at`). Returns what the line adds to
+/// the subtotal and its quote.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_combo_line(
+    pool: &PgPool,
+    catalog: &mut crate::orders::catalog_view::Catalog,
+    ctx: &crate::combos::order_line::ComboCtx,
+    branch_id: Uuid,
+    channel: Option<&str>,
+    sale_channel: madar_catalog::combo::Channel,
+    line: &CartLineInput,
+    input: &crate::orders::handlers::OrderItemInput,
+    at: DateTime<Utc>,
+    out: &mut Vec<SnapshotLine>,
+    deductions: &mut Vec<SnapshotDeduction>,
+) -> Result<(i32, crate::deals::types::QuotedCombo), AppError> {
+    use crate::combos::{codes::refuse, order_line as ol};
+    use serde_json::json;
+    // The delivery sub-channel can switch the combo, or a pick, off.
+    if channel_off(pool, branch_id, channel, line.menu_item_id).await? {
+        return Err(refuse(
+            "COMBO_UNAVAILABLE",
+            json!({"combo_id": line.menu_item_id, "reason": "branch"}),
+        ));
+    }
+    for p in line.combo.iter().flat_map(|c| c.picks.iter()) {
+        if channel_off(pool, branch_id, channel, p.menu_item_id).await? {
+            let item = ctx
+                .items
+                .get(&p.menu_item_id)
+                .map(|f| f.name.clone())
+                .unwrap_or_default();
+            return Err(refuse(
+                "COMBO_ITEM_UNAVAILABLE",
+                json!({"menu_item_id": p.menu_item_id, "item": item}),
+            ));
+        }
+    }
+    let cl = ol::resolve(
+        pool,
+        catalog,
+        ctx,
+        input,
+        ol::Sale {
+            channel: sale_channel,
+            prices: crate::orders::handlers::ClientPrices::Ignore,
+            strict: true,
+            judge_availability: true,
+        },
+    )
+    .await?;
+
+    let h = &cl.header;
+    out.push(SnapshotLine {
+        menu_item_id: line.menu_item_id,
+        item_name: h.item_name.clone(),
+        name_translations: h.name_translations.clone(),
+        size_label: None,
+        unit_price: 0,
+        quantity: h.quantity,
+        line_total: 0,
+        notes: h.notes.clone(),
+        addons: Vec::new(),
+        optionals: Vec::new(),
+        line_cost: Some(0),
+        unit_cost: Some(0),
+        cost_missing: false,
+        line_kind: "combo".into(),
+        id: h.combo.id,
+        combo_line_id: None,
+        combo_slot_id: None,
+        combo_slot_name: None,
+        combo_unit_price: h.combo.unit_price,
+        combo_share: 0,
+        combo_surcharge: 0,
+        deal_minor: 0,
+        combo: None,
+    });
+
+    let mut charged: i64 = 0;
+    for part in &cl.parts {
+        let sidx = out.len();
+        let mut line_deductions: Vec<SnapshotDeduction> = part
+            .deductions
+            .iter()
+            .map(|d| SnapshotDeduction {
+                line_index: sidx,
+                org_ingredient_id: d.org_ingredient_id,
+                ingredient_name: d.ingredient_name.clone(),
+                unit: d.unit.clone(),
+                quantity: d.quantity,
+                source: d.source.clone(),
+                category: d.category.clone(),
+                addon_item_id: d.addon_item_id,
+                optional_field_id: d.optional_field_id,
+                cost_per_unit: None,
+                line_cost: None,
+            })
+            .collect();
+        enrich_costs(pool, branch_id, &mut line_deductions, at).await?;
+        let (line_cost, unit_cost, cost_missing) =
+            rollup_line_cost(&line_deductions, part.quantity);
+        let addons: Vec<SnapshotAddon> = part
+            .addons
+            .iter()
+            .map(|a| SnapshotAddon {
+                addon_item_id: a.addon_item_id,
+                addon_name: a.addon_name.clone(),
+                name_translations: a.name_translations.clone(),
+                unit_price: a.unit_price,
+                quantity: a.quantity,
+                line_cost: addon_cost(&line_deductions, a.addon_item_id),
+            })
+            .collect();
+        let optionals: Vec<SnapshotOptional> = part
+            .optionals
+            .iter()
+            .map(|o| SnapshotOptional {
+                optional_field_id: o.optional_field_id,
+                field_name: o.field_name.clone(),
+                name_translations: o.name_translations.clone(),
+                price: o.price,
+                org_ingredient_id: o.org_ingredient_id,
+                ingredient_name: o.ingredient_name.clone(),
+                ingredient_unit: o.ingredient_unit.clone(),
+                quantity_used: o.quantity_used,
+                cost: match (o.quantity_used, o.org_ingredient_id) {
+                    (Some(qty), Some(_)) => line_deductions
+                        .iter()
+                        .find(|d| d.optional_field_id == Some(o.optional_field_id))
+                        .and_then(|d| d.cost_per_unit)
+                        .map(|c| (qty * c).round() as i64),
+                    _ => Some(0),
+                },
+            })
+            .collect();
+        charged += i64::from(part.charged_subtotal());
+        out.push(SnapshotLine {
+            menu_item_id: part.menu_item_id.unwrap_or_default(),
+            item_name: part.item_name.clone(),
+            name_translations: part.name_translations.clone(),
+            size_label: part.size_label.clone(),
+            unit_price: part.unit_price,
+            quantity: part.quantity,
+            line_total: part.combo.share + part.combo.surcharge,
+            notes: part.notes.clone(),
+            addons,
+            optionals,
+            line_cost,
+            unit_cost,
+            cost_missing,
+            line_kind: "combo_part".into(),
+            id: part.combo.id,
+            combo_line_id: part.combo.header_id,
+            combo_slot_id: part.combo.slot_id,
+            combo_slot_name: part.combo.slot_name.clone(),
+            combo_unit_price: None,
+            combo_share: part.combo.share,
+            combo_surcharge: part.combo.surcharge,
+            deal_minor: 0,
+            combo: part.combo.tag.clone(),
+        });
+        deductions.extend(line_deductions);
+    }
+    let charged = i32::try_from(charged)
+        .map_err(|_| AppError::BadRequest("Order total is too large".into()))?;
+    let q = &cl.quote;
+    let parse = |s: &str| Uuid::parse_str(s).unwrap_or_default();
+    Ok((
+        charged,
+        crate::deals::types::QuotedCombo {
+            price: q.price as i32,
+            unit_total: q.unit_total as i32,
+            saving_unit: q.saving_unit as i32,
+            parts: q
+                .parts
+                .iter()
+                .map(|p| crate::deals::types::QuotedComboPart {
+                    slot_id: parse(&p.slot_id),
+                    menu_item_id: parse(&p.menu_item_id),
+                    size_label: p.size_label.clone(),
+                    quantity: p.quantity as i32,
+                    unit_price: p.unit_price as i32,
+                    combo_share: p.combo_share as i32,
+                    combo_surcharge: p.combo_surcharge as i32,
+                    line_total: p.line_total as i32,
+                    addons_total: p.addons_total as i32,
+                })
+                .collect(),
+        },
+    ))
 }
 
 /// branch-size override > catalog-size override > the branch/channel-effective base.
@@ -580,6 +1062,7 @@ pub async fn apply_snapshot(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ctx: &FinalizeCtx<'_>,
     lines: &[SnapshotLine],
+    deals: &[SnapshotDeal],
     deductions: &[SnapshotDeduction],
 ) -> Result<(MaterializedOrder, Vec<String>), AppError> {
     let order_number: i32 = sqlx::query_scalar(
@@ -688,6 +1171,8 @@ pub async fn apply_snapshot(
     .await?;
 
     let mut warnings: Vec<String> = Vec::new();
+    // The stored row of each snapshot line, for the deals that name them.
+    let mut row_of: std::collections::HashMap<usize, Uuid> = std::collections::HashMap::new();
 
     for (idx, line) in lines.iter().enumerate() {
         let line_deductions: Vec<&SnapshotDeduction> =
@@ -699,8 +1184,11 @@ pub async fn apply_snapshot(
             r#"INSERT INTO order_items
                 (order_id, menu_item_id, item_name, name_translations, size_label,
                  unit_price, quantity, line_total, notes, deductions_snapshot,
-                 bundle_id, bundle_unit_price, line_cost, unit_cost, cost_missing, price_flagged)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NULL, $11, $12, $13, false)
+                 line_cost, unit_cost, cost_missing, price_flagged,
+                 id, line_kind, combo_line_id, combo_slot_id, combo_slot_name,
+                 combo_unit_price, combo_share, combo_surcharge, deal_minor)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false,
+                       COALESCE($14, gen_random_uuid()), $15, $16, $17, $18, $19, $20, $21, $22)
                RETURNING id"#,
         )
         .bind(order.id)
@@ -716,8 +1204,18 @@ pub async fn apply_snapshot(
         .bind(line.line_cost)
         .bind(line.unit_cost)
         .bind(line.cost_missing)
+        .bind(line.id)
+        .bind(&line.line_kind)
+        .bind(line.combo_line_id)
+        .bind(line.combo_slot_id)
+        .bind(&line.combo_slot_name)
+        .bind(line.combo_unit_price)
+        .bind(line.combo_share)
+        .bind(line.combo_surcharge)
+        .bind(line.deal_minor)
         .fetch_one(&mut **tx)
         .await?;
+        row_of.insert(idx, item_id);
 
         for addon in &line.addons {
             let addon_line = addon.unit_price * addon.quantity * line.quantity;
@@ -768,6 +1266,31 @@ pub async fn apply_snapshot(
             &mut warnings,
         )
         .await?;
+    }
+
+    // The deals applied at intake, as the till's are booked.
+    if !deals.is_empty() {
+        let org_id: Uuid = sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
+            .bind(ctx.branch_id)
+            .fetch_one(&mut **tx)
+            .await?;
+        let priced: Vec<crate::deals::order::PricedDeal> = deals
+            .iter()
+            .map(|d| crate::deals::order::PricedDeal {
+                rule_id: d.deal_rule_id,
+                name: d.name.clone(),
+                name_translations: d.name_translations.clone(),
+                times: d.times,
+                discount: d.discount,
+                discount_server: Some(d.discount),
+                lines: d
+                    .lines
+                    .iter()
+                    .map(|l| (l.line_index, l.units, l.discount, l.discount))
+                    .collect(),
+            })
+            .collect();
+        crate::deals::order::insert(tx, org_id, order.id, &priced, &row_of).await?;
     }
 
     Ok((order, warnings))
@@ -827,6 +1350,9 @@ async fn apply_one_deductions(
 pub fn kitchen_lines(cart: &CartSnapshot) -> Vec<crate::kitchen::KitchenLine> {
     cart.lines
         .iter()
+        // A combo's header is never fired; each part goes to its station,
+        // tagged with the combo (C12).
+        .filter(|line| line.line_kind != "combo")
         .map(|line| {
             let modifiers = line
                 .addons
@@ -840,6 +1366,7 @@ pub fn kitchen_lines(cart: &CartSnapshot) -> Vec<crate::kitchen::KitchenLine> {
                 })
                 .collect();
             crate::kitchen::KitchenLine {
+                combo: line.combo.clone(),
                 menu_item_id: Some(line.menu_item_id),
                 name: line.item_name.clone(),
                 qty: line.quantity,

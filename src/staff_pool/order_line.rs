@@ -78,8 +78,9 @@ pub(crate) async fn pool_context(
     })
 }
 
-/// The refusals that do not depend on the day's count. A bundle is never on
-/// the pool: it has no size and no choice groups of its own to be the base of.
+/// The refusals that do not depend on the day's count. A line with no menu
+/// item is never on the pool: it has no size and no choice groups to be the
+/// base of.
 pub(crate) fn refusal_of(
     ctx: &PoolContext,
     menu_item_id: Option<Uuid>,

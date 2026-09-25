@@ -106,14 +106,6 @@ const SOURCES: &[SourceDef] = &[
         group_col: "image_group_id",
     },
     SourceDef {
-        table: "bundles",
-        field: "image",
-        org_col: "org_id",
-        url_col: "image_url",
-        purpose: AssetPurpose::BundlePhoto,
-        group_col: "image_group_id",
-    },
-    SourceDef {
         table: "organizations",
         field: "logo",
         org_col: "id",

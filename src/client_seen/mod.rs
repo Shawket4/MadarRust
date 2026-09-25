@@ -288,6 +288,25 @@ pub fn branch_header(headers: &actix_web::http::header::HeaderMap) -> Option<Uui
     header_str(headers, BRANCH_HEADER).and_then(|v| Uuid::parse_str(v).ok())
 }
 
+/// The first POS build that sells combos (COMBOS_CONTRACT.md §2.4).
+pub const COMBOS_FROM: (u64, u64, u64) = (0, 9, 0);
+
+/// Whether this client can sell combos, so the menu endpoints an old till
+/// builds its menu from (`GET /menu-items`, `/catalog/sync`) may include
+/// `kind=combo` rows: a browser (the dashboard, the public pages), the
+/// dashboard app, a KDS, and POS ≥ 0.9.0. A POS older than that — or a
+/// native client that names no version at all — never sees a combo there
+/// (the `/sync/pull` feed still carries them; an old core stores feed rows
+/// but never builds its menu from them).
+pub fn sells_combos(headers: &actix_web::http::header::HeaderMap) -> bool {
+    let client = ClientHeader::parse(headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok()));
+    match client.app.as_deref() {
+        Some("pos") => client.version.is_some_and(|v| v >= COMBOS_FROM),
+        Some("kds") | Some(DASHBOARD_CLIENT) => true,
+        _ => is_browser(headers),
+    }
+}
+
 /// A POS that predates `X-Madar-Client` (or reports < 0.7). Browsers (the
 /// dashboard, which never gated on `shifts:*`) are not counted.
 pub fn is_legacy_pos_request(headers: &actix_web::http::header::HeaderMap) -> bool {

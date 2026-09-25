@@ -539,21 +539,22 @@ DECLARE
     org uuid := '{org}';
     br uuid := '{branch}';
     adm uuid := '{admin}';
-    cat uuid; item uuid; item2 uuid; bun uuid; icat uuid; pm uuid; dev uuid; sec uuid; tbl uuid; tbl2 uuid;
+    cat uuid; item uuid; item2 uuid; icat uuid; pm uuid; dev uuid; sec uuid; tbl uuid; tbl2 uuid;
     ot uuid; ot2 uuid; til uuid; ord uuid; ord2 uuid;
 BEGIN
     INSERT INTO categories (org_id, name) VALUES (org, 'Hot') RETURNING id INTO cat;
     INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Latte', cat) RETURNING id INTO item;
     INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Mocha', cat) RETURNING id INTO item2;
     INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES (item, 'M', 1000), (item2, 'M', 1200);
-    INSERT INTO bundles (org_id, name, price, status) VALUES (org, 'Duo', 2000, 'active') RETURNING id INTO bun;
-    INSERT INTO bundle_components (bundle_id, item_id) VALUES (bun, item), (bun, item2);
     INSERT INTO ingredient_categories (org_id, slug, name) VALUES (org, 'dairy', 'Dairy') RETURNING id INTO icat;
     INSERT INTO org_ingredients (org_id, name, unit, category_id) VALUES (org, 'Milk', 'ml', icat);
     INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash) VALUES (org, 'Cash', '#000', 'cash', true) RETURNING id INTO pm;
     INSERT INTO branch_payment_methods (branch_id, payment_method_id, org_id) VALUES (br, pm, org);
     INSERT INTO user_payment_methods (user_id, payment_method_id, org_id) VALUES (adm, pm, org);
     INSERT INTO discounts (org_id, name, type, value) VALUES (org, 'Staff', 'percentage', 0.1);
+    -- Combos module: one live deal rule (and a deleted one that must not project).
+    INSERT INTO deal_rules (org_id, name, kind, qty, price) VALUES (org, 'Any 2 for 90', 'n_for_price', 2, 9000);
+    INSERT INTO deal_rules (org_id, name, kind, qty, price, deleted_at) VALUES (org, 'Gone', 'n_for_price', 2, 9000, now());
     INSERT INTO addon_items (org_id, name, type, default_price) VALUES (org, 'Oat milk', 'milk', 1500);
     INSERT INTO customers (org_id, name, phone, phone_key) VALUES (org, 'Mona', '0100 123 4567', '01001234567');
     INSERT INTO staff_drinks (id, org_id, branch_id, menu_item_id, item_name, note, business_date, recorded_at)
@@ -704,6 +705,13 @@ async fn pull_checksums_equal_projected_sets_for_every_type(pool: PgPool) {
 
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     for ty in ALL_TYPES {
+        // Combos were removed: `bundle` stays a wire type (tills v0.8 count a
+        // full snapshot complete only when it is answered), always empty.
+        if *ty == "bundle" {
+            assert!(full.types.iter().any(|t| t == "bundle"), "{:?}", full.types);
+            assert!(full.data.get("bundle").is_none_or(|v| v.is_empty()));
+            continue;
+        }
         assert!(
             !full.data.get(*ty).is_none_or(|v| v.is_empty()),
             "fixture seeds a live `{ty}`"
@@ -1065,7 +1073,6 @@ async fn a_late_branch_has_its_staff_and_addons_too(pool: PgPool) {
         "category",
         "discount",
         "ingredient",
-        "bundle",
         "customer",
     ] {
         assert!(

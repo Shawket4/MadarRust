@@ -3478,7 +3478,7 @@ async fn a_live_reward_the_balance_does_not_cover_is_refused(pool: PgPool) {
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
-/// A replayed line that no longer exists, or a bundle, has nothing to cover.
+/// A replayed line that no longer exists has nothing to cover.
 /// The sale lands; units beyond the line are clamped to it.
 #[sqlx::test]
 async fn a_replayed_reward_on_a_line_that_is_not_there_is_dropped_not_fatal(pool: PgPool) {

@@ -9,7 +9,7 @@ pub mod routes;
 /// fragment to be prefixed with a table alias (`o.{SOLD}`).
 ///
 /// Every money aggregate in the codebase — the orders KPI strip, the branch
-/// sales report, the shift report, insights, bundle sales — must scope on this
+/// sales report, the shift report, insights — must scope on this
 /// and nothing else. They historically each picked their own (`= 'completed'`,
 /// `!= 'voided'`, `NOT IN ('voided','refunded')`), so the same day's revenue
 /// read differently on three screens depending on whether any ticket was still

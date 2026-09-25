@@ -166,12 +166,6 @@ pub struct AvailabilityOut {
     pub branches: Vec<BranchAvailabilityOut>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct UsedInBundleOut {
-    pub bundle_id: Uuid,
-    pub name: String,
-}
-
 /// The full item aggregate the one-page Menu Studio editor renders.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StudioAggregate {
@@ -194,7 +188,12 @@ pub struct StudioAggregate {
     /// How the item is made, in order. Edited through `PUT /recipes/steps/{id}`
     /// and saved by the studio alongside the recipe lines.
     pub recipe_steps: Vec<crate::recipes::steps::RecipeStep>,
-    pub used_in_bundles: Vec<UsedInBundleOut>,
+    /// COMPAT STUB, always `[]`: combos were removed (2026-09-25), and the
+    /// Menu Studio of dashboards built before reads `used_in_bundles.length`
+    /// unguarded. Not in the OpenAPI document.
+    #[serde(default, skip_deserializing)]
+    #[schema(ignore)]
+    pub used_in_bundles: Vec<serde_json::Value>,
     /// The item this one's recipe follows (linked copy), or `null`.
     #[serde(default)]
     pub recipe_source_item_id: Option<Uuid>,
@@ -660,20 +659,6 @@ async fn build_studio_aggregate(
     // ── Availability: org_active + per-branch/channel from menu_price_overrides. ──
     let availability = fetch_availability(pool, org_id, &size_ids, basics.is_active).await?;
 
-    // ── Bundles this item is a component of. ──
-    let bundle_rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT DISTINCT b.id, b.name FROM bundle_components bc \
-         JOIN bundles b ON b.id = bc.bundle_id \
-         WHERE bc.item_id = $1 ORDER BY b.name",
-    )
-    .bind(item_id)
-    .fetch_all(pool)
-    .await?;
-    let used_in_bundles = bundle_rows
-        .into_iter()
-        .map(|(bundle_id, name)| UsedInBundleOut { bundle_id, name })
-        .collect();
-
     let catalog_revision = current_catalog_revision(pool, org_id).await?;
     let recipe_steps = crate::recipes::steps::fetch_item_steps(pool, item_id).await?;
     let image = crate::assets::refs::slot_refs(
@@ -703,7 +688,7 @@ async fn build_studio_aggregate(
         options,
         availability,
         recipe_steps,
-        used_in_bundles,
+        used_in_bundles: Vec::new(),
         recipe_source_item_id: link.recipe_source_item_id,
         linked_copy_ids: link.linked_copy_ids,
     })

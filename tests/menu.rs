@@ -2228,7 +2228,7 @@ async fn test_menu_catalog_overridden_filter_and_sort(pool: PgPool) {
     assert_eq!(page.data[0].item.id, latte, "overridden item sorts first");
 }
 
-// ── `image` asset refs on every menu/category/bundle read ────────────────────
+// ── `image` asset refs on every menu/category read ───────────────────────────
 
 async fn attach_photo(
     pool: &PgPool,
@@ -2283,7 +2283,7 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
             .configure(madar_rust::costing::routes::configure)
-            .configure(madar_rust::bundles::routes::configure),
+            .configure(madar_rust::bundles::configure),
     )
     .await;
     let org = seed_org(&pool).await;
@@ -2294,13 +2294,6 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
     }
     let cat = seed_category(&pool, org, "Mains").await;
     let item = seed_menu_item(&pool, org, cat, "Burger", 1000).await;
-    let bundle = Uuid::new_v4();
-    sqlx::query("INSERT INTO bundles (id, org_id, name, price) VALUES ($1, $2, 'Combo', 900)")
-        .bind(bundle)
-        .bind(org)
-        .execute(&pool)
-        .await
-        .unwrap();
     let gi = attach_photo(
         &pool,
         &store,
@@ -2319,16 +2312,6 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
         AssetPurpose::CategoryPhoto,
         cat,
         2,
-    )
-    .await;
-    let gb = attach_photo(
-        &pool,
-        &store,
-        org,
-        AssetTable::Bundles,
-        AssetPurpose::BundlePhoto,
-        bundle,
-        3,
     )
     .await;
     // A third-party absolute URL is served verbatim (no uploads prefix).
@@ -2397,14 +2380,23 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
     assert!(resp.status().is_success(), "{}", resp.status());
     assert_image(&json(resp).await, gc, "PATCH categories");
 
-    // Bundles: get + list.
-    let resp = test::call_service(&app, get(format!("/bundles/{bundle}"))).await;
+    // Combos are gone. Every till in the field still fetches this page as a
+    // REQUIRED part of its catalog refresh: it must answer, empty, in the
+    // `PaginatedBundles` shape those builds decode.
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/bundles?org_id={org}&status=active&page=1&per_page=500"
+        )),
+    )
+    .await;
     assert!(resp.status().is_success(), "{}", resp.status());
-    assert_image(&json(resp).await, gb, "bundles/{id}");
-    let resp = test::call_service(&app, get(format!("/bundles?org_id={org}"))).await;
-    assert!(resp.status().is_success(), "{}", resp.status());
-    let v = json(resp).await;
-    assert_image(&v["data"][0], gb, "bundles list");
+    assert_eq!(
+        json(resp).await,
+        serde_json::json!({"data": [], "total": 0, "page": 1, "per_page": 500, "total_pages": 0})
+    );
+    let resp = test::call_service(&app, get(format!("/bundles/{item}"))).await;
+    assert_eq!(resp.status().as_u16(), 404, "only the list stub is left");
 }
 
 #[sqlx::test]

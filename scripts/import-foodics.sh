@@ -7,8 +7,8 @@
 #                             [--keep-stock] [--reset-devices] [--reset-tables]
 #                             [--reset-loyalty] [--reset-qr] [--yes] [--yes-prod]
 #
-#   --replace-menu     hard-delete the org's menu (categories, items, modifier groups,
-#                      bundles) AND every row referencing it — orders, tickets, recipes,
+#   --replace-menu     hard-delete the org's menu (categories, items, modifier groups)
+#                      AND every row referencing it — orders, tickets, recipes,
 #                      overrides, loyalty — then seed.
 #   --reset-org        hard-delete ALL of the org's data (branches, users, orders,
 #                      inventory, menu, …), recreate the org row with the same id and

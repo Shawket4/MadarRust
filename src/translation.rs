@@ -175,8 +175,8 @@ pub async fn ensure_translations(translations: &mut HashMap<String, String>) -> 
     Ok(())
 }
 
-/// Convenience wrapper for modules that store translations as `serde_json::Value`
-/// (e.g. bundles). Converts the JSON value to a `HashMap`, runs `ensure_translations`,
+/// Convenience wrapper for modules that store translations as `serde_json::Value`.
+/// Converts the JSON value to a `HashMap`, runs `ensure_translations`,
 /// and converts back.
 ///
 /// If the input value is `null` or `{}`, it creates an empty map. When `source_name`

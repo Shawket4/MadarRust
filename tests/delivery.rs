@@ -252,7 +252,18 @@ mod kitchen_projection {
                 line_cost: None,
                 unit_cost: None,
                 cost_missing: false,
+                line_kind: "item".into(),
+                id: None,
+                combo_line_id: None,
+                combo_slot_id: None,
+                combo_slot_name: None,
+                combo_unit_price: None,
+                combo_share: 0,
+                combo_surcharge: 0,
+                deal_minor: 0,
+                combo: None,
             }],
+            deals: vec![],
         };
         let lines = kitchen_lines(&cart);
         assert_eq!(lines.len(), 1);

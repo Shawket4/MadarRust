@@ -1,5 +1,5 @@
 //! Shared menu-item configuration resolution (sizes, addons, optionals, inventory).
-//! Used by standalone order lines and bundle component lines.
+//! Used by order lines (the till's checkout and a waiter's fire).
 
 use crate::errors::AppError;
 use crate::orders::catalog_view::Catalog;
@@ -15,25 +15,13 @@ pub struct AddonInput {
     pub quantity: i32,
     /// Charged unit price (piastres) the POS applied for this addon. When present
     /// it is RECORDED as the addon's unit_price; absent → the server's expected
-    /// (catalog) price is used. Bundle-component addons ignore this (server-priced).
+    /// (catalog) price is used.
     #[serde(default)]
     pub unit_price: Option<i32>,
 }
 
 pub fn default_qty() -> i32 {
     1
-}
-
-#[derive(Deserialize, Serialize, Clone, ToSchema)]
-pub struct BundleComponentInput {
-    pub item_id: Uuid,
-    pub quantity: i32,
-    #[serde(default)]
-    pub size_label: Option<String>,
-    #[serde(default)]
-    pub addons: Vec<AddonInput>,
-    #[serde(default)]
-    pub optional_field_ids: Vec<Uuid>,
 }
 
 #[derive(Clone)]
@@ -117,7 +105,7 @@ pub fn merge_sized_option_lines(
 }
 
 /// Resolve a menu item configuration (same rules as a standalone POS line).
-/// [line_quantity] is the total multiplier for inventory (e.g. bundle line qty × component qty per bundle).
+/// [line_quantity] is the total multiplier for inventory (the line's quantity).
 pub async fn resolve_menu_item_configuration(
     pool: &PgPool,
     menu_item_id: Uuid,
@@ -125,8 +113,8 @@ pub async fn resolve_menu_item_configuration(
     line_quantity: i32,
     addons: &[AddonInput],
     optional_field_ids: &[Uuid],
-    // Branch the line is sold at — addon prices are resolved branch-effective so a
-    // bundle's component-addon surcharge matches what the branch POS charged.
+    // Branch the line is sold at — addon prices are resolved branch-effective,
+    // as the branch POS charged them.
     branch_id: Uuid,
 ) -> Result<MenuItemResolution, AppError> {
     if line_quantity <= 0 {
