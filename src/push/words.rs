@@ -70,6 +70,11 @@ pub const WORDS: &[(&str, &str, &str)] = &[
         "حجزك ليوم {date} اترفض",
     ),
     (
+        "staff.n_claim_withdrawn",
+        "{name} took back their claim for the open shift on {date}",
+        "{name} لغى حجزه للوردية المتاحة يوم {date}",
+    ),
+    (
         "staff.n_cover",
         "{name} is covering {owner}'s shift — confirm to pay it",
         "{name} بيغطي وردية {owner} — أكّد عشان تتدفع",

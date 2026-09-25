@@ -4190,3 +4190,101 @@ async fn an_open_shift_says_when_it_was_claimed(pool: PgPool) {
     );
     assert_eq!(parse(&mine["my_claims"][0]["claimed_at"]), at, "my claims");
 }
+
+/// Hunt B-H1-5 (SC-9, S-162): the claimer takes back a claim while it waits,
+/// as every other pending request can be cancelled by the one who asked. The
+/// shift is open again, the claim stays in their Requests as withdrawn, and
+/// the managers told of the claim hear. Anything else is a coded 409.
+#[sqlx::test]
+async fn a_claimer_withdraws_a_waiting_claim(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
+    let withdraw = async |token: &str| {
+        call!(
+            app,
+            "POST",
+            format!("/staff/open-shifts/{id}/withdraw"),
+            token
+        )
+    };
+    refused!(withdraw(&tb).await, 409, "NO_PENDING_CLAIM");
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let told = async |key: &str| -> Vec<Uuid> {
+        let mut who: Vec<Uuid> =
+            sqlx::query_scalar("SELECT employee_id FROM staff_notifications WHERE key = $1")
+                .bind(key)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        who.sort();
+        who
+    };
+    let managers = told("staff.n_claim").await;
+    assert!(managers.contains(&f.owner_emp), "{managers:?}");
+
+    // Only the claimer, only from the app.
+    refused!(withdraw(&ta).await, 409, "NO_PENDING_CLAIM");
+    let (s, _) = done(withdraw(&f.owner()).await).await;
+    assert_eq!(s, 403, "a manager's account isn't the claimer");
+    let (s, row) = done(withdraw(&tb).await).await;
+    assert_eq!(s, 200, "{row}");
+    assert_eq!(row["id"], json!(id));
+    assert_eq!(row["status"], json!("open"));
+    assert!(
+        row["claimed_by"].is_null() && row["claimed_at"].is_null(),
+        "{row}"
+    );
+    let mine = my_claims(&app, &tb, d, d).await;
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0]["status"], json!("withdrawn"));
+    assert!(mine[0]["decided_at"].is_string(), "{mine:?}");
+    assert_eq!(told("staff.n_claim_withdrawn").await, managers);
+    let args: Value = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE key = 'staff.n_claim_withdrawn' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(args, json!({ "name": "Bassem", "date": d }));
+    refused!(withdraw(&tb).await, 409, "NO_PENDING_CLAIM");
+
+    // Open again: Amal claims it and the owner approves — too late to withdraw.
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        ta
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 204);
+    refused!(withdraw(&ta).await, 409, "CLAIM_ALREADY_DECIDED");
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{}/withdraw", Uuid::new_v4()),
+        ta
+    ))
+    .await;
+    assert_eq!(s, 404);
+}

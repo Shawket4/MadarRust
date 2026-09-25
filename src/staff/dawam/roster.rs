@@ -1023,6 +1023,89 @@ pub async fn claim_open_shift(
     Ok(HttpResponse::Ok().json(row))
 }
 
+/// Take back my claim while it waits (SC-9, S-162), as the one who asked can
+/// cancel any pending request: the shift is open again, the claim stays in
+/// my Requests as `withdrawn`, and the managers told of it hear. 409
+/// `NO_PENDING_CLAIM` when I have no claim waiting on it, 409
+/// `CLAIM_ALREADY_DECIDED` once it was approved or declined.
+#[utoipa::path(
+    post, path = "/staff/open-shifts/{id}/withdraw", tag = "staff",
+    params(("id" = Uuid, Path)),
+    responses((status = 200, body = OpenShift), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn withdraw_claim(
+    me: Me,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let (employee_id, org_id) = (me.employee_id, me.org_id);
+    let pool = pool.get_ref();
+    let subject = access::subject(pool, org_id, employee_id).await?;
+    let found: Option<(Uuid, NaiveDate)> = sqlx::query_as(
+        "SELECT branch_id, on_date FROM staff_open_shifts \
+          WHERE id = $1 AND org_id = $2 AND branch_id = ANY($3)",
+    )
+    .bind(*id)
+    .bind(org_id)
+    .bind(&subject.branches)
+    .fetch_optional(pool)
+    .await?;
+    let Some((branch_id, on_date)) = found else {
+        return Err(AppError::NotFound("No open shift here.".into()));
+    };
+    let mut tx = pool.begin().await?;
+    let reopened: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL \
+          WHERE id = $1 AND status = 'claimed' AND claimed_by = $2 RETURNING id",
+    )
+    .bind(*id)
+    .bind(employee_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if reopened.is_none() {
+        drop(tx);
+        let last: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM staff_open_shift_claims \
+              WHERE open_shift_id = $1 AND employee_id = $2 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(*id)
+        .bind(employee_id)
+        .fetch_optional(pool)
+        .await?;
+        return Err(match last.as_deref() {
+            Some("approved" | "declined") => AppError::Refused {
+                code: "CLAIM_ALREADY_DECIDED",
+                reason: "Your claim was already decided. Ask your manager to change it.".into(),
+            },
+            _ => AppError::Refused {
+                code: "NO_PENDING_CLAIM",
+                reason: "You have no claim waiting on this shift.".into(),
+            },
+        });
+    }
+    close_claim(&mut tx, *id, "withdrawn", None).await?;
+    tx.commit().await?;
+    // The same people the claim told (`claim_open_shift`).
+    let name = employee_name(pool, employee_id).await;
+    notify_managers(
+        pool,
+        org_id,
+        Some(branch_id),
+        Cap::HrScheduleEdit,
+        Some(employee_id),
+        "staff.n_claim_withdrawn",
+        json!({ "name": name, "date": on_date }),
+    )
+    .await;
+    let row = open_shifts_at(pool, &[branch_id], on_date, on_date)
+        .await?
+        .into_iter()
+        .find(|o| o.id == *id)
+        .ok_or(AppError::Internal)?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
 #[derive(Deserialize, ToSchema)]
 pub struct DecideRoster {
     pub approve: bool,
