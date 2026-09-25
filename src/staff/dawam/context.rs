@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::branches_of;
 use crate::auth::jwt::Claims;
-use crate::authz::{CAPS, Cap, EffectiveSet, LimitKey};
+use crate::authz::{CAPS, Cap, EffectiveSet, LimitKey, Tier};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::staff::access;
 use crate::staff::attendance::load_settings;
@@ -41,11 +41,17 @@ pub struct ContextPerson {
     pub branch_ids: Vec<Uuid>,
     pub gender: Option<String>,
     pub hire_date: Option<NaiveDate>,
-    /// Only for people whose pay the caller may see.
+    /// Only for people whose pay the caller may see (null too when no
+    /// salary is set: `salary_set`).
     pub base_salary_piastres: Option<i64>,
+    /// A salary is on file (D9); false = "not set". Never hidden.
+    pub salary_set: bool,
     /// Their salary-advance cap, decided by the server (AV-5, AT-3); shown
     /// under the same visibility as the salary.
     pub advance_cap_piastres: Option<i64>,
+    /// What they owe in salary advances is within the cap; never hidden, so
+    /// a manager sees "within cap" / "over cap" without the figure (D7).
+    pub advance_within_cap: bool,
     pub pay_method: String,
     pub pay_account: Option<String>,
     pub pref_time: Option<String>,
@@ -66,6 +72,10 @@ pub struct ContextSettings {
     pub late_deduction_tiers: serde_json::Value,
     /// The business saved its rules; nobody clocks in before (RU-1, DSH-6).
     pub rules_saved: bool,
+    /// When the rules were first saved; null until then. The sweep never
+    /// marks absent (or charges) a shift that started before it (B-SETUP-5),
+    /// so neither does the app (B-ONB-1).
+    pub rules_saved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -84,6 +94,10 @@ pub struct StaffContext {
     /// The HR capabilities I hold (`hr.*` keys) — through my Madar account;
     /// empty for an employee with none. The app gates tabs on these (PM-4).
     pub caps: Vec<String>,
+    /// The capabilities I hold at EVERY branch: the list `GET /authz/me`
+    /// puts in `everywhere`, for the business-wide acts (the rules, payroll,
+    /// public holidays: `hr.rules.edit`, D3). Empty without a Madar account.
+    pub caps_everywhere: Vec<String>,
     /// My ceiling on a bonus before it waits for the owner; null = none.
     pub adjustment_limit_piastres: Option<i64>,
     /// My ceiling on a deduction (AD-5: separate from the bonus limit).
@@ -193,10 +207,14 @@ pub async fn my_context(
                          SELECT 1 FROM employee_branches pb WHERE pb.employee_id = e.id \
                             AND pb.branch_id = ANY($6)))) \
                      THEN e.base_salary_piastres END AS base_salary_piastres, \
+                e.base_salary_piastres IS NOT NULL AS salary_set, \
                 CASE WHEN e.id = $4 OR ($3 AND ($6::uuid[] IS NULL OR EXISTS ( \
                          SELECT 1 FROM employee_branches pb WHERE pb.employee_id = e.id \
                             AND pb.branch_id = ANY($6)))) \
                      THEN dawam_advance_cap(e.org_id, e.base_salary_piastres) END AS advance_cap_piastres, \
+                COALESCE((SELECT SUM(sa.remaining_piastres) FROM salary_advances sa \
+                           WHERE sa.employee_id = e.id AND sa.status IN ('pending', 'approved')), 0) \
+                    <= dawam_advance_cap(e.org_id, e.base_salary_piastres) AS advance_within_cap, \
                 e.pay_method, \
                 CASE WHEN e.id = $4 OR $3 THEN e.pay_account END AS pay_account, \
                 e.pref_time, e.cant_work_days, d.model AS device_model, d.first_seen_at AS device_since \
@@ -226,6 +244,15 @@ pub async fn my_context(
         .filter(|m| m.group == "hr" && eff.can(m.cap))
         .map(|m| m.key.to_string())
         .collect();
+    let caps_everywhere = match &claims {
+        Some(c) => access::caps_everywhere(pool, c, org_id)
+            .await?
+            .iter()
+            .filter(|c| c.meta().tier != Tier::Legacy)
+            .map(|c| c.key().to_string())
+            .collect(),
+        None => Vec::new(),
+    };
     Ok(HttpResponse::Ok().json(StaffContext {
         employee_id: me.employee_id,
         user_id: me.user_id,
@@ -235,6 +262,7 @@ pub async fn my_context(
         org_name,
         role: role.into(),
         caps,
+        caps_everywhere,
         adjustment_limit_piastres: eff
             .limits_of(Cap::HrAdjustmentsCreate)
             .get(LimitKey::MaxAmount),
@@ -260,6 +288,7 @@ pub async fn my_context(
             absence_deduction_days: s.absence_deduction_days,
             late_deduction_tiers: s.late_deduction_tiers,
             rules_saved: rules_saved(pool, org_id).await?,
+            rules_saved_at: s.rules_saved_at,
         },
     }))
 }

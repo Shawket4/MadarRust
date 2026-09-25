@@ -679,6 +679,19 @@ pub(crate) async fn day_adjustments(
 
     let default_paid = settings.excused_time_paid_default;
     let mut adj = DayAdjustments::default();
+    // Where the pings put the person that day (D2): approved time off counts
+    // only the minutes actually away.
+    let pings: Vec<(Uuid, DateTime<Utc>, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT p.attendance_record_id, p.at, p.inside, a.check_out_at \
+           FROM attendance_pings p JOIN attendance_records a ON a.id = p.attendance_record_id \
+          WHERE a.employee_id = $1 AND a.business_date = $2 AND a.covered_employee_id IS NULL \
+          ORDER BY p.attendance_record_id, p.at",
+    )
+    .bind(employee_id)
+    .bind(business_date)
+    .fetch_all(pool)
+    .await?;
+    adj.away = away_runs(&pings);
     for row in rows {
         let timed = |candidates: [Option<DateTime<Utc>>; 2], paid: bool| TimedRequest {
             candidates: candidates.into_iter().flatten().collect(),
@@ -736,6 +749,38 @@ pub(crate) async fn day_adjustments(
         }
     }
     Ok(adj)
+}
+
+/// The runs a record's pings put the person outside the fence: from the
+/// first outside ping to the next inside one, an open run to the record's
+/// check-out (or for good while it is open; readers clip to the punches).
+/// `pings` are `(record, at, inside, check_out)`, grouped by record, oldest
+/// first.
+fn away_runs(
+    pings: &[(Uuid, DateTime<Utc>, bool, Option<DateTime<Utc>>)],
+) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    let mut runs = Vec::new();
+    let mut open: Option<(Uuid, DateTime<Utc>, Option<DateTime<Utc>>)> = None;
+    for &(record, at, inside, out) in pings {
+        if let Some((r, from, end)) = open
+            && r != record
+        {
+            runs.push((from, end.unwrap_or(DateTime::<Utc>::MAX_UTC)));
+            open = None;
+        }
+        match (inside, open) {
+            (false, None) => open = Some((record, at, out)),
+            (true, Some((_, from, _))) => {
+                runs.push((from, at));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some((_, from, end)) = open {
+        runs.push((from, end.unwrap_or(DateTime::<Utc>::MAX_UTC)));
+    }
+    runs
 }
 
 // ── Month guard (RQ-4) ────────────────────────────────────────
@@ -1643,6 +1688,17 @@ async fn record_for_shift(
     .into_iter()
     .find(|s| s.work_shift_id == shift_id)
     .ok_or_else(|| AppError::Conflict("That shift is no longer on the roster".into()))?;
+    // A correction that clocks the owner in on a shift a colleague is
+    // covering would pay it twice (D1).
+    if request.from_time.is_some() {
+        crate::staff::attendance::refuse_if_covered(
+            pool,
+            request.employee_id,
+            request.on_date,
+            Some(shift_id),
+        )
+        .await?;
+    }
     sqlx::query(
         "INSERT INTO attendance_records \
              (org_id, employee_id, branch_id, work_shift_id, business_date, status, \

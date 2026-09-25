@@ -230,10 +230,18 @@ pub async fn decide_holiday(
     let org_id = crate::staff::scope_org(&req, &claims)?;
     let pool = pool.get_ref();
     let date = *date;
-    // A public holiday is national and the business's, every branch at once;
-    // RU-10 gives its one-tap setup to the MANAGER, so publishing a roster at
-    // ANY branch is enough to decide it (Mac E2E R-B3, orchestrator decision).
-    access::gate(pool, &claims, org_id, Cap::HrSchedulePublish).await?;
+    // A public holiday is the business's, every branch at once: no absences
+    // and the holiday rate everywhere. Owner decision D3 (24 Sep 2026): the
+    // owner decides it, like the rules and payroll (supersedes R-B3's
+    // manager one-tap). Whoever holds the rules right at every branch;
+    // managers read holidays and never decide them.
+    if !access::can_everywhere(pool, &claims, org_id, Cap::HrRulesEdit).await? {
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWNER_ONLY",
+            reason: "Only the owner decides public holidays.".into(),
+        });
+    }
     if body.decision != "holiday" && body.decision != "dismissed" {
         return Err(AppError::BadRequest(
             "decision is holiday or dismissed".into(),

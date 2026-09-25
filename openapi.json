@@ -41477,7 +41477,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Automatic payroll deductions a manager overrode or waived, by type and by issuer",
+            "description": "Automatic payroll deductions a manager overrode or waived, by type and by issuer, with `history`: every waive, unwaive and override event (who, when, why)",
             "content": {
               "application/json": {
                 "schema": {
@@ -45657,7 +45657,7 @@
         "tags": [
           "staff"
         ],
-        "summary": "Stop a monthly line from the next period on; past payslips keep it (AD-3).",
+        "summary": "Stop a monthly line from the next period on: the open month and past\npayslips keep it (AD-3, owner decision D6).",
         "operationId": "stop_adjustment",
         "parameters": [
           {
@@ -52665,6 +52665,103 @@
         "responses": {
           "204": {
             "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/staff/open-shifts/{id}/withdraw": {
+      "post": {
+        "tags": [
+          "staff"
+        ],
+        "summary": "Take back my claim while it waits (SC-9, S-162), as the one who asked can\ncancel any pending request: the shift is open again, the claim stays in\nmy Requests as `withdrawn`, and the managers told of it hear. 409\n`NO_PENDING_CLAIM` when I have no claim waiting on it, 409\n`CLAIM_ALREADY_DECIDED` once it was approved or declined.",
+        "operationId": "withdraw_claim",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenShift"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -63001,6 +63098,27 @@
             ],
             "format": "uuid"
           },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "decided_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who decided a line that waited for the owner, when, and why (a\nrejection always says why, D8)."
+          },
+          "decision_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "effective_date": {
             "type": "string",
             "format": "date",
@@ -64138,6 +64256,7 @@
           "limit_rest_hours",
           "limit_overtime_day_hours",
           "orders_per_staff",
+          "cover_pay_mode",
           "created_at",
           "updated_at"
         ],
@@ -64161,6 +64280,10 @@
               "null"
             ],
             "format": "uuid"
+          },
+          "cover_pay_mode": {
+            "type": "string",
+            "description": "How a confirmed cover is paid (owner decision D5): `minute_rate` (the\ncoverer's day rate ÷ 8 h × the minutes covered, CV-4; the default) or\n`full_block` (the covered block as a full day). A branch may override\nit (listed in `overridden`)."
           },
           "created_at": {
             "type": "string",
@@ -64424,6 +64547,16 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "history": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/DeductionOverrideEvent"
+            },
+            "description": "Deduction overrides audit only: every waive, unwaive and override\nevent with who, when and why, newest first (at most 500) — the\nhistory, so a waiver later undone still shows (owner decision D8,\nAT-10). Additive."
           },
           "to": {
             "type": [
@@ -68156,6 +68289,10 @@
             "type": "integer",
             "format": "int64"
           },
+          "salary_missing": {
+            "type": "boolean",
+            "description": "On payroll with no salary set (owner decision D9): everything prices\nat 0, and approval is refused (409 SALARY_MISSING) until the owner\nsets it or marks them not on payroll."
+          },
           "worked_days": {
             "type": "number",
             "format": "double"
@@ -68244,6 +68381,8 @@
           "name",
           "role",
           "branch_ids",
+          "salary_set",
+          "advance_within_cap",
           "pay_method",
           "cant_work_days"
         ],
@@ -68256,13 +68395,17 @@
             "format": "int64",
             "description": "Their salary-advance cap, decided by the server (AV-5, AT-3); shown\nunder the same visibility as the salary."
           },
+          "advance_within_cap": {
+            "type": "boolean",
+            "description": "What they owe in salary advances is within the cap; never hidden, so\na manager sees \"within cap\" / \"over cap\" without the figure (D7)."
+          },
           "base_salary_piastres": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "Only for people whose pay the caller may see."
+            "description": "Only for people whose pay the caller may see (null too when no\nsalary is set: `salary_set`)."
           },
           "branch_ids": {
             "type": "array",
@@ -68336,6 +68479,10 @@
             "type": "string",
             "description": "`owner` · `manager` · `employee` (from the linked account; an employee\nwith no account is `employee`)."
           },
+          "salary_set": {
+            "type": "boolean",
+            "description": "A salary is on file (D9); false = \"not set\". Never hidden."
+          },
           "user_id": {
             "type": [
               "string",
@@ -68391,6 +68538,14 @@
           "rules_saved": {
             "type": "boolean",
             "description": "The business saved its rules; nobody clocks in before (RU-1, DSH-6)."
+          },
+          "rules_saved_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the rules were first saved; null until then. The sweep never\nmarks absent (or charges) a shift that started before it (B-SETUP-5),\nso neither does the app (B-ONB-1)."
           }
         }
       },
@@ -71090,7 +71245,8 @@
           "payslips",
           "history",
           "totals",
-          "paid_count"
+          "paid_count",
+          "missing_salary_count"
         ],
         "properties": {
           "history": {
@@ -71099,6 +71255,11 @@
               "$ref": "#/components/schemas/PayrollPeriod"
             },
             "description": "Earlier periods, newest first."
+          },
+          "missing_salary_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "People on payroll with no salary set (D9): the preview rows with\n`salary_missing`; approval is refused until it is 0."
           },
           "paid_count": {
             "type": "integer",
@@ -71604,6 +71765,13 @@
         "properties": {
           "approve": {
             "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why. Required to reject (400 `REASON_REQUIRED`, D8); optional to\napprove."
           }
         }
       },
@@ -71758,6 +71926,96 @@
           },
           "unit": {
             "type": "string"
+          }
+        }
+      },
+      "DeductionOverrideEvent": {
+        "type": "object",
+        "description": "One waive, unwaive or override of a payroll deduction, from the money\naudit log (D8).",
+        "required": [
+          "deduction_id",
+          "action",
+          "at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`waive` · `unwaive` · `override`"
+          },
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "actor_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "amount_after_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "amount_before_piastres": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "What the line charged before and after this event (a waiver: after\n0; undoing one: before 0)."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deduction_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "effective_date": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date",
+            "description": "The line itself: its day, what made it (`absence`, `late_penalty`,\n…) and its rule's reason code. Null if the line is gone."
+          },
+          "employee_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "employee_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -73376,8 +73634,10 @@
           "name",
           "app_access",
           "employment_status",
+          "salary_set",
           "pay_method",
           "on_payroll",
+          "advance_within_cap",
           "cant_work_days",
           "branch_ids",
           "created_at",
@@ -73392,6 +73652,10 @@
             "format": "int64",
             "description": "The owner's cap on what this person may owe in salary advances, in\npiastres (AV-5): the server's figure, so no client recomputes it.\nHidden with the salary."
           },
+          "advance_within_cap": {
+            "type": "boolean",
+            "description": "What they owe in salary advances (pending ones counted) is within the\ncap. Never hidden: what a manager sees instead of the cap (D7)."
+          },
           "app_access": {
             "type": "boolean",
             "description": "May sign in to the staff app with a WhatsApp code."
@@ -73402,7 +73666,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "`None` when the caller may not read this person's pay — see the module docs."
+            "description": "`None` when the caller may not read this person's pay — see the module\ndocs — or when no salary is set (`salary_set` tells the two apart)."
           },
           "branch_ids": {
             "type": "array",
@@ -73572,6 +73836,10 @@
               "null"
             ],
             "description": "The linked user's POS role; null for an unlinked employee."
+          },
+          "salary_set": {
+            "type": "boolean",
+            "description": "A salary is on file (owner decision D9): false = \"not set\" (someone a\nmanager added or imported), shown as \"—\" and flagged by payroll.\nNever hidden: it says nothing about the amount."
           },
           "termination_date": {
             "type": [
@@ -78248,6 +78516,61 @@
           }
         }
       },
+      "MyClaim": {
+        "type": "object",
+        "description": "One of my claims on an open shift, and how it ended (SC-9, S-162): a\nrequest like any other, so it stays in my Requests once decided.",
+        "required": [
+          "id",
+          "open_shift_id",
+          "branch_id",
+          "on_date",
+          "work_shift_id",
+          "shift_name",
+          "status",
+          "claimed_at"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "claimed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it was decided or withdrawn; null while pending, and on a claim\ndecided before the server kept this history."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "on_date": {
+            "type": "string",
+            "format": "date"
+          },
+          "open_shift_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "shift_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending` · `approved` · `declined` · `withdrawn`. A shift the\nmanager took back while the claim waited is `declined`."
+          },
+          "work_shift_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "MyRosterView": {
         "type": "object",
         "required": [
@@ -78256,6 +78579,7 @@
           "shifts",
           "unpublished_weeks",
           "open_shifts",
+          "my_claims",
           "swaps",
           "team",
           "cant_work_days",
@@ -78272,6 +78596,13 @@
           "from": {
             "type": "string",
             "format": "date"
+          },
+          "my_claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MyClaim"
+            },
+            "description": "My claims on open shifts, decided ones included: those on dates in\nrange, and every pending one wherever it falls (SC-9, S-162)."
           },
           "open_shifts": {
             "type": "array",
@@ -78725,6 +79056,14 @@
           "branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the live claim was made; null while open."
           },
           "claimed_by": {
             "type": [
@@ -82395,6 +82734,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "missing_salary_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "People on payroll with no salary set (D9); approval waits for them."
+          },
           "net_piastres": {
             "type": "integer",
             "format": "int64"
@@ -85122,6 +85466,13 @@
             ],
             "format": "uuid",
             "description": "`None` = the org-wide default row."
+          },
+          "cover_pay_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`minute_rate` · `full_block` (D5). On a branch: its own override;\n`inherit: [\"cover_pay_mode\"]` goes back to the business's."
           },
           "default_overtime_multiplier": {
             "type": [
@@ -87893,6 +88244,13 @@
             "type": [
               "string",
               "null"
+            ],
+            "description": "Why (kept as the decision note). Required to reject: `note` or\n`reason`, `reason` wins (400 `REASON_REQUIRED`, D8)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
             ]
           }
         }
@@ -88321,8 +88679,8 @@
           "status",
           "created_at",
           "updated_at",
-          "cap_piastres",
-          "outstanding_piastres"
+          "outstanding_piastres",
+          "within_cap"
         ],
         "properties": {
           "amount_piastres": {
@@ -88330,9 +88688,12 @@
             "format": "int64"
           },
           "cap_piastres": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "The owner's cap on what this person may owe in advances, in piastres\n(AV-5) — the server's figure, so no client recomputes it."
+            "description": "The owner's cap on what this person may owe in advances, in piastres\n(AV-5) — the server's figure, so no client recomputes it. Null for a\ncaller who may not read this person's salary: the cap is half the\nsalary, so it would give it away (owner decision D7). The person\nalways sees their own."
           },
           "created_at": {
             "type": "string",
@@ -88406,6 +88767,10 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "within_cap": {
+            "type": "boolean",
+            "description": "What is owed (pending ones counted) is within the cap: what a manager\nsees instead of the cap (D7). False = over it: only the owner can\napprove more."
           }
         }
       },
@@ -89789,6 +90154,7 @@
           "modules",
           "role",
           "caps",
+          "caps_everywhere",
           "branches",
           "people",
           "work_shifts",
@@ -89823,6 +90189,13 @@
               "type": "string"
             },
             "description": "The HR capabilities I hold (`hr.*` keys) — through my Madar account;\nempty for an employee with none. The app gates tabs on these (PM-4)."
+          },
+          "caps_everywhere": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The capabilities I hold at EVERY branch: the list `GET /authz/me`\nputs in `everywhere`, for the business-wide acts (the rules, payroll,\npublic holidays: `hr.rules.edit`, D3). Empty without a Madar account."
           },
           "deduction_limit_piastres": {
             "type": [

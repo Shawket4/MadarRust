@@ -338,6 +338,35 @@ where
     assert_eq!(st, 200, "{b}");
 }
 
+/// Pings that put `who` outside the fence from `from` until `to` on `rec`
+/// (one outside at `from`, one back inside at `to`).
+async fn away(pool: &PgPool, f: &F, who: Uuid, rec: Uuid, from: DateTime<Utc>, to: DateTime<Utc>) {
+    for (at, inside) in [(from, false), (to, true)] {
+        sqlx::query(
+            "INSERT INTO attendance_pings (org_id, employee_id, attendance_record_id, at, inside) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(f.org)
+        .bind(who)
+        .bind(rec)
+        .bind(at)
+        .bind(inside)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+async fn worked(pool: &PgPool, rec: Uuid) -> (i32, i32, String) {
+    sqlx::query_as(
+        "SELECT worked_minutes, late_minutes, status FROM attendance_records WHERE id = $1",
+    )
+    .bind(rec)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 async fn deduction(pool: &PgPool, rec: Uuid, source: &str) -> i64 {
     sqlx::query_scalar(
         "SELECT COALESCE(SUM(amount_piastres), 0)::bigint FROM payroll_deductions \
@@ -934,6 +963,8 @@ async fn an_excuse_is_paid_by_the_rule_of_its_branch_and_unpaid_time_is_deducted
     )
     .await;
 
+    // She was away for the whole window (D2: only minutes away count).
+    away(&pool, &f, f.e, rec, at(d, "12:00"), at(d, "14:00")).await;
     let ex = file(
         &app,
         &f,
@@ -2043,18 +2074,18 @@ async fn deciding_a_holiday_takes_back_the_sweeps_absence_and_dismissing_restore
     )
     .await;
 
-    // Refusals first (AT-11): someone with no roster right at any branch
-    // can't decide it (a branch manager can: RU-10, R-B3); an unknown date is
-    // not a holiday; a bad decision is refused.
-    let nobody = user(&pool, f.org, "teller").await;
-    let (st, _) = send!(
+    // Refusals first (AT-11): only the owner decides it (D3), so a branch
+    // manager is refused; an unknown date is not a holiday; a bad decision
+    // is refused.
+    let (st, b) = send!(
         app,
         "PUT",
         format!("/staff/holidays/{d}"),
-        user_token(nobody, f.org, UserRole::Teller),
+        f.mgr_token(),
         json!({ "decision": "holiday" })
     );
-    assert_eq!(st, 403, "no roster right anywhere");
+    assert_eq!(st, 403, "a branch manager");
+    assert_eq!(b["code"], "OWNER_ONLY");
     let (st, _) = send!(
         app,
         "PUT",
@@ -2727,4 +2758,199 @@ async fn already_decided_and_overlap_refusals_are_coded(pool: PgPool) {
         !b["error"].as_str().unwrap().starts_with("Conflict:"),
         "{b}"
     );
+}
+
+/// Owner decision D2 (24 Sep 2026): excuses (paid and unpaid) and early
+/// departures follow one rule. Only the minutes actually away inside the
+/// approved window count: unpaid charges them, paid forgives them, and
+/// worked time never goes above real presence (no false overtime). Every
+/// figure is re-derived when the request is approved.
+#[sqlx::test]
+async fn approved_time_off_counts_only_the_minutes_actually_away(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    roster(&pool, &f, f.e, &[f.day_shift]).await;
+    let shift = |d: &str| (at(d, "09:00"), at(d, "17:00"));
+    let approve = |id: Value, paid: bool| {
+        let app = &app;
+        let token = f.owner_token();
+        async move {
+            let (st, row) = decide(
+                app,
+                &token,
+                &id,
+                json!({ "status": "approved", "is_paid": paid }),
+            )
+            .await;
+            assert_eq!(st, 200, "{row}");
+        }
+    };
+
+    // Youssef: an unpaid 60-minute excuse, clocked in and inside throughout:
+    // nothing charged, nothing taken off worked time.
+    let d = "2026-08-10";
+    let rec = record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d,
+        shift(d),
+        Some(shift(d)),
+        "present",
+    )
+    .await;
+    let ex = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "excuse", "on_date": d,
+        "from_time": "12:00:00", "to_time": "13:00:00" }),
+    )
+    .await;
+    approve(ex["id"].clone(), false).await;
+    assert_eq!(
+        deduction(&pool, rec, "excused_unpaid").await,
+        0,
+        "was there all along"
+    );
+    assert_eq!(worked(&pool, rec).await.0, 480);
+
+    // Salma: a paid 65-minute excuse while present: worked stays 480 (it
+    // used to become 545, a false 9h05).
+    let d = "2026-08-11";
+    let rec = record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d,
+        shift(d),
+        Some(shift(d)),
+        "present",
+    )
+    .await;
+    let ex = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "excuse", "on_date": d,
+        "from_time": "12:00:00", "to_time": "13:05:00" }),
+    )
+    .await;
+    approve(ex["id"].clone(), true).await;
+    assert_eq!(worked(&pool, rec).await.0, 480, "no false overtime");
+    assert_eq!(deduction(&pool, rec, "excused_unpaid").await, 0);
+
+    // Away 40 of an unpaid 60-minute window: 40 minutes charged, and those
+    // 40 minutes aren't worked.
+    let d = "2026-08-12";
+    let rec = record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d,
+        shift(d),
+        Some(shift(d)),
+        "present",
+    )
+    .await;
+    away(&pool, &f, f.e, rec, at(d, "12:00"), at(d, "12:40")).await;
+    let ex = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "excuse", "on_date": d,
+        "from_time": "12:00:00", "to_time": "13:00:00" }),
+    )
+    .await;
+    approve(ex["id"].clone(), false).await;
+    assert_eq!(
+        deduction(&pool, rec, "excused_unpaid").await,
+        DAY * 40 / 480
+    );
+    assert_eq!(worked(&pool, rec).await.0, 440);
+
+    // The same away time on a PAID excuse is forgiven; still not worked.
+    let d = "2026-08-13";
+    let rec = record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d,
+        shift(d),
+        Some(shift(d)),
+        "present",
+    )
+    .await;
+    away(&pool, &f, f.e, rec, at(d, "12:00"), at(d, "12:40")).await;
+    let ex = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "excuse", "on_date": d,
+        "from_time": "12:00:00", "to_time": "13:00:00" }),
+    )
+    .await;
+    approve(ex["id"].clone(), true).await;
+    assert_eq!(deduction(&pool, rec, "excused_unpaid").await, 0);
+    assert_eq!(worked(&pool, rec).await.0, 440);
+
+    // An unpaid excuse over the start: arriving when it ends is not late;
+    // the hour away is charged once, at the minute rate.
+    let d = "2026-08-14";
+    let rec = record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d,
+        shift(d),
+        Some((at(d, "10:00"), at(d, "17:00"))),
+        "late",
+    )
+    .await;
+    let ex = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "excuse", "on_date": d,
+        "from_time": "09:00:00", "to_time": "10:00:00" }),
+    )
+    .await;
+    approve(ex["id"].clone(), false).await;
+    let (w, late, status) = worked(&pool, rec).await;
+    assert_eq!((w, late, status.as_str()), (420, 0, "present"));
+    assert_eq!(deduction(&pool, rec, "excused_unpaid").await, DAY / 8);
+    assert_eq!(
+        deduction(&pool, rec, "late_penalty").await,
+        0,
+        "never charged twice"
+    );
+
+    // An unpaid early departure agreed for 15:00 but Omar stayed: nothing.
+    let d = "2026-08-15";
+    let rec = record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d,
+        shift(d),
+        Some(shift(d)),
+        "present",
+    )
+    .await;
+    let early = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "early_departure", "on_date": d,
+        "from_time": "15:00:00" }),
+    )
+    .await;
+    approve(early["id"].clone(), false).await;
+    assert_eq!(deduction(&pool, rec, "excused_unpaid").await, 0, "stayed");
 }

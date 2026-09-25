@@ -2850,3 +2850,243 @@ async fn a_till_punch_upgrades_a_legacy_pin(pool: PgPool) {
     .unwrap();
     assert_eq!(unstamped, 0);
 }
+
+/// Owner decision D1 (24 Sep 2026): a shift a colleague is covering can't
+/// be punched for its owner by any method (the app, the till, a manager's
+/// punch, a manual record, an approved correction) while the cover is
+/// pending or confirmed; it would be paid twice. A rejected cover doesn't
+/// block: the owner then clocks in and counts late from their own start.
+#[sqlx::test]
+async fn a_covered_shift_refuses_every_punch_for_its_owner(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    // Amal's shift began an hour ago and she never came; Bassem covers it.
+    let shift_id = shift_around_now(&pool, &f, f.a, 60, 240).await;
+    let bassem = session(&pool, f.b).await;
+    let cover = json_of(call!(
+        app,
+        post,
+        "/staff/me/cover",
+        phone(&bassem),
+        with(
+            here(),
+            json!({ "employee_id": f.a, "work_shift_id": shift_id })
+        )
+    ))
+    .await;
+    assert_eq!(cover["cover_status"], "pending", "{cover}");
+    let cover_id = cover["id"].as_str().unwrap().to_string();
+    let covered = |label: &'static str| {
+        move |status: actix_web::http::StatusCode, body: Value| {
+            assert_eq!(status, 409, "{label}: {body}");
+            assert_eq!(body["code"], "SHIFT_COVERED", "{label}: {body}");
+            assert_eq!(body["vars"], json!({ "coverer_name": "Bassem" }), "{label}");
+        }
+    };
+    let amal = session(&pool, f.a).await;
+    let owner = owner_t(&f);
+
+    // Pending: her own phone, the till and a manager's punch are refused.
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/check-in",
+        phone(&amal),
+        with(here(), json!({ "branch_id": f.branch }))
+    );
+    let status = resp.status();
+    covered("app")(status, json_of(resp).await);
+    give_pin(&pool, f.a_user, "4321").await;
+    let till = open_till(&pool, f.org, f.branch, f.owner).await;
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance/till-punch",
+        at_till(&owner, till),
+        json!({ "branch_id": f.branch, "pin": "4321" })
+    );
+    let status = resp.status();
+    covered("till")(status, json_of(resp).await);
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance/punch",
+        owner.clone(),
+        json!({ "employee_id": f.a, "reason": "Phone died" })
+    );
+    let status = resp.status();
+    covered("manager")(status, json_of(resp).await);
+
+    // Confirmed: a manual record and an approved correction are refused too.
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/attendance/{cover_id}/cover"),
+        owner.clone(),
+        json!({ "approve": true })
+    );
+    assert_eq!(resp.status(), 200);
+    let day = local(&pool, Utc::now(), &f.tz).await.date();
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance",
+        owner.clone(),
+        json!({ "employee_id": f.a, "branch_id": f.branch, "business_date": day,
+                "work_shift_id": shift_id, "check_in_at": Utc::now() - Duration::minutes(30),
+                "reason": "Was here" })
+    );
+    let status = resp.status();
+    covered("manual")(status, json_of(resp).await);
+    let came = local(&pool, Utc::now() - Duration::minutes(30), &f.tz)
+        .await
+        .time();
+    let req = json_of(call!(
+        app,
+        post,
+        "/staff/me/requests",
+        phone(&amal),
+        json!({ "kind": "correction", "on_date": day, "work_shift_id": shift_id,
+                "from_time": came.format("%H:%M").to_string(), "reason": "I was here" })
+    ))
+    .await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/requests/{}/decision", req["id"].as_str().unwrap()),
+        owner.clone(),
+        json!({ "status": "approved" })
+    );
+    let status = resp.status();
+    covered("correction")(status, json_of(resp).await);
+    let worked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attendance_records WHERE employee_id = $1 \
+            AND check_in_at IS NOT NULL",
+    )
+    .bind(f.a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(worked, 0, "nothing clocked Amal in");
+
+    // A rejected cover doesn't block: she clocks in, late from her start.
+    sqlx::query("UPDATE attendance_records SET cover_status = 'rejected' WHERE id = $1::uuid")
+        .bind(&cover_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/check-in",
+        phone(&amal),
+        with(here(), json!({ "branch_id": f.branch }))
+    );
+    assert_eq!(resp.status(), 201);
+    let rec = json_of(resp).await;
+    assert_eq!(rec["status"], "late", "{rec}");
+}
+
+/// B-CV-1: a colleague's cover OF my shift reaches my app, so it stops
+/// offering "Clock in" on the covered block (D1 refuses it anyway). The row
+/// is the coverer's, names me in `covered_employee_id`, carries its
+/// `cover_status` whatever it is, and never shows the coverer's location.
+#[sqlx::test]
+async fn my_attendance_includes_a_cover_of_my_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    // Amal's shift began an hour ago; Bassem covers it.
+    let shift_id = shift_around_now(&pool, &f, f.a, 60, 240).await;
+    let bassem = session(&pool, f.b).await;
+    let cover = json_of(call!(
+        app,
+        post,
+        "/staff/me/cover",
+        phone(&bassem),
+        with(
+            here(),
+            json!({ "employee_id": f.a, "work_shift_id": shift_id })
+        )
+    ))
+    .await;
+    let cover_id = cover["id"].clone();
+    let amal = session(&pool, f.a).await;
+    let day = local(&pool, Utc::now(), &f.tz).await.date();
+    for status in ["pending", "confirmed", "rejected"] {
+        sqlx::query("UPDATE attendance_records SET cover_status = $2 WHERE id = $1::uuid")
+            .bind(cover_id.as_str().unwrap())
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows = json_of(call!(
+            app,
+            get,
+            format!("/staff/me/attendance?from={day}&to={day}"),
+            phone(&amal)
+        ))
+        .await;
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == cover_id)
+            .unwrap_or_else(|| panic!("{status}: {rows}"));
+        assert_eq!(row["employee_id"], json!(f.b), "the coverer's row");
+        assert_eq!(row["covered_employee_id"], json!(f.a));
+        assert_eq!(row["cover_status"], status);
+        assert_eq!(row["work_shift_id"], json!(shift_id));
+        assert!(
+            row["check_in_latitude"].is_null() && row["check_in_longitude"].is_null(),
+            "never the coverer's location: {row}"
+        );
+    }
+    // The coverer still sees their own row, location and all.
+    let rows = json_of(call!(
+        app,
+        get,
+        format!("/staff/me/attendance?from={day}&to={day}"),
+        phone(&bassem)
+    ))
+    .await;
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == cover_id)
+        .unwrap();
+    assert!(row["check_in_latitude"].is_number(), "{row}");
+}
+
+/// B-ONB-1: the staff context says when the rules were first saved, so the
+/// app never marks absent a shift that started before it (the sweep never
+/// does, B-SETUP-5). Null until the first save.
+#[sqlx::test]
+async fn the_context_says_when_the_rules_were_first_saved(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    let s = session(&pool, f.a).await;
+    let saved: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT rules_saved_at FROM attendance_settings WHERE org_id = $1 AND branch_id IS NULL",
+    )
+    .bind(f.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let ctx = json_of(call!(app, get, "/staff/me/context", phone(&s))).await;
+    assert_eq!(ctx["settings"]["rules_saved"], true, "{ctx}");
+    let at: DateTime<Utc> = ctx["settings"]["rules_saved_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{ctx}"))
+        .parse()
+        .unwrap();
+    assert_eq!(at, saved);
+    sqlx::query("UPDATE attendance_settings SET rules_saved_at = NULL WHERE org_id = $1")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ctx = json_of(call!(app, get, "/staff/me/context", phone(&s))).await;
+    assert_eq!(ctx["settings"]["rules_saved"], false, "{ctx}");
+    assert!(ctx["settings"]["rules_saved_at"].is_null(), "{ctx}");
+}

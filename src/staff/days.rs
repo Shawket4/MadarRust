@@ -487,6 +487,86 @@ pub(crate) async fn published_horizon(
     }))
 }
 
+/// A roster edit changed a person's date (its times, a block, or who works
+/// it): the absences the sweep wrote on it that no longer match the roster go,
+/// with the automatic deductions they carried, so the new times are judged
+/// from scratch (owner decision D4, 24 Sep 2026). Before, the old absence
+/// stayed charged and nobody could punch in or cover at the new times.
+///
+/// Only the sweep's own rows (no punch, not manual, not written or edited by
+/// anyone, no status set by hand, no request pointing at them), and never in
+/// an approved month. A manager's decision on a line is kept (AT-7): a waived
+/// or overridden deduction stays, detached from the record, as a holiday
+/// does it.
+pub(crate) async fn clear_stale_absences(
+    pool: &PgPool,
+    employee_id: Uuid,
+    date: NaiveDate,
+) -> Result<(), AppError> {
+    let org_id: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM employees WHERE id = $1")
+        .bind(employee_id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(org_id) = org_id else {
+        return Ok(());
+    };
+    if crate::staff::period_lock::is_closed(pool, org_id, date).await? {
+        return Ok(());
+    }
+    let rostered: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>)> =
+        resolve_range(pool, &[employee_id], date, date, None)
+            .await?
+            .into_iter()
+            .map(|s| (s.work_shift_id, s.scheduled_start_at, s.scheduled_end_at))
+            .collect();
+    let candidates: Vec<(
+        Uuid,
+        Option<Uuid>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+    )> = sqlx::query_as(
+        "SELECT a.id, a.work_shift_id, a.scheduled_start_at, a.scheduled_end_at \
+               FROM attendance_records a \
+              WHERE a.employee_id = $1 AND a.business_date = $2 \
+                AND a.status IN ('absent', 'on_leave') AND a.check_in_at IS NULL \
+                AND NOT a.is_manual AND a.created_by IS NULL AND a.edited_by IS NULL \
+                AND NOT a.status_overridden AND a.covered_employee_id IS NULL \
+                AND NOT EXISTS (SELECT 1 FROM staff_requests r \
+                                 WHERE r.attendance_record_id = a.id)",
+    )
+    .bind(employee_id)
+    .bind(date)
+    .fetch_all(pool)
+    .await?;
+    let stale: Vec<Uuid> = candidates
+        .into_iter()
+        .filter(|(_, shift, start, end)| {
+            !rostered
+                .iter()
+                .any(|(s, a, b)| Some(*s) == *shift && Some(*a) == *start && Some(*b) == *end)
+        })
+        .map(|(id, ..)| id)
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM payroll_deductions \
+          WHERE attendance_record_id = ANY($1) AND source <> 'manual' \
+            AND created_by IS NULL AND waived_at IS NULL AND overridden_at IS NULL",
+    )
+    .bind(&stale)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM attendance_records WHERE id = ANY($1)")
+        .bind(&stale)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// A published week changed for these people on these dates: mark each day
 /// "changed" (the app shows it) and tell each person once (SC-4). Days in
 /// weeks nobody published stay drafts and are silent.
@@ -508,6 +588,8 @@ pub(crate) async fn mark_changed_and_tell(
 ) -> Result<(), AppError> {
     let mut told: BTreeSet<Uuid> = BTreeSet::new();
     for &(employee_id, date) in changes {
+        // The shift changed: the sweep's absence on it no longer holds (D4).
+        clear_stale_absences(pool, employee_id, date).await?;
         let published: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM staff_week_publications p \
                              JOIN employee_branches eb ON eb.branch_id = p.branch_id \

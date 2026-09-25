@@ -555,6 +555,7 @@ paths(
         crate::staff::dawam::roster::publish,
         crate::staff::dawam::roster::post_open_shift,
         crate::staff::dawam::roster::claim_open_shift,
+        crate::staff::dawam::roster::withdraw_claim,
         crate::staff::dawam::roster::decide_claim,
         crate::staff::dawam::roster::ask_swap,
         crate::staff::dawam::roster::answer_swap,

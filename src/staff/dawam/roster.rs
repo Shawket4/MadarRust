@@ -90,6 +90,9 @@ pub struct OpenShift {
     pub claimed_by: Option<Uuid>,
     #[sqlx(default)]
     pub claimed_by_name: Option<String>,
+    /// When the live claim was made; null while open.
+    #[sqlx(default)]
+    pub claimed_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
     pub start_at: Option<DateTime<Utc>>,
     #[sqlx(default)]
@@ -341,7 +344,7 @@ pub(crate) async fn open_shifts_at(
 ) -> Result<Vec<OpenShift>, AppError> {
     let mut rows: Vec<OpenShift> = sqlx::query_as(
         "SELECT o.id, o.branch_id, o.work_shift_id, ws.name AS shift_name, o.on_date, o.status, \
-                o.claimed_by, e.name AS claimed_by_name, \
+                o.claimed_by, e.name AS claimed_by_name, o.claimed_at, \
                 (o.on_date + COALESCE(dt.start_time, ws.start_time)) \
                     AT TIME ZONE COALESCE(b.timezone::text, org.timezone::text, 'Africa/Cairo') \
                     AS start_at, \
@@ -490,6 +493,68 @@ async fn labour_warnings(
     Ok(out)
 }
 
+/// One of my claims on an open shift, and how it ended (SC-9, S-162): a
+/// request like any other, so it stays in my Requests once decided.
+#[derive(Serialize, ToSchema, sqlx::FromRow, Clone)]
+pub struct MyClaim {
+    pub id: Uuid,
+    pub open_shift_id: Uuid,
+    pub branch_id: Uuid,
+    pub on_date: NaiveDate,
+    pub work_shift_id: Uuid,
+    pub shift_name: String,
+    /// `pending` · `approved` · `declined` · `withdrawn`. A shift the
+    /// manager took back while the claim waited is `declined`.
+    pub status: String,
+    pub claimed_at: DateTime<Utc>,
+    /// When it was decided or withdrawn; null while pending, and on a claim
+    /// decided before the server kept this history.
+    pub decided_at: Option<DateTime<Utc>>,
+}
+
+/// My claims on dates in `from..=to`, and every pending one wherever it falls.
+async fn my_claims_in(
+    pool: &PgPool,
+    employee_id: Uuid,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<MyClaim>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT c.id, c.open_shift_id, o.branch_id, o.on_date, o.work_shift_id, \
+                ws.name AS shift_name, c.status, c.created_at AS claimed_at, c.decided_at \
+           FROM staff_open_shift_claims c \
+           JOIN staff_open_shifts o ON o.id = c.open_shift_id \
+           JOIN work_shifts ws ON ws.id = o.work_shift_id \
+          WHERE c.employee_id = $1 AND (o.on_date BETWEEN $2 AND $3 OR c.status = 'pending') \
+          ORDER BY o.on_date, c.created_at",
+    )
+    .bind(employee_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Close an open shift's pending claim (the log beside `staff_open_shifts`,
+/// which keeps only the live claimer).
+async fn close_claim(
+    conn: &mut sqlx::PgConnection,
+    open_shift_id: Uuid,
+    status: &str,
+    by: Option<Uuid>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE staff_open_shift_claims SET status = $2, decided_at = now(), decided_by = $3 \
+          WHERE open_shift_id = $1 AND status = 'pending'",
+    )
+    .bind(open_shift_id)
+    .bind(status)
+    .bind(by)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct MyRosterView {
     pub from: NaiveDate,
@@ -500,6 +565,9 @@ pub struct MyRosterView {
     pub unpublished_weeks: Vec<NaiveDate>,
     /// Open shifts at my branches, in published weeks (SC-9).
     pub open_shifts: Vec<OpenShift>,
+    /// My claims on open shifts, decided ones included: those on dates in
+    /// range, and every pending one wherever it falls (SC-9, S-162).
+    pub my_claims: Vec<MyClaim>,
     pub swaps: Vec<Swap>,
     /// Colleagues' published shifts at my branches — what a swap can be with.
     pub team: Vec<RosterShift>,
@@ -563,10 +631,14 @@ pub async fn my_roster(
         }
         w += Duration::days(7);
     }
+    let now = Utc::now();
     let open_shifts = open_shifts_at(pool, &branches, query.from, query.to)
         .await?
         .into_iter()
-        .filter(|o| o.status == "open" || o.claimed_by == Some(employee_id))
+        // One that already started can't be claimed, so it isn't offered.
+        .filter(|o| {
+            (o.status == "open" && not_started(o, now)) || o.claimed_by == Some(employee_id)
+        })
         .filter(|o| published.contains(&(o.branch_id, week_start(o.on_date))))
         .collect();
     let (pref_time, cant_work_days, prefs_set_by): (Option<String>, Vec<i16>, String) =
@@ -582,6 +654,7 @@ pub async fn my_roster(
         shifts,
         unpublished_weeks: unpublished,
         open_shifts,
+        my_claims: my_claims_in(pool, employee_id, query.from, query.to).await?,
         swaps: swaps_of(pool, org_id, Some(employee_id), None, None).await?,
         team,
         pref_time,
@@ -636,14 +709,17 @@ pub async fn publish(
     if fresh > 0 {
         // Each open shift is announced by its OWN date, one notice per date
         // (SC-9, N-031, Mac E2E R-B2) — as posting into a published week does.
-        let open_dates: Vec<NaiveDate> = sqlx::query_scalar(
-            "SELECT DISTINCT on_date FROM staff_open_shifts WHERE branch_id = $1 AND status = 'open' \
-                AND on_date BETWEEN $2 AND $2 + 6 ORDER BY on_date",
-        )
-        .bind(body.branch_id)
-        .bind(ws)
-        .fetch_all(pool)
-        .await?;
+        // One that already started is not (hunt B-H1-2).
+        let now = Utc::now();
+        let mut open_dates: Vec<NaiveDate> =
+            open_shifts_at(pool, &[body.branch_id], ws, ws + Duration::days(6))
+                .await?
+                .into_iter()
+                .filter(|o| o.status == "open" && not_started(o, now))
+                .map(|o| o.on_date)
+                .collect();
+        open_dates.dedup();
+        let own = own_employees(pool, org_id, &claims).await?;
         for p in staff_at(pool, body.branch_id).await? {
             notify(
                 pool,
@@ -653,6 +729,9 @@ pub async fn publish(
                 json!({ "date": ws }),
             )
             .await;
+            if own.contains(&p.employee_id) {
+                continue;
+            }
             for d in &open_dates {
                 notify(
                     pool,
@@ -666,6 +745,66 @@ pub async fn publish(
         }
     }
     Ok(HttpResponse::NoContent().finish())
+}
+
+/// Has `shift` started on `date` at `branch` — `date` plus that weekday's
+/// start (else the block's), on the branch's clock, as [`open_shifts_at`]
+/// shows it — at or before now?
+async fn block_started(
+    pool: &PgPool,
+    branch_id: Uuid,
+    shift_id: Uuid,
+    date: NaiveDate,
+) -> Result<bool, AppError> {
+    Ok(sqlx::query_scalar(
+        "SELECT ($3::date + COALESCE(dt.start_time, ws.start_time)) \
+                    AT TIME ZONE COALESCE(b.timezone::text, org.timezone::text, 'Africa/Cairo') \
+                <= now() \
+           FROM work_shifts ws \
+           JOIN branches b ON b.id = $1 \
+           JOIN organizations org ON org.id = b.org_id \
+           LEFT JOIN work_shift_day_times dt ON dt.work_shift_id = ws.id \
+                AND dt.day_of_week = EXTRACT(DOW FROM $3::date)::smallint \
+          WHERE ws.id = $2",
+    )
+    .bind(branch_id)
+    .bind(shift_id)
+    .bind(date)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false))
+}
+
+/// The caller's own employee record(s) in the org: whoever posts or
+/// publishes an open shift isn't told to claim it (hunt B-H1-3).
+async fn own_employees(
+    pool: &PgPool,
+    org_id: Uuid,
+    claims: &crate::auth::jwt::Claims,
+) -> Result<Vec<Uuid>, AppError> {
+    let Ok(user) = claims.user_id_safe() else {
+        return Ok(Vec::new());
+    };
+    Ok(
+        sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
+            .bind(user)
+            .bind(org_id)
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+/// An open shift that already started can be neither posted nor claimed.
+fn shift_started() -> AppError {
+    AppError::Refused {
+        code: "SHIFT_STARTED",
+        reason: "That shift has already started.".into(),
+    }
+}
+
+/// An open shift still worth offering: not yet started.
+fn not_started(o: &OpenShift, now: DateTime<Utc>) -> bool {
+    o.start_at.is_none_or(|s| s > now)
 }
 
 /// Is `date`'s week published at `branch`?
@@ -731,6 +870,10 @@ pub async fn post_open_shift(
             ),
         });
     }
+    // Nobody could work it, and everyone would be told (hunt B-H1-2).
+    if block_started(pool, body.branch_id, body.work_shift_id, body.on_date).await? {
+        return Err(shift_started());
+    }
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date, posted_by) \
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
@@ -744,7 +887,11 @@ pub async fn post_open_shift(
     .await?;
     // A draft week's open shift is announced when the week is published.
     if is_published(pool, body.branch_id, body.on_date).await? {
+        let own = own_employees(pool, org_id, &claims).await?;
         for p in staff_at(pool, body.branch_id).await? {
+            if own.contains(&p.employee_id) {
+                continue;
+            }
             notify(
                 pool,
                 org_id,
@@ -798,6 +945,9 @@ pub async fn claim_open_shift(
             reason: "Someone already claimed that shift.".into(),
         });
     }
+    if block_started(pool, branch_id, shift_id, on_date).await? {
+        return Err(shift_started());
+    }
     if !is_published(pool, branch_id, on_date).await? {
         return Err(AppError::Refused {
             code: "WEEK_NOT_PUBLISHED",
@@ -826,6 +976,7 @@ pub async fn claim_open_shift(
         days::check_overlaps(&mut tx, employee_id, on_date, on_date).await?;
         tx.rollback().await?;
     }
+    let mut tx = pool.begin().await?;
     let claimed: Option<Uuid> = sqlx::query_scalar(
         "UPDATE staff_open_shifts SET status = 'claimed', claimed_by = $2, claimed_at = now() \
           WHERE id = $1 AND org_id = $3 AND status = 'open' RETURNING id",
@@ -833,7 +984,7 @@ pub async fn claim_open_shift(
     .bind(*id)
     .bind(employee_id)
     .bind(org_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     if claimed.is_none() {
         // Lost the race to a colleague's claim.
@@ -842,6 +993,17 @@ pub async fn claim_open_shift(
             reason: "Someone already claimed that shift.".into(),
         });
     }
+    // Logged with the same now() as claimed_at (one transaction).
+    sqlx::query(
+        "INSERT INTO staff_open_shift_claims (org_id, open_shift_id, employee_id, status) \
+         VALUES ($1, $2, $3, 'pending')",
+    )
+    .bind(org_id)
+    .bind(*id)
+    .bind(employee_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     let name = employee_name(pool, employee_id).await;
     notify_managers(
         pool,
@@ -850,6 +1012,89 @@ pub async fn claim_open_shift(
         Cap::HrScheduleEdit,
         Some(employee_id),
         "staff.n_claim",
+        json!({ "name": name, "date": on_date }),
+    )
+    .await;
+    let row = open_shifts_at(pool, &[branch_id], on_date, on_date)
+        .await?
+        .into_iter()
+        .find(|o| o.id == *id)
+        .ok_or(AppError::Internal)?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
+/// Take back my claim while it waits (SC-9, S-162), as the one who asked can
+/// cancel any pending request: the shift is open again, the claim stays in
+/// my Requests as `withdrawn`, and the managers told of it hear. 409
+/// `NO_PENDING_CLAIM` when I have no claim waiting on it, 409
+/// `CLAIM_ALREADY_DECIDED` once it was approved or declined.
+#[utoipa::path(
+    post, path = "/staff/open-shifts/{id}/withdraw", tag = "staff",
+    params(("id" = Uuid, Path)),
+    responses((status = 200, body = OpenShift), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn withdraw_claim(
+    me: Me,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let (employee_id, org_id) = (me.employee_id, me.org_id);
+    let pool = pool.get_ref();
+    let subject = access::subject(pool, org_id, employee_id).await?;
+    let found: Option<(Uuid, NaiveDate)> = sqlx::query_as(
+        "SELECT branch_id, on_date FROM staff_open_shifts \
+          WHERE id = $1 AND org_id = $2 AND branch_id = ANY($3)",
+    )
+    .bind(*id)
+    .bind(org_id)
+    .bind(&subject.branches)
+    .fetch_optional(pool)
+    .await?;
+    let Some((branch_id, on_date)) = found else {
+        return Err(AppError::NotFound("No open shift here.".into()));
+    };
+    let mut tx = pool.begin().await?;
+    let reopened: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL \
+          WHERE id = $1 AND status = 'claimed' AND claimed_by = $2 RETURNING id",
+    )
+    .bind(*id)
+    .bind(employee_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if reopened.is_none() {
+        drop(tx);
+        let last: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM staff_open_shift_claims \
+              WHERE open_shift_id = $1 AND employee_id = $2 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(*id)
+        .bind(employee_id)
+        .fetch_optional(pool)
+        .await?;
+        return Err(match last.as_deref() {
+            Some("approved" | "declined") => AppError::Refused {
+                code: "CLAIM_ALREADY_DECIDED",
+                reason: "Your claim was already decided. Ask your manager to change it.".into(),
+            },
+            _ => AppError::Refused {
+                code: "NO_PENDING_CLAIM",
+                reason: "You have no claim waiting on this shift.".into(),
+            },
+        });
+    }
+    close_claim(&mut tx, *id, "withdrawn", None).await?;
+    tx.commit().await?;
+    // The same people the claim told (`claim_open_shift`).
+    let name = employee_name(pool, employee_id).await;
+    notify_managers(
+        pool,
+        org_id,
+        Some(branch_id),
+        Cap::HrScheduleEdit,
+        Some(employee_id),
+        "staff.n_claim_withdrawn",
         json!({ "name": name, "date": on_date }),
     )
     .await;
@@ -918,6 +1163,7 @@ pub async fn decide_claim(
         if won.is_none() {
             return Err(AppError::Conflict("That claim was already decided.".into()));
         }
+        close_claim(&mut tx, *id, "approved", Some(by)).await?;
         let block = Block {
             work_shift_id: shift_id,
             times: None,
@@ -957,6 +1203,8 @@ pub async fn decide_claim(
         if won.is_none() {
             return Err(AppError::Conflict("That claim was already decided.".into()));
         }
+        // The shift reopens, but the claimer's declined claim stays theirs.
+        close_claim(&mut tx, *id, "declined", Some(by)).await?;
         tx.commit().await?;
         notify(
             pool,
@@ -997,20 +1245,25 @@ pub async fn cancel_open_shift(
         return Err(AppError::NotFound("No open shift here.".into()));
     };
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
+    let by = claims.user_id_safe().ok();
+    let mut tx = pool.begin().await?;
     let gone: Option<Option<Uuid>> = sqlx::query_scalar(
         "UPDATE staff_open_shifts SET status = 'cancelled', decided_by = $2 \
           WHERE id = $1 AND status IN ('open', 'claimed') \
           RETURNING claimed_by",
     )
     .bind(*id)
-    .bind(claims.user_id_safe().ok())
-    .fetch_optional(pool)
+    .bind(by)
+    .fetch_optional(&mut *tx)
     .await?;
     let Some(claimer) = gone else {
         return Err(AppError::Conflict(
             "That shift was already filled or cancelled.".into(),
         ));
     };
+    // A claim waiting on it ends declined, and stays in the claimer's Requests.
+    close_claim(&mut tx, *id, "declined", by).await?;
+    tx.commit().await?;
     if let Some(c) = claimer {
         notify(
             pool,

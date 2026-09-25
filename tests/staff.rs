@@ -1940,44 +1940,52 @@ async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool
 }
 
 #[sqlx::test]
-async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool) {
-    // The pure shape of the rule, without the clock: an excused window inside the
-    // attendance span is credited when paid and ignored when not.
-    use chrono::TimeZone;
+async fn an_excuse_never_credits_time_the_person_was_there_for(pool: PgPool) {
+    // The pure shape of the rule (owner decision D2): worked time is real
+    // presence. An excuse, paid or not, adds nothing to it (a paid one used
+    // to credit its window on top of the time worked); the minutes the pings
+    // put the person away inside the window come off it.
+    use chrono::{DateTime, TimeZone};
     use madar_rust::staff::attendance::{DayAdjustments, WindowRequest, derive};
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
-    let excuse = |paid: bool| DayAdjustments {
+    let excuse = |paid: bool, away: Vec<(DateTime<Utc>, DateTime<Utc>)>| DayAdjustments {
         excuses: vec![WindowRequest {
             candidates: vec![(at(12, 0), at(14, 0))],
             work_shift_id: None,
             paid,
         }],
+        away,
         ..Default::default()
     };
+    let day = |adj: &DayAdjustments| {
+        derive(
+            Some(at(9, 0)),
+            Some(at(17, 0)),
+            Some(at(9, 0)),
+            Some(at(17, 0)),
+            None,
+            adj,
+        )
+    };
 
-    let paid = derive(
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        None,
-        &excuse(true),
-    );
-    let unpaid = derive(
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        None,
-        &excuse(false),
-    );
-
-    assert_eq!(unpaid.worked_minutes, 480, "the clocked span, unchanged");
     assert_eq!(
-        paid.worked_minutes, 600,
-        "a paid excuse credits the two hours back"
+        day(&excuse(false, vec![])).worked_minutes,
+        480,
+        "there all along"
     );
+    assert_eq!(
+        day(&excuse(true, vec![])).worked_minutes,
+        480,
+        "no credit on top"
+    );
+    // Away 12:30-13:30: an hour not worked, paid or not.
+    let away = vec![(at(12, 30), at(13, 30))];
+    assert_eq!(day(&excuse(true, away.clone())).worked_minutes, 420);
+    assert_eq!(day(&excuse(false, away)).worked_minutes, 420);
+    // Away outside the window is the left-mid-shift flag's, not the excuse's.
+    let later = vec![(at(15, 0), at(16, 0))];
+    assert_eq!(day(&excuse(true, later)).worked_minutes, 480);
     let _ = pool;
 }
 

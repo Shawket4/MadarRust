@@ -645,7 +645,7 @@ async fn away_exact(
         ));
     }
     let salary: i64 =
-        sqlx::query_scalar("SELECT base_salary_piastres FROM employees WHERE id = $1")
+        sqlx::query_scalar("SELECT COALESCE(base_salary_piastres, 0) FROM employees WHERE id = $1")
             .bind(employee_id)
             .fetch_optional(pool)
             .await?
@@ -868,6 +868,20 @@ pub async fn resolve_flag(
             .fetch_one(pool)
             .await?,
         );
+        crate::staff::payroll::audit(
+            pool,
+            org_id,
+            Some(by),
+            "adjustment.create",
+            "payroll_deductions",
+            deduction_id,
+            Some(employee_id),
+            None,
+            Some(reason),
+            json!({ "kind": "deduction", "value_piastres": amount, "source": source,
+                    "flag_id": *id, "status": status, "effective_date": date }),
+        )
+        .await?;
         if status == "approved" {
             notify(
                 pool,
@@ -1218,6 +1232,20 @@ async fn decide_cover_record(
     if decided == 0 {
         return Err(AppError::Conflict("That cover was already decided.".into()));
     }
+    // A money act: who, when (AT-10, D8).
+    crate::staff::payroll::audit(
+        pool,
+        org_id,
+        Some(by),
+        "cover.decide",
+        "attendance_records",
+        Some(id),
+        Some(coverer),
+        None,
+        None,
+        json!({ "approve": approve, "date": day }),
+    )
+    .await?;
     // The flag says what was decided (CV-3).
     sqlx::query(
         "UPDATE attendance_flags SET resolution = $3, resolved_by = $2, resolved_at = now() \
@@ -1336,6 +1364,20 @@ pub async fn decide_overtime(
         .bind(by)
         .execute(pool)
         .await?;
+    // A money act: who, when (AT-10, D8).
+    crate::staff::payroll::audit(
+        pool,
+        org_id,
+        Some(by),
+        "overtime.decide",
+        "attendance_records",
+        Some(*id),
+        Some(employee_id),
+        None,
+        None,
+        json!({ "approve": body.approve, "minutes": minutes, "date": on_date }),
+    )
+    .await?;
     notify(
         pool,
         org_id,
@@ -1536,6 +1578,14 @@ pub(crate) async fn punch(
                     .await?;
             crate::staff::attendance::check_window(shift.as_ref(), at)?;
             crate::staff::period_lock::assert_open(pool, org_id, business_date, "a punch").await?;
+            // A colleague is covering it: never paid twice (D1).
+            crate::staff::attendance::refuse_if_covered(
+                pool,
+                employee_id,
+                business_date,
+                shift.as_ref().map(|s| s.work_shift_id),
+            )
+            .await?;
             let id = sqlx::query_scalar(
                 "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                     business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, \
