@@ -1701,6 +1701,25 @@ async fn the_bank_file_and_wallet_list_come_from_the_server(pool: PgPool) {
     .await;
     assert!(all.starts_with("employee,employee_id,pay_method,account,base,"));
     assert_eq!(all.lines().count(), 3);
+    // Minor default M31: the cash list (pay envelopes) is name and amount,
+    // without anyone who has 0 to pay. Nour is paid in cash with nothing.
+    let nour =
+        common::employees::employee(&pool, f.org, "Nour", None, None, false, &[f.a], 0).await;
+    sqlx::query("UPDATE employees SET pay_method = 'cash' WHERE id = ANY($1)")
+        .bind(vec![f.bassem, nour])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let cash = text_of(call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv?method=cash", f.period),
+        owner
+    ))
+    .await;
+    assert_eq!(cash, "employee,amount\n\"Bassem\",5000.00\n");
     let resp = call!(
         app,
         get,
@@ -2145,6 +2164,22 @@ async fn deductions_past_earnings_carry_to_the_next_month_and_are_named(pool: Pg
         50_000,
         "the advance stays owed"
     );
+    // Minor default M28 (PAY-12): a payslip that nets to 0 settles itself
+    // as "Nothing to pay", its carried amount still on it; one with pay
+    // waits to be marked paid.
+    let settled: Vec<(Uuid, Option<String>, bool, i64)> = sqlx::query_as(
+        "SELECT employee_id, paid_method, paid_at IS NOT NULL, carry_out_piastres FROM payslips \
+          WHERE payroll_period_id = $1 ORDER BY net_piastres",
+    )
+    .bind(f.period)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let of = |who: Uuid| settled.iter().find(|r| r.0 == who).cloned().unwrap();
+    assert_eq!(of(f.amal).1.as_deref(), Some("none"));
+    assert!(of(f.amal).2);
+    assert_eq!(of(f.amal).3, 100_000);
+    assert!(!of(f.bassem).2, "Bassem is owed his pay");
     // Next month carries it in as its first deduction.
     let next_start = f.end + Duration::days(1);
     let next_end = (next_start + Duration::days(32)).with_day(1).unwrap() - Duration::days(1);
@@ -4116,9 +4151,9 @@ async fn a_second_decision_is_already_decided_and_told_once(pool: PgPool) {
     assert_eq!(resp.status(), 404);
 }
 
-/// Hunt H2-B4 (AV-4): asking for an advance tells the people who may decide
-/// it at the person's branch — as a leave request tells its deciders — and
-/// never the asker. A manager's own ask reaches the owner.
+/// Hunt H2-B4 (AV-4), minor default M37: asking for an advance tells the
+/// people who may decide it at the person's branch and the owners
+/// (`staff.n_advance_requested`, with the amount), and never the asker. A manager's own ask reaches the owner.
 #[sqlx::test]
 async fn an_advance_ask_tells_its_deciders(pool: PgPool) {
     let app = app!(pool);
@@ -4143,7 +4178,7 @@ async fn an_advance_ask_tells_its_deciders(pool: PgPool) {
     let mgr_b_emp = emp("Manager B", mgr_b, "+201012345603", &[f.b]).await;
     let told = async || -> Vec<(Uuid, Value)> {
         let rows: Vec<(Uuid, Value)> = sqlx::query_as(
-            "SELECT employee_id, args FROM staff_notifications WHERE key = 'staff.n_request' \
+            "SELECT employee_id, args FROM staff_notifications WHERE key = 'staff.n_advance_requested' \
               ORDER BY employee_id",
         )
         .fetch_all(&pool)
@@ -4178,14 +4213,9 @@ async fn an_advance_ask_tells_its_deciders(pool: PgPool) {
     want.sort();
     assert_eq!(who, want, "A's deciders, not B's manager nor Amal");
     assert!(!who.contains(&mgr_b_emp) && !who.contains(&f.amal));
-    assert_eq!(
-        rows[0].1,
-        json!({ "name": "Amal", "kind": "salary_advance", "date": today })
-    );
-    assert_eq!(
-        madar_rust::push::render("staff.n_request", &rows[0].1, false).unwrap(),
-        format!("Amal: new Salary advance request for {today}")
-    );
+    assert_eq!(rows[0].1["name"], json!("Amal"));
+    assert_eq!(rows[0].1["amount"], json!(50_000));
+    let _ = today;
 
     // The manager's own ask: someone else decides it.
     ask(mgr_emp).await;
@@ -4519,4 +4549,558 @@ async fn pay_refusals_carry_codes(pool: PgPool) {
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Minor default M32: a pending overtime or cover in a month that is already
+/// approved or paid can be rejected (no money moves), so it leaves
+/// Approvals; approving stays refused (PERIOD_CLOSED: add a line in next
+/// month instead).
+#[sqlx::test]
+async fn a_pending_overtime_or_cover_in_a_paid_month_can_be_rejected_not_approved(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let ot = || day(&pool, &f, f.amal, f.a, f.start, "present", 9, 480, 0, 60);
+    let first = ot().await;
+    let cover = |status: &'static str| {
+        let pool = pool.clone();
+        let (org, a, amal, bassem, on) = (f.org, f.a, f.amal, f.bassem, f.start);
+        async move {
+            let start = on.and_hms_opt(18, 0, 0).unwrap().and_utc();
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, \
+                     status, scheduled_start_at, scheduled_end_at, check_in_at, check_out_at, \
+                     worked_minutes, check_in_method, covered_employee_id, cover_status) \
+                 VALUES ($1, $2, $3, $4, 'present', $5, $5 + INTERVAL '2 hours', $5, \
+                         $5 + INTERVAL '2 hours', 120, 'cover', $6, $7) RETURNING id",
+            )
+            .bind(org)
+            .bind(amal)
+            .bind(a)
+            .bind(on)
+            .bind(start)
+            .bind(bassem)
+            .bind(status)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let cov = cover("pending").await;
+    sqlx::query("UPDATE payroll_periods SET status = 'paid' WHERE id = $1")
+        .bind(f.period)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let decide = |what: &str, id: Uuid, approve: bool| {
+        let app = &app;
+        let uri = format!("/staff/attendance/{id}/{what}");
+        let owner = f.owner();
+        async move { call!(app, patch, uri, owner, json!({ "approve": approve })) }
+    };
+    for (what, id) in [("overtime", first), ("cover", cov)] {
+        let resp = decide(what, id, true).await;
+        assert_eq!(
+            resp.status(),
+            409,
+            "{what}: approving pays into the paid month"
+        );
+        assert_eq!(json_of(resp).await["code"], "PERIOD_CLOSED");
+        let resp = decide(what, id, false).await;
+        assert_eq!(resp.status(), 200, "{what}: rejecting moves no money");
+    }
+    let (ot_status, cover_status): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT overtime_status FROM attendance_records WHERE id = $1), \
+                (SELECT cover_status FROM attendance_records WHERE id = $2)",
+    )
+    .bind(first)
+    .bind(cov)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (ot_status.as_deref(), cover_status.as_deref()),
+        (Some("rejected"), Some("rejected"))
+    );
+}
+
+/// Minor default M29 (AD-6): the payslip says why a line was waived (and
+/// why an overridden one charges what it does), in the preview and in the
+/// approved payslip.
+#[sqlx::test]
+async fn the_payslip_says_why_a_line_was_waived(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let line = |amount: i64, source: &'static str| {
+        let pool = pool.clone();
+        let (org, amal, on) = (f.org, f.amal, f.start);
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+                     effective_date, source) VALUES ($1, $2, $3, 'rule', $4, $5) RETURNING id",
+            )
+            .bind(org)
+            .bind(amal)
+            .bind(amount)
+            .bind(on)
+            .bind(source)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let absence = line(23_077, "absence").await;
+    let late = line(1_000, "late_penalty").await;
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{absence}/waive"),
+        f.owner(),
+        json!({ "reason": "Hospital visit" })
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = call!(
+        app,
+        patch,
+        format!("/staff/payroll/deductions/{late}/override"),
+        f.owner(),
+        json!({ "amount_piastres": 500, "reason": "Bus strike" })
+    );
+    assert_eq!(resp.status(), 200);
+    let check = |slip: &Value| {
+        let lines = slip["breakdown"]["deductions"].as_array().unwrap().clone();
+        let find = |id: Uuid| {
+            lines
+                .iter()
+                .find(|l| l["id"] == json!(id))
+                .cloned()
+                .unwrap()
+        };
+        let a = find(absence);
+        assert_eq!(a["waived"], true, "{a}");
+        assert_eq!(a["waive_reason"], "Hospital visit", "{a}");
+        let l = find(late);
+        assert_eq!(l["piastres"], 500, "{l}");
+        assert_eq!(l["override_reason"], "Bus strike", "{l}");
+        assert!(l.get("waived").is_none());
+    };
+    check(&slip_of(&app, &f, f.amal).await);
+    let resp = generate(&app, &f).await;
+    assert_eq!(resp.status(), 200, "{}", text_of(resp).await);
+    check(&slip_of(&app, &f, f.amal).await);
+}
+
+/// Minor default M33: a deduction made from a flag that is over the
+/// manager's limit waits for the owner, and the flag says so
+/// (`deduction_status: pending`) instead of just "handled".
+#[sqlx::test]
+async fn a_flag_deduction_over_the_limit_says_it_waits_for_the_owner(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "UPDATE org_role_grants g SET limits = '{\"max_amount\": 20000}'::jsonb \
+           FROM org_roles r WHERE r.id = g.org_role_id AND r.org_id = $1 \
+            AND r.kind::text = 'branch_manager' AND g.capability_id = 245",
+    )
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SELECT authz_bump_epoch($1)")
+        .bind(f.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rec = day(&pool, &f, f.amal, f.a, f.start, "present", 9, 480, 0, 0).await;
+    let flag = |minutes: i32| {
+        let pool = pool.clone();
+        let (org, amal, a) = (f.org, f.amal, f.a);
+        async move {
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO attendance_flags (org_id, employee_id, branch_id, \
+                     attendance_record_id, kind, minutes_away) \
+                 VALUES ($1, $2, $3, $4, 'left_mid_shift', $5) RETURNING id",
+            )
+            .bind(org)
+            .bind(amal)
+            .bind(a)
+            .bind(rec)
+            .bind(minutes)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let over = flag(60).await;
+    let row = json_of(call!(
+        app,
+        patch,
+        format!("/staff/flags/{over}"),
+        f.mgr(),
+        json!({ "action": "deduct", "amount_piastres": 50_000 })
+    ))
+    .await;
+    assert_eq!(row["resolution"], "deducted", "{row}");
+    assert_eq!(
+        row["deduction_status"], "pending",
+        "waits for the owner: {row}"
+    );
+    assert!(row["deduction_id"].is_string());
+    // Resolved within the limit it counts at once.
+    sqlx::query("UPDATE attendance_flags SET resolution = 'ignored' WHERE id = $1")
+        .bind(over)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let within = flag(20).await;
+    let row = json_of(call!(
+        app,
+        patch,
+        format!("/staff/flags/{within}"),
+        f.mgr(),
+        json!({ "action": "deduct", "amount_piastres": 10_000 })
+    ))
+    .await;
+    assert_eq!(row["deduction_status"], "approved", "{row}");
+    // Ignoring deducts nothing.
+    let ignored = flag(15).await;
+    let row = json_of(call!(
+        app,
+        patch,
+        format!("/staff/flags/{ignored}"),
+        f.mgr(),
+        json!({ "action": "ignore" })
+    ))
+    .await;
+    assert!(row["deduction_status"].is_null(), "{row}");
+}
+
+/// Minor default M37: asking for a salary advance tells whoever decides it
+/// (the branch's managers who decide advances, and the owner), as other
+/// requests do; never the asker.
+#[sqlx::test]
+async fn an_advance_request_tells_the_managers_and_the_owner(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let mgr_e =
+        common::employees::employee(&pool, f.org, "Mgr", Some(f.mgr), None, false, &[f.a], 0).await;
+    let owner_e =
+        common::employees::employee(&pool, f.org, "Owner", Some(f.owner), None, false, &[], 0)
+            .await;
+    let asked = json_of(call!(
+        app,
+        post,
+        "/staff/me/advances",
+        phone_token(&pool, f.amal).await,
+        json!({ "amount_piastres": 40_000, "installments": 2 })
+    ))
+    .await;
+    let told = |who: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+                    AND key = 'staff.n_advance_requested'",
+            )
+            .bind(who)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for who in [mgr_e, owner_e] {
+        let got = told(who).await;
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0]["name"], "Amal");
+        assert_eq!(got[0]["amount"], 40_000);
+        assert_eq!(got[0]["advance_id"], asked["id"]);
+    }
+    assert!(told(f.amal).await.is_empty(), "never the asker");
+    // Bassem's branch (B) has no advance decider but the owner.
+    json_of(call!(
+        app,
+        post,
+        "/staff/me/advances",
+        phone_token(&pool, f.bassem).await,
+        json!({ "amount_piastres": 10_000, "installments": 1 })
+    ))
+    .await;
+    assert_eq!(told(mgr_e).await.len(), 1, "not the manager of A");
+    assert_eq!(told(owner_e).await.len(), 2);
+}
+
+/// Minor default M27: a new bonus or deduction with no date lands in the
+/// first open month: after an early approval, next month's pay instead of a
+/// refusal. The app's context says which day that is. A date given in the
+/// approved month is still refused.
+#[sqlx::test]
+async fn a_new_pay_line_lands_in_the_first_open_month(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    assert_eq!(generate(&app, &f).await.status(), 200, "approved early");
+    let next = f.end + Duration::days(1);
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        f.mgr(),
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 10_000,
+                "reason": "Help at inventory" })
+    );
+    assert_eq!(resp.status(), 201);
+    let line = json_of(resp).await;
+    assert_eq!(line["effective_date"], json!(next), "{line}");
+    let resp = call!(
+        app,
+        post,
+        "/staff/adjustments",
+        f.mgr(),
+        json!({ "employee_id": f.amal, "kind": "bonus", "amount_piastres": 10_000,
+                "reason": "x", "effective_date": f.start })
+    );
+    assert_eq!(resp.status(), 409);
+    assert_eq!(json_of(resp).await["code"], "PERIOD_CLOSED");
+    let mgr_e = common::employees::employee(
+        &pool,
+        f.org,
+        "Mgr",
+        Some(f.mgr),
+        Some("+201012345670"),
+        true,
+        &[f.a],
+        0,
+    )
+    .await;
+    let ctx = json_of(call!(
+        app,
+        get,
+        "/staff/me/context",
+        phone_token(&pool, mgr_e).await
+    ))
+    .await;
+    assert_eq!(ctx["first_open_date"], json!(next), "{ctx}");
+    // Reopened, today's month is open again.
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    let ctx = json_of(call!(
+        app,
+        get,
+        "/staff/me/context",
+        phone_token(&pool, mgr_e).await
+    ))
+    .await;
+    let today: NaiveDate = sqlx::query_scalar("SELECT (now() AT TIME ZONE 'UTC')::date")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ctx["first_open_date"], json!(today));
+}
+
+/// Hunt H2-P1 (PAY-1, PAY-7): after the month rolls over, a month that
+/// isn't fully paid dropped into History with no way to approve or pay it.
+/// `/staff/payroll/current` stays on the month covering today and lists
+/// every OLDER month still draft or approved-but-unpaid in `unsettled`
+/// (oldest first); every action works on it by period id; a paid month
+/// leaves the list.
+#[sqlx::test]
+async fn an_older_month_not_fully_paid_is_listed_and_settled_by_id(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let period = async |start: NaiveDate, status: &str| -> Uuid {
+        let end = madar_rust::staff::dawam::pay::period_window(start, 1).1;
+        sqlx::query_scalar(
+            "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+             VALUES ($1, 'old', $2, $3, $4) RETURNING id",
+        )
+        .bind(f.org)
+        .bind(start)
+        .bind(end)
+        .bind(status)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let last = f.start - Duration::days(1);
+    let last_start = madar_rust::staff::dawam::pay::period_window(last, 1).0;
+    let before = madar_rust::staff::dawam::pay::period_window(last_start - Duration::days(1), 1).0;
+    let paid_long_ago = period(before, "paid").await;
+    let draft = period(last_start, "draft").await;
+
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner.clone())).await;
+    assert_eq!(
+        cur["period"]["id"],
+        json!(f.period),
+        "current stays on today's month"
+    );
+    let unsettled = cur["unsettled"].as_array().expect("unsettled").clone();
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    let u = &unsettled[0];
+    assert_eq!(u["period_id"], json!(draft));
+    assert_eq!(u["starts_on"], json!(last_start));
+    assert_eq!(u["ends_on"], json!(last));
+    assert_eq!(u["status"], json!("draft"));
+    assert_eq!(u["people"], json!(2), "Amal and Bassem are on payroll");
+    assert_eq!(u["paid_count"], json!(0));
+    assert!(u["net_total_piastres"].as_i64().unwrap() > 0, "{u}");
+    assert!(
+        !unsettled
+            .iter()
+            .any(|u| u["period_id"] == json!(paid_long_ago)),
+        "a paid month isn't listed"
+    );
+
+    // Approve it by its id; it stays listed until everyone is paid.
+    let resp = call!(
+        app,
+        post,
+        format!("/staff/payroll/periods/{draft}/generate"),
+        owner.clone(),
+        json!({})
+    );
+    assert_eq!(resp.status(), 200);
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner.clone())).await;
+    let u = &cur["unsettled"][0];
+    assert_eq!(u["status"], json!("generated"));
+    assert_eq!(u["people"], json!(2));
+    let net: i64 = sqlx::query_scalar(
+        "SELECT SUM(net_piastres)::bigint FROM payslips WHERE payroll_period_id = $1",
+    )
+    .bind(draft)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(u["net_total_piastres"], json!(net));
+
+    for (who, method) in [(f.amal, "cash"), (f.bassem, "bank")] {
+        let resp = call!(
+            app,
+            patch,
+            format!("/staff/payroll/periods/{draft}/payslips/{who}/paid"),
+            owner.clone(),
+            json!({ "method": method })
+        );
+        assert_eq!(resp.status(), 200);
+        if who == f.amal {
+            let cur = json_of(call!(app, get, "/staff/payroll/current", owner.clone())).await;
+            assert_eq!(cur["unsettled"][0]["paid_count"], json!(1));
+        }
+    }
+    assert_eq!(period_status(&pool, draft).await, "paid");
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner)).await;
+    assert_eq!(cur["unsettled"], json!([]), "a paid month leaves the list");
+    // The current month itself is never in `unsettled`.
+    assert_eq!(cur["period"]["id"], json!(f.period));
+}
+
+/// Minor default M43 (AT-13): the payroll refusals that still read
+/// "Conflict: …" carry a code (and their figures), so the dashboard and the
+/// app word them in the reader's language, and the English has no prefix.
+#[sqlx::test]
+async fn payroll_conflicts_carry_codes_without_a_prefix(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let refused = async |resp: actix_web::dev::ServiceResponse, code: &str| -> Value {
+        assert_eq!(resp.status(), 409, "{code}");
+        let out = json_of(resp).await;
+        assert_eq!(out["code"], json!(code), "{out}");
+        assert!(
+            !out["error"].as_str().unwrap().starts_with("Conflict"),
+            "{out}"
+        );
+        out["vars"].clone()
+    };
+    // A rule-made line: never deleted; not waived, so no unwaive; once
+    // waived, no override.
+    let rule: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, source, status) \
+         VALUES ($1, $2, 1000, 'Late', $3, 'late_penalty', 'approved') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let del = format!("/staff/payroll/deductions/{rule}");
+    refused(
+        call!(app, delete, del, owner.clone()),
+        "RULE_LINE_NOT_DELETED",
+    )
+    .await;
+    let unwaive = format!("/staff/payroll/deductions/{rule}/unwaive");
+    refused(
+        call!(app, patch, unwaive, owner.clone(), json!({ "reason": "x" })),
+        "NOT_WAIVED",
+    )
+    .await;
+    let waive = format!("/staff/payroll/deductions/{rule}/waive");
+    let resp = call!(
+        app,
+        patch,
+        waive,
+        owner.clone(),
+        json!({ "reason": "Sick" })
+    );
+    assert_eq!(resp.status(), 200);
+    let ov = format!("/staff/payroll/deductions/{rule}/override");
+    refused(
+        call!(
+            app,
+            patch,
+            ov,
+            owner.clone(),
+            json!({ "amount_piastres": 5, "reason": "x" })
+        ),
+        "WAIVER_FINAL",
+    )
+    .await;
+
+    // Periods.
+    let resp = call!(
+        app,
+        post,
+        "/staff/payroll/periods",
+        owner.clone(),
+        json!({ "name": "Again", "start_date": f.start, "end_date": f.end })
+    );
+    refused(resp, "PERIOD_OVERLAPS").await;
+    let p = f.period;
+    let status = async |to: &str| {
+        call!(
+            app,
+            patch,
+            format!("/staff/payroll/periods/{p}/status"),
+            owner.clone(),
+            json!({ "status": to, "reason": "x" })
+        )
+    };
+    let export = format!("/staff/payroll/periods/{p}/export.csv?method=bank");
+    refused(
+        call!(app, get, export, owner.clone()),
+        "PERIOD_NOT_GENERATED",
+    )
+    .await;
+    refused(status("generated").await, "APPROVE_WITH_GENERATE").await;
+    refused(status("paid").await, "PAID_BY_PAYSLIPS").await;
+    let vars = refused(status("closed").await, "PERIOD_STATUS_MOVE").await;
+    assert_eq!(vars, json!({ "from": "draft", "to": "closed" }));
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let vars = refused(generate(&app, &f).await, "PERIOD_FROZEN").await;
+    assert_eq!(vars, json!({ "status": "generated" }));
+    let vars = refused(
+        call!(
+            app,
+            delete,
+            format!("/staff/payroll/periods/{p}"),
+            owner.clone()
+        ),
+        "PERIOD_NOT_DRAFT_DELETE",
+    )
+    .await;
+    assert_eq!(vars, json!({ "status": "generated" }));
+    let paid = format!("/staff/payroll/periods/{p}/payslips/{}/paid", f.amal);
+    let resp = call!(app, patch, paid, owner.clone(), json!({ "method": "cash" }));
+    assert_eq!(resp.status(), 200);
+    refused(status("draft").await, "PAYROLL_PAID_NO_REOPEN").await;
 }

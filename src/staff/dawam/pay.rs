@@ -155,6 +155,86 @@ pub struct CurrentPayroll {
     /// People on payroll with no salary set (D9): the preview rows with
     /// `salary_missing`; approval is refused until it is 0.
     pub missing_salary_count: i64,
+    /// Older months that aren't fully paid, oldest first (hunt H2-P1): a
+    /// month that rolled over while still a draft, or approved with someone
+    /// unpaid. Each is settled by its id (approve, mark paid, reopen,
+    /// export); a paid or closed month isn't listed.
+    pub unsettled: Vec<UnsettledPeriod>,
+}
+
+/// An older month still to settle (hunt H2-P1).
+#[derive(Serialize, ToSchema)]
+pub struct UnsettledPeriod {
+    pub period_id: Uuid,
+    pub starts_on: NaiveDate,
+    pub ends_on: NaiveDate,
+    /// `draft` (never approved) · `generated` (approved, someone unpaid)
+    pub status: String,
+    /// The month's net pay: live for a draft, the frozen payslips once
+    /// approved.
+    pub net_total_piastres: i64,
+    /// Payslips marked paid (a 'none' mark counts); 0 for a draft.
+    pub paid_count: i64,
+    /// People on the month's payroll.
+    pub people: i64,
+}
+
+/// Every month before `before` still draft or approved-but-unpaid, oldest
+/// first (hunt H2-P1).
+async fn unsettled_periods(
+    pool: &PgPool,
+    org_id: Uuid,
+    before: NaiveDate,
+) -> Result<Vec<UnsettledPeriod>, AppError> {
+    let periods = sqlx::query_as::<_, PayrollPeriod>(&format!(
+        "SELECT {PERIOD_COLS} FROM payroll_periods \
+          WHERE org_id = $1 AND start_date < $2 AND status IN ('draft', 'generated') \
+          ORDER BY start_date"
+    ))
+    .bind(org_id)
+    .bind(before)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(periods.len());
+    let mut settings = None;
+    for p in periods {
+        let (net_total_piastres, paid_count, people) = if p.status == "draft" {
+            if settings.is_none() {
+                settings = Some(load_settings(pool, org_id, None).await?);
+            }
+            let mut conn = pool.acquire().await?;
+            let slips = compute_payslips(
+                &mut conn,
+                org_id,
+                p.start_date,
+                p.end_date,
+                settings.as_ref().expect("loaded above"),
+                None,
+            )
+            .await?;
+            let t = PayrollTotals::of_computed(&slips);
+            (t.net_piastres, 0, t.people)
+        } else {
+            sqlx::query_as::<_, (i64, i64, i64)>(
+                "SELECT COALESCE(SUM(net_piastres), 0)::bigint, \
+                        COUNT(*) FILTER (WHERE paid_at IS NOT NULL), COUNT(*) \
+                   FROM payslips WHERE payroll_period_id = $1",
+            )
+            .bind(p.id)
+            .fetch_one(pool)
+            .await?
+        };
+        out.push(UnsettledPeriod {
+            period_id: p.id,
+            starts_on: p.start_date,
+            ends_on: p.end_date,
+            status: p.status,
+            net_total_piastres,
+            paid_count,
+            people,
+        });
+    }
+    Ok(out)
 }
 
 /// The running period with everyone's pay (PAY-1..PAY-5).
@@ -206,6 +286,7 @@ pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
     };
     let paid_count = payslips.iter().filter(|s| s.paid_at.is_some()).count() as i64;
     let missing_salary_count = preview.iter().filter(|s| s.salary_missing).count() as i64;
+    let unsettled = unsettled_periods(pool.get_ref(), org_id, period.start_date).await?;
     Ok(HttpResponse::Ok().json(CurrentPayroll {
         period,
         preview,
@@ -214,6 +295,7 @@ pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
         totals,
         paid_count,
         missing_salary_count,
+        unsettled,
     }))
 }
 
@@ -526,7 +608,9 @@ pub struct NewAdjustment {
     pub percent_of_base: Option<Decimal>,
     pub reason: String,
     /// The month it lands in (AD-1): any day of that month; the first month
-    /// of a recurring line (AD-3). Defaults to today. Must be an open month.
+    /// of a recurring line (AD-3). Defaults to today, or, when today's month
+    /// is already approved, the first day of the next open month (M27).
+    /// Given explicitly, it must be in an open month (409 PERIOD_CLOSED).
     #[serde(default)]
     pub effective_date: Option<NaiveDate>,
     /// Every month until stopped (AD-3).
@@ -605,8 +689,13 @@ pub async fn create_adjustment(
         }
     };
     // The person's own day, not the server's or the first branch's (AT-1).
+    // Not given: the first open month (after an early approval, next
+    // month's pay; minor default M27). Given in a closed month: refused.
     let today = today_for_employee(pool, org_id, body.employee_id).await?;
-    let effective_date = body.effective_date.unwrap_or(today);
+    let effective_date = match body.effective_date {
+        Some(d) => d,
+        None => period_lock::first_open_day(pool, org_id, today).await?,
+    };
     // Once a month is approved, fixes go into the next month (AD-10).
     period_lock::assert_open(pool, org_id, effective_date, "a pay line").await?;
 
@@ -1494,6 +1583,174 @@ pub async fn my_expense_advances(me: Me, pool: crate::db::Db) -> Result<HttpResp
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
+}
+
+/// A correction of an expense advance's tag: why (required, AT-10).
+#[derive(Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
+pub struct ClearExpenseAdvance {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ReassignExpenseAdvance {
+    /// Who really received the cash.
+    pub employee_id: Uuid,
+    /// Why (required).
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The expense advance an owner corrects: the owner's (whoever runs payroll
+/// for every branch, 403 OWNER_ONLY otherwise), with a reason (400
+/// REASON_REQUIRED), and never in an approved or paid month (409
+/// PERIOD_CLOSED, BC-3). Minor default M39.
+async fn expense_for_correction(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    id: Uuid,
+    reason: Option<&str>,
+) -> Result<(ExpenseAdvance, String, Option<Uuid>), AppError> {
+    if !access::can_everywhere(pool, claims, org_id, Cap::HrPayrollRun).await? {
+        return Err(AppError::Coded {
+            status: 403,
+            code: "OWNER_ONLY",
+            reason: "Only the owner corrects an expense advance.".into(),
+        });
+    }
+    let row = sqlx::query_as::<_, ExpenseAdvance>(&format!(
+        "{EXP_SELECT} WHERE e.id = $1 AND e.org_id = $2"
+    ))
+    .bind(id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Expense advance not found".into()))?;
+    let reason = reason
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .ok_or_else(|| AppError::Coded {
+            status: 400,
+            code: "REASON_REQUIRED",
+            reason: "Say why you're correcting it.".into(),
+        })?
+        .to_string();
+    period_lock::assert_open(pool, org_id, row.given_on, "this expense advance").await?;
+    let movement: Option<Uuid> =
+        sqlx::query_scalar("SELECT till_movement_id FROM expense_advances WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    Ok((row, reason, movement))
+}
+
+/// Clear an expense advance (a till pay-out's "expense advance to" tag, or
+/// a logged one) with a reason: the record goes, a till's cash movement
+/// stays exactly as it is (AV-10, minor default M39). Owner only.
+#[utoipa::path(
+    delete, path = "/staff/expense-advances/{id}", tag = "staff",
+    params(("id" = Uuid, Path), ClearExpenseAdvance),
+    responses((status = 204), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn clear_expense_advance(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    query: web::Query<ClearExpenseAdvance>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = crate::staff::scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    let (row, reason, movement) =
+        expense_for_correction(pool, &claims, org_id, *id, query.reason.as_deref()).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM expense_advances WHERE id = $1 AND org_id = $2")
+        .bind(*id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "expense_advance.clear",
+        "expense_advances",
+        Some(*id),
+        Some(row.employee_id),
+        None,
+        Some(&reason),
+        json!({ "amount_piastres": row.amount_piastres, "via": row.via,
+                "given_on": row.given_on, "till_movement_id": movement,
+                "purpose": row.purpose }),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
+/// Give an expense advance to the person who really received the cash, with
+/// a reason; a till's cash movement stays as it is (minor default M39).
+/// Owner only.
+#[utoipa::path(
+    patch, path = "/staff/expense-advances/{id}", tag = "staff",
+    params(("id" = Uuid, Path)), request_body = ReassignExpenseAdvance,
+    responses((status = 200, body = ExpenseAdvance), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn reassign_expense_advance(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+    body: web::Json<ReassignExpenseAdvance>,
+) -> Result<HttpResponse, AppError> {
+    let claims = caller(&req)?;
+    let org_id = crate::staff::scope_org(&req, &claims)?;
+    let pool = pool.get_ref();
+    let (row, reason, movement) =
+        expense_for_correction(pool, &claims, org_id, *id, body.reason.as_deref()).await?;
+    let to = access::subject(pool, org_id, body.employee_id).await?;
+    if to.employment_status != "active" {
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "EMPLOYEE_INACTIVE",
+            reason: "That person isn't an active employee.".into(),
+            vars: json!({ "status": to.employment_status }),
+        });
+    }
+    if to.id == row.employee_id {
+        return Err(AppError::BadRequest("It's already theirs.".into()));
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE expense_advances SET employee_id = $3 WHERE id = $1 AND org_id = $2")
+        .bind(*id)
+        .bind(org_id)
+        .bind(to.id)
+        .execute(&mut *tx)
+        .await?;
+    audit(
+        &mut *tx,
+        org_id,
+        claims.user_id_safe().ok(),
+        "expense_advance.reassign",
+        "expense_advances",
+        Some(*id),
+        Some(to.id),
+        None,
+        Some(&reason),
+        json!({ "from_employee_id": row.employee_id, "to_employee_id": to.id,
+                "amount_piastres": row.amount_piastres, "via": row.via,
+                "given_on": row.given_on, "till_movement_id": movement }),
+    )
+    .await?;
+    tx.commit().await?;
+    let row = sqlx::query_as::<_, ExpenseAdvance>(&format!("{EXP_SELECT} WHERE e.id = $1"))
+        .bind(*id)
+        .fetch_one(pool)
+        .await?;
+    Ok(HttpResponse::Ok().json(row))
 }
 
 // ── the inbox ───────────────────────────────────────────────────────────────

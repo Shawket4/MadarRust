@@ -1,4 +1,4 @@
-use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_governor::Governor;
 use actix_web::{middleware::Condition, web};
 
 use crate::auth::middleware::JwtMiddleware;
@@ -9,14 +9,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     // The partner endpoint takes a password on every request, so it is
     // brute-forceable in a way JWT-protected routes are not. bcrypt's work
     // factor already makes guessing expensive; this caps the attempt rate on
-    // top. 30/min sustained (a token every 2 s) with a burst of 30 is far more
+    // top. 60/min sustained (a token every 1 s) with a burst of 60 is far more
     // than any analytics pull needs — partners poll hourly, not per second.
-    let gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(2)
-        .burst_size(30)
-        .finish()
-        .expect("Invalid rate limiter configuration");
+    let gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "INTEGRATIONS", "PARTNER");
     let limited = rate_limiting_enabled();
 
     cfg.service(

@@ -3090,3 +3090,59 @@ async fn the_context_says_when_the_rules_were_first_saved(pool: PgPool) {
     assert_eq!(ctx["settings"]["rules_saved"], false, "{ctx}");
     assert!(ctx["settings"]["rules_saved_at"].is_null(), "{ctx}");
 }
+
+/// Minor default M15 (CL-3): the team board says when a punch for each
+/// person opens (their next shift's start less its check-in window), so the
+/// dashboard can offer Punch before the shift starts, as the app does. Null
+/// for someone not rostered today.
+#[sqlx::test]
+async fn team_presence_says_when_a_punch_opens(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, &tz_at(12)).await;
+    // Amal's shift starts in 30 minutes; its check-in window is 45.
+    let shift_id = shift_around_now(&pool, &f, f.a, -30, 240).await;
+    sqlx::query("UPDATE work_shifts SET checkin_window_minutes = 45 WHERE id = $1")
+        .bind(shift_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let start: DateTime<Utc> = sqlx::query_scalar(
+        "SELECT start_at FROM dawam_roster(ARRAY[$1]::uuid[], $2, $2) WHERE work_shift_id = $3",
+    )
+    .bind(f.a)
+    .bind(local(&pool, Utc::now(), &f.tz).await.date())
+    .bind(shift_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let body = json_of(call!(
+        app,
+        get,
+        format!("/staff/team/presence?branch_id={}", f.branch),
+        owner_t(&f)
+    ))
+    .await;
+    let row = |who: Uuid| {
+        body["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["employee_id"] == json!(who))
+            .cloned()
+            .unwrap()
+    };
+    let amal = row(f.a);
+    assert_eq!(amal["state"], "off", "not due yet: {amal}");
+    let opens: DateTime<Utc> = amal["punch_opens_at"].as_str().unwrap().parse().unwrap();
+    assert_eq!(opens, start - Duration::minutes(45));
+    assert!(row(f.b)["punch_opens_at"].is_null(), "not rostered");
+    // And the server takes a manager's punch from then (CL-3).
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance/punch",
+        owner_t(&f),
+        json!({ "employee_id": f.a, "reason": "Phone died" })
+    );
+    assert_eq!(resp.status(), 200);
+}

@@ -658,7 +658,9 @@ async fn a_successful_pin_login_backfills_the_fingerprint(pool: PgPool) {
             .unwrap();
     assert_eq!(
         after,
-        Some(madar_rust::auth::pin_fingerprint::fingerprint(org_id, "1234")),
+        Some(madar_rust::auth::pin_fingerprint::fingerprint(
+            org_id, "1234"
+        )),
         "the fingerprint is HMAC(key, org || pin) under the current key"
     );
     // It is a LOOKUP key, never something a client sees.
@@ -1710,7 +1712,8 @@ async fn one_address_gets_sixty_login_attempts_a_minute(pool: PgPool) {
             .set_json(json!({}))
             .to_request()
     };
-    for i in 0..routes::LOGIN_PER_MINUTE {
+    let login = madar_rust::rate_limit::limit_of("AUTH", "LOGIN").burst;
+    for i in 0..login {
         let resp = test::call_service(&app, attempt()).await;
         assert_ne!(
             resp.status(),
@@ -1725,11 +1728,11 @@ async fn one_address_gets_sixty_login_attempts_a_minute(pool: PgPool) {
             break;
         }
     }
-    assert!(limited, "past sixty the address is still limited");
+    assert!(limited, "past its burst the address is still limited");
 
     // Activation codes keep their own tighter bucket.
     let mut refused = 0;
-    for _ in 0..12 {
+    for _ in 0..madar_rust::rate_limit::limit_of("AUTH", "ACTIVATION").burst + 2 {
         let resp = test::call_service(
             &app,
             test::TestRequest::post()
@@ -1742,7 +1745,7 @@ async fn one_address_gets_sixty_login_attempts_a_minute(pool: PgPool) {
             refused += 1;
         }
     }
-    assert!(refused > 0, "activation stays at ten a minute");
+    assert!(refused > 0, "activation keeps its own tighter bucket");
 }
 
 /// Owner decision 2026-09-16: an owner's PIN on a pre-0.8 tablet (no
@@ -1804,13 +1807,22 @@ async fn an_owner_pin_on_a_pre_0_8_tablet_is_refused(pool: PgPool) {
         "body": body,
     });
     if std::env::var_os("MADAR_WRITE_LEGACY_GOLDEN").is_some() {
-        std::fs::write(&golden, serde_json::to_string_pretty(&captured).unwrap() + "\n").unwrap();
+        std::fs::write(
+            &golden,
+            serde_json::to_string_pretty(&captured).unwrap() + "\n",
+        )
+        .unwrap();
     }
     let pinned: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&golden).expect("golden present")).unwrap();
-    assert_eq!(pinned["body"], captured["body"], "the refusal changed: rerun with MADAR_WRITE_LEGACY_GOLDEN=1");
+    assert_eq!(
+        pinned["body"], captured["body"],
+        "the refusal changed: rerun with MADAR_WRITE_LEGACY_GOLDEN=1"
+    );
     assert!(
-        body["error"].as_str().is_some_and(|e| e.contains("updating")),
+        body["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("updating")),
         "old builds show `error`: {body}"
     );
 
@@ -1818,7 +1830,11 @@ async fn an_owner_pin_on_a_pre_0_8_tablet_is_refused(pool: PgPool) {
     assert_eq!(resp.status(), 200, "an owner on 0.8+ signs in");
 
     let resp = test::call_service(&app, login("Teller", "271828", None)).await;
-    assert_eq!(resp.status(), 200, "a teller on an old tablet is unaffected");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a teller on an old tablet is unaffected"
+    );
 }
 
 // ── An open till gates a TILL sign-in, never a dashboard one ───

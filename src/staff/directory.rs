@@ -821,8 +821,10 @@ pub async fn create_employee(
                     .fetch_one(pool)
                     .await?;
             if already {
-                return Err(AppError::Conflict(
-                    "That user is already an employee.".into(),
+                return Err(crate::staff::coded(
+                    409,
+                    "ALREADY_EMPLOYEE",
+                    "That user is already an employee.",
                 ));
             }
             guard_linked_user(pool, &claims, user, Cap::HrStaffCreate).await?;
@@ -853,9 +855,12 @@ pub async fn create_employee(
         && let Some(p) = &phone
         && phone_taken(pool, org_id, p, None).await?
     {
-        return Err(AppError::Conflict(format!(
-            "Someone here already signs in with {p}."
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PHONE_TAKEN",
+            format!("Someone here already signs in with {p}."),
+            serde_json::json!({ "phone": p }),
+        ));
     }
     if body.base_salary_piastres.is_some_and(|s| s < 0) {
         return Err(AppError::BadRequest("Salary cannot be negative".into()));
@@ -1015,9 +1020,12 @@ pub async fn put_employee(
         && let Some(Some(p)) = &phone
         && phone_taken(pool, org_id, p, Some(*employee_id)).await?
     {
-        return Err(AppError::Conflict(format!(
-            "Someone here already signs in with {p}."
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PHONE_TAKEN",
+            format!("Someone here already signs in with {p}."),
+            serde_json::json!({ "phone": p }),
+        ));
     }
 
     // Branches: the caller must run every branch they add or take away.

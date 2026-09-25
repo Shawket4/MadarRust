@@ -504,8 +504,10 @@ async fn delete_adjustment(
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, cap, &subject).await?;
     if source != "manual" {
-        return Err(AppError::Conflict(
-            "A rule-made line is never deleted: waive or override it, with a reason.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "RULE_LINE_NOT_DELETED",
+            "A rule-made line is never deleted: waive or override it, with a reason.",
         ));
     }
     period_lock::assert_open(pool.get_ref(), org_id, effective_date, "a pay line").await?;
@@ -679,8 +681,10 @@ pub async fn override_deduction(
     }
     // A waived line is final (AD-8): no override brings it back or changes it.
     if waived {
-        return Err(AppError::Conflict(
-            "This deduction was waived — a waiver is final.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "WAIVER_FINAL",
+            "This deduction was waived — a waiver is final.",
         ));
     }
     // Raising a deduction is adding one: the increase is judged against the
@@ -865,7 +869,11 @@ pub async fn unwaive_deduction(
         ));
     }
     if !waived {
-        return Err(AppError::Conflict("This deduction is not waived.".into()));
+        return Err(crate::staff::coded(
+            409,
+            "NOT_WAIVED",
+            "This deduction is not waived.",
+        ));
     }
     let mut tx = pool.begin().await?;
     // Who took the waiver back, when and why stay on the row (AT-7, AT-10).
@@ -1077,28 +1085,32 @@ pub async fn create_my_advance(
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
     let row = insert_advance(pool, me.org_id, me.employee_id, &body, me.user_id).await?;
-    // Its deciders hear, as a leave request's do (hunt H2-B4): whoever may
-    // decide advances at the person's branch — the owner included — never
-    // the person. Dated today on that branch's clock.
+    // Whoever decides it hears, as for every other request (hunt H2-B4,
+    // minor default M37): whoever may decide advances at the person's
+    // branch and the owners, never the asker — one notice each, with the
+    // amount.
     let subject = access::subject(pool, me.org_id, me.employee_id).await?;
-    let today: NaiveDate = sqlx::query_scalar(
-        "SELECT (now() AT TIME ZONE COALESCE(b.timezone::text, o.timezone::text, 'Africa/Cairo'))::date \
-           FROM organizations o LEFT JOIN branches b ON b.id = $2 WHERE o.id = $1",
-    )
-    .bind(me.org_id)
-    .bind(subject.home())
-    .fetch_one(pool)
-    .await?;
-    crate::staff::dawam::notify_managers(
-        pool,
-        me.org_id,
-        subject.home(),
-        Cap::HrAdvancesDecide,
-        Some(me.employee_id),
-        "staff.n_request",
-        serde_json::json!({ "name": subject.name, "kind": "salary_advance", "date": today }),
-    )
-    .await;
+    let mut to =
+        crate::staff::dawam::managers_of(pool, me.org_id, subject.home(), Cap::HrAdvancesDecide)
+            .await
+            .unwrap_or_default();
+    for o in crate::staff::dawam::owners(pool, me.org_id).await? {
+        if !to.contains(&o) {
+            to.push(o);
+        }
+    }
+    let args = json!({ "name": row.employee_name, "amount": row.amount_piastres,
+                       "advance_id": row.id });
+    for e in to.into_iter().filter(|e| *e != me.employee_id) {
+        crate::staff::dawam::notify(
+            pool,
+            me.org_id,
+            e,
+            "staff.n_advance_requested",
+            args.clone(),
+        )
+        .await;
+    }
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -1176,8 +1188,10 @@ pub async fn create_period(
     .fetch_one(pool.get_ref())
     .await?;
     if overlaps {
-        return Err(AppError::Conflict(
-            "That span overlaps a period that already exists.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "PERIOD_OVERLAPS",
+            "That span overlaps a period that already exists.",
         ));
     }
 
@@ -1264,8 +1278,10 @@ pub async fn set_period_status(
             .fetch_one(&mut *tx)
             .await?;
             if any_paid {
-                return Err(AppError::Conflict(
-                    "Someone has already been paid — this payroll can't be reopened.".into(),
+                return Err(crate::staff::coded(
+                    409,
+                    "PAYROLL_PAID_NO_REOPEN",
+                    "Someone has already been paid — this payroll can't be reopened.",
                 ));
             }
             let dropped = sqlx::query("DELETE FROM payslips WHERE payroll_period_id = $1")
@@ -1318,19 +1334,26 @@ pub async fn set_period_status(
             .await?;
         }
         (_, "generated") => {
-            return Err(AppError::Conflict(
-                "Approve a month with POST …/generate; it freezes the payslips.".into(),
+            return Err(crate::staff::coded(
+                409,
+                "APPROVE_WITH_GENERATE",
+                "Approve a month with POST …/generate; it freezes the payslips.",
             ));
         }
         (_, "paid") => {
-            return Err(AppError::Conflict(
-                "A month is Paid when every payslip is marked paid — never by hand (PAY-7).".into(),
+            return Err(crate::staff::coded(
+                409,
+                "PAID_BY_PAYSLIPS",
+                "A month is Paid when every payslip is marked paid — never by hand (PAY-7).",
             ));
         }
         (cur, target) => {
-            return Err(AppError::Conflict(format!(
-                "A {cur} period cannot move to {target}"
-            )));
+            return Err(crate::staff::coded_vars(
+                409,
+                "PERIOD_STATUS_MOVE",
+                format!("A {cur} period cannot move to {target}"),
+                json!({ "from": cur, "to": target }),
+            ));
         }
     }
     let row = sqlx::query_as::<_, PayrollPeriod>(&format!(
@@ -1374,9 +1397,14 @@ pub async fn delete_period(
     .await?
     .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
     if status != "draft" {
-        return Err(AppError::Conflict(format!(
-            "A {status} period cannot be deleted — reopen it first (only before anyone is paid)"
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PERIOD_NOT_DRAFT_DELETE",
+            format!(
+                "A {status} period cannot be deleted — reopen it first (only before anyone is paid)"
+            ),
+            json!({ "status": status }),
+        ));
     }
     // Any payslips a draft still holds cascade away, and their collections'
     // trigger gives the advances back.
@@ -1787,6 +1815,8 @@ pub(crate) async fn compute_payslips(
         effective_date: NaiveDate,
         recurring: bool,
         waived: bool,
+        waive_reason: Option<String>,
+        override_reason: Option<String>,
         reason_code: Option<String>,
         reason_vars: Option<serde_json::Value>,
     }
@@ -1808,9 +1838,11 @@ pub(crate) async fn compute_payslips(
         };
         // Only deductions carry the server's reason codes (AT-13).
         let codes = if table == "payroll_deductions" {
-            "reason_code, reason_vars"
+            "reason_code, reason_vars, waive_reason, \
+             CASE WHEN overridden_at IS NOT NULL THEN override_reason END AS override_reason"
         } else {
-            "NULL::text AS reason_code, NULL::jsonb AS reason_vars"
+            "NULL::text AS reason_code, NULL::jsonb AS reason_vars, \
+             NULL::text AS waive_reason, NULL::text AS override_reason"
         };
         let rows: Vec<AdjRow> = sqlx::query_as(&format!(
             // A recurring allowance or deduction counts in every period from
@@ -1884,8 +1916,15 @@ pub(crate) async fn compute_payslips(
                     // person's own words.
                     "reason_code": row.reason_code, "reason_vars": row.reason_vars,
                 });
+                // Why a human changed it, on the payslip (AD-6, minor
+                // default M29): a waiver's reason beside `waived`, an
+                // override's beside the amount it charges now.
+                if let Some(why) = &row.override_reason {
+                    line["override_reason"] = json!(why);
+                }
                 if row.waived {
                     line["waived"] = json!(true);
+                    line["waive_reason"] = json!(row.waive_reason);
                     lines.push(line);
                     continue;
                 }
@@ -2092,10 +2131,15 @@ pub async fn generate_period(
     .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
 
     if period.status != "draft" {
-        return Err(AppError::Conflict(format!(
-            "A {} period is frozen — reopen it (before anyone is paid) to approve it again",
-            period.status
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PERIOD_FROZEN",
+            format!(
+                "A {} period is frozen — reopen it (before anyone is paid) to approve it again",
+                period.status
+            ),
+            json!({ "status": period.status }),
+        ));
     }
     // A draft never holds payslips after a reopen; clear any older leftovers
     // (their collections cascade and the ledger refunds them).
@@ -2138,14 +2182,12 @@ pub async fn generate_period(
     let mut grand_total = 0i64;
 
     for slip in &computed {
-        // A payslip with nothing on it — no pay, no lines — is marked paid by
-        // the run itself, so it never blocks the month reaching Paid (PAY-7).
-        let empty = slip.net_piastres == 0
-            && slip.base_piastres == 0
-            && slip.overtime_piastres == 0
-            && slip.bonuses_piastres == 0
-            && slip.deductions_piastres == 0
-            && slip.advance_installment_piastres == 0;
+        // Nothing to pay — a payslip that nets to 0, whatever its lines (a
+        // joiner whose carried debt ate the month, PAY-12) — is marked paid
+        // by the run itself ("Nothing to pay"), so it never blocks the month
+        // reaching Paid (PAY-7, minor default M28). The carried amount still
+        // shows on the payslip.
+        let empty = slip.net_piastres == 0;
         let payslip_id: Uuid = sqlx::query_scalar(
             "INSERT INTO payslips (
                  org_id, payroll_period_id, employee_id, base_salary_piastres, worked_days,
@@ -2302,7 +2344,8 @@ pub async fn preview_period(
 #[into_params(parameter_in = Query)]
 pub struct ExportQuery {
     /// `bank` (a transfer file: name, account, amount) · `wallet` (numbers
-    /// and amounts) · `cash`; omitted = everyone, every figure (PAY-8).
+    /// and amounts) · `cash` (the envelope list: name and amount, nobody with
+    /// 0 to pay); omitted = everyone, every figure (PAY-8).
     #[serde(default)]
     pub method: Option<String>,
 }
@@ -2353,8 +2396,10 @@ pub async fn export_period_csv(
             .await?
             .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
     if period.1 == "draft" {
-        return Err(AppError::Conflict(
-            "Generate the period before exporting it".into(),
+        return Err(crate::staff::coded(
+            409,
+            "PERIOD_NOT_GENERATED",
+            "Approve the period before exporting it",
         ));
     }
 
@@ -2385,6 +2430,18 @@ pub async fn export_period_csv(
                     "{},{},{}\n",
                     esc(slip.employee_name.as_deref().unwrap_or("")),
                     esc(slip.pay_account.as_deref().unwrap_or("")),
+                    money(slip.net_piastres),
+                ));
+            }
+        }
+        // The pay envelopes: who and how much, nobody with nothing to pay
+        // (minor default M31).
+        Some("cash") => {
+            csv.push_str("employee,amount\n");
+            for slip in slips.iter().filter(|s| s.net_piastres > 0) {
+                csv.push_str(&format!(
+                    "{},{}\n",
+                    esc(slip.employee_name.as_deref().unwrap_or("")),
                     money(slip.net_piastres),
                 ));
             }

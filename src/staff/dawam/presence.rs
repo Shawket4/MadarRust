@@ -560,6 +560,13 @@ pub struct AttendanceFlag {
     /// Time away × the person's minute rate, rounded to the nearest 5 EGP (CL-7).
     #[sqlx(default)]
     pub suggested_deduction_piastres: i64,
+    /// The deduction the flag was handled with (a deduct or an unpaid
+    /// excuse), and its status: `approved`, or `pending` = over the
+    /// manager's limit, it waits for the owner (minor default M33).
+    #[sqlx(default)]
+    pub deduction_id: Option<Uuid>,
+    #[sqlx(default)]
+    pub deduction_status: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -596,8 +603,10 @@ pub async fn list_flags(
     .await?;
     let mut rows: Vec<AttendanceFlag> = sqlx::query_as(
         "SELECT f.id, f.employee_id, e.name AS employee_name, f.branch_id, f.attendance_record_id, \
-                f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at \
+                f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at, \
+                f.deduction_id, fd.status AS deduction_status \
            FROM attendance_flags f JOIN employees e ON e.id = f.employee_id \
+           LEFT JOIN payroll_deductions fd ON fd.id = f.deduction_id \
           WHERE f.org_id = $1 AND ($2 OR f.resolution IS NULL) \
             AND ($3::uuid[] IS NULL OR f.branch_id = ANY($3)) \
           ORDER BY f.detected_at DESC LIMIT 200",
@@ -793,8 +802,10 @@ pub async fn resolve_flag(
     }
     let row: AttendanceFlag = sqlx::query_as(
         "SELECT f.id, f.employee_id, e.name AS employee_name, f.branch_id, f.attendance_record_id, \
-                f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at \
-           FROM attendance_flags f JOIN employees e ON e.id = f.employee_id WHERE f.id = $1",
+                f.kind, f.minutes_away, f.detected_at, f.resolution, f.resolved_at, \
+                f.deduction_id, fd.status AS deduction_status \
+           FROM attendance_flags f JOIN employees e ON e.id = f.employee_id \
+           LEFT JOIN payroll_deductions fd ON fd.id = f.deduction_id WHERE f.id = $1",
     )
     .bind(*id)
     .fetch_one(pool)
@@ -1418,9 +1429,12 @@ pub async fn decide_overtime(
         });
     }
     access::require_at(pool, &claims, org_id, Cap::HrOvertimeApprove, branch_id).await?;
-    // An approved month is a snapshot: its overtime is decided (AD-10).
-    crate::staff::period_lock::assert_open(pool, org_id, on_date, "this overtime").await?;
     if body.approve {
+        // An approved month is a snapshot: approving would pay into it
+        // (AD-10). Rejecting moves no money, so a pending overtime in a paid
+        // month can still leave Approvals (minor default M32); the fix is a
+        // line in next month.
+        crate::staff::period_lock::assert_open(pool, org_id, on_date, "this overtime").await?;
         // Priced exactly as payroll will price it (AT-9): the same facts
         // (the salary in force that day, the day's rostered minutes, the
         // night minutes) through the same function under the branch's rules

@@ -1381,3 +1381,83 @@ async fn sign_in_refusals_carry_codes(pool: PgPool) {
         "{b}"
     );
 }
+
+/// Minor default M13 (SA-3): asking for a sign-in code as a suspended
+/// employee, or for a paused business, is refused at the request, with why,
+/// and no WhatsApp code is written or sent. Someone unknown is still
+/// PHONE_NOT_REGISTERED.
+#[sqlx::test]
+async fn a_code_request_says_why_an_inactive_account_or_paused_business_cant_sign_in(pool: PgPool) {
+    let app = app!(pool);
+    let live = seed(&pool).await;
+    let paused = seed(&pool).await;
+    sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
+        .bind(paused.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let suspended = employee(
+        &pool,
+        live.org,
+        "Sami",
+        None,
+        Some("01041000001"),
+        true,
+        &[live.a],
+        300_000,
+    )
+    .await;
+    sqlx::query("UPDATE employees SET employment_status = 'suspended' WHERE id = $1")
+        .bind(suspended)
+        .execute(&pool)
+        .await
+        .unwrap();
+    employee(
+        &pool,
+        paused.org,
+        "Pia",
+        None,
+        Some("01041000002"),
+        true,
+        &[paused.a],
+        300_000,
+    )
+    .await;
+    sqlx::query("DELETE FROM staff_otp")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ask = |number: &'static str| {
+        let app = &app;
+        async move {
+            let req = test::TestRequest::post()
+                .uri("/auth/staff/otp/request")
+                .set_json(json!({ "phone": number }))
+                .to_request();
+            let resp = test::call_service(app, req).await;
+            (resp.status().as_u16(), body(resp).await)
+        }
+    };
+    let (s, b) = ask("01041000001").await;
+    assert_eq!(
+        (s, b["code"].clone()),
+        (403, json!("ACCOUNT_NOT_ACTIVE")),
+        "{b}"
+    );
+    assert_eq!(b["vars"], json!({ "status": "suspended" }));
+    assert_eq!(b["error"], "Your account isn't active. Ask your manager.");
+    let (s, b) = ask("01041000002").await;
+    assert_eq!((s, b["code"].clone()), (403, json!("ORG_SUSPENDED")), "{b}");
+    assert_eq!(b["error"], "This business is paused.");
+    let (s, b) = ask("01041000009").await;
+    assert_eq!(
+        (s, b["code"].clone()),
+        (404, json!("PHONE_NOT_REGISTERED")),
+        "{b}"
+    );
+    let codes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM staff_otp")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(codes, 0, "no code written, so none sent");
+}

@@ -113,6 +113,10 @@ pub struct StaffContext {
     /// any location is taken (AT-5). A new phone, or a restored session on
     /// one that never accepted, starts null.
     pub privacy_accepted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The first day (from my today) not inside an approved or paid month:
+    /// where a new bonus or deduction lands by default ("lands in October's
+    /// pay", minor default M27).
+    pub first_open_date: NaiveDate,
 }
 
 #[utoipa::path(
@@ -278,6 +282,12 @@ pub async fn my_context(
         people,
         work_shifts,
         privacy_accepted_at: super::privacy::accepted_at(pool, me.device_id).await?,
+        first_open_date: crate::staff::period_lock::first_open_day(
+            pool,
+            org_id,
+            super::pay::today_for_employee(pool, org_id, me.employee_id).await?,
+        )
+        .await?,
         settings: ContextSettings {
             period_start_day: s.period_start_day,
             overtime_mode: s.overtime_mode,
