@@ -155,6 +155,86 @@ pub struct CurrentPayroll {
     /// People on payroll with no salary set (D9): the preview rows with
     /// `salary_missing`; approval is refused until it is 0.
     pub missing_salary_count: i64,
+    /// Older months that aren't fully paid, oldest first (hunt H2-P1): a
+    /// month that rolled over while still a draft, or approved with someone
+    /// unpaid. Each is settled by its id (approve, mark paid, reopen,
+    /// export); a paid or closed month isn't listed.
+    pub unsettled: Vec<UnsettledPeriod>,
+}
+
+/// An older month still to settle (hunt H2-P1).
+#[derive(Serialize, ToSchema)]
+pub struct UnsettledPeriod {
+    pub period_id: Uuid,
+    pub starts_on: NaiveDate,
+    pub ends_on: NaiveDate,
+    /// `draft` (never approved) · `generated` (approved, someone unpaid)
+    pub status: String,
+    /// The month's net pay: live for a draft, the frozen payslips once
+    /// approved.
+    pub net_total_piastres: i64,
+    /// Payslips marked paid (a 'none' mark counts); 0 for a draft.
+    pub paid_count: i64,
+    /// People on the month's payroll.
+    pub people: i64,
+}
+
+/// Every month before `before` still draft or approved-but-unpaid, oldest
+/// first (hunt H2-P1).
+async fn unsettled_periods(
+    pool: &PgPool,
+    org_id: Uuid,
+    before: NaiveDate,
+) -> Result<Vec<UnsettledPeriod>, AppError> {
+    let periods = sqlx::query_as::<_, PayrollPeriod>(&format!(
+        "SELECT {PERIOD_COLS} FROM payroll_periods \
+          WHERE org_id = $1 AND start_date < $2 AND status IN ('draft', 'generated') \
+          ORDER BY start_date"
+    ))
+    .bind(org_id)
+    .bind(before)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(periods.len());
+    let mut settings = None;
+    for p in periods {
+        let (net_total_piastres, paid_count, people) = if p.status == "draft" {
+            if settings.is_none() {
+                settings = Some(load_settings(pool, org_id, None).await?);
+            }
+            let mut conn = pool.acquire().await?;
+            let slips = compute_payslips(
+                &mut conn,
+                org_id,
+                p.start_date,
+                p.end_date,
+                settings.as_ref().expect("loaded above"),
+                None,
+            )
+            .await?;
+            let t = PayrollTotals::of_computed(&slips);
+            (t.net_piastres, 0, t.people)
+        } else {
+            sqlx::query_as::<_, (i64, i64, i64)>(
+                "SELECT COALESCE(SUM(net_piastres), 0)::bigint, \
+                        COUNT(*) FILTER (WHERE paid_at IS NOT NULL), COUNT(*) \
+                   FROM payslips WHERE payroll_period_id = $1",
+            )
+            .bind(p.id)
+            .fetch_one(pool)
+            .await?
+        };
+        out.push(UnsettledPeriod {
+            period_id: p.id,
+            starts_on: p.start_date,
+            ends_on: p.end_date,
+            status: p.status,
+            net_total_piastres,
+            paid_count,
+            people,
+        });
+    }
+    Ok(out)
 }
 
 /// The running period with everyone's pay (PAY-1..PAY-5).
@@ -206,6 +286,7 @@ pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
     };
     let paid_count = payslips.iter().filter(|s| s.paid_at.is_some()).count() as i64;
     let missing_salary_count = preview.iter().filter(|s| s.salary_missing).count() as i64;
+    let unsettled = unsettled_periods(pool.get_ref(), org_id, period.start_date).await?;
     Ok(HttpResponse::Ok().json(CurrentPayroll {
         period,
         preview,
@@ -214,6 +295,7 @@ pub async fn current(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
         totals,
         paid_count,
         missing_salary_count,
+        unsettled,
     }))
 }
 

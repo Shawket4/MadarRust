@@ -4893,3 +4893,100 @@ async fn a_new_pay_line_lands_in_the_first_open_month(pool: PgPool) {
         .unwrap();
     assert_eq!(ctx["first_open_date"], json!(today));
 }
+
+/// Hunt H2-P1 (PAY-1, PAY-7): after the month rolls over, a month that
+/// isn't fully paid dropped into History with no way to approve or pay it.
+/// `/staff/payroll/current` stays on the month covering today and lists
+/// every OLDER month still draft or approved-but-unpaid in `unsettled`
+/// (oldest first); every action works on it by period id; a paid month
+/// leaves the list.
+#[sqlx::test]
+async fn an_older_month_not_fully_paid_is_listed_and_settled_by_id(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let owner = f.owner();
+    let period = async |start: NaiveDate, status: &str| -> Uuid {
+        let end = madar_rust::staff::dawam::pay::period_window(start, 1).1;
+        sqlx::query_scalar(
+            "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+             VALUES ($1, 'old', $2, $3, $4) RETURNING id",
+        )
+        .bind(f.org)
+        .bind(start)
+        .bind(end)
+        .bind(status)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let last = f.start - Duration::days(1);
+    let last_start = madar_rust::staff::dawam::pay::period_window(last, 1).0;
+    let before = madar_rust::staff::dawam::pay::period_window(last_start - Duration::days(1), 1).0;
+    let paid_long_ago = period(before, "paid").await;
+    let draft = period(last_start, "draft").await;
+
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner.clone())).await;
+    assert_eq!(
+        cur["period"]["id"],
+        json!(f.period),
+        "current stays on today's month"
+    );
+    let unsettled = cur["unsettled"].as_array().expect("unsettled").clone();
+    assert_eq!(unsettled.len(), 1, "{unsettled:?}");
+    let u = &unsettled[0];
+    assert_eq!(u["period_id"], json!(draft));
+    assert_eq!(u["starts_on"], json!(last_start));
+    assert_eq!(u["ends_on"], json!(last));
+    assert_eq!(u["status"], json!("draft"));
+    assert_eq!(u["people"], json!(2), "Amal and Bassem are on payroll");
+    assert_eq!(u["paid_count"], json!(0));
+    assert!(u["net_total_piastres"].as_i64().unwrap() > 0, "{u}");
+    assert!(
+        !unsettled
+            .iter()
+            .any(|u| u["period_id"] == json!(paid_long_ago)),
+        "a paid month isn't listed"
+    );
+
+    // Approve it by its id; it stays listed until everyone is paid.
+    let resp = call!(
+        app,
+        post,
+        format!("/staff/payroll/periods/{draft}/generate"),
+        owner.clone(),
+        json!({})
+    );
+    assert_eq!(resp.status(), 200);
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner.clone())).await;
+    let u = &cur["unsettled"][0];
+    assert_eq!(u["status"], json!("generated"));
+    assert_eq!(u["people"], json!(2));
+    let net: i64 = sqlx::query_scalar(
+        "SELECT SUM(net_piastres)::bigint FROM payslips WHERE payroll_period_id = $1",
+    )
+    .bind(draft)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(u["net_total_piastres"], json!(net));
+
+    for (who, method) in [(f.amal, "cash"), (f.bassem, "bank")] {
+        let resp = call!(
+            app,
+            patch,
+            format!("/staff/payroll/periods/{draft}/payslips/{who}/paid"),
+            owner.clone(),
+            json!({ "method": method })
+        );
+        assert_eq!(resp.status(), 200);
+        if who == f.amal {
+            let cur = json_of(call!(app, get, "/staff/payroll/current", owner.clone())).await;
+            assert_eq!(cur["unsettled"][0]["paid_count"], json!(1));
+        }
+    }
+    assert_eq!(period_status(&pool, draft).await, "paid");
+    let cur = json_of(call!(app, get, "/staff/payroll/current", owner)).await;
+    assert_eq!(cur["unsettled"], json!([]), "a paid month leaves the list");
+    // The current month itself is never in `unsettled`.
+    assert_eq!(cur["period"]["id"], json!(f.period));
+}
