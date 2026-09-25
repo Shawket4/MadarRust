@@ -1049,7 +1049,30 @@ pub async fn create_my_advance(
     pool: crate::db::Db,
     body: web::Json<CreateAdvanceRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let row = insert_advance(pool.get_ref(), me.org_id, me.employee_id, &body).await?;
+    let pool = pool.get_ref();
+    let row = insert_advance(pool, me.org_id, me.employee_id, &body).await?;
+    // Its deciders hear, as a leave request's do (hunt H2-B4): whoever may
+    // decide advances at the person's branch — the owner included — never
+    // the person. Dated today on that branch's clock.
+    let subject = access::subject(pool, me.org_id, me.employee_id).await?;
+    let today: NaiveDate = sqlx::query_scalar(
+        "SELECT (now() AT TIME ZONE COALESCE(b.timezone::text, o.timezone::text, 'Africa/Cairo'))::date \
+           FROM organizations o LEFT JOIN branches b ON b.id = $2 WHERE o.id = $1",
+    )
+    .bind(me.org_id)
+    .bind(subject.home())
+    .fetch_one(pool)
+    .await?;
+    crate::staff::dawam::notify_managers(
+        pool,
+        me.org_id,
+        subject.home(),
+        Cap::HrAdvancesDecide,
+        Some(me.employee_id),
+        "staff.n_request",
+        serde_json::json!({ "name": subject.name, "kind": "salary_advance", "date": today }),
+    )
+    .await;
     Ok(HttpResponse::Created().json(row))
 }
 

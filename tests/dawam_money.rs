@@ -3697,3 +3697,80 @@ async fn a_second_decision_is_already_decided_and_told_once(pool: PgPool) {
     let resp = decide(&format!("/staff/attendance/{none}/overtime"), true).await;
     assert_eq!(resp.status(), 404);
 }
+
+/// Hunt H2-B4 (AV-4): asking for an advance tells the people who may decide
+/// it at the person's branch — as a leave request tells its deciders — and
+/// never the asker. A manager's own ask reaches the owner.
+#[sqlx::test]
+async fn an_advance_ask_tells_its_deciders(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let emp = async |name: &str, user: Uuid, phone: &str, branches: &[Uuid]| -> Uuid {
+        common::employees::employee(
+            &pool,
+            f.org,
+            name,
+            Some(user),
+            Some(phone),
+            true,
+            branches,
+            400_000,
+        )
+        .await
+    };
+    let mgr_emp = emp("Manager", f.mgr, "+201012345601", &[f.a]).await;
+    let owner_emp = emp("Owner", f.owner, "+201012345602", &[]).await;
+    let mgr_b = user(&pool, f.org, "Manager B", "branch_manager").await;
+    assign(&pool, mgr_b, f.b).await;
+    let mgr_b_emp = emp("Manager B", mgr_b, "+201012345603", &[f.b]).await;
+    let told = async || -> Vec<(Uuid, Value)> {
+        let rows: Vec<(Uuid, Value)> = sqlx::query_as(
+            "SELECT employee_id, args FROM staff_notifications WHERE key = 'staff.n_request' \
+              ORDER BY employee_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM staff_notifications")
+            .execute(&pool)
+            .await
+            .unwrap();
+        rows
+    };
+    let ask = async |who: Uuid| {
+        let resp = call!(
+            app,
+            post,
+            "/staff/me/advances",
+            phone_token(&pool, who).await,
+            json!({ "amount_piastres": 50_000, "installments": 2 })
+        );
+        assert_eq!(resp.status(), 201);
+    };
+    let today: NaiveDate = sqlx::query_scalar("SELECT (now() AT TIME ZONE 'UTC')::date")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    ask(f.amal).await;
+    let rows = told().await;
+    let mut who: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
+    let mut want = vec![mgr_emp, owner_emp];
+    who.sort();
+    want.sort();
+    assert_eq!(who, want, "A's deciders, not B's manager nor Amal");
+    assert!(!who.contains(&mgr_b_emp) && !who.contains(&f.amal));
+    assert_eq!(
+        rows[0].1,
+        json!({ "name": "Amal", "kind": "salary_advance", "date": today })
+    );
+    assert_eq!(
+        madar_rust::push::render("staff.n_request", &rows[0].1, false).unwrap(),
+        format!("Amal: new Salary advance request for {today}")
+    );
+
+    // The manager's own ask: someone else decides it.
+    ask(mgr_emp).await;
+    let who: Vec<Uuid> = told().await.into_iter().map(|r| r.0).collect();
+    assert_eq!(who, vec![owner_emp]);
+}
