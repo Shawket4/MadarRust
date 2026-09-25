@@ -1205,6 +1205,17 @@ pub async fn get_menu_item(
     let recipes = fetch_item_recipes(pool.get_ref(), *id).await?;
     let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), *id).await?;
     let recipe_steps = crate::recipes::steps::fetch_item_steps(pool.get_ref(), *id).await?;
+    // Its "make it a meal" link (C14), as the list and the feed carry it, so
+    // the studio shows what is saved; only while the combo is still live.
+    let meal = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT mi.meal_combo_id, mi.meal_slot_id FROM menu_items mi \
+           JOIN menu_items c ON c.id = mi.meal_combo_id AND c.kind = 'combo' AND c.deleted_at IS NULL \
+          WHERE mi.id = $1 AND mi.meal_slot_id IS NOT NULL",
+    )
+    .bind(*id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .map(|(combo_id, slot_id)| crate::combos::types::MealLink { combo_id, slot_id });
 
     Ok(HttpResponse::Ok().json(MenuItemFull {
         item,
@@ -1216,7 +1227,7 @@ pub async fn get_menu_item(
         recipe_steps,
         allowed_addon_ids,
         pricing: None,
-        meal: None,
+        meal,
         combo: None,
     }))
 }
