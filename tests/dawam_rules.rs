@@ -2954,3 +2954,76 @@ async fn approved_time_off_counts_only_the_minutes_actually_away(pool: PgPool) {
     approve(early["id"].clone(), false).await;
     assert_eq!(deduction(&pool, rec, "excused_unpaid").await, 0, "stayed");
 }
+
+/// Minor default M16: a mission (or leave) over a day the person already
+/// worked still turns it into a paid day away (the punches are kept), but
+/// the request says which of its days were worked, so the approver is
+/// warned before approving.
+#[sqlx::test]
+async fn a_mission_over_a_worked_day_names_the_worked_day(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    roster(&pool, &f, f.e, &[f.day_shift]).await;
+    let (d1, d2) = ("2026-08-10", "2026-08-11");
+    record(
+        &pool,
+        &f,
+        f.e,
+        f.day_shift,
+        d1,
+        (at(d1, "09:00"), at(d1, "17:00")),
+        Some((at(d1, "09:00"), at(d1, "17:00"))),
+        "present",
+    )
+    .await;
+    let mission = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "mission", "on_date": d1, "end_date": d2,
+        "title": "Supplier visit" }),
+    )
+    .await;
+    assert_eq!(mission["worked_dates"], json!([d1]), "{mission}");
+    let (st, list) = send!(
+        app,
+        "GET",
+        format!("/staff/requests?employee_id={}", f.e),
+        f.owner_token()
+    );
+    assert_eq!(st, 200);
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == mission["id"])
+        .unwrap();
+    assert_eq!(row["worked_dates"], json!([d1]));
+    // Other kinds carry none.
+    let late = file(
+        &app,
+        &f,
+        f.e,
+        json!({ "kind": "late_arrival", "on_date": d1,
+        "to_time": "10:00:00" }),
+    )
+    .await;
+    assert_eq!(late["worked_dates"], json!([]));
+    // Approving still works: the day is paid time away, the punches stay.
+    let (st, row) = decide(
+        &app,
+        &f.owner_token(),
+        &mission["id"],
+        json!({ "status": "approved" }),
+    )
+    .await;
+    assert_eq!(st, 200, "{row}");
+    let punched: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM attendance_records WHERE employee_id = $1 AND check_in_at IS NOT NULL",
+    )
+    .bind(f.e)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(punched, 1);
+}

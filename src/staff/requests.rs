@@ -167,6 +167,13 @@ pub struct StaffRequest {
     #[sqlx(default)]
     #[serde(default)]
     pub month_closed: bool,
+    /// For a leave or mission: the days it covers that the person already
+    /// clocked in on. Approving turns those worked days into leave (the
+    /// punches are kept), so the approver is warned first (minor default
+    /// M16). Empty for every other kind.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub worked_dates: Vec<NaiveDate>,
 }
 
 const REQUEST_SELECT: &str = r#"
@@ -179,7 +186,14 @@ const REQUEST_SELECT: &str = r#"
            COALESCE(de.name, du.name) AS decided_by_name,
            COALESCE(ce.name, cu.name) AS cancelled_by_name,
            r.created_at, r.updated_at,
-           ar.check_in_at AS record_check_in_at, ar.check_out_at AS record_check_out_at
+           ar.check_in_at AS record_check_in_at, ar.check_out_at AS record_check_out_at,
+           CASE WHEN r.kind IN ('leave', 'mission') THEN
+               ARRAY(SELECT DISTINCT w.business_date FROM attendance_records w
+                      WHERE w.employee_id = r.employee_id AND w.covered_employee_id IS NULL
+                        AND w.check_in_at IS NOT NULL
+                        AND w.business_date BETWEEN r.on_date AND COALESCE(r.end_date, r.on_date)
+                      ORDER BY 1)
+           ELSE '{}'::date[] END AS worked_dates
       FROM staff_requests r
       JOIN employees e ON e.id = r.employee_id
       LEFT JOIN users du ON du.id = r.decided_by
