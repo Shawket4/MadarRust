@@ -3881,3 +3881,54 @@ async fn pending_covers_and_overtime_are_listed_without_a_range(pool: PgPool) {
     let resp = call!(app, get, "/staff/attendance?overtime_status=soon", owner);
     assert_eq!(resp.status(), 400);
 }
+
+/// Hunt H2-B6: an old pending pay line stays in the list behind any number
+/// of newer decided ones (the list stopped at the newest 300).
+#[sqlx::test]
+async fn an_old_pending_pay_line_is_listed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, status, created_at) \
+         VALUES ($1, $2, 10000, 'Old', $3, 'pending', now() - INTERVAL '90 days') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, status, created_at) \
+         SELECT $1, $2, 100, 'Line ' || g, $3, 'approved', now() - INTERVAL '1 minute' * g \
+           FROM generate_series(1, 320) g",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rows = json_of(call!(app, get, "/staff/adjustments", f.owner())).await;
+    let rows = rows.as_array().unwrap();
+    assert!(
+        rows.iter().any(|r| r["id"] == json!(old)),
+        "the old pending line is listed ({} rows)",
+        rows.len()
+    );
+    assert_eq!(
+        rows.len(),
+        301,
+        "every pending one, and a page of decided ones"
+    );
+    let pending = json_of(call!(
+        app,
+        get,
+        "/staff/adjustments?status=pending",
+        f.owner()
+    ))
+    .await;
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+}

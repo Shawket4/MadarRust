@@ -4439,3 +4439,98 @@ async fn a_flag_is_deducted_once(pool: PgPool) {
     assert_eq!(told, 1, "told once");
     refused!(deduct().await, 404, "FLAG_HANDLED");
 }
+
+/// Hunt H2-B6: an old pending swap stays visible and decidable behind any
+/// number of newer ones. The list stopped at the newest 100 (so Approvals
+/// lost it), and a decision looked the swap up in that same page (404).
+#[sqlx::test]
+async fn an_old_pending_swap_is_listed_and_decided(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(17, 0), t(21, 0)).await;
+    // 1 old pending, then 105 newer pending and 105 newer rejected ones.
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO staff_swaps (org_id, requester_id, requester_date, requester_shift_id, \
+             peer_id, peer_date, peer_shift_id, status, created_at) \
+         VALUES ($1, $2, DATE '2027-01-01', $4, $3, DATE '2027-01-01', $5, 'pending', \
+                 now() - INTERVAL '90 days') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.b)
+    .bind(m)
+    .bind(e)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO staff_swaps (org_id, requester_id, requester_date, requester_shift_id, \
+             peer_id, peer_date, peer_shift_id, status, created_at) \
+         SELECT $1, $2, DATE '2027-02-01' + g, $4, $3, DATE '2027-02-01' + g, $5, \
+                CASE WHEN g % 2 = 0 THEN 'pending' ELSE 'rejected' END, \
+                now() - INTERVAL '1 minute' * g \
+           FROM generate_series(1, 210) g",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.b)
+    .bind(m)
+    .bind(e)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let listed = async |uri: &str| -> Vec<Value> {
+        let (s, body) = done(call!(app, "GET", uri, f.owner())).await;
+        assert_eq!(s, 200, "{body}");
+        body.as_array().unwrap().clone()
+    };
+    let all = listed("/staff/swaps").await;
+    assert!(
+        all.iter().any(|s| s["id"] == json!(old)),
+        "the old pending swap is listed ({} rows)",
+        all.len()
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|s| s["status"] == json!("pending"))
+            .count(),
+        106,
+        "every pending one"
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|s| s["status"] == json!("rejected"))
+            .count(),
+        100,
+        "decided ones stay a page"
+    );
+    let pending = listed("/staff/swaps?status=pending").await;
+    assert_eq!(pending.len(), 106);
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/swaps/{old}/decision"),
+        f.owner(),
+        json!({ "approve": false })
+    ))
+    .await;
+    assert_eq!(s, 204, "{body}");
+    // The staff app's list keeps every open one of mine too.
+    let (s, mine) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={}&to={}", today(), today()),
+        phone_token(&pool, f.a).await
+    ))
+    .await;
+    assert_eq!(s, 200, "{mine}");
+    let swaps = mine["swaps"].as_array().unwrap();
+    assert_eq!(
+        swaps
+            .iter()
+            .filter(|s| s["status"] == json!("pending"))
+            .count(),
+        105
+    );
+}
