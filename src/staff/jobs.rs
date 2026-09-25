@@ -119,6 +119,7 @@ pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
         "monthly_fairness",
         crate::staff::dawam::suggest::monthly_fairness(pool).await,
     );
+    step("remind_holidays", remind_holidays(pool).await);
     step("phones_that_died", phones_that_died(pool).await);
     step("tracking_went_quiet", tracking_went_quiet(pool).await);
     first.map_or(Ok(()), Err)
@@ -201,6 +202,64 @@ pub async fn open_pay_periods(pool: &PgPool) -> Result<(), AppError> {
         };
         if let Err(e) = opened.await {
             skipped("open_pay_periods", org_id, None, &e);
+        }
+    }
+    Ok(())
+}
+
+/// How far ahead an undecided public holiday is brought up.
+const HOLIDAY_REMINDER_DAYS: i64 = 7;
+
+/// A public holiday a week away that nobody has decided yet: whoever
+/// decides (the owners, D3) is told once, so it is set up before the day
+/// (minor default M24). Once per holiday date and person, however many
+/// ticks run inside the week.
+#[doc(hidden)]
+pub async fn remind_holidays(pool: &PgPool) -> Result<(), AppError> {
+    let orgs: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
+        "SELECT o.id, (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id \
+                         AND b.deleted_at IS NULL ORDER BY b.created_at LIMIT 1) \
+           FROM organizations o WHERE {LIVE_ORG}"
+    ))
+    .fetch_all(pool)
+    .await?;
+    for (org_id, tz) in orgs {
+        let told = async {
+            let today =
+                crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo"))
+                    .await?;
+            let due: Vec<_> = crate::staff::dawam::holidays::holidays_in(
+                pool,
+                org_id,
+                today,
+                today + chrono::Duration::days(HOLIDAY_REMINDER_DAYS),
+            )
+            .await?
+            .into_iter()
+            .filter(|h| h.decision.is_none())
+            .collect();
+            if due.is_empty() {
+                return Ok::<(), AppError>(());
+            }
+            let owners = crate::staff::dawam::owners(pool, org_id).await?;
+            for h in &due {
+                for o in &owners {
+                    crate::staff::dawam::notify_once(
+                        pool,
+                        org_id,
+                        *o,
+                        "staff.n_holiday_undecided",
+                        serde_json::json!({ "date": h.on_date, "name_en": h.name_en,
+                                            "name_ar": h.name_ar }),
+                        &format!("holiday:{}", h.on_date),
+                    )
+                    .await;
+                }
+            }
+            Ok(())
+        };
+        if let Err(e) = told.await {
+            skipped("remind_holidays", org_id, None, &e);
         }
     }
     Ok(())

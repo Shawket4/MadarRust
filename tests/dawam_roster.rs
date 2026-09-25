@@ -3763,3 +3763,57 @@ async fn one_edit_tells_each_person_once(pool: PgPool) {
     .unwrap();
     assert_eq!(n, 2);
 }
+
+/// Minor default M24: a public holiday a week away that nobody has decided
+/// is brought to whoever decides it (the owner, D3), once, by the sweep.
+/// Decided or far-off holidays aren't.
+#[sqlx::test]
+async fn an_undecided_holiday_a_week_away_is_brought_to_the_owner_once(pool: PgPool) {
+    let f = seed(&pool).await;
+    let (soon, decided, far) = (
+        today() + Duration::days(3),
+        today() + Duration::days(2),
+        today() + Duration::days(20),
+    );
+    for (on, decision) in [(soon, None), (decided, Some("holiday")), (far, None)] {
+        sqlx::query(
+            "INSERT INTO staff_holidays (org_id, on_date, name_en, name_ar, decision) \
+             VALUES ($1, $2, 'Test day', 'يوم تجربة', $3)",
+        )
+        .bind(f.org)
+        .bind(on)
+        .bind(decision)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for _ in 0..2 {
+        madar_rust::staff::jobs::remind_holidays(&pool)
+            .await
+            .unwrap();
+    }
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_holiday_undecided' ORDER BY args->>'date'",
+    )
+    .bind(f.owner_emp)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let ours: Vec<&Value> = told
+        .iter()
+        .filter(|a| [json!(soon), json!(decided), json!(far)].contains(&a["date"]))
+        .collect();
+    assert_eq!(ours.len(), 1, "{told:?}");
+    assert_eq!(ours[0]["date"], json!(soon));
+    assert_eq!(ours[0]["name_en"], "Test day");
+    let staff: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = ANY($1) \
+            AND key = 'staff.n_holiday_undecided'",
+    )
+    .bind(vec![f.a, f.b, f.x])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(staff, 0, "only whoever decides");
+}
