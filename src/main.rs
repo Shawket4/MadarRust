@@ -167,6 +167,24 @@ async fn run() -> std::io::Result<()> {
     }
     let demo_enabled = demo_settings.enabled;
     let demo_cfg = web::Data::new(demo_settings);
+    // App Review's staff sign-in (`staff::dawam::signin::ReviewLogin`): on
+    // only with BOTH env vars set. Said loudly at boot; the code never is.
+    let review_login = madar_rust::staff::dawam::signin::ReviewLogin::from_env();
+    match &review_login {
+        Some(r) => tracing::warn!(
+            phone = %r.phone(),
+            "⚠️  App Review sign-in ON: a staff code asked for this phone is MADAR_REVIEW_OTP and no WhatsApp is sent. Unset MADAR_REVIEW_PHONE and MADAR_REVIEW_OTP after the review."
+        ),
+        None if env::var_os("MADAR_REVIEW_PHONE").is_some()
+            || env::var_os("MADAR_REVIEW_OTP").is_some() =>
+        {
+            tracing::warn!(
+                "App Review sign-in OFF: it needs both MADAR_REVIEW_PHONE (a valid phone) and MADAR_REVIEW_OTP (six digits)"
+            )
+        }
+        None => {}
+    }
+    let review_login = review_login.map(web::Data::new);
     // Shlink short-URL provider (reads env vars on each call; degrade-safe).
     let qr_provider = qr_card::routes::make_provider();
     let uploads_clone = uploads_dir.clone();
@@ -283,6 +301,11 @@ async fn run() -> std::io::Result<()> {
             }))
             // Every API route. The route-coverage guard mounts exactly this.
             .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone()));
+
+        // App Review's sign-in, only when both of its env vars are set.
+        if let Some(review) = &review_login {
+            app = app.app_data(review.clone());
+        }
 
         // Public demo endpoints only when DEMO_MODE is on.
         if demo_enabled {

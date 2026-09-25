@@ -26,33 +26,41 @@ const LAT: f64 = 29.9792;
 const LNG: f64 = 31.1342;
 
 /// The whole API, as `main.rs` mounts it: a staff token must be refused by
-/// every route that is not `/staff/*`.
+/// every route that is not `/staff/*`. `$review`: App Review's sign-in, on
+/// (main.rs mounts it only when both of its env vars are set).
 macro_rules! app {
-    ($pool:expr) => {{
+    ($pool:expr) => {
+        app!($pool, None::<madar_rust::staff::dawam::signin::ReviewLogin>)
+    };
+    ($pool:expr, $review:expr) => {{
         unsafe {
             std::env::set_var("MADAR_DISABLE_RATE_LIMIT", "1");
             std::env::set_var("MADAR_DISABLE_AUTO_TRANSLATION", "1");
         }
         let read_pool = web::Data::new($pool.clone());
+        let mut service = App::new()
+            .app_data(web::Data::new($pool.clone()))
+            .app_data(web::Data::new(
+                madar_rust::menu::cache::MenuCache::from_env(),
+            ))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(
+                madar_rust::auth::org_status::OrgStatusCache::new(),
+            ))
+            .app_data(web::Data::new(
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            ))
+            .app_data(madar_rust::qr_card::routes::make_provider())
+            .app_data(web::Data::new(
+                madar_rust::demo::config::DemoConfig::from_env(),
+            ))
+            .app_data(web::Data::new(madar_rust::ai::AiState::from_env()));
+        let review: Option<madar_rust::staff::dawam::signin::ReviewLogin> = $review;
+        if let Some(review) = review {
+            service = service.app_data(web::Data::new(review));
+        }
         test::init_service(
-            App::new()
-                .app_data(web::Data::new($pool.clone()))
-                .app_data(web::Data::new(
-                    madar_rust::menu::cache::MenuCache::from_env(),
-                ))
-                .app_data(web::Data::new(secret()))
-                .app_data(web::Data::new(
-                    madar_rust::auth::org_status::OrgStatusCache::new(),
-                ))
-                .app_data(web::Data::new(
-                    madar_rust::realtime::hub::BranchEventHub::new(),
-                ))
-                .app_data(madar_rust::qr_card::routes::make_provider())
-                .app_data(web::Data::new(
-                    madar_rust::demo::config::DemoConfig::from_env(),
-                ))
-                .app_data(web::Data::new(madar_rust::ai::AiState::from_env()))
-                .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone())),
+            service.configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone())),
         )
         .await
     }};
@@ -1460,4 +1468,270 @@ async fn a_code_request_says_why_an_inactive_account_or_paused_business_cant_sig
         .await
         .unwrap();
     assert_eq!(codes, 0, "no code written, so none sent");
+}
+
+// ── App Review's sign-in ───────────────────────────────────────────────────
+
+/// POST a JSON body with no session; the status and the answer.
+async fn post_json<S>(app: &S, uri: &str, b: Value) -> (u16, Value)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let req = test::TestRequest::post().uri(uri).set_json(b).to_request();
+    let resp = test::call_service(app, req).await;
+    (resp.status().as_u16(), body(resp).await)
+}
+
+type Messages = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A WhatsApp gateway (`WHATSAPP_SERVICE_URL`) that keeps every message it
+/// is asked to send.
+async fn whatsapp_gateway() -> Messages {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    unsafe { std::env::set_var("WHATSAPP_SERVICE_URL", url) };
+    let seen = Messages::default();
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    req.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&req).to_string();
+                    let Some(end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let len = text[..end]
+                        .lines()
+                        .find_map(|l| {
+                            let l = l.to_ascii_lowercase();
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if req.len() >= end + 4 + len {
+                        log.lock().unwrap().push(text[end + 4..].to_string());
+                        break;
+                    }
+                }
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    )
+                    .await;
+            });
+        }
+    });
+    seen
+}
+
+/// Waits (5 s at most) for a WhatsApp message to a number ending in `digits`.
+async fn whatsapp_to(gateway: &Messages, digits: &str) {
+    for _ in 0..100 {
+        if gateway.lock().unwrap().iter().any(|m| m.contains(digits)) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no WhatsApp to …{digits}: {:?}", gateway.lock().unwrap());
+}
+
+/// The code on file for `number`, as the sign-in stores it.
+async fn otp_code(pool: &PgPool, number: &str) -> String {
+    sqlx::query_scalar("SELECT code FROM staff_otp WHERE phone = $1")
+        .bind(madar_rust::phone::normalize_phone(number).unwrap())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// App Review (Apple's reviewers can't receive a WhatsApp code): the review
+/// sign-in is off unless BOTH `MADAR_REVIEW_PHONE` and `MADAR_REVIEW_OTP`
+/// (six digits) are set. Off, the review phone signs in like anyone: a
+/// WhatsApp code, and the review code is refused.
+#[sqlx::test]
+async fn app_review_sign_in_is_off_by_default(pool: PgPool) {
+    use madar_rust::staff::dawam::signin::ReviewLogin;
+    assert!(ReviewLogin::from_env().is_none(), "unset here: off");
+    assert!(ReviewLogin::new(None, Some("246810")).is_none(), "no phone");
+    assert!(
+        ReviewLogin::new(Some("01020000888"), None).is_none(),
+        "no code"
+    );
+    assert!(
+        ReviewLogin::new(Some("01020000888"), Some("24681")).is_none(),
+        "five digits"
+    );
+    assert!(ReviewLogin::new(Some("01020000888"), Some("24681x")).is_none());
+    assert!(ReviewLogin::new(Some("not a phone"), Some("246810")).is_none());
+    let on = ReviewLogin::new(Some("01020000888"), Some("246810")).expect("both set: on");
+    assert!(
+        !format!("{on:?}").contains("246810"),
+        "the code is never printed"
+    );
+
+    let gateway = whatsapp_gateway().await;
+    let app = app!(pool);
+    let o = seed(&pool).await;
+    employee(
+        &pool,
+        o.org,
+        "Reviewer",
+        None,
+        Some("01020000888"),
+        true,
+        &[o.a],
+        300_000,
+    )
+    .await;
+    let (s, b) = post_json(
+        &app,
+        "/auth/staff/otp/request",
+        json!({ "phone": "01020000888" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    whatsapp_to(&gateway, "1020000888").await;
+    // The one-in-a-million chance the real code was the review code.
+    if otp_code(&pool, "01020000888").await != "246810" {
+        let (s, b) = post_json(
+            &app,
+            "/auth/staff/otp/verify",
+            json!({ "phone": "01020000888", "code": "246810", "model": "T" }),
+        )
+        .await;
+        assert_eq!((s, b["code"].clone()), (400, json!("OTP_WRONG")), "{b}");
+    }
+}
+
+/// On: a code asked for the review phone IS the review code, and no WhatsApp
+/// is sent; the rest of the sign-in is unchanged (one code a minute, five
+/// tries, used once, a bound phone, the location notice still to accept).
+/// A wrong code is refused, and any other phone is unaffected.
+#[sqlx::test]
+async fn app_review_sign_in_takes_its_code_only_for_its_phone(pool: PgPool) {
+    use madar_rust::staff::dawam::signin::ReviewLogin;
+    let gateway = whatsapp_gateway().await;
+    let review = ReviewLogin::new(Some("+201020000888"), Some("246810")).unwrap();
+    let app = app!(pool, Some(review));
+    let o = seed(&pool).await;
+    let reviewer = employee(
+        &pool,
+        o.org,
+        "Reviewer",
+        None,
+        Some("01020000888"),
+        true,
+        &[o.a],
+        300_000,
+    )
+    .await;
+    employee(
+        &pool,
+        o.org,
+        "Nour",
+        None,
+        Some("01020000999"),
+        true,
+        &[o.a],
+        300_000,
+    )
+    .await;
+
+    let (s, b) = post_json(
+        &app,
+        "/auth/staff/otp/request",
+        json!({ "phone": "01020000888" }),
+    )
+    .await;
+    assert_eq!(
+        (s, b),
+        (200, json!({ "sent": true })),
+        "sent, and no code echoed"
+    );
+    assert_eq!(otp_code(&pool, "01020000888").await, "246810");
+    let (s, b) = post_json(
+        &app,
+        "/auth/staff/otp/request",
+        json!({ "phone": "01020000888" }),
+    )
+    .await;
+    assert_eq!(
+        (s, b["code"].clone()),
+        (409, json!("OTP_RECENTLY_SENT")),
+        "{b}"
+    );
+
+    let verify = |code: &'static str| {
+        let app = &app;
+        async move {
+            post_json(
+                app,
+                "/auth/staff/otp/verify",
+                json!({ "phone": "01020000888", "code": code, "model": "Review" }),
+            )
+            .await
+        }
+    };
+    let (s, b) = verify("135790").await;
+    assert_eq!(
+        (s, b["code"].clone(), b["vars"]["attempts_left"].clone()),
+        (400, json!("OTP_WRONG"), json!(4)),
+        "{b}"
+    );
+    let (s, v) = verify("246810").await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["employee_id"], json!(reviewer));
+    assert!(v["device_token"].is_string(), "{v}");
+    let ctx = body(call!(app, "GET", "/staff/me/context", session_of(&v))).await;
+    assert_eq!(ctx["employee_id"], json!(reviewer));
+    assert!(
+        ctx["privacy_accepted_at"].is_null(),
+        "the notice still to accept: {ctx}"
+    );
+    let (s, b) = verify("246810").await;
+    assert_eq!(
+        (s, b["code"].clone()),
+        (400, json!("OTP_NONE_ACTIVE")),
+        "used once: {b}"
+    );
+
+    // Any other phone: a WhatsApp code, and the review code is no key to it.
+    let (s, b) = post_json(
+        &app,
+        "/auth/staff/otp/request",
+        json!({ "phone": "01020000999" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    whatsapp_to(&gateway, "1020000999").await;
+    if otp_code(&pool, "01020000999").await != "246810" {
+        let (s, b) = post_json(
+            &app,
+            "/auth/staff/otp/verify",
+            json!({ "phone": "01020000999", "code": "246810", "model": "T" }),
+        )
+        .await;
+        assert_eq!((s, b["code"].clone()), (400, json!("OTP_WRONG")), "{b}");
+    }
+    assert!(
+        !gateway
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| m.contains("1020000888")),
+        "no WhatsApp to the review phone"
+    );
 }
