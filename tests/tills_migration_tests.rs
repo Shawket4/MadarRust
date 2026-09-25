@@ -478,6 +478,8 @@ async fn schema_has_no_stray_shift_identifiers(pool: PgPool) {
         -- swaps (which name the work shifts they trade) and shift-tied requests.
         WHERE name !~ 'work_shift' AND name !~ '^staff_schedules' AND name <> 'shift_counts'
           AND name !~ '^_?staff_open_shifts' AND name !~ '^staff_swaps'
+          -- Claims on those open shifts, kept once decided (hunt B-H1-1).
+          AND name !~ '^_?staff_open_shift_claims'
           -- Requests tied to a work shift (a split day's own block, RQ-9).
           AND name !~ '^staff_requests_'
         ORDER BY 1").await;
