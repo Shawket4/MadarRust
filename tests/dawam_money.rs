@@ -3963,3 +3963,75 @@ async fn a_salary_nobody_set_is_flagged_and_payroll_waits_for_it(pool: PgPool) {
             .unwrap();
     assert_eq!(before, after);
 }
+
+/// Minor default M32: a pending overtime or cover in a month that is already
+/// approved or paid can be rejected (no money moves), so it leaves
+/// Approvals; approving stays refused (PERIOD_CLOSED: add a line in next
+/// month instead).
+#[sqlx::test]
+async fn a_pending_overtime_or_cover_in_a_paid_month_can_be_rejected_not_approved(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let ot = || day(&pool, &f, f.amal, f.a, f.start, "present", 9, 480, 0, 60);
+    let first = ot().await;
+    let cover = |status: &'static str| {
+        let pool = pool.clone();
+        let (org, a, amal, bassem, on) = (f.org, f.a, f.amal, f.bassem, f.start);
+        async move {
+            let start = on.and_hms_opt(18, 0, 0).unwrap().and_utc();
+            sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, \
+                     status, scheduled_start_at, scheduled_end_at, check_in_at, check_out_at, \
+                     worked_minutes, check_in_method, covered_employee_id, cover_status) \
+                 VALUES ($1, $2, $3, $4, 'present', $5, $5 + INTERVAL '2 hours', $5, \
+                         $5 + INTERVAL '2 hours', 120, 'cover', $6, $7) RETURNING id",
+            )
+            .bind(org)
+            .bind(amal)
+            .bind(a)
+            .bind(on)
+            .bind(start)
+            .bind(bassem)
+            .bind(status)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let cov = cover("pending").await;
+    sqlx::query("UPDATE payroll_periods SET status = 'paid' WHERE id = $1")
+        .bind(f.period)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let decide = |what: &str, id: Uuid, approve: bool| {
+        let app = &app;
+        let uri = format!("/staff/attendance/{id}/{what}");
+        let owner = f.owner();
+        async move { call!(app, patch, uri, owner, json!({ "approve": approve })) }
+    };
+    for (what, id) in [("overtime", first), ("cover", cov)] {
+        let resp = decide(what, id, true).await;
+        assert_eq!(
+            resp.status(),
+            409,
+            "{what}: approving pays into the paid month"
+        );
+        assert_eq!(json_of(resp).await["code"], "PERIOD_CLOSED");
+        let resp = decide(what, id, false).await;
+        assert_eq!(resp.status(), 200, "{what}: rejecting moves no money");
+    }
+    let (ot_status, cover_status): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT overtime_status FROM attendance_records WHERE id = $1), \
+                (SELECT cover_status FROM attendance_records WHERE id = $2)",
+    )
+    .bind(first)
+    .bind(cov)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (ot_status.as_deref(), cover_status.as_deref()),
+        (Some("rejected"), Some("rejected"))
+    );
+}

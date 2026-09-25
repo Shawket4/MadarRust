@@ -1334,9 +1334,12 @@ pub async fn decide_overtime(
         });
     }
     access::require_at(pool, &claims, org_id, Cap::HrOvertimeApprove, branch_id).await?;
-    // An approved month is a snapshot: its overtime is decided (AD-10).
-    crate::staff::period_lock::assert_open(pool, org_id, on_date, "this overtime").await?;
     if body.approve {
+        // An approved month is a snapshot: approving would pay into it
+        // (AD-10). Rejecting moves no money, so a pending overtime in a paid
+        // month can still leave Approvals (minor default M32); the fix is a
+        // line in next month.
+        crate::staff::period_lock::assert_open(pool, org_id, on_date, "this overtime").await?;
         // Priced exactly as payroll will price it (AT-9): the same facts
         // (the salary in force that day, the day's rostered minutes, the
         // night minutes) through the same function under the branch's rules
