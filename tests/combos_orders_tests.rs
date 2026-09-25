@@ -442,7 +442,7 @@ async fn a_combo_and_plain_lines_share_one_order(pool: PgPool) {
         .insert_header(("Authorization", format!("Bearer {}", s.admin_token())))
         .to_request();
     let got: Value = test::call_and_read_body_json(&app, req).await;
-    let mut ids = |v: &Value| -> Vec<String> {
+    let ids = |v: &Value| -> Vec<String> {
         let mut x: Vec<String> = lines(v).iter().map(|l| l["id"].to_string()).collect();
         x.sort();
         x
