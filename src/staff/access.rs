@@ -64,7 +64,11 @@ pub async fn subject(pool: &PgPool, org_id: Uuid, employee_id: Uuid) -> Result<S
     .fetch_optional(pool)
     .await?;
     let Some((org_id, user_id, name, employment_status)) = row else {
-        return Err(AppError::NotFound("Employee not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "EMPLOYEE_NOT_FOUND",
+            "Employee not found",
+        ));
     };
     Ok(Subject {
         id: employee_id,
@@ -201,7 +205,13 @@ pub async fn require_at(
             .fetch_optional(pool)
             .await?;
     match in_org {
-        None => return Err(AppError::NotFound("Branch not found".into())),
+        None => {
+            return Err(crate::staff::coded(
+                404,
+                "BRANCH_NOT_FOUND",
+                "Branch not found",
+            ));
+        }
         Some(o) if o != org_id => {
             return Err(AppError::Forbidden(
                 "Branch belongs to a different org".into(),
