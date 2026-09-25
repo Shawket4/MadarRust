@@ -834,10 +834,9 @@ async fn settle_flag(
             "Unpaid excuse",
         ),
         "deduct" => {
-            let amount = body
-                .amount_piastres
-                .filter(|a| *a > 0)
-                .ok_or_else(|| AppError::BadRequest("Type the amount to deduct.".into()))?;
+            let amount = body.amount_piastres.filter(|a| *a > 0).ok_or_else(|| {
+                crate::staff::coded(400, "AMOUNT_REQUIRED", "Type the amount to deduct.")
+            })?;
             (
                 "deducted",
                 amount,
@@ -849,7 +848,13 @@ async fn settle_flag(
             )
         }
         "revoke" if kind == "new_phone" => ("revoked", 0, ""),
-        _ => return Err(AppError::BadRequest("Unknown action".into())),
+        _ => {
+            return Err(crate::staff::coded(
+                400,
+                "FLAG_ACTION_UNKNOWN",
+                "Unknown action",
+            ));
+        }
     };
     // A deduction from a flag is a pay line like any other: nobody deducts
     // from themselves, and above the manager's limit it waits for the owner
@@ -1154,8 +1159,10 @@ pub async fn open_cover(
     .fetch_one(pool)
     .await?;
     if open {
-        return Err(AppError::Conflict(
-            "Clock out of your own shift first.".into(),
+        return Err(crate::staff::coded(
+            409,
+            "CLOCK_OUT_FIRST",
+            "Clock out of your own shift first.",
         ));
     }
     let id: Uuid = sqlx::query_scalar(
@@ -1259,7 +1266,11 @@ async fn decide_cover_record(
     .fetch_optional(pool)
     .await?;
     let Some((coverer, branch_id, _owner, coverer_user, owner_user, day)) = row else {
-        return Err(AppError::NotFound("No cover waiting here.".into()));
+        return Err(crate::staff::coded(
+            404,
+            "NO_COVER_WAITING",
+            "No cover waiting here.",
+        ));
     };
     access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
     if Some(by) == coverer_user || Some(by) == owner_user {
@@ -1387,7 +1398,11 @@ pub async fn decide_overtime(
     .fetch_optional(pool)
     .await?;
     let Some((employee_id, branch_id, minutes, on_date, status)) = row else {
-        return Err(AppError::NotFound("No overtime waiting here.".into()));
+        return Err(crate::staff::coded(
+            404,
+            "NO_OVERTIME_WAITING",
+            "No overtime waiting here.",
+        ));
     };
     let status = status.unwrap_or_default();
     if status != "pending" {
@@ -1412,7 +1427,9 @@ pub async fn decide_overtime(
         let settings = load_settings(pool, org_id, Some(branch_id)).await?;
         let day = crate::staff::penalties::load_facts(pool, *id, &settings)
             .await?
-            .ok_or_else(|| AppError::NotFound("No overtime waiting here.".into()))?;
+            .ok_or_else(|| {
+                crate::staff::coded(404, "NO_OVERTIME_WAITING", "No overtime waiting here.")
+            })?;
         let mut facts = day.facts.clone();
         facts.overtime_status = Some("approved".into());
         let amount = crate::staff::pricing::price_shift(&facts, &day.rules).overtime_piastres;
@@ -1518,7 +1535,11 @@ pub async fn punch_for(
     access::gate(pool, &claims, org_id, Cap::HrAttendancePunchOthers).await?;
     let reason = body.reason.trim();
     if reason.is_empty() {
-        return Err(AppError::BadRequest("A reason is required.".into()));
+        return Err(crate::staff::coded(
+            400,
+            "REASON_REQUIRED",
+            "A reason is required.",
+        ));
     }
     let subject = access::subject(pool, org_id, body.employee_id).await?;
     if subject.employment_status != "active" {
@@ -1539,7 +1560,11 @@ pub async fn punch_for(
     }
     crate::staff::attendance::require_rules(pool, org_id).await?;
     if subject.branches.is_empty() {
-        return Err(AppError::BadRequest("That person has no branch.".into()));
+        return Err(crate::staff::coded(
+            400,
+            "EMPLOYEE_NO_BRANCH",
+            "That person has no branch.",
+        ));
     }
     access::require_for(pool, &claims, Cap::HrAttendancePunchOthers, &subject).await?;
     // Only the manager's own phone can vouch for a queued time; from the
@@ -1553,7 +1578,9 @@ pub async fn punch_for(
     // branch wins when the caller holds the right there too.
     let fallback = access::decision_branch(pool, &claims, Cap::HrAttendancePunchOthers, &subject)
         .await?
-        .ok_or_else(|| AppError::BadRequest("That person has no branch.".into()))?;
+        .ok_or_else(|| {
+            crate::staff::coded(400, "EMPLOYEE_NO_BRANCH", "That person has no branch.")
+        })?;
     let branch = match shift_branch_at(pool, body.employee_id, fallback, stamped.at).await? {
         Some(b) if b != fallback => {
             access::require_at(pool, &claims, org_id, Cap::HrAttendancePunchOthers, b).await?;
@@ -1696,7 +1723,7 @@ pub(crate) async fn punch(
             .bind(at)
             .fetch_optional(pool)
             .await?
-            .ok_or_else(|| AppError::Conflict("They already worked that shift today.".into()))?;
+            .ok_or_else(|| crate::staff::coded(409, "SHIFT_ALREADY_WORKED", "They already worked that shift today."))?;
             (id, true, branch)
         }
     };
@@ -1783,7 +1810,11 @@ pub async fn till_punch(
     .fetch_one(pool)
     .await?;
     if !branch_ok {
-        return Err(AppError::NotFound("Branch not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "BRANCH_NOT_FOUND",
+            "Branch not found",
+        ));
     }
     // Either module off: 403 MODULE_OFF with the spec's sentence (P-010,
     // PS-7), so the till words it instead of "no permission" (B-POS-1).

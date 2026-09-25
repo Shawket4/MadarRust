@@ -309,9 +309,14 @@ pub struct BalanceQuery {
 fn validate_status_filter(status: Option<&str>) -> Result<(), AppError> {
     match status {
         None | Some("pending") | Some("approved") | Some("rejected") | Some("cancelled") => Ok(()),
-        Some(other) => Err(AppError::BadRequest(format!(
-            "Unknown status '{other}' — expected pending, approved, rejected, or cancelled"
-        ))),
+        Some(other) => Err(crate::staff::coded_vars(
+            400,
+            "STATUS_UNKNOWN",
+            format!(
+                "Unknown status '{other}' — expected pending, approved, rejected, or cancelled"
+            ),
+            serde_json::json!({ "status": other }),
+        )),
     }
 }
 
@@ -319,10 +324,15 @@ fn validate_kind(kind: &str) -> Result<(), AppError> {
     if KINDS.contains(&kind) {
         Ok(())
     } else {
-        Err(AppError::BadRequest(format!(
-            "Unknown request kind '{kind}' — expected one of {}",
-            KINDS.join(", ")
-        )))
+        Err(crate::staff::coded_vars(
+            400,
+            "REQUEST_KIND_UNKNOWN",
+            format!(
+                "Unknown request kind '{kind}' — expected one of {}",
+                KINDS.join(", ")
+            ),
+            serde_json::json!({ "kind": kind }),
+        ))
     }
 }
 
@@ -391,7 +401,8 @@ struct Shape {
 /// this exists so the API answers "a late arrival needs a time" rather than
 /// surfacing a constraint name.
 fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
-    let bad = |m: &str| Err(AppError::BadRequest(m.to_string()));
+    // Each shape refusal has its own code (hunt H2-B9).
+    let bad = |code: &'static str, m: &str| Err(crate::staff::coded(400, code, m));
     let mut shape = Shape {
         end_date: None,
         leave_half: None,
@@ -403,40 +414,59 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
             "late_arrival" | "early_departure" | "excuse" | "correction"
         )
     {
-        return bad("Only a late arrival, early departure, excuse or correction names a shift");
+        return bad(
+            "SHIFT_NOT_FOR_KIND",
+            "Only a late arrival, early departure, excuse or correction names a shift",
+        );
     }
     match body.kind.as_str() {
         "leave" => {
             let end = body.end_date.unwrap_or(body.on_date);
             if end < body.on_date {
-                return bad("End date is before start date");
+                return bad("END_BEFORE_START", "End date is before start date");
             }
             let half = body.is_half_day.unwrap_or(false);
             if half && end != body.on_date {
-                return bad("A half day must start and end on the same date");
+                return bad(
+                    "HALF_DAY_ONE_DATE",
+                    "A half day must start and end on the same date",
+                );
             }
             shape.end_date = Some(end);
             shape.leave_half = match (half, body.leave_half.as_deref()) {
                 (false, None) => None,
-                (false, Some(_)) => return bad("Only a half day says which half"),
+                (false, Some(_)) => {
+                    return bad("HALF_ONLY_FOR_HALF_DAY", "Only a half day says which half");
+                }
                 (true, None | Some("first")) => Some("first"),
                 (true, Some("second")) => Some("second"),
-                (true, Some(_)) => return bad("A half day is the first or the second half"),
+                (true, Some(_)) => {
+                    return bad(
+                        "HALF_DAY_WHICH_HALF",
+                        "A half day is the first or the second half",
+                    );
+                }
             };
         }
         "late_arrival" => {
             if body.to_time.is_none() {
-                return bad("A late arrival needs the time you expect to arrive");
+                return bad(
+                    "LATE_ARRIVAL_TIME_REQUIRED",
+                    "A late arrival needs the time you expect to arrive",
+                );
             }
         }
         "early_departure" => {
             if body.from_time.is_none() {
-                return bad("An early departure needs the time you expect to leave");
+                return bad(
+                    "EARLY_DEPARTURE_TIME_REQUIRED",
+                    "An early departure needs the time you expect to leave",
+                );
             }
         }
         "excuse" => match (body.from_time, body.to_time) {
             (Some(from), Some(to)) if to == from => {
-                return bad("The window must end after it starts");
+                return bad("WINDOW_EMPTY", "The window must end after it starts");
             }
             // Ending at or before it starts on the clock = past midnight.
             (Some(from), Some(to)) => {
@@ -444,17 +474,25 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
                     shape.end_date = Some(body.on_date + Duration::days(1));
                 }
             }
-            _ => return bad("A permission needs a start and an end time"),
+            _ => {
+                return bad(
+                    "EXCUSE_TIMES_REQUIRED",
+                    "A permission needs a start and an end time",
+                );
+            }
         },
         "mission" => {
             // The app sends the note; a title-less mission takes it (§3).
             shape.title = clean(body.title.as_ref()).or_else(|| clean(body.reason.as_ref()));
             if shape.title.is_none() {
-                return bad("A mission needs a title or a note saying where you'll be");
+                return bad(
+                    "MISSION_TITLE_REQUIRED",
+                    "A mission needs a title or a note saying where you'll be",
+                );
             }
             let end = body.end_date.unwrap_or(body.on_date);
             if end < body.on_date {
-                return bad("End date is before start date");
+                return bad("END_BEFORE_START", "End date is before start date");
             }
             shape.end_date = Some(end);
         }
@@ -462,12 +500,23 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
             // The record it fixes, or — a rostered shift nobody clocked yet —
             // the shift (RQ-9).
             if body.attendance_record_id.is_none() && body.work_shift_id.is_none() {
-                return bad("A correction needs the attendance record or the shift it fixes");
+                return bad(
+                    "CORRECTION_TARGET_REQUIRED",
+                    "A correction needs the attendance record or the shift it fixes",
+                );
             }
             match (body.from_time, body.to_time) {
-                (None, None) => return bad("A correction needs a proposed time"),
+                (None, None) => {
+                    return bad(
+                        "CORRECTION_TIME_REQUIRED",
+                        "A correction needs a proposed time",
+                    );
+                }
                 (Some(from), Some(to)) if to == from => {
-                    return bad("The check-out must be after the check-in");
+                    return bad(
+                        "CHECK_OUT_BEFORE_CHECK_IN",
+                        "The check-out must be after the check-in",
+                    );
                 }
                 _ => {}
             }
@@ -987,7 +1036,11 @@ async fn insert_request(
         .fetch_one(pool)
         .await?;
         if !known {
-            return Err(AppError::NotFound("Shift not found".into()));
+            return Err(crate::staff::coded(
+                404,
+                "SHIFT_NOT_FOUND",
+                "Shift not found",
+            ));
         }
     }
 
@@ -1007,10 +1060,18 @@ async fn insert_request(
         .fetch_optional(pool)
         .await?;
         match owned {
-            None => return Err(AppError::NotFound("Attendance record not found".into())),
+            None => {
+                return Err(crate::staff::coded(
+                    404,
+                    "RECORD_NOT_FOUND",
+                    "Attendance record not found",
+                ));
+            }
             Some(date) if date != body.on_date => {
-                return Err(AppError::BadRequest(
-                    "That record is not on the date you are correcting".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "RECORD_OTHER_DATE",
+                    "That record is not on the date you are correcting",
                 ));
             }
             Some(_) => {}
@@ -1036,13 +1097,19 @@ async fn insert_request(
             shift_id = None;
         } else if let Some(shift) = shift_id {
             if !shifts.iter().any(|s| s.id == shift) {
-                return Err(AppError::BadRequest(
-                    "That shift isn't on your roster that day".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "NOT_ROSTERED",
+                    "That shift isn't on your roster that day",
                 ));
             }
             // Nobody corrects a shift that hasn't started yet.
             if shifts.iter().any(|s| s.id == shift && s.start > s.now) {
-                return Err(AppError::BadRequest("That shift hasn't started yet".into()));
+                return Err(crate::staff::coded(
+                    400,
+                    "SHIFT_NOT_STARTED",
+                    "That shift hasn't started yet",
+                ));
             }
             record_id = sqlx::query_scalar(
                 "SELECT id FROM attendance_records \
@@ -1107,7 +1174,7 @@ pub(crate) async fn load_request(pool: &PgPool, id: Uuid) -> Result<StaffRequest
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+        .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
     enrich(pool, std::slice::from_mut(&mut row)).await?;
     Ok(row)
 }
@@ -1277,7 +1344,7 @@ pub async fn create_request_admin(
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrLeaveCreate).await?;
     let employee_id = body
         .employee_id
-        .ok_or_else(|| AppError::BadRequest("employee_id is required".into()))?;
+        .ok_or_else(|| crate::staff::coded(400, "EMPLOYEE_REQUIRED", "employee_id is required"))?;
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrLeaveCreate, &subject).await?;
 
@@ -1433,7 +1500,7 @@ pub async fn decide_request(
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
 
     let subject = access::subject(pool, org_id, existing.employee_id).await?;
     let is_own = me
@@ -1476,25 +1543,35 @@ pub async fn decide_request(
     if decision == "cancelled" {
         // AT-7: undoing a decision, or someone else's request, says why.
         if (!is_own || existing.status == "approved") && note.is_none() {
-            return Err(AppError::BadRequest(if existing.status == "approved" {
-                "Say why this approved request is cancelled".into()
-            } else {
-                "Say why you are cancelling someone else's request".into()
-            }));
+            // 400 CANCEL_REASON_REQUIRED {status}: the request's own.
+            return Err(crate::staff::coded_vars(
+                400,
+                "CANCEL_REASON_REQUIRED",
+                if existing.status == "approved" {
+                    "Say why this approved request is cancelled"
+                } else {
+                    "Say why you are cancelling someone else's request"
+                },
+                serde_json::json!({ "status": existing.status }),
+            ));
         }
         // An approved correction has rewritten the punch; cancelling the
         // request would free the shift for another correction while the punch
         // stays rewritten (RQ-9). The punch is corrected on the attendance
         // record instead.
         if existing.kind == "correction" && existing.status == "approved" {
-            return Err(AppError::Conflict(
-                "An approved correction has already rewritten the punch — correct the attendance record instead".into(),
+            return Err(crate::staff::coded(
+                409,
+                "CORRECTION_APPLIED",
+                "An approved correction has already rewritten the punch — correct the attendance record instead",
             ));
         }
     }
     if decision == "approved" && existing.kind == "leave" && body.is_paid.is_none() {
-        return Err(AppError::BadRequest(
-            "Say whether this leave is paid or unpaid".into(),
+        return Err(crate::staff::coded(
+            400,
+            "LEAVE_PAY_REQUIRED",
+            "Say whether this leave is paid or unpaid",
         ));
     }
     if decision != "rejected" {
@@ -1561,7 +1638,7 @@ async fn apply_decision(
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
 
     // ── is_paid resolution ──────────────────────────────────────
     // Only the window kinds and leave carry a pay decision. The approver's
@@ -1586,7 +1663,7 @@ async fn apply_decision(
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
     check_transition(&locked.status, decision)?;
     let before = locked.status.clone();
 
@@ -1673,8 +1750,10 @@ async fn record_for_shift(
     actor: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
     let Some(branch) = request_branch(pool, request.employee_id, request.on_date).await? else {
-        return Err(AppError::Conflict(
-            "That shift is no longer on the roster".into(),
+        return Err(crate::staff::coded(
+            409,
+            "NOT_ROSTERED",
+            "That shift is no longer on the roster",
         ));
     };
     let tz = crate::staff::branch_timezone(pool, branch).await?;
@@ -1687,7 +1766,9 @@ async fn record_for_shift(
     .await?
     .into_iter()
     .find(|s| s.work_shift_id == shift_id)
-    .ok_or_else(|| AppError::Conflict("That shift is no longer on the roster".into()))?;
+    .ok_or_else(|| {
+        crate::staff::coded(409, "NOT_ROSTERED", "That shift is no longer on the roster")
+    })?;
     // A correction that clocks the owner in on a shift a colleague is
     // covering would pay it twice (D1).
     if request.from_time.is_some() {
@@ -1767,7 +1848,7 @@ async fn apply_correction(
     .bind(record_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Attendance record not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "RECORD_NOT_FOUND", "Attendance record not found"))?;
     let tz = crate::staff::branch_timezone(pool, rec.branch_id).await?;
     let proposed_in = match request.from_time {
         Some(t) => Some(
