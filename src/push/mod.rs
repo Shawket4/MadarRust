@@ -146,11 +146,36 @@ fn word(key: &str, ar: bool) -> Option<&'static str> {
         .map(|(_, en, a)| if ar { *a } else { *en })
 }
 
-/// A notification line in the phone's language. `{kind}` resolves through a
-/// `<key>.kind_*` word first (falling back to the raw value); `*amount*`
-/// arguments render as piastres.
+/// The CLDR plural category of a count in the phone's language, as
+/// madar-core's `i18n::plural_of` picks it (its PLURAL FORMS): English `one`
+/// / `other`; Arabic `zero`, `one`, `two`, `few` (3–10), `many` (11–99) and
+/// `other` (100, 101, 102, …), counted on the last two digits.
+fn plural_of(n: i64, ar: bool) -> &'static str {
+    let c = n.unsigned_abs();
+    if !ar {
+        return if c == 1 { "one" } else { "other" };
+    }
+    match (c, c % 100) {
+        (0, _) => "zero",
+        (1, _) => "one",
+        (2, _) => "two",
+        (_, 3..=10) => "few",
+        (_, 11..=99) => "many",
+        _ => "other",
+    }
+}
+
+/// A notification line in the phone's language. A numeric `count` picks the
+/// phrase's plural form when the words have one (`<key>_one`, `_two`,
+/// `_few`, `_many`, synced from madar-core's i18n), else the key's own
+/// words; `{kind}` resolves through a `<key>.kind_*` word first (falling back
+/// to the raw value); `*amount*` arguments render as piastres.
 pub fn render(key: &str, args: &Value, ar: bool) -> Option<String> {
-    let mut s = word(key, ar)?.to_string();
+    let form = args
+        .get("count")
+        .and_then(Value::as_i64)
+        .and_then(|n| word(&format!("{key}_{}", plural_of(n, ar)), ar));
+    let mut s = form.or_else(|| word(key, ar))?.to_string();
     for (k, v) in args.as_object().into_iter().flatten() {
         let text = match (k.as_str(), v) {
             (k, Value::Number(n)) if k.contains("amount") => {
@@ -512,5 +537,88 @@ mod tests {
         ] {
             assert!(word(k, false).is_some() && word(k, true).is_some(), "{k}");
         }
+    }
+
+    /// The count's category, as madar-core's `i18n::plural_of`.
+    #[test]
+    fn a_counts_category_is_the_cores() {
+        let cats = |ar: bool, ns: &[i64]| ns.iter().map(|n| plural_of(*n, ar)).collect::<Vec<_>>();
+        assert_eq!(
+            cats(false, &[0, 1, 2, 5, 11]),
+            ["other", "one", "other", "other", "other"]
+        );
+        assert_eq!(
+            cats(
+                true,
+                &[0, 1, 2, 3, 10, 11, 99, 100, 101, 102, 103, 111, 200]
+            ),
+            [
+                "zero", "one", "two", "few", "few", "many", "many", "other", "other", "other",
+                "few", "many", "other"
+            ]
+        );
+    }
+
+    /// A push with a count reads in that count's form, as the phone's inbox
+    /// does (madar-core i18n PLURAL FORMS): "1 open shift", never "1 open
+    /// shifts"; Arabic its own words for 1, 2, 3–10 and 11–99.
+    #[test]
+    fn a_counted_push_takes_its_form() {
+        let week = |count: i64, ar: bool| {
+            render(
+                "staff.n_open_shifts_week",
+                &json!({ "week_start": "2026-10-03", "count": count, "branch_id": "b1" }),
+                ar,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            week(1, false),
+            "1 open shift in the week of 2026-10-03 — claim it in Shifts"
+        );
+        assert_eq!(
+            week(4, false),
+            "4 open shifts in the week of 2026-10-03 — claim one in Shifts"
+        );
+        assert_eq!(
+            week(1, true),
+            "وردية متاحة واحدة في أسبوع 2026-10-03 — احجزها من الورديات"
+        );
+        assert_eq!(
+            week(2, true),
+            "ورديتين متاحتين في أسبوع 2026-10-03 — احجز واحدة من الورديات"
+        );
+        assert_eq!(
+            week(4, true),
+            "4 ورديات متاحة في أسبوع 2026-10-03 — احجز واحدة من الورديات"
+        );
+        assert_eq!(
+            week(12, true),
+            "12 وردية متاحة في أسبوع 2026-10-03 — احجز واحدة من الورديات"
+        );
+        assert_eq!(
+            week(103, true),
+            "103 ورديات متاحة في أسبوع 2026-10-03 — احجز واحدة من الورديات",
+            "counted on the last two digits"
+        );
+        // No count, or a key with no forms: its own words.
+        assert_eq!(
+            render(
+                "staff.n_open_shifts_week",
+                &json!({ "week_start": "x" }),
+                false
+            )
+            .unwrap(),
+            "{count} open shifts in the week of x — claim one in Shifts"
+        );
+        assert_eq!(
+            render(
+                "staff.n_paid",
+                &json!({ "method": "cash", "count": 1 }),
+                false
+            )
+            .unwrap(),
+            "Your pay is marked paid (cash)"
+        );
     }
 }
