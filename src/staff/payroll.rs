@@ -971,6 +971,7 @@ pub(crate) async fn insert_advance(
     org_id: Uuid,
     employee_id: Uuid,
     body: &CreateAdvanceRequest,
+    actor: Option<Uuid>,
 ) -> Result<SalaryAdvance, AppError> {
     let installments = body.installments.unwrap_or(1);
     let monthly = installment_of(body.amount_piastres, installments)?;
@@ -992,6 +993,24 @@ pub(crate) async fn insert_advance(
             .filter(|r| !r.is_empty()),
     )
     .fetch_one(pool)
+    .await?;
+    // Who asked (the person, or a manager on their behalf), when, for what
+    // (AD-9, AT-10, D8).
+    audit(
+        pool,
+        org_id,
+        actor,
+        "advance.request",
+        "salary_advances",
+        Some(id),
+        Some(employee_id),
+        None,
+        body.reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty()),
+        json!({ "amount_piastres": body.amount_piastres, "installments": installments }),
+    )
     .await?;
 
     load_advance(pool, id).await
@@ -1028,7 +1047,14 @@ pub async fn create_advance_admin(
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrAdvancesDecide, &subject).await?;
 
-    let mut row = insert_advance(pool.get_ref(), org_id, employee_id, &body).await?;
+    let mut row = insert_advance(
+        pool.get_ref(),
+        org_id,
+        employee_id,
+        &body,
+        claims.user_id_safe().ok(),
+    )
+    .await?;
     hide_caps(
         pool.get_ref(),
         &claims,
@@ -1049,7 +1075,7 @@ pub async fn create_my_advance(
     pool: crate::db::Db,
     body: web::Json<CreateAdvanceRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let row = insert_advance(pool.get_ref(), me.org_id, me.employee_id, &body).await?;
+    let row = insert_advance(pool.get_ref(), me.org_id, me.employee_id, &body, me.user_id).await?;
     Ok(HttpResponse::Created().json(row))
 }
 
@@ -1141,6 +1167,19 @@ pub async fn create_period(
     .bind(body.start_date)
     .bind(body.end_date)
     .fetch_one(pool.get_ref())
+    .await?;
+    audit(
+        pool.get_ref(),
+        org_id,
+        claims.user_id_safe().ok(),
+        "period.create",
+        "payroll_periods",
+        Some(row.id),
+        None,
+        Some(row.id),
+        None,
+        json!({ "name": row.name, "start_date": row.start_date, "end_date": row.end_date }),
+    )
     .await?;
     Ok(HttpResponse::Created().json(row))
 }
@@ -1381,6 +1420,11 @@ pub struct ComputedPayslip {
     #[serde(skip)]
     #[schema(ignore)]
     pub advance_applications: Vec<(Uuid, i64)>,
+    /// On payroll with no salary set (owner decision D9): everything prices
+    /// at 0, and approval is refused (409 SALARY_MISSING) until the owner
+    /// sets it or marks them not on payroll.
+    #[serde(default)]
+    pub salary_missing: bool,
 }
 
 /// The whole run's figures, added up by the server (AT-3).
@@ -1394,6 +1438,9 @@ pub struct PayrollTotals {
     pub advances_piastres: i64,
     pub net_piastres: i64,
     pub carry_out_piastres: i64,
+    /// People on payroll with no salary set (D9); approval waits for them.
+    #[serde(default)]
+    pub missing_salary_count: i64,
 }
 
 impl PayrollTotals {
@@ -1408,6 +1455,7 @@ impl PayrollTotals {
             t.advances_piastres += s.advance_installment_piastres;
             t.net_piastres += s.net_piastres;
             t.carry_out_piastres += s.carry_out_piastres;
+            t.missing_salary_count += i64::from(s.salary_missing);
         }
         t
     }
@@ -1463,11 +1511,14 @@ pub(crate) async fn compute_payslips(
         employee_id: Uuid,
         name: String,
         base_salary_piastres: i64,
+        salary_missing: bool,
         hire_date: Option<NaiveDate>,
         termination_date: Option<NaiveDate>,
     }
+    // No salary set (D9) prices at 0 and is flagged.
     let staff: Vec<Staff> = sqlx::query_as(
-        "SELECT p.id AS employee_id, p.name, p.base_salary_piastres, p.hire_date, \
+        "SELECT p.id AS employee_id, p.name, COALESCE(p.base_salary_piastres, 0) AS base_salary_piastres, \
+                p.base_salary_piastres IS NULL AS salary_missing, p.hire_date, \
                 p.termination_date \
            FROM employees p \
           WHERE p.org_id = $1 \
@@ -1954,6 +2005,7 @@ pub(crate) async fn compute_payslips(
             advance_installment_piastres: advance,
             net_piastres: net,
             carry_out_piastres: capped,
+            salary_missing: person.salary_missing,
             breakdown: json!({
                 "bonuses": bonus_lines,
                 "deductions": deduction_lines,
@@ -2039,6 +2091,25 @@ pub async fn generate_period(
         None,
     )
     .await?;
+    // Nobody on payroll is paid 0 because a salary was never set (owner
+    // decision D9): approval waits until each is set or marked not on
+    // payroll.
+    let missing: Vec<&ComputedPayslip> = computed.iter().filter(|s| s.salary_missing).collect();
+    if !missing.is_empty() {
+        let names: Vec<&str> = missing.iter().map(|s| s.name.as_str()).collect();
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "SALARY_MISSING",
+            reason: format!(
+                "Set a salary first (or mark them not on payroll): {}.",
+                names.join(", ")
+            ),
+            vars: json!({
+                "names": names,
+                "employee_ids": missing.iter().map(|s| s.employee_id).collect::<Vec<_>>(),
+            }),
+        });
+    }
 
     let mut employee_count = 0i32;
     let mut grand_total = 0i64;

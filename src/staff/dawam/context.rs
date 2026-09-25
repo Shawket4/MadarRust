@@ -41,8 +41,11 @@ pub struct ContextPerson {
     pub branch_ids: Vec<Uuid>,
     pub gender: Option<String>,
     pub hire_date: Option<NaiveDate>,
-    /// Only for people whose pay the caller may see.
+    /// Only for people whose pay the caller may see (null too when no
+    /// salary is set: `salary_set`).
     pub base_salary_piastres: Option<i64>,
+    /// A salary is on file (D9); false = "not set". Never hidden.
+    pub salary_set: bool,
     /// Their salary-advance cap, decided by the server (AV-5, AT-3); shown
     /// under the same visibility as the salary.
     pub advance_cap_piastres: Option<i64>,
@@ -204,6 +207,7 @@ pub async fn my_context(
                          SELECT 1 FROM employee_branches pb WHERE pb.employee_id = e.id \
                             AND pb.branch_id = ANY($6)))) \
                      THEN e.base_salary_piastres END AS base_salary_piastres, \
+                e.base_salary_piastres IS NOT NULL AS salary_set, \
                 CASE WHEN e.id = $4 OR ($3 AND ($6::uuid[] IS NULL OR EXISTS ( \
                          SELECT 1 FROM employee_branches pb WHERE pb.employee_id = e.id \
                             AND pb.branch_id = ANY($6)))) \

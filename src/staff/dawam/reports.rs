@@ -97,7 +97,7 @@ pub async fn labour_vs_sales(
         "SELECT a.employee_id, a.work_shift_id, a.business_date, a.branch_id, \
                 COALESCE((SELECT h.base_salary_piastres FROM employee_salary_history h \
                            WHERE h.employee_id = a.employee_id AND h.effective_from <= a.business_date \
-                           ORDER BY h.effective_from DESC LIMIT 1), p.base_salary_piastres) AS salary, \
+                           ORDER BY h.effective_from DESC LIMIT 1), p.base_salary_piastres, 0) AS salary, \
                 (EXTRACT(EPOCH FROM (a.scheduled_end_at - a.scheduled_start_at)) / 60)::int AS scheduled, \
                 COALESCE(a.worked_minutes, 0) AS worked, COALESCE(a.overtime_minutes, 0) AS overtime, \
                 COALESCE(dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, $5, $6), 0)::bigint AS night, \
