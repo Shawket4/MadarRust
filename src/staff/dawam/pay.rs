@@ -691,11 +691,18 @@ pub async fn list_adjustments(
         &[Cap::HrAdjustmentsCreate, Cap::HrDeductionsCreate],
     )
     .await?;
-    let rows = sqlx::query_as::<_, Adjustment>(&format!(
+    // Every pending line however old, and the newest 300 decided ones: a
+    // page of history must never hide a line still waiting (hunt H2-B6).
+    let select = format!(
         "{ADJ_SELECT} WHERE x.org_id = $1 AND ($2::uuid IS NULL OR x.employee_id = $2) \
-            AND ($3::text IS NULL OR x.status = $3) AND {} \
-          ORDER BY x.created_at DESC LIMIT 300",
+            AND ($3::text IS NULL OR x.status = $3) AND {}",
         access::in_scope("x.employee_id", 4)
+    );
+    let rows = sqlx::query_as::<_, Adjustment>(&format!(
+        "({select} AND x.status = 'pending') \
+         UNION ALL \
+         ({select} AND x.status <> 'pending' ORDER BY x.created_at DESC LIMIT 300) \
+         ORDER BY created_at DESC"
     ))
     .bind(org_id)
     .bind(query.employee_id)

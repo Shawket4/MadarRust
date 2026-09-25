@@ -655,7 +655,7 @@ pub async fn my_roster(
         unpublished_weeks: unpublished,
         open_shifts,
         my_claims: my_claims_in(pool, employee_id, query.from, query.to).await?,
-        swaps: swaps_of(pool, org_id, Some(employee_id), None, None).await?,
+        swaps: swaps_of(pool, org_id, Some(employee_id), None, None, None).await?,
         team,
         pref_time,
         cant_work_days,
@@ -960,6 +960,7 @@ pub async fn claim_open_shift(
         let block = Block {
             work_shift_id: shift_id,
             times: None,
+            branch_id: Some(branch_id),
         };
         days::validate_block(&mut tx, &subject, on_date, &block).await?;
         let already = resolve_range(&mut *tx, &[employee_id], on_date, on_date, None)
@@ -1164,9 +1165,11 @@ pub async fn decide_claim(
             return Err(AppError::Conflict("That claim was already decided.".into()));
         }
         close_claim(&mut tx, *id, "approved", Some(by)).await?;
+        // Worked at the branch that posted it (hunt H2-B8).
         let block = Block {
             work_shift_id: shift_id,
             times: None,
+            branch_id: Some(branch_id),
         };
         days::validate_block(&mut tx, &subject, on_date, &block).await?;
         days::add_block(
@@ -1298,15 +1301,18 @@ pub struct Swap {
 }
 
 /// Swaps in the org: one person's, or those touching a set of branches
-/// (`None` = all).
+/// (`None` = all), or the one `id`. Every open one (awaiting the colleague
+/// or the manager) however old, and the newest 100 decided ones: a page of
+/// history must never hide a swap still waiting (hunt H2-B6).
 async fn swaps_of(
     pool: &PgPool,
     org_id: Uuid,
     person: Option<Uuid>,
     status: Option<&str>,
     branches: Option<&[Uuid]>,
+    id: Option<Uuid>,
 ) -> Result<Vec<Swap>, AppError> {
-    Ok(sqlx::query_as(&format!(
+    let select = format!(
         "SELECT s.id, s.requester_id, ru.name AS requester_name, s.requester_date, \
                 s.requester_shift_id, rs.name AS requester_shift_name, s.peer_id, \
                 pu.name AS peer_name, s.peer_date, s.peer_shift_id, ps.name AS peer_shift_name, \
@@ -1318,15 +1324,23 @@ async fn swaps_of(
           WHERE s.org_id = $1 \
             AND ($2::uuid IS NULL OR s.requester_id = $2 OR s.peer_id = $2) \
             AND ($3::text IS NULL OR s.status = $3) \
-            AND ({} OR {}) \
-          ORDER BY s.created_at DESC LIMIT 100",
+            AND ($5::uuid IS NULL OR s.id = $5) \
+            AND ({} OR {})",
         access::in_scope("s.requester_id", 4),
         access::in_scope("s.peer_id", 4)
+    );
+    Ok(sqlx::query_as(&format!(
+        "({select} AND s.status IN ('awaiting_peer', 'pending')) \
+         UNION ALL \
+         ({select} AND s.status NOT IN ('awaiting_peer', 'pending') \
+          ORDER BY s.created_at DESC LIMIT 100) \
+         ORDER BY created_at DESC"
     ))
     .bind(org_id)
     .bind(person)
     .bind(status)
     .bind(branches)
+    .bind(id)
     .fetch_all(pool)
     .await?)
 }
@@ -1393,13 +1407,16 @@ async fn apply_swap(
             reason: "Those shifts aren't on the roster any more.".into(),
         });
     };
+    // Each shift keeps its times and where it was worked (hunt H2-B8).
     let to_requester = Block {
         work_shift_id: s.peer_shift_id,
-        times: theirs,
+        times: theirs.times,
+        branch_id: theirs.branch_id,
     };
     let to_peer = Block {
         work_shift_id: s.requester_shift_id,
-        times: mine,
+        times: mine.times,
+        branch_id: mine.branch_id,
     };
     days::validate_block(conn, requester, s.peer_date, &to_requester).await?;
     days::validate_block(conn, peer, s.requester_date, &to_peer).await?;
@@ -1555,7 +1572,7 @@ pub async fn ask_swap(
         json!({ "name": name }),
     )
     .await;
-    let row = swaps_of(pool, org_id, Some(employee_id), None, None)
+    let row = swaps_of(pool, org_id, Some(employee_id), None, None, Some(id))
         .await?
         .into_iter()
         .find(|s| s.id == id)
@@ -1617,7 +1634,7 @@ pub async fn answer_swap(
         )
         .await;
     }
-    let row = swaps_of(pool, org_id, Some(employee_id), None, None)
+    let row = swaps_of(pool, org_id, Some(employee_id), None, None, Some(*id))
         .await?
         .into_iter()
         .find(|s| s.id == *id)
@@ -1661,7 +1678,7 @@ pub async fn cancel_swap(
         json!({ "name": name }),
     )
     .await;
-    let row = swaps_of(pool, me.org_id, Some(me.employee_id), None, None)
+    let row = swaps_of(pool, me.org_id, Some(me.employee_id), None, None, Some(*id))
         .await?
         .into_iter()
         .find(|s| s.id == *id)
@@ -1695,6 +1712,7 @@ pub async fn list_swaps(
         None,
         query.status.as_deref(),
         scope.as_deref(),
+        None,
     )
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -1754,7 +1772,7 @@ pub async fn decide_swap(
     let by = claims.user_id_safe()?;
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
-    let s = swaps_of(pool, org_id, None, Some("pending"), None)
+    let s = swaps_of(pool, org_id, None, Some("pending"), None, Some(*id))
         .await?
         .into_iter()
         .find(|s| s.id == *id)

@@ -4192,3 +4192,161 @@ async fn an_advance_ask_tells_its_deciders(pool: PgPool) {
     let who: Vec<Uuid> = told().await.into_iter().map(|r| r.0).collect();
     assert_eq!(who, vec![owner_emp]);
 }
+
+/// Hunt H2-B5: Approvals asks for every pending cover and overtime, however
+/// old — `GET /staff/attendance` needed a date range, so the dashboard's
+/// 35-day window lost older ones. `?cover_status=pending` and
+/// `?overtime_status=pending` need no range; the manager's branches still
+/// bound what they see; any other listing still needs its range.
+#[sqlx::test]
+async fn pending_covers_and_overtime_are_listed_without_a_range(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let long_ago = f.start - Duration::days(70);
+    let old_ot = day(&pool, &f, f.amal, f.a, long_ago, "present", 8, 480, 0, 45).await;
+    let b_ot = day(&pool, &f, f.bassem, f.b, long_ago, "present", 8, 480, 0, 30).await;
+    let done_ot = day(
+        &pool,
+        &f,
+        f.amal,
+        f.a,
+        long_ago + Duration::days(1),
+        "present",
+        8,
+        480,
+        0,
+        20,
+    )
+    .await;
+    sqlx::query("UPDATE attendance_records SET overtime_status = 'approved' WHERE id = $1")
+        .bind(done_ot)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cover = day(
+        &pool,
+        &f,
+        f.amal,
+        f.a,
+        long_ago + Duration::days(2),
+        "present",
+        8,
+        480,
+        0,
+        0,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE attendance_records SET covered_employee_id = $2, cover_status = 'pending', \
+                check_in_method = 'cover' WHERE id = $1",
+    )
+    .bind(cover)
+    .bind(f.bassem)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let ids = async |uri: &str, token: &str| -> Vec<String> {
+        let resp = call!(app, get, uri, token);
+        assert_eq!(resp.status(), 200, "{uri}");
+        let mut ids: Vec<String> = json_of(resp)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let (owner, mgr) = (f.owner(), f.mgr());
+    assert_eq!(
+        ids("/staff/attendance?overtime_status=pending", &owner).await,
+        sorted(vec![old_ot.to_string(), b_ot.to_string()])
+    );
+    assert_eq!(
+        ids("/staff/attendance?overtime_status=pending", &mgr).await,
+        vec![old_ot.to_string()],
+        "the manager's branch only"
+    );
+    assert_eq!(
+        ids("/staff/attendance?cover_status=pending", &owner).await,
+        vec![cover.to_string()]
+    );
+    // With a range, the filter narrows it.
+    let uri = format!(
+        "/staff/attendance?from={long_ago}&to={}&overtime_status=pending",
+        long_ago + Duration::days(5)
+    );
+    assert_eq!(
+        ids(&uri, &owner).await,
+        sorted(vec![old_ot.to_string(), b_ot.to_string()])
+    );
+    // Anything else still needs its range.
+    for uri in [
+        "/staff/attendance",
+        "/staff/attendance?overtime_status=approved",
+        "/staff/attendance?cover_status=rejected",
+    ] {
+        let resp = call!(app, get, uri, owner);
+        assert_eq!(resp.status(), 400, "{uri}");
+        let body = json_of(resp).await;
+        assert_eq!(body["code"], "RANGE_REQUIRED", "{uri} {body}");
+    }
+    let resp = call!(app, get, "/staff/attendance?overtime_status=soon", owner);
+    assert_eq!(resp.status(), 400);
+}
+
+/// Hunt H2-B6: an old pending pay line stays in the list behind any number
+/// of newer decided ones (the list stopped at the newest 300).
+#[sqlx::test]
+async fn an_old_pending_pay_line_is_listed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, status, created_at) \
+         VALUES ($1, $2, 10000, 'Old', $3, 'pending', now() - INTERVAL '90 days') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
+             effective_date, status, created_at) \
+         SELECT $1, $2, 100, 'Line ' || g, $3, 'approved', now() - INTERVAL '1 minute' * g \
+           FROM generate_series(1, 320) g",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(f.start)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rows = json_of(call!(app, get, "/staff/adjustments", f.owner())).await;
+    let rows = rows.as_array().unwrap();
+    assert!(
+        rows.iter().any(|r| r["id"] == json!(old)),
+        "the old pending line is listed ({} rows)",
+        rows.len()
+    );
+    assert_eq!(
+        rows.len(),
+        301,
+        "every pending one, and a page of decided ones"
+    );
+    let pending = json_of(call!(
+        app,
+        get,
+        "/staff/adjustments?status=pending",
+        f.owner()
+    ))
+    .await;
+    assert_eq!(pending.as_array().unwrap().len(), 1);
+}
