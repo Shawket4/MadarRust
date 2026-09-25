@@ -1701,6 +1701,25 @@ async fn the_bank_file_and_wallet_list_come_from_the_server(pool: PgPool) {
     .await;
     assert!(all.starts_with("employee,employee_id,pay_method,account,base,"));
     assert_eq!(all.lines().count(), 3);
+    // Minor default M31: the cash list (pay envelopes) is name and amount,
+    // without anyone who has 0 to pay. Nour is paid in cash with nothing.
+    let nour =
+        common::employees::employee(&pool, f.org, "Nour", None, None, false, &[f.a], 0).await;
+    sqlx::query("UPDATE employees SET pay_method = 'cash' WHERE id = ANY($1)")
+        .bind(vec![f.bassem, nour])
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(reopen(&app, &f).await.status(), 200);
+    assert_eq!(generate(&app, &f).await.status(), 200);
+    let cash = text_of(call!(
+        app,
+        get,
+        format!("/staff/payroll/periods/{}/export.csv?method=cash", f.period),
+        owner
+    ))
+    .await;
+    assert_eq!(cash, "employee,amount\n\"Bassem\",5000.00\n");
     let resp = call!(
         app,
         get,

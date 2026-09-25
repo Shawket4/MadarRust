@@ -2288,7 +2288,8 @@ pub async fn preview_period(
 #[into_params(parameter_in = Query)]
 pub struct ExportQuery {
     /// `bank` (a transfer file: name, account, amount) · `wallet` (numbers
-    /// and amounts) · `cash`; omitted = everyone, every figure (PAY-8).
+    /// and amounts) · `cash` (the envelope list: name and amount, nobody with
+    /// 0 to pay); omitted = everyone, every figure (PAY-8).
     #[serde(default)]
     pub method: Option<String>,
 }
@@ -2371,6 +2372,18 @@ pub async fn export_period_csv(
                     "{},{},{}\n",
                     esc(slip.employee_name.as_deref().unwrap_or("")),
                     esc(slip.pay_account.as_deref().unwrap_or("")),
+                    money(slip.net_piastres),
+                ));
+            }
+        }
+        // The pay envelopes: who and how much, nobody with nothing to pay
+        // (minor default M31).
+        Some("cash") => {
+            csv.push_str("employee,amount\n");
+            for slip in slips.iter().filter(|s| s.net_piastres > 0) {
+                csv.push_str(&format!(
+                    "{},{}\n",
+                    esc(slip.employee_name.as_deref().unwrap_or("")),
                     money(slip.net_piastres),
                 ));
             }
