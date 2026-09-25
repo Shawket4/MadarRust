@@ -3133,7 +3133,7 @@ async fn claiming_a_taken_open_shift_is_already_claimed(pool: PgPool) {
 /// open shift in it by its OWN date — one notice per date, not one dated at
 /// the week's start.
 #[sqlx::test]
-async fn publishing_announces_each_open_shift_date(pool: PgPool) {
+async fn publishing_announces_the_weeks_open_shifts_once(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool).await;
     let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
@@ -3156,16 +3156,27 @@ async fn publishing_announces_each_open_shift_date(pool: PgPool) {
         .await
         .unwrap();
     publish(&app, &f, f.br_a, ws).await;
-    let mut dates: Vec<String> = sqlx::query_scalar(
-        "SELECT args->>'date' FROM staff_notifications \
-          WHERE employee_id = $1 AND key = 'staff.n_open_shift'",
+    // Minor default M21: ONE notice per publish ("3 open shifts this week")
+    // that opens the list, with the dates; no per-date notices.
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications \
+          WHERE employee_id = $1 AND key = 'staff.n_open_shifts_week'",
     )
     .bind(f.a)
     .fetch_all(&pool)
     .await
     .unwrap();
-    dates.sort();
-    assert_eq!(dates, [d1.to_string(), d2.to_string()], "one per date");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["count"], 3);
+    assert_eq!(told[0]["week_start"], json!(ws));
+    assert_eq!(told[0]["dates"], json!([d1, d2]));
+    let per_date: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(per_date, 0);
 }
 
 /// E2E B-ROTA-4 (SC-9, SC-5): an open shift can't be posted on a
@@ -3549,11 +3560,6 @@ async fn only_the_owner_decides_a_holiday(pool: PgPool) {
     ))
     .await;
     assert!(everywhere(&ctx).is_empty(), "no Madar account: {ctx}");
-}
-
-async fn refused_status(resp: actix_web::dev::ServiceResponse, status: u16) {
-    let (s, body) = done(resp).await;
-    assert_eq!(s, status, "{body}");
 }
 
 async fn absence_lines(pool: &PgPool, who: Uuid, on: NaiveDate) -> Vec<(Option<Uuid>, i64, bool)> {

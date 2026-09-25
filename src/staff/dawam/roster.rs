@@ -634,16 +634,19 @@ pub async fn publish(
     .await?
     .rows_affected();
     if fresh > 0 {
-        // Each open shift is announced by its OWN date, one notice per date
-        // (SC-9, N-031, Mac E2E R-B2) — as posting into a published week does.
-        let open_dates: Vec<NaiveDate> = sqlx::query_scalar(
-            "SELECT DISTINCT on_date FROM staff_open_shifts WHERE branch_id = $1 AND status = 'open' \
+        // The week's open shifts in ONE notice per person per publish ("3 open
+        // shifts this week"), which opens the list: minor default M21 (it was
+        // one notice per open-shift date, R-B2). The dates ride along.
+        let open: Vec<NaiveDate> = sqlx::query_scalar(
+            "SELECT on_date FROM staff_open_shifts WHERE branch_id = $1 AND status = 'open' \
                 AND on_date BETWEEN $2 AND $2 + 6 ORDER BY on_date",
         )
         .bind(body.branch_id)
         .bind(ws)
         .fetch_all(pool)
         .await?;
+        let mut dates = open.clone();
+        dates.dedup();
         for p in staff_at(pool, body.branch_id).await? {
             notify(
                 pool,
@@ -653,13 +656,14 @@ pub async fn publish(
                 json!({ "date": ws }),
             )
             .await;
-            for d in &open_dates {
+            if !open.is_empty() {
                 notify(
                     pool,
                     org_id,
                     p.employee_id,
-                    "staff.n_open_shift",
-                    json!({ "date": d }),
+                    "staff.n_open_shifts_week",
+                    json!({ "week_start": ws, "count": open.len(), "dates": dates,
+                            "branch_id": body.branch_id }),
                 )
                 .await;
             }
