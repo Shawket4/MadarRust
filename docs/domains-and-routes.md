@@ -114,11 +114,36 @@ A shop on the branding tier gets its own hostname, its slug as the label:
 the **product in the path**:
 
 ```
+rue.madar-pos.cloud/                  the shop's links page (menu, ordering, rewards,
+                                      bookings, custom links, socials, branches)
+rue.madar-pos.cloud/rewards           loyalty sign-up for the whole shop
 rue.madar-pos.cloud/card/<token>     the member's own loyalty card
 rue.madar-pos.cloud/join/...          the counter QR's signup form
-rue.madar-pos.cloud/order             ordering
-rue.madar-pos.cloud/book              table bookings
+rue.madar-pos.cloud/order/            ordering
+rue.madar-pos.cloud/order/menu        the read-only menu (optional ?branch=<id>)
+rue.madar-pos.cloud/book/             table bookings
 ```
+
+**The root is the links page (2026-09-26).** It used to be the loyalty sign-up.
+The sign-up moved to `/rewards`. `/join/…` and `/card/<token>` did **not** move
+and still answer on the shop host through the loyalty bundle, because they are
+printed on counter cards and opened from wallet passes. The org-wide join QR
+now encodes `/rewards`. A code printed earlier that encodes the bare root lands
+on the links page, whose Rewards button goes to the same sign-up.
+Wallet-pass URLs (`webServiceURL` and the images Google fetches) are
+untouched and still come from `PUBLIC_LOYALTY_BASE_URL` (section 5).
+
+The links page is a route of the **loyalty bundle**, not a bundle of its own.
+`/`, `/rewards`, `/join/…` and `/card/<token>` are all client-side routes of the
+one SPA that nginx already serves at the root of the shop host
+(`deploy/shop/nginx-wildcard.conf`, `location /` → `/loyalty.html`). So the
+change needed no nginx edit at all, and it keeps the same origin, CSP and deploy
+step as before. The page reads one endpoint, `GET /public/orgs/links?slug=`, and
+its buttons are built by the same functions that build the QR codes
+(`qr_card::handlers::links_module_href`), so a button and a printed code cannot
+disagree. A shop off the branding tier has no links page address: there is no
+generic links host, `public_url` is `null` in the editor, and the links QR
+endpoint answers 409.
 
 So the hostname says *whose*, and the path says *what*. This is the inverse of the current
 arrangement, where the hostname says what (`order`, `reservations`, `loyalty`) and the shop
@@ -138,12 +163,10 @@ branded shop's slug is frozen: once the slug is in a hostname it is printed on c
 cards, window stickers and posters that cannot be recalled, so it stops being editable
 (`src/orgs/slugs.rs`, `is_frozen`).
 
-**One caveat, and it is a large one: the backend half of this does not exist yet.** Slug
-validation and the reserved list are written. Nothing in the backend reads the `Host` header
-or maps a slug to an organisation — there is no such code in `src/`. The DNS record and an
-nginx block can be put in place now and will serve the bundles, but requests will not resolve
-to a shop until that lookup is built. Do not switch a live shop's printed QR codes to a
-per-shop hostname before it is.
+**The slug lookup exists** (this section once said it did not): every bundle resolves its
+shop from the first label of its own hostname through `GET /public/orgs/brand?slug=` (and
+the links page through `GET /public/orgs/links?slug=`). QR codes point at per-shop hosts
+only when `PUBLIC_SHOP_SUBDOMAINS=1`.
 
 ---
 

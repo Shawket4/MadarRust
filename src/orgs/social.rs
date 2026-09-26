@@ -67,7 +67,7 @@ pub fn links_of(value: &serde_json::Value) -> Vec<SocialLink> {
 /// `http` is excluded as well as the obvious dangers: these URLs are printed
 /// into a pass that lives on a phone for years, and a plaintext link we baked
 /// in cannot be upgraded later.
-fn is_safe(url: &str) -> bool {
+pub(crate) fn is_safe(url: &str) -> bool {
     url.starts_with("https://")
         && url.len() > "https://".len()
         && !url.contains(char::is_whitespace)
