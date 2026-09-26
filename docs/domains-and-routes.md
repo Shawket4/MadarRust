@@ -23,6 +23,7 @@ Every one of these is an `A` record straight to `187.124.33.153`, except `www`, 
 | `demo` | Static dashboard bundle, demo build — `/var/www/madar-demo` | static |
 | `get` | Static marketing/landing bundle — `/var/www/madar-get` | static + `/api` (unproven) |
 | `legal` | Static legal documents — `/var/www/madar-legal` | static, no backend at all |
+| `links` | Static links-page bundle — `/var/www/madar-links`, plus `/api/` (**new**, `deploy/links/nginx-links.conf`) | static + backend |
 | `loyalty` | Static loyalty bundle — `/var/www/madar-loyalty`, plus `/api/` proxied | static + backend |
 | `order` | Static ordering bundle — `/var/www/madar-order`, plus `/api` proxied | static + backend |
 | `reservations` | Static bookings bundle — `/var/www/madar-reservations`, plus `/api` | static + backend |
@@ -114,11 +115,34 @@ A shop on the branding tier gets its own hostname, its slug as the label:
 the **product in the path**:
 
 ```
+rue.madar-pos.cloud/                  the shop's links page (menu, ordering, rewards,
+                                      bookings, custom links, socials, branches)
+rue.madar-pos.cloud/rewards           loyalty sign-up for the whole shop
 rue.madar-pos.cloud/card/<token>     the member's own loyalty card
 rue.madar-pos.cloud/join/...          the counter QR's signup form
-rue.madar-pos.cloud/order             ordering
-rue.madar-pos.cloud/book              table bookings
+rue.madar-pos.cloud/order/            ordering
+rue.madar-pos.cloud/order/menu        the read-only menu (optional ?branch=<id>)
+rue.madar-pos.cloud/book/             table bookings
 ```
+
+**The root is the links page (2026-09-26).** It used to be the loyalty sign-up.
+The sign-up moved to `/rewards`. `/join/…` and `/card/<token>` did **not** move
+and still answer on the shop host through the loyalty bundle, because they are
+printed on counter cards and opened from wallet passes. The org-wide join QR
+now encodes `/rewards`. A code printed earlier that encodes the bare root lands
+on the links page, whose Rewards button goes to the same sign-up.
+Wallet-pass URLs (`webServiceURL` and the images Google fetches) are
+untouched and still come from `PUBLIC_LOYALTY_BASE_URL` (section 5).
+
+The links page reads one endpoint, `GET /public/orgs/links?slug=` (or
+`?org_id=`). Its buttons are built by the same functions that build the QR
+codes (`qr_card::handlers::links_module_href`), so a button and a printed code
+cannot disagree. A shop without its own host has its page on the generic host
+`links.madar-pos.cloud/<org_id>` (`PUBLIC_LINKS_BASE_URL`), and its buttons
+point at the generic hosts. nginx for the shop host is in
+`deploy/shop/nginx-wildcard.conf`: `location = /` serves the links bundle, and
+everything not matched by `/order/`, `/book/`, `/links/` or `/api/` falls through
+to the loyalty bundle.
 
 So the hostname says *whose*, and the path says *what*. This is the inverse of the current
 arrangement, where the hostname says what (`order`, `reservations`, `loyalty`) and the shop
@@ -138,12 +162,10 @@ branded shop's slug is frozen: once the slug is in a hostname it is printed on c
 cards, window stickers and posters that cannot be recalled, so it stops being editable
 (`src/orgs/slugs.rs`, `is_frozen`).
 
-**One caveat, and it is a large one: the backend half of this does not exist yet.** Slug
-validation and the reserved list are written. Nothing in the backend reads the `Host` header
-or maps a slug to an organisation — there is no such code in `src/`. The DNS record and an
-nginx block can be put in place now and will serve the bundles, but requests will not resolve
-to a shop until that lookup is built. Do not switch a live shop's printed QR codes to a
-per-shop hostname before it is.
+**The slug lookup exists** (this section once said it did not): every bundle resolves its
+shop from the first label of its own hostname through `GET /public/orgs/brand?slug=` (and
+the links page through `GET /public/orgs/links?slug=`). QR codes point at per-shop hosts
+only when `PUBLIC_SHOP_SUBDOMAINS=1`.
 
 ---
 
