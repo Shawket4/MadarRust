@@ -94844,6 +94844,10 @@
           "name": {
             "type": "string"
           },
+          "name_translations": {
+            "type": "object",
+            "description": "`{locale: name}`, as the dashboard authored it (`{}` when untranslated):\na till shows the option in its own language. Additive."
+          },
           "price": {
             "type": "integer",
             "format": "int32",
