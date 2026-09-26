@@ -69,6 +69,9 @@ JOIN org_ingredients oi ON oi.id = rl.ingredient_id
 WHERE rl.owner_type = 'item_size';
 
 -- ── addon_items ← modifier_options (legacy_source='addon') + their group. ──
+-- A custom group (legacy_addon_type NULL, new clients only) lists its options
+-- here with `type` NULL: the order path prices every option through this view.
+-- Every reader of the old addon shape filters `type IS NOT NULL`.
 CREATE VIEW addon_items AS
 SELECT mo.id, mg.org_id, mo.name, mg.legacy_addon_type AS type, mo.price AS default_price,
        mo.is_active, mo.name_translations, mo.created_at, mo.updated_at

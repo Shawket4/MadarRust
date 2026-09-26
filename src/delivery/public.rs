@@ -832,7 +832,9 @@ async fn public_combos_and_deals(
 /// Load the org-wide global addon catalog (the POS model: one catalog for every
 /// item), priced/availability-resolved per channel (branch_channel → branch →
 /// catalog default). Channel-unavailable options are excluded. Ordered by `type`
-/// then `name`. Loaded once per request, not per item.
+/// then `name`. Loaded once per request, not per item. A custom group's options
+/// (no legacy type) are not in it: they reach the menu through the item's
+/// `modifier_groups` (see `menu::handlers::AddonItem`).
 async fn load_addon_catalog(
     pool: &PgPool,
     org_id: Uuid,
@@ -853,7 +855,7 @@ async fn load_addon_catalog(
          LEFT JOIN branch_channel_addon_overrides bcao \
                 ON bcao.addon_item_id = a.id AND bcao.branch_id = $1 \
                AND bcao.channel = $2::delivery_channel \
-         WHERE a.org_id = $3 AND a.is_active = true \
+         WHERE a.org_id = $3 AND a.is_active = true AND a.type IS NOT NULL \
          ORDER BY a.type, a.name",
     )
     .bind(branch_id)

@@ -4224,8 +4224,9 @@ pub async fn preview_recipe(
     for addon in &body.addons {
         let addon_qty = addon.quantity.max(1) as f64;
 
+        // A custom group's option has no add-on type: it adds, never swaps.
         let (addon_name, addon_type): (String, String) =
-            sqlx::query_as("SELECT name, type FROM addon_items WHERE id = $1")
+            sqlx::query_as("SELECT name, COALESCE(type, '') FROM addon_items WHERE id = $1")
                 .bind(addon.addon_item_id)
                 .fetch_optional(pool.get_ref())
                 .await?
