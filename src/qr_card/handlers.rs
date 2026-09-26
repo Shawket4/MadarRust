@@ -198,8 +198,35 @@ const REWARDS_PATH: &str = "/rewards";
 /// channel needed.
 const MENU_PATH: &str = "/order/menu";
 
-/// The shop's own origin, for the links page — the same rule, and the same
-/// `PUBLIC_SHOP_SUBDOMAINS` gate, the QR codes follow.
+/// Where the links page itself lives: the root of the shop's own host, for a
+/// shop on the branding tier with a slug. NOT behind `PUBLIC_SHOP_SUBDOMAINS`:
+/// that gate chooses between a shop host and a generic host for the codes,
+/// and the links page has no generic host to fall back to — it is either at
+/// the shop's own address or nowhere. The same rule the dashboard uses to show
+/// a shop its addresses.
+pub(crate) async fn links_page_origin(
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    let row: Option<(Option<String>, bool)> = sqlx::query_as(
+        "SELECT slug, custom_branding FROM organizations \
+          WHERE id = $1 AND is_active AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((Some(slug), true)) = row else {
+        return Ok(None);
+    };
+    let slug = slug.trim().to_lowercase();
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    Ok(public_root_domain().map(|root| format!("https://{slug}.{root}")))
+}
+
+/// The shop's own origin for the links page's BUTTONS — the same rule, and the
+/// same `PUBLIC_SHOP_SUBDOMAINS` gate, the QR codes follow.
 pub(crate) async fn links_shop_origin(
     pool: &PgPool,
     org_id: Uuid,
@@ -245,20 +272,20 @@ fn org_menu_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
     }
 }
 
-/// The links page itself: the ROOT of a shop's own host, or
-/// `{PUBLIC_LINKS_BASE_URL}/{org_id}` for a shop without one.
-pub(crate) fn org_links_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
+/// The links page itself: the ROOT of a shop's own host, served by the
+/// loyalty bundle there.
+///
+/// A shop without its own host has no links page address — there is no
+/// generic links host. Refused plainly rather than pointed somewhere that
+/// would render another page.
+pub(crate) fn org_links_url(shop: Option<&str>, _org_id: Uuid) -> Result<String, AppError> {
     match shop {
         Some(origin) => Ok(format!("{origin}/")),
-        None => {
-            let base = std::env::var("PUBLIC_LINKS_BASE_URL")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| {
-                    AppError::ServiceUnavailable("PUBLIC_LINKS_BASE_URL not configured".into())
-                })?;
-            Ok(format!("{}/{}", base.trim_end_matches('/'), org_id))
-        }
+        None => Err(AppError::Conflict(
+            "The links page lives at the shop's own web address, which comes with custom \
+             branding"
+                .into(),
+        )),
     }
 }
 
@@ -1328,7 +1355,7 @@ pub async fn org_links_qr(
     )
     .await?;
 
-    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let shop = links_page_origin(pool.get_ref(), org_id).await?;
     let long_url = org_links_url(shop.as_deref(), org_id)?;
     let row = db::get_or_create_short_link(
         pool.get_ref(),

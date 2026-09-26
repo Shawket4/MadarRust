@@ -79301,7 +79301,7 @@
               "string",
               "null"
             ],
-            "description": "Where the page is, or `None` when there is nowhere to put it yet (a\nshop with no own host on a deployment with no generic links host)."
+            "description": "Where the page is: the root of the shop's own host, for a shop on the\nbranding tier with a slug. `None` otherwise — there is no generic links\nhost."
           },
           "show_branches": {
             "type": "boolean"

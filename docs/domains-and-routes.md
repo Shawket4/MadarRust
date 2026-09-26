@@ -23,7 +23,6 @@ Every one of these is an `A` record straight to `187.124.33.153`, except `www`, 
 | `demo` | Static dashboard bundle, demo build — `/var/www/madar-demo` | static |
 | `get` | Static marketing/landing bundle — `/var/www/madar-get` | static + `/api` (unproven) |
 | `legal` | Static legal documents — `/var/www/madar-legal` | static, no backend at all |
-| `links` | Static links-page bundle — `/var/www/madar-links`, plus `/api/` (**new**, `deploy/links/nginx-links.conf`) | static + backend |
 | `loyalty` | Static loyalty bundle — `/var/www/madar-loyalty`, plus `/api/` proxied | static + backend |
 | `order` | Static ordering bundle — `/var/www/madar-order`, plus `/api` proxied | static + backend |
 | `reservations` | Static bookings bundle — `/var/www/madar-reservations`, plus `/api` | static + backend |
@@ -134,15 +133,17 @@ on the links page, whose Rewards button goes to the same sign-up.
 Wallet-pass URLs (`webServiceURL` and the images Google fetches) are
 untouched and still come from `PUBLIC_LOYALTY_BASE_URL` (section 5).
 
-The links page reads one endpoint, `GET /public/orgs/links?slug=` (or
-`?org_id=`). Its buttons are built by the same functions that build the QR
-codes (`qr_card::handlers::links_module_href`), so a button and a printed code
-cannot disagree. A shop without its own host has its page on the generic host
-`links.madar-pos.cloud/<org_id>` (`PUBLIC_LINKS_BASE_URL`), and its buttons
-point at the generic hosts. nginx for the shop host is in
-`deploy/shop/nginx-wildcard.conf`: `location = /` serves the links bundle, and
-everything not matched by `/order/`, `/book/`, `/links/` or `/api/` falls through
-to the loyalty bundle.
+The links page is a route of the **loyalty bundle**, not a bundle of its own.
+`/`, `/rewards`, `/join/…` and `/card/<token>` are all client-side routes of the
+one SPA that nginx already serves at the root of the shop host
+(`deploy/shop/nginx-wildcard.conf`, `location /` → `/loyalty.html`). So the
+change needed no nginx edit at all, and it keeps the same origin, CSP and deploy
+step as before. The page reads one endpoint, `GET /public/orgs/links?slug=`, and
+its buttons are built by the same functions that build the QR codes
+(`qr_card::handlers::links_module_href`), so a button and a printed code cannot
+disagree. A shop off the branding tier has no links page address: there is no
+generic links host, `public_url` is `null` in the editor, and the links QR
+endpoint answers 409.
 
 So the hostname says *whose*, and the path says *what*. This is the inverse of the current
 arrangement, where the hostname says what (`order`, `reservations`, `loyalty`) and the shop

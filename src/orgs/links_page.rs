@@ -36,7 +36,7 @@ use crate::authz::require::require;
 use crate::errors::{AppError, AppErrorResponse};
 use crate::orgs::handlers::extract_claims;
 use crate::qr_card::handlers::{
-    links_module_href, links_module_path, links_shop_origin, org_links_url,
+    links_module_href, links_module_path, links_page_origin, links_shop_origin, org_links_url,
 };
 
 use super::public::{BrandQuery, PublicBrand, brand_of, resolve_org};
@@ -199,8 +199,9 @@ pub struct LinksPageSettings {
     #[schema(value_type = Object)]
     pub social_links: serde_json::Value,
     pub modules: Vec<LinksModuleStatus>,
-    /// Where the page is, or `None` when there is nowhere to put it yet (a
-    /// shop with no own host on a deployment with no generic links host).
+    /// Where the page is: the root of the shop's own host, for a shop on the
+    /// branding tier with a slug. `None` otherwise — there is no generic links
+    /// host.
     pub public_url: Option<String>,
     /// Whether the shop wears its own colours on the page.
     pub custom_branding: bool,
@@ -578,7 +579,7 @@ async fn settings_view(pool: &PgPool, org_id: Uuid) -> Result<LinksPageSettings,
             .await?
             .ok_or_else(|| AppError::NotFound("Organization not found".into()))?;
     let brand = crate::orgs::branding::load(pool, org_id).await?;
-    let shop = links_shop_origin(pool, org_id).await?;
+    let page_origin = links_page_origin(pool, org_id).await?;
 
     let modules = LinksItemKind::MODULES
         .into_iter()
@@ -614,7 +615,7 @@ async fn settings_view(pool: &PgPool, org_id: Uuid) -> Result<LinksPageSettings,
         branches,
         social_links,
         modules,
-        public_url: org_links_url(shop.as_deref(), org_id).ok(),
+        public_url: org_links_url(page_origin.as_deref(), org_id).ok(),
         custom_branding,
         card_image_url: brand.card_image_url,
         loyalty_mode: avail.loyalty_mode,

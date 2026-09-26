@@ -39,7 +39,6 @@ fn env() {
             "PUBLIC_RESERVATIONS_BASE_URL",
             "https://reservations.madar-pos.cloud",
         );
-        std::env::set_var("PUBLIC_LINKS_BASE_URL", "https://links.madar-pos.cloud");
     }
 }
 
@@ -230,6 +229,21 @@ async fn an_unbranded_shop_links_to_the_generic_hosts(pool: PgPool) {
     );
     assert_eq!(page["brand"]["custom_branding"], false);
     assert_eq!(page["brand"]["background_color"], "#0D6273");
+
+    // And the page itself has no address to hand out: it lives at the root of
+    // a shop's own host, and this shop has none.
+    let tok = admin_token(&pool, org).await;
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/orgs/{org}/links-page"))
+            .insert_header(("Authorization", format!("Bearer {tok}")))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let got: Value = test::read_body_json(resp).await;
+    assert!(got["public_url"].is_null(), "{got}");
 }
 
 /// What the editor saves is what the public page shows — and the socials go
