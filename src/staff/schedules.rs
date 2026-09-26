@@ -318,6 +318,13 @@ pub struct PutDayRequest {
 pub struct DayKey {
     pub employee_id: Uuid,
     pub on_date: NaiveDate,
+    /// The board it is reset from (BUG-4): only the blocks worked at that
+    /// branch go back to the pattern; the other branches' stay (one of the
+    /// person's branches, else 400 `EMPLOYEE_NOT_AT_BRANCH`). Omitted (an
+    /// old client) = the branches the caller may edit the roster at: an
+    /// owner resets the whole date, as before.
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -1649,11 +1656,27 @@ pub async fn reset_day(
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     let subject = editable_subject(pool, &claims, org_id, query.employee_id).await?;
+    let scope = match query.branch_id {
+        Some(at) => {
+            board_branch(pool, &claims, org_id, &subject, at).await?;
+            Some(vec![at])
+        }
+        None => access::scope(pool, &claims, org_id, Cap::HrScheduleEdit).await?,
+    };
+    let by = claims.user_id_safe().ok();
     let mut tx = pool.begin().await?;
-    let removed = days::reset_day(&mut tx, subject.id, query.on_date).await?;
+    let changed = days::reset_day(
+        &mut tx,
+        org_id,
+        subject.id,
+        query.on_date,
+        scope.as_deref(),
+        by,
+    )
+    .await?;
     days::check_overlaps(&mut tx, subject.id, query.on_date, query.on_date).await?;
     tx.commit().await?;
-    if removed > 0 {
+    if changed {
         after_day_change(pool, org_id, subject.id, query.on_date).await?;
     }
     Ok(HttpResponse::Ok().json(day_view(pool, org_id, subject.id, query.on_date).await?))

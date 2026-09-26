@@ -158,6 +158,22 @@ pub struct DateSet {
     pub day_off: bool,
 }
 
+/// A person's shift at ANOTHER branch that date (BUG-4): the board shows it
+/// ("at <branch>") so the cell never reads "Off", but it is not this
+/// board's: never one of `shifts`, never sent back by a PUT from here.
+#[derive(Serialize, ToSchema, Clone)]
+pub struct ElsewhereShift {
+    pub employee_id: Uuid,
+    pub date: NaiveDate,
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    pub work_shift_id: Uuid,
+    pub shift_name: String,
+    pub start_time: NaiveTime,
+    pub end_time: NaiveTime,
+    pub crosses_midnight: bool,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct RosterView {
     pub branch_id: Uuid,
@@ -175,10 +191,16 @@ pub struct RosterView {
     pub warnings: Vec<engine::LabourWarning>,
     /// The limits are not yet confirmed by a lawyer; say so beside them.
     pub limits_unconfirmed: bool,
-    /// The dates that hold their own set (a date change), a day off included:
-    /// the ones "back to the pattern" applies to.
+    /// The dates whose part at THIS branch is not the pattern's (a date
+    /// change here, a day off included): the ones "back to the pattern"
+    /// applies to on this board. A date changed only at another branch is
+    /// not one (BUG-4).
     #[serde(default)]
     pub date_sets: Vec<DateSet>,
+    /// The staff's shifts at other branches in range, for display only
+    /// (BUG-4).
+    #[serde(default)]
+    pub elsewhere: Vec<ElsewhereShift>,
 }
 
 /// 400 `RANGE_BACKWARDS`, or `RANGE_TOO_WIDE` {max_days} past 62 days.
@@ -401,22 +423,13 @@ pub async fn roster(
         crate::staff::attendance::load_settings(pool, org_id, Some(query.branch_id)).await?;
     let warnings =
         labour_warnings(pool, &settings, &staff, &everywhere, query.from, query.to).await?;
-    let shifts = everywhere
+    let (shifts, away): (Vec<RosterShift>, Vec<RosterShift>) = everywhere
         .into_iter()
-        .filter(|s| s.branch_id == query.branch_id)
-        .collect();
+        .partition(|s| s.branch_id == query.branch_id);
     let ids: Vec<Uuid> = staff.iter().map(|p| p.employee_id).collect();
-    let date_sets: Vec<DateSet> = sqlx::query_as(
-        "SELECT employee_id, on_date AS date, bool_and(work_shift_id IS NULL) AS day_off \
-           FROM staff_schedule_overrides \
-          WHERE employee_id = ANY($1) AND on_date BETWEEN $2 AND $3 \
-          GROUP BY employee_id, on_date ORDER BY on_date, employee_id",
-    )
-    .bind(&ids)
-    .bind(query.from)
-    .bind(query.to)
-    .fetch_all(pool)
-    .await?;
+    let date_sets =
+        date_sets_at(pool, query.branch_id, &ids, &shifts, query.from, query.to).await?;
+    let elsewhere = elsewhere_of(pool, away).await?;
     Ok(HttpResponse::Ok().json(RosterView {
         branch_id: query.branch_id,
         from: query.from,
@@ -433,7 +446,91 @@ pub async fn roster(
         warnings,
         limits_unconfirmed: true,
         date_sets,
+        elsewhere,
     }))
+}
+
+/// The dates whose part at `branch` differs from the pattern's there (BUG-4):
+/// where "back to the pattern" applies on that board. `here` = the range's
+/// shifts worked at `branch`. `day_off`: nothing is worked here that date.
+async fn date_sets_at(
+    pool: &PgPool,
+    branch: Uuid,
+    ids: &[Uuid],
+    here: &[RosterShift],
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<Vec<DateSet>, AppError> {
+    let own: Vec<(Uuid, NaiveDate)> = sqlx::query_as(
+        "SELECT DISTINCT employee_id, on_date FROM staff_schedule_overrides \
+          WHERE employee_id = ANY($1) AND on_date BETWEEN $2 AND $3 \
+          ORDER BY on_date, employee_id",
+    )
+    .bind(ids)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    if own.is_empty() {
+        return Ok(Vec::new());
+    }
+    let pattern = crate::staff::schedules::pattern_range(pool, ids, from, to, None).await?;
+    Ok(own
+        .into_iter()
+        .filter_map(|(employee_id, date)| {
+            let mut now: Vec<_> = here
+                .iter()
+                .filter(|s| s.employee_id == employee_id && s.date == date)
+                .map(|s| (s.work_shift_id, s.start_time, s.end_time))
+                .collect();
+            let mut was: Vec<_> = pattern
+                .iter()
+                .filter(|s| {
+                    s.employee_id == employee_id && s.on_date == date && s.branch_id == Some(branch)
+                })
+                .map(|s| (s.work_shift_id, s.start_time, s.end_time))
+                .collect();
+            now.sort();
+            was.sort();
+            (now != was).then_some(DateSet {
+                employee_id,
+                date,
+                day_off: now.is_empty(),
+            })
+        })
+        .collect())
+}
+
+/// Shifts worked at other branches, with the branch's name.
+async fn elsewhere_of(
+    pool: &PgPool,
+    away: Vec<RosterShift>,
+) -> Result<Vec<ElsewhereShift>, AppError> {
+    if away.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<Uuid> = away.iter().map(|s| s.branch_id).collect();
+    let names: HashMap<Uuid, String> =
+        sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM branches WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+    Ok(away
+        .into_iter()
+        .map(|s| ElsewhereShift {
+            employee_id: s.employee_id,
+            date: s.date,
+            branch_name: names.get(&s.branch_id).cloned().unwrap_or_default(),
+            branch_id: s.branch_id,
+            work_shift_id: s.work_shift_id,
+            shift_name: s.shift_name,
+            start_time: s.start_time,
+            end_time: s.end_time,
+            crosses_midnight: s.crosses_midnight,
+        })
+        .collect())
 }
 
 /// RU-13 over a roster range: the rostered limits per person, plus days whose

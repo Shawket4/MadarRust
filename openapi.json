@@ -57825,6 +57825,16 @@
               "type": "string",
               "format": "date"
             }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "The board it is reset from (BUG-4): only the blocks worked at that\nbranch go back to the pattern; the other branches' stay (one of the\nperson's branches, else 400 `EMPLOYEE_NOT_AT_BRANCH`). Omitted (an\nold client) = the branches the caller may edit the roster at: an\nowner resets the whole date, as before.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -75557,6 +75567,54 @@
           }
         }
       },
+      "ElsewhereShift": {
+        "type": "object",
+        "description": "A person's shift at ANOTHER branch that date (BUG-4): the board shows it\n(\"at <branch>\") so the cell never reads \"Off\", but it is not this\nboard's: never one of `shifts`, never sent back by a PUT from here.",
+        "required": [
+          "employee_id",
+          "date",
+          "branch_id",
+          "branch_name",
+          "work_shift_id",
+          "shift_name",
+          "start_time",
+          "end_time",
+          "crosses_midnight"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "crosses_midnight": {
+            "type": "boolean"
+          },
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "employee_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "end_time": {
+            "type": "string"
+          },
+          "shift_name": {
+            "type": "string"
+          },
+          "start_time": {
+            "type": "string"
+          },
+          "work_shift_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "Employee": {
         "type": "object",
         "required": [
@@ -91028,7 +91086,14 @@
             "items": {
               "$ref": "#/components/schemas/DateSet"
             },
-            "description": "The dates that hold their own set (a date change), a day off included:\nthe ones \"back to the pattern\" applies to."
+            "description": "The dates whose part at THIS branch is not the pattern's (a date\nchange here, a day off included): the ones \"back to the pattern\"\napplies to on this board. A date changed only at another branch is\nnot one (BUG-4)."
+          },
+          "elsewhere": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElsewhereShift"
+            },
+            "description": "The staff's shifts at other branches in range, for display only\n(BUG-4)."
           },
           "from": {
             "type": "string",
