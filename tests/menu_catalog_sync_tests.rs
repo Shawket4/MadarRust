@@ -811,3 +811,104 @@ async fn test_only_active_included(pool: PgPool) {
     assert!(opt_ids.contains(&live_opt));
     assert!(!opt_ids.contains(&dead_opt), "inactive option omitted");
 }
+
+// ── Translated names ride with the groups AND their options ──────────
+
+/// An Arabic till resolves every group title and option name from its
+/// `name_translations` (madar-core `menu::resolve`). The options shipped
+/// without them, so the item sheet and a combo's Customise showed "Oat Milk",
+/// "Extra Shot"… in English on an Arabic till (T1, 2026-09-26). The same
+/// `SyncItem` is the `/sync/pull` `menu_item` row, so both are checked.
+#[sqlx::test]
+async fn groups_and_options_carry_their_name_translations(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let org = seed_org(&pool).await;
+    let user = seed_user(&pool, org).await;
+    grant(&pool, "menu_items", "read").await;
+    let cat = seed_category(&pool, org).await;
+    let item = seed_item(&pool, org, cat, "Latte", 5000).await;
+    let token = org_admin_token(user, org);
+    let branch = seed_branch(&pool, org).await;
+
+    let grp = seed_group(&pool, org, "Extras", Some("extra"), "multi", 0, None, false).await;
+    sqlx::query(
+        "UPDATE modifier_groups SET name_translations = '{\"ar\":\"إضافات\",\"en\":\"Extras\"}' WHERE id = $1",
+    )
+    .bind(grp)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let shot = seed_option(&pool, grp, "Extra Shot", 1500).await;
+    sqlx::query(
+        "UPDATE modifier_options SET name_translations = '{\"ar\":\"شوت إضافي\",\"en\":\"Extra Shot\"}' WHERE id = $1",
+    )
+    .bind(shot)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Never translated: an empty object, not a missing key.
+    let plain = seed_option(&pool, grp, "Vanilla", 1000).await;
+    attach_group(&pool, item, grp, 0, None, None, None, None).await;
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/catalog/sync?branch_id={branch}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let row = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == item.to_string())
+        .expect("the item is in the snapshot")
+        .clone();
+
+    let pull = madar_rust::sync::pull::pull_core(
+        &pool,
+        org,
+        &madar_rust::sync::pull::PullRequest {
+            branch_id: branch,
+            device_id: None,
+            types: Some(vec!["menu_item".into()]),
+            limit: None,
+            ledger_page_size: None,
+            snapshot_cursor: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let fed = pull.data["menu_item"]
+        .iter()
+        .find(|i| i["id"] == item.to_string())
+        .expect("the item rides the feed")
+        .clone();
+
+    for (wire, it) in [("/catalog/sync", &row), ("/sync/pull menu_item", &fed)] {
+        let g = &it["modifier_groups"][0];
+        assert_eq!(g["name_translations"]["ar"], "إضافات", "{wire}: {g}");
+        let opt = |id: Uuid| {
+            g["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["id"] == id.to_string())
+                .unwrap_or_else(|| panic!("{wire}: option {id} in {g}"))
+                .clone()
+        };
+        let o = opt(shot);
+        assert_eq!(o["name"], "Extra Shot", "{wire}");
+        assert_eq!(o["name_translations"]["ar"], "شوت إضافي", "{wire}: {o}");
+        assert_eq!(o["name_translations"]["en"], "Extra Shot", "{wire}: {o}");
+        assert_eq!(
+            opt(plain)["name_translations"],
+            serde_json::json!({}),
+            "{wire}"
+        );
+    }
+}

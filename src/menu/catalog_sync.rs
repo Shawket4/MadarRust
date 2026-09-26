@@ -88,6 +88,11 @@ pub struct SyncSize {
 pub struct SyncOption {
     pub id: Uuid,
     pub name: String,
+    /// `{locale: name}`, as the dashboard authored it (`{}` when untranslated):
+    /// a till shows the option in its own language. Additive.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
     /// Effective price in piastres (branch_channel → branch → channel → catalog default).
     pub price: i32,
     /// Effective availability (branch_channel → branch → channel → TRUE).
@@ -552,6 +557,7 @@ async fn load_modifier_groups(
                 options.push(SyncOption {
                     id: o.id,
                     name: o.name.clone(),
+                    name_translations: o.name_translations.clone(),
                     price: o.price,
                     is_available: o.is_available,
                     replaces_ingredient_id: o.replaces_ingredient_id,
@@ -587,6 +593,7 @@ async fn load_modifier_groups(
 struct RawOption {
     id: Uuid,
     name: String,
+    name_translations: serde_json::Value,
     price: i32,
     is_available: bool,
     replaces_ingredient_id: Option<Uuid>,
@@ -621,8 +628,17 @@ async fn load_group_options(
 
     // Options with price/availability resolved (same COALESCE shape as sizes, but
     // target_type='modifier_option' and default price = mo.price).
-    let opt_rows: Vec<(Uuid, Uuid, String, i32, bool, Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT mo.group_id, mo.id, mo.name, \
+    let opt_rows: Vec<(
+        Uuid,
+        Uuid,
+        String,
+        serde_json::Value,
+        i32,
+        bool,
+        Option<Uuid>,
+        bool,
+    )> = sqlx::query_as(
+        "SELECT mo.group_id, mo.id, mo.name, mo.name_translations, \
                 COALESCE(bc.price, b.price, c.price, mo.price) AS price, \
                 COALESCE(bc.is_available, b.is_available, c.is_available, TRUE) AS is_available, \
                 mo.replaces_ingredient_id, mo.is_default \
@@ -647,11 +663,22 @@ async fn load_group_options(
     .await?;
 
     let mut option_ids = Vec::with_capacity(opt_rows.len());
-    for (group_id, id, name, price, is_available, replaces_ingredient_id, is_default) in opt_rows {
+    for (
+        group_id,
+        id,
+        name,
+        name_translations,
+        price,
+        is_available,
+        replaces_ingredient_id,
+        is_default,
+    ) in opt_rows
+    {
         option_ids.push(id);
         by_group.entry(group_id).or_default().push(RawOption {
             id,
             name,
+            name_translations,
             price,
             is_available,
             replaces_ingredient_id,
@@ -726,7 +753,6 @@ async fn load_referenced_ingredients(
         )
         .collect())
 }
-
 
 /// `SyncItem`s for a set of ids, resolved for `branch_id` (default channel).
 /// Inactive or deleted items are omitted (sync pull projection).
