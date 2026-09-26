@@ -54,6 +54,11 @@ pub struct PublicBranch {
 #[derive(Deserialize, IntoParams)]
 pub struct PublicBranchesQuery {
     pub org_id: Uuid,
+    /// The read-only menu (`/menu`): every active branch, not only the ones
+    /// taking online orders — a shop with ordering switched off still has a
+    /// menu to show. Each branch's channel flags stay as they are, so a client
+    /// never offers an order where none is taken.
+    pub browse: Option<bool>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -157,11 +162,12 @@ pub async fn public_branches(
            JOIN organizations o ON o.id = b.org_id
            LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
            WHERE b.org_id = $1 AND b.is_active = true AND b.deleted_at IS NULL
-             AND (COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false)
+             AND ($2 OR COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false)
                   OR COALESCE(s.umbrella_enabled, false) OR COALESCE(s.pickup_enabled, false))
            ORDER BY b.name"#,
     ))
     .bind(query.org_id)
+    .bind(query.browse.unwrap_or(false))
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -373,8 +379,15 @@ pub struct DeliveryMenuDiscount {
     pub value_rate: rust_decimal::Decimal,
 }
 
+/// The `channel` of the read-only dine-in menu (see [`ChannelParam`]).
+const DINE_IN_PREVIEW: &str = "dine_in";
+
 #[derive(Deserialize, IntoParams)]
 pub struct ChannelParam {
+    /// A delivery channel, or `dine_in` — the dine-in menu (branch prices, no
+    /// channel discount), accepted ONLY with `preview=true`: the read-only
+    /// menu of a shop that takes no online orders. Nothing can be ordered
+    /// against it; quote and intake know no such channel.
     pub channel: String,
     /// Read-only browse preview. When `true`, the menu is returned even if the
     /// channel is closed right now, so customers can browse while a branch is
@@ -394,6 +407,22 @@ pub async fn public_menu(
     query: web::Query<ChannelParam>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
+    if query.channel == DINE_IN_PREVIEW {
+        if !query.preview.unwrap_or(false) {
+            return Err(AppError::BadRequest(
+                "the dine-in menu is read-only: pass preview=true".into(),
+            ));
+        }
+        let org_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT org_id FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+        )
+        .bind(branch_id)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        let org_id = org_id.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+        let menu = load_public_menu(pool.get_ref(), org_id, branch_id, None).await?;
+        return Ok(HttpResponse::Ok().json(menu));
+    }
     validate_channel(&query.channel)?;
 
     let branch: Option<(Uuid, bool)> = sqlx::query_as(&format!(

@@ -3127,6 +3127,55 @@ mod it {
     }
 
     #[sqlx::test]
+    async fn the_dine_in_menu_is_a_read_only_preview_for_any_branch(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        // No ordering channel at all: a shop that only wants a menu online.
+        let item = seed_item(&pool, org, 500).await;
+        let app = app!(&pool);
+
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/branches/{branch}/menu?channel=dine_in&preview=true"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        let items = b["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{b}");
+        assert_eq!(items[0]["id"], item.to_string());
+
+        // Never without preview: nothing is ordered against it.
+        let (st, _b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=dine_in")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+
+        // The branch list hides it for ordering, and shows it for browsing.
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(b.as_array().unwrap().len(), 0, "{b}");
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}&browse=true")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let list = b.as_array().unwrap();
+        assert_eq!(list.len(), 1, "{b}");
+        assert_eq!(list[0]["id"], branch.to_string());
+        assert_eq!(list[0]["in_mall_enabled"], false);
+    }
+
+    #[sqlx::test]
     async fn public_menu_exposes_default_milk_addon(pool: PgPool) {
         let org = seed_org(&pool).await;
         let branch = seed_branch(&pool, org).await;

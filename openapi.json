@@ -32178,6 +32178,18 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "browse",
+            "in": "query",
+            "description": "The read-only menu (`/menu`): every active branch, not only the ones\ntaking online orders — a shop with ordering switched off still has a\nmenu to show. Each branch's channel flags stay as they are, so a client\nnever offers an order where none is taken.",
+            "required": false,
+            "schema": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -32688,6 +32700,7 @@
           {
             "name": "channel",
             "in": "query",
+            "description": "A delivery channel, or `dine_in` — the dine-in menu (branch prices, no\nchannel discount), accepted ONLY with `preview=true`: the read-only\nmenu of a shop that takes no online orders. Nothing can be ordered\nagainst it; quote and intake know no such channel.",
             "required": true,
             "schema": {
               "type": "string"
