@@ -22,6 +22,11 @@
 -- Not representable in the unified model, so not seeded: size-scoped optionals,
 -- per-item/per-size/combo add-on ingredient overrides, per-attachment labels.
 --
+-- Since 20260923010000 (price lives in sizes) inserting a menu item creates its
+-- `one_size` row itself, under the same stable id: the seed upserts that row
+-- rather than inserting it, and a real size retires it (checked against the
+-- v1.7.0 schema, migrations + deploy/menu_unification_shim.sql, 2026-09-26).
+--
 -- Safe by design: one transaction, refuses to run if the org already has menu
 -- items / modifier groups, reuses same-named suppliers & ingredients.
 --
@@ -701,8 +706,13 @@ BEGIN
       v_factor := (s->>2)::numeric;
       IF v_label = 'one_size' THEN
         v_size := md5(v_item::text || ':one_size')::uuid;
+        -- Since 20260923010000 (price lives in sizes) inserting the item already
+        -- created this row, same stable id, from its base_price: keep it, with
+        -- the seed's price.
         INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort, is_active)
-        VALUES (v_size, v_item, 'one_size', (s->>1)::int, 0, true);
+        VALUES (v_size, v_item, 'one_size', (s->>1)::int, 0, true)
+        ON CONFLICT (id) DO UPDATE
+          SET price = EXCLUDED.price, sort = 0, is_active = true;
       ELSE
         v_size := gen_random_uuid();
         INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort, is_active)
