@@ -17,12 +17,17 @@
 #                      their movements/reconciliations, table occupancy, kitchen
 #                      tickets, refunds, the inventory ledger (movements, stocktakes,
 #                      receipts, purchase orders, transfers, waste; branch_stock is
-#                      rebased to 0), customers + loyalty history, HR activity
-#                      (attendance, payroll, requests), approvals, AI chats, menu
-#                      decisions, the POS changefeed and the order/ticket counters.
+#                      rebased to 0), customers + loyalty history, all Dawam
+#                      activity (attendance, requests, leave balances, payroll and
+#                      payslips, advances, the rota: schedules, open shifts, swaps),
+#                      staff drinks, approvals, AI chats, menu decisions, the POS
+#                      changefeed and the order/ticket counters.
 #                      The setup is KEPT: branches, users/roles/permissions, devices,
 #                      menu, recipes, the ingredient & supplier catalog, floor
-#                      geometry, payment methods, discounts, schedules, settings.
+#                      geometry, payment methods, discounts, settings, and the
+#                      Dawam setup: employees (salary, pay method, app access),
+#                      their salary history, branches and documents, departments,
+#                      leave types, holidays and shift templates.
 #                      No CSV is read and nothing is imported in this mode.
 #     With --reset-activity only (each adds to what is cleared, or changes it):
 #   --keep-stock       carry today's stock levels over: after the ledger is cleared,
@@ -66,7 +71,7 @@ reset_qr=off
 do_import=on
 yes=0
 
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -151,7 +156,7 @@ mode="add"
 [[ "$replace_menu" == on ]] && mode="replace-menu: the whole menu and every order/ticket that uses it"
 [[ "$reset_org" == on ]] && mode="reset-org: ALL data of the org (branches, users, orders, inventory, menu)"
 if [[ "$reset_activity" == on ]]; then
-  mode="reset-activity: everything the org DID (orders, tickets, tills, inventory ledger, customers, HR activity)"
+  mode="reset-activity: everything the org DID (orders, tickets, tills, inventory ledger, customers, Dawam activity + rota)"
   extras=""
   [[ "$reset_devices" == on ]] && extras+=", devices"
   [[ "$reset_tables" == on ]] && extras+=", floor sections + tables"

@@ -91,8 +91,9 @@ SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
 -- one of them is cleared without editing this list. What is deliberately NOT a
 -- root: branches, users/roles/permissions/overrides, devices, the menu, recipes,
 -- org_ingredients/suppliers/packaging, floor sections + branch_tables, payment
--- methods, discounts, work_shifts + staff_schedules/profiles, loyalty
--- settings and reward catalog, qr_short_links, asset_* (menu images).
+-- methods, discounts, the Dawam setup (employees, salary history, documents,
+-- departments, leave types, holidays, shift templates), loyalty settings and
+-- reward catalog, qr_short_links, asset_* (menu images).
 CREATE FUNCTION pg_temp.purge_activity(tbl text, col text DEFAULT 'org_id')
 RETURNS void LANGUAGE plpgsql AS $fn$
 DECLARE o uuid := current_setting('app.org_id')::uuid;
@@ -134,15 +135,48 @@ SELECT pg_temp.purge_activity('loyalty_transactions');
 SELECT pg_temp.purge_activity('customers');
 SELECT pg_temp.purge_activity('loyalty_customers');
 
--- HR activity (work_shifts, staff_schedules, staff_profiles/documents stay).
+-- Dawam (the staff app): everything that HAPPENED, and the rota built on top
+-- of the setup. KEPT, as the setup: the employees themselves (profile, app
+-- access, department, job title, base salary, pay method/account, preferences),
+-- their salary history, their branches and their documents; and the Dawam
+-- configuration (departments, leave types, holidays, shift templates +
+-- day times, attendance settings). Owner, 2026-09-26: "clear all dawam data
+-- except employees and salary data for the employee, basically the setup".
+-- Attendance.
 SELECT pg_temp.purge_activity('attendance_records');
-SELECT pg_temp.purge_activity('payslips');
-SELECT pg_temp.purge_activity('payroll_periods');
-SELECT pg_temp.purge_activity('payroll_bonuses');
-SELECT pg_temp.purge_activity('payroll_deductions');
-SELECT pg_temp.purge_activity('salary_advances');
+SELECT pg_temp.purge_activity('attendance_pings');
+SELECT pg_temp.purge_activity('attendance_flags');
+SELECT pg_temp.purge_activity('attendance_tombstones');
+-- Requests and the balances they drew on.
 SELECT pg_temp.purge_activity('staff_requests');
 SELECT pg_temp.purge_activity('leave_balances');
+-- Pay: runs, payslips, one-off bonuses/deductions, advances.
+SELECT pg_temp.purge_activity('payslips');
+SELECT pg_temp.purge_activity('payroll_bonuses');
+SELECT pg_temp.purge_activity('payroll_deductions');
+SELECT pg_temp.purge_activity('payroll_audit_log');
+SELECT pg_temp.purge_activity('payroll_periods');
+SELECT pg_temp.purge_activity('salary_advance_collections');
+SELECT pg_temp.purge_activity('salary_advances');
+SELECT pg_temp.purge_activity('expense_advances');
+-- The rota: schedules, overrides, open shifts, swaps, publications.
+SELECT pg_temp.purge_activity('staff_schedule_overrides');
+SELECT pg_temp.purge_activity('staff_schedules');
+SELECT pg_temp.purge_activity('staff_open_shift_claims');
+SELECT pg_temp.purge_activity('staff_open_shifts');
+SELECT pg_temp.purge_activity('staff_swaps');
+SELECT pg_temp.purge_activity('staff_roster_changes');
+SELECT pg_temp.purge_activity('staff_week_publications');
+SELECT pg_temp.purge_activity('staff_coverage_needs');
+-- What Dawam learned or told people.
+SELECT pg_temp.purge_activity('staff_notifications');
+SELECT pg_temp.purge_activity('staff_suggestion_events');
+SELECT pg_temp.purge_activity('staff_suggestion_cache');
+SELECT pg_temp.purge_activity('staff_learning_state');
+SELECT pg_temp.purge_activity('staff_fairness_audits');
+SELECT pg_temp.purge_activity('staff_preference_log');
+-- Staff drinks poured from the pool (the pool's settings stay).
+SELECT pg_temp.purge_activity('staff_drinks');
 
 -- Decisions, approvals and assistant history.
 SELECT pg_temp.purge_activity('approvals');
