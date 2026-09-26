@@ -445,6 +445,15 @@ async fn make_it_a_meal_links_and_unlinks(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!((c, sl), (Some(s.combo), Some(s.slot_drink)));
+    // the item reads the link back, so the studio shows what is saved (live T3:
+    // GET /menu-items/{id} always said `meal: null`, the studio read "Not offered")
+    let (st, item) = call(&app, "GET", &format!("/menu-items/{}", s.cola), &tok, None).await;
+    assert_eq!(st, 200, "{item}");
+    assert_eq!(
+        item["meal"],
+        json!({"combo_id": s.combo, "slot_id": s.slot_drink}),
+        "{item}"
+    );
     // the burger has no place in the Drink slot
     let (st, e) = call(
         &app,
@@ -481,6 +490,8 @@ async fn make_it_a_meal_links_and_unlinks(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(c, None);
+    let (_, item) = call(&app, "GET", &format!("/menu-items/{}", s.cola), &tok, None).await;
+    assert_eq!(item["meal"], Value::Null, "{item}");
     // both null unlinks too
     let (st, _) = call(
         &app,
