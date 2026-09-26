@@ -27,6 +27,10 @@ pub const PLATFORMS: &[(&str, &str)] = &[
     ("x", "X"),
     ("youtube", "YouTube"),
     ("whatsapp", "WhatsApp"),
+    // The delivery app most of these shops already sell through: a customer
+    // who follows a shop often orders it there, and the store page is a link
+    // like any other.
+    ("talabat", "Talabat"),
     ("website", "Website"),
 ];
 
@@ -120,6 +124,7 @@ mod tests {
     #[test]
     fn only_platforms_we_know_and_only_https() {
         assert!(validate(&json!({"instagram": "https://instagram.com/rue"})).is_ok());
+        assert!(validate(&json!({"talabat": "https://www.talabat.com/egypt/rue"})).is_ok());
         assert!(
             validate(&json!({"myspace": "https://example.com"})).is_err(),
             "an unknown key would print unchecked on a pass"
