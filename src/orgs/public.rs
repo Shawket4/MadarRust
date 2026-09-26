@@ -75,19 +75,35 @@ pub async fn brand(
     query: web::Query<BrandQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = resolve_org(pool.get_ref(), &query).await?;
+    Ok(HttpResponse::Ok().json(public_brand(pool.get_ref(), org_id).await?))
+}
 
-    let org = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
+/// The shop's public face, through the one brand loader (tier gate included).
+/// Shared with the links page, which returns this same block.
+pub(crate) async fn public_brand(pool: &PgPool, org_id: Uuid) -> Result<PublicBrand, AppError> {
+    let org = crate::orgs::branding::load(pool, org_id).await?;
     // Two different absences, and only the outer one is a missing shop: the row
     // may exist and simply have no address of its own, which is what a shop
     // that has never been given a slug looks like.
     let slug: Option<String> =
         sqlx::query_scalar::<_, Option<String>>("SELECT slug FROM organizations WHERE id = $1")
             .bind(org_id)
-            .fetch_optional(pool.get_ref())
+            .fetch_optional(pool)
             .await?
             .ok_or_else(|| AppError::NotFound("No shop at that address".into()))?;
 
-    Ok(HttpResponse::Ok().json(PublicBrand {
+    Ok(brand_of(org_id, slug, org))
+}
+
+/// A loaded brand, in the shape guest pages read. For callers that need the
+/// rest of [`crate::orgs::branding::OrgBrand`] too (the links page reads its
+/// social links), so the loader runs once.
+pub(crate) fn brand_of(
+    org_id: Uuid,
+    slug: Option<String>,
+    org: crate::orgs::branding::OrgBrand,
+) -> PublicBrand {
+    PublicBrand {
         org_id,
         name: org.name,
         slug,
@@ -98,7 +114,7 @@ pub async fn brand(
         background_color: org.palette.background,
         foreground_color: org.palette.foreground,
         accent_color: org.palette.accent,
-    }))
+    }
 }
 
 /// Which shop a guest page is asking about: by id when it already knows, by
@@ -106,7 +122,7 @@ pub async fn brand(
 ///
 /// Shared by every public per-shop surface, so they cannot drift on the one
 /// question that decides whose logo and whose colours a customer sees.
-async fn resolve_org(pool: &PgPool, query: &BrandQuery) -> Result<Uuid, AppError> {
+pub(crate) async fn resolve_org(pool: &PgPool, query: &BrandQuery) -> Result<Uuid, AppError> {
     match (
         query.org_id,
         query

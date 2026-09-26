@@ -239,6 +239,11 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "/public/orgs/favicon",
         "public favicon for the ordering pages",
     ),
+    (
+        "GET",
+        "/public/orgs/links",
+        "the shop's links page: brand, socials, enabled modules, custom links, branches",
+    ),
     // ── Loyalty card (the member's own unguessable token) ──
     (
         "GET",

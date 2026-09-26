@@ -28788,6 +28788,377 @@
         ]
       }
     },
+    "/orgs/{id}/links-page": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The links page, as the editor sees it.",
+        "operationId": "get_links_page",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinksPageSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Save the links page.",
+        "description": "The organisation settings capability, as every other settings screen —\nand the same one that lets a manager change the shop's logo. The social\nlinks ride along because the page shows them; they are written to the\norganisation's own column, under the same rules as `PATCH /orgs/{id}`.",
+        "operationId": "put_links_page",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinksPageInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinksPageSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/orgs/{id}/links-qr": {
+      "get": {
+        "tags": [
+          "qr"
+        ],
+        "summary": "The code for the shop's links page — the one address that leads to\neverything else (menu, ordering, rewards, bookings, socials).",
+        "operationId": "org_links_qr",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "card",
+            "in": "query",
+            "description": "`true` (default) → branded A6 card PNG; `false` → plain receipt QR PNG.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "caption",
+            "in": "query",
+            "description": "Dynamic caption line beneath the tagline (A6 card only).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dpi",
+            "in": "query",
+            "description": "Raster DPI for the A6 card (clamped 72–2400). Default 600.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "bleed_mm",
+            "in": "query",
+            "description": "Print bleed in mm (A6 card only). Default 0.",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            }
+          },
+          {
+            "name": "crop_marks",
+            "in": "query",
+            "description": "Draw crop marks (A6 card, only meaningful when `bleed_mm > 0`).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "svg",
+            "in": "query",
+            "description": "Return the A6 card as SVG (`data:image/svg+xml;base64,…`). Default false.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "module_px",
+            "in": "query",
+            "description": "Pixels per module for the plain receipt QR (1–40). Default 16.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The links page QR",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QrResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/orgs/{id}/logo": {
       "put": {
         "tags": [
@@ -34301,6 +34672,109 @@
             "description": "Square PNG",
             "content": {
               "image/png": {}
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/orgs/links": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The shop's links page, in one request.",
+        "description": "Public for the same reason `/public/orgs/brand` is — it is the first thing\na customer's browser asks — and it answers \"no shop\" identically for a shop\nthat does not exist and one that is switched off, for the same reason.",
+        "operationId": "public_org_links",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "The shop, when the page already knows which one it is.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "description": "The first label of the hostname, when it does not — `rue` for\n`rue.madar-pos.cloud`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicLinksPage"
+                }
+              }
             }
           },
           "400": {
@@ -78579,6 +79053,280 @@
           }
         }
       },
+      "LinksItemKind": {
+        "type": "string",
+        "description": "What a button is. The four modules are a closed list, like the social\nplatforms: each one is a page we serve, and `custom` is the shop's own link.",
+        "enum": [
+          "order",
+          "menu",
+          "rewards",
+          "book",
+          "custom"
+        ]
+      },
+      "LinksModuleStatus": {
+        "type": "object",
+        "description": "Whether a module can be shown, and why — the editor's hint line.",
+        "required": [
+          "kind",
+          "available",
+          "branch_names",
+          "path"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "The switch that governs it is on somewhere. A hidden module that is\navailable is the shop's choice; an unavailable one cannot be shown."
+          },
+          "branch_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The branches where it is on (menu: every active branch; rewards: none,\nthe programme is the org's)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LinksItemKind"
+          },
+          "path": {
+            "type": "string",
+            "description": "Where it opens on the shop's own host."
+          }
+        }
+      },
+      "LinksPageBranch": {
+        "type": "object",
+        "description": "A branch, as the editor lists it.",
+        "required": [
+          "id",
+          "name",
+          "visible"
+        ],
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maps_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "visible": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LinksPageBranchInput": {
+        "type": "object",
+        "description": "Per-branch settings for \"Visit us\".",
+        "required": [
+          "branch_id"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maps_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A Google Maps (or any https) link, so Directions opens the shop's own\npin. Without one, Directions searches the branch's coordinates or\naddress."
+          },
+          "visible": {
+            "type": "boolean"
+          }
+        }
+      },
+      "LinksPageInput": {
+        "type": "object",
+        "description": "What the editor saves.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinksPageBranchInput"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinksPageItem"
+            }
+          },
+          "show_branches": {
+            "type": "boolean"
+          },
+          "show_cover": {
+            "type": "boolean"
+          },
+          "social_links": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The organisation's social links — the SAME map `PATCH /orgs/{id}`\ntakes, stored in the same column, under the same closed list and\nhttps rule. Omitted = unchanged."
+          },
+          "tagline_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tagline_en": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LinksPageItem": {
+        "type": "object",
+        "description": "One button, as stored and as edited.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Custom links only: a stable id, so the editor can tell two links with\nthe same title apart. Minted by the server when missing."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LinksItemKind"
+          },
+          "title_ar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Custom links only. Falls back to the English title when empty."
+          },
+          "title_en": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Custom links only."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Custom links only — a full `https://` address."
+          },
+          "visible": {
+            "type": "boolean",
+            "description": "Off = kept in the list (and its place) but not shown."
+          }
+        }
+      },
+      "LinksPageSettings": {
+        "type": "object",
+        "description": "The editor's view: what is saved, plus what it is built from.",
+        "required": [
+          "items",
+          "show_cover",
+          "show_branches",
+          "branches",
+          "social_links",
+          "modules",
+          "custom_branding"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinksPageBranch"
+            },
+            "description": "Every active branch, with its settings."
+          },
+          "card_image_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The shop's card image, which the page uses as its cover."
+          },
+          "custom_branding": {
+            "type": "boolean",
+            "description": "Whether the shop wears its own colours on the page."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinksPageItem"
+            }
+          },
+          "loyalty_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinksModuleStatus"
+            }
+          },
+          "public_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the page is, or `None` when there is nowhere to put it yet (a\nshop with no own host on a deployment with no generic links host)."
+          },
+          "show_branches": {
+            "type": "boolean"
+          },
+          "show_cover": {
+            "type": "boolean"
+          },
+          "social_links": {
+            "type": "object",
+            "description": "`organizations.social_links`, as stored."
+          },
+          "tagline_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tagline_en": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "LintIssue": {
         "type": "object",
         "description": "One finding. `entity_type` is `attachment` | `item` | `option` | `ingredient`.",
@@ -87079,6 +87827,155 @@
           "sort": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "PublicLinksBranch": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "directions_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The shop's Maps link, else a search for the coordinates, else for the\naddress. `None` when the branch has none of the three."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PublicLinksItem": {
+        "type": "object",
+        "description": "One button on the public page, already resolved.",
+        "required": [
+          "kind",
+          "href",
+          "branch_names",
+          "channels"
+        ],
+        "properties": {
+          "branch_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Order / book: the branches where it is on."
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Order: the channels on anywhere — `pickup`, `delivery`, `in_mall`,\n`umbrella`."
+          },
+          "href": {
+            "type": "string",
+            "description": "Absolute. For a module: the shop's own host when it has one, else the\ngeneric host. For a custom link: the shop's URL."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/LinksItemKind"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Modules only: the same place as a path on the shop's own host, for a\npage being read ON that host."
+          },
+          "title_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_en": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Custom links only (a module's title is the page's own words)."
+          }
+        }
+      },
+      "PublicLinksPage": {
+        "type": "object",
+        "description": "Everything the links page shows, in one request.",
+        "required": [
+          "brand",
+          "items",
+          "socials",
+          "branches"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicLinksBranch"
+            },
+            "description": "Empty when \"Visit us\" is off."
+          },
+          "brand": {
+            "$ref": "#/components/schemas/PublicBrand"
+          },
+          "cover_image_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The card image, when the shop uses it as the cover (and is on the\nbranding tier — the loader already applied that)."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicLinksItem"
+            },
+            "description": "Visible, available buttons, in the shop's order."
+          },
+          "loyalty_mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`points` or `visits`, when the rewards button is shown."
+          },
+          "socials": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicSocialLink"
+            }
+          },
+          "tagline_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tagline_en": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

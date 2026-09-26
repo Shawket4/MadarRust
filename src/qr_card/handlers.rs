@@ -190,6 +190,77 @@ fn render_data_url(
 const ORDER_MOUNT: &str = "/order";
 /// Where bookings are mounted on a shop's own host.
 const BOOK_MOUNT: &str = "/book";
+/// Where the loyalty sign-up lives on a shop's own host, now that the root is
+/// the shop's links page. `/join/…` and `/card/<token>` stay where they were:
+/// they are printed on counter cards and baked into issued passes.
+const REWARDS_PATH: &str = "/rewards";
+/// The read-only menu inside the ordering mount — browse mode, no ordering
+/// channel needed.
+const MENU_PATH: &str = "/order/menu";
+
+/// The shop's own origin, for the links page — the same rule, and the same
+/// `PUBLIC_SHOP_SUBDOMAINS` gate, the QR codes follow.
+pub(crate) async fn links_shop_origin(
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    shop_origin(pool, org_id).await
+}
+
+/// Where a links-page module opens, as an absolute URL: on the shop's own host
+/// when it has one, on the generic hosts otherwise — built by the SAME
+/// functions that build the QR codes, so a button on the page and a code on a
+/// table can never point at two different places.
+///
+/// `None` when the generic host it needs is not configured; the page drops
+/// that button rather than render one that leads nowhere.
+pub(crate) fn links_module_href(shop: Option<&str>, org_id: Uuid, module: &str) -> Option<String> {
+    match module {
+        "order" => org_order_url(shop, org_id).ok(),
+        "menu" => org_menu_url(shop, org_id).ok(),
+        "rewards" => org_loyalty_url(shop, org_id).ok(),
+        "book" => org_booking_url(shop, org_id).ok(),
+        _ => None,
+    }
+}
+
+/// The same module as a path on a shop's own host, for a page that is being
+/// read ON that host and so need not name it.
+pub(crate) fn links_module_path(module: &str) -> Option<&'static str> {
+    match module {
+        "order" => Some("/order/"),
+        "menu" => Some(MENU_PATH),
+        "rewards" => Some(REWARDS_PATH),
+        "book" => Some("/book/"),
+        _ => None,
+    }
+}
+
+/// The read-only menu. On a shop's host it is `/order/menu`; on the generic
+/// host the ordering page's browse mode (`?preview=1`) is the same page.
+fn org_menu_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
+    match shop {
+        Some(origin) => Ok(format!("{origin}{MENU_PATH}")),
+        None => Ok(format!("{}?preview=1", order_base(None, org_id)?)),
+    }
+}
+
+/// The links page itself: the ROOT of a shop's own host, or
+/// `{PUBLIC_LINKS_BASE_URL}/{org_id}` for a shop without one.
+pub(crate) fn org_links_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
+    match shop {
+        Some(origin) => Ok(format!("{origin}/")),
+        None => {
+            let base = std::env::var("PUBLIC_LINKS_BASE_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    AppError::ServiceUnavailable("PUBLIC_LINKS_BASE_URL not configured".into())
+                })?;
+            Ok(format!("{}/{}", base.trim_end_matches('/'), org_id))
+        }
+    }
+}
 
 /// The origin a shop's own codes should point at, or `None` when it has none.
 ///
@@ -394,8 +465,9 @@ fn loyalty_base() -> Result<String, AppError> {
 
 /// Build `{PUBLIC_LOYALTY_BASE_URL}/join/{branch_id}` — the counter's join form.
 fn branch_loyalty_url(shop: Option<&str>, branch_id: Uuid) -> Result<String, AppError> {
-    // The card is mounted at the ROOT of a shop's own host, so the join form
-    // hangs straight off it.
+    // The card bundle answers `/join/…` at the root of a shop's own host (only
+    // `/` itself went to the links page), so the join form hangs straight off
+    // it — and every counter card already printed keeps working.
     let base = match shop {
         Some(origin) => origin.to_string(),
         None => loyalty_base()?,
@@ -413,11 +485,11 @@ fn branch_loyalty_url(shop: Option<&str>, branch_id: Uuid) -> Result<String, App
 fn org_loyalty_url(shop: Option<&str>, org_id: Uuid) -> Result<String, AppError> {
     match shop {
         // The hostname already NAMES the shop, so the id would be saying it
-        // twice. The card bundle's `/` route resolves the org from the host and
-        // renders exactly this page, so `https://rue.madar-pos.cloud/` IS the
-        // whole-shop join — the shortest URL the shop will ever print, and a
-        // sparser QR code for it.
-        Some(origin) => Ok(format!("{origin}/")),
+        // twice. The card bundle's `/rewards` route resolves the org from the
+        // host and renders exactly this page. It used to be the root; the root
+        // is the shop's links page now, which links here, so a code printed
+        // before the move still reaches the sign-up — one tap further.
+        Some(origin) => Ok(format!("{origin}{REWARDS_PATH}")),
         None => Ok(format!("{}/join/org/{org_id}", loyalty_base()?)),
     }
 }
@@ -1219,6 +1291,69 @@ pub async fn org_loyalty_qr(
     }))
 }
 
+// ── GET /orgs/{id}/links-qr ──────────────────────────────────────────────────
+
+/// The code for the shop's links page — the one address that leads to
+/// everything else (menu, ordering, rewards, bookings, socials).
+#[utoipa::path(
+    get,
+    path = "/orgs/{id}/links-qr",
+    tag = "qr",
+    params(
+        ("id" = Uuid, Path, description = "Organization ID"),
+        QrRenderQuery,
+    ),
+    responses(
+        (status = 200, description = "The links page QR", body = QrResponse),
+        AppErrorResponse,
+    ),
+    security(("bearer_jwt" = []))
+)]
+pub async fn org_links_qr(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    provider: web::Data<Arc<dyn ShortLinkProvider>>,
+    id: web::Path<Uuid>,
+    q: web::Query<QrRenderQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    let org_id = *id;
+    require_same_org(&claims, Some(org_id))?;
+    // The same capability the links page editor reads with.
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::OrgSettingsRead,
+        None,
+    )
+    .await?;
+
+    let shop = shop_origin(pool.get_ref(), org_id).await?;
+    let long_url = org_links_url(shop.as_deref(), org_id)?;
+    let row = db::get_or_create_short_link(
+        pool.get_ref(),
+        provider.get_ref().as_ref(),
+        org_id,
+        None,
+        "org_links",
+        &org_id.to_string(),
+        &long_url,
+        None,
+        None,
+    )
+    .await?;
+
+    let brand = card_brand_for(pool.get_ref(), org_id).await?;
+    let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref(), &row.kind)?;
+    Ok(HttpResponse::Ok().json(QrResponse {
+        kind: "org_links".into(),
+        long_url: row.long_url,
+        short_url: row.short_url,
+        short_code: row.short_code,
+        qr_data_url,
+    }))
+}
+
 // ── GET /branches/{id}/loyalty-qr ────────────────────────────────────────────
 
 /// The counter's join QR: a static, per-branch card that opens the public
@@ -1316,7 +1451,8 @@ mod address_tests {
             org_order_url(shop, ORG).unwrap(),
             "https://drops.madar-pos.cloud/order/"
         );
-        // The card is mounted at the root, bookings at /book.
+        // The join form and the card stay at the root's /join and /card —
+        // printed counter cards and issued passes carry them — bookings at /book.
         assert_eq!(
             branch_loyalty_url(shop, BRANCH).unwrap(),
             format!("https://drops.madar-pos.cloud/join/{BRANCH}")
@@ -1338,7 +1474,7 @@ mod address_tests {
         let shop = Some(SHOP);
         assert_eq!(
             org_loyalty_url(shop, ORG).unwrap(),
-            "https://drops.madar-pos.cloud/"
+            "https://drops.madar-pos.cloud/rewards"
         );
         assert_eq!(
             org_booking_url(shop, ORG).unwrap(),
@@ -1357,6 +1493,42 @@ mod address_tests {
             assert!(
                 !url.contains(&ORG.to_string()),
                 "the host already says which shop: {url}"
+            );
+        }
+    }
+
+    /// The links page's buttons are built by the same functions as the codes,
+    /// so on a shop's own host they are that host's mounts.
+    #[test]
+    fn links_page_targets_on_a_shops_own_host() {
+        let shop = Some(SHOP);
+        assert_eq!(
+            links_module_href(shop, ORG, "menu").unwrap(),
+            "https://drops.madar-pos.cloud/order/menu"
+        );
+        assert_eq!(
+            links_module_href(shop, ORG, "rewards").unwrap(),
+            "https://drops.madar-pos.cloud/rewards"
+        );
+        assert_eq!(
+            links_module_href(shop, ORG, "order").unwrap(),
+            "https://drops.madar-pos.cloud/order/"
+        );
+        assert_eq!(
+            links_module_href(shop, ORG, "book").unwrap(),
+            "https://drops.madar-pos.cloud/book/"
+        );
+        assert_eq!(
+            org_links_url(shop, ORG).unwrap(),
+            "https://drops.madar-pos.cloud/"
+        );
+        assert!(links_module_href(shop, ORG, "custom").is_none());
+        // The relative forms are the same mounts.
+        for m in ["order", "menu", "rewards", "book"] {
+            let path = links_module_path(m).unwrap();
+            assert_eq!(
+                format!("{SHOP}{path}"),
+                links_module_href(shop, ORG, m).unwrap()
             );
         }
     }
