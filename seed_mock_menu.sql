@@ -22,12 +22,24 @@
 -- Not representable in the unified model, so not seeded: size-scoped optionals,
 -- per-item/per-size/combo add-on ingredient overrides, per-attachment labels.
 --
+-- Since 20260923010000 (price lives in sizes) inserting a menu item creates its
+-- `one_size` row itself, under the same stable id: the seed upserts that row
+-- rather than inserting it, and a real size retires it (checked against the
+-- v1.7.0 schema, migrations + deploy/menu_unification_shim.sql, 2026-09-26).
+--
 -- Safe by design: one transaction, refuses to run if the org already has menu
 -- items / modifier groups, reuses same-named suppliers & ingredients.
+--
+-- -v replace=1 seeds FROM SCRATCH instead: in the same transaction it first
+-- hard-deletes the org's menu (modifier groups, items, categories), its
+-- ingredients, suppliers and kitchen stations, with every row that references
+-- them, so nothing typed by hand survives. Refused when the org has any order:
+-- it is for a test / review org, never a shop that has sold.
 --
 -- Run:
 --   psql "$DATABASE_URL" -v org=test1 -v dry_run=1 -f seed_mock_menu.sql   # roll back
 --   psql "$DATABASE_URL" -v org=test1 -f seed_mock_menu.sql
+--   psql "$DATABASE_URL" -v org=test1 -v replace=1 -f seed_mock_menu.sql   # from scratch
 -- Production (Postgres on the host, not in docker):
 --   sudo -u postgres psql -d madar -v org=<org-uuid> -v dry_run=1 -f seed_mock_menu.sql
 -- `org` matches the organization name, slug or id (case-insensitive).
@@ -43,10 +55,80 @@
 \else
   \set dry_run 0
 \endif
+\if :{?replace}
+\else
+  \set replace 0
+\endif
 
 BEGIN;
 
 SELECT set_config('seed.org', :'org', true);
+
+\if :replace
+-- ── From scratch: clear what a previous seed (or a person) left ──────────────
+-- pg_temp.purge(table, where) deletes the matching rows after first deleting,
+-- depth-first, every row in any table whose foreign key points at them
+-- (the same helper as scripts/import-foodics.sh --replace-menu).
+CREATE FUNCTION pg_temp.purge(tbl regclass, cond text, path regclass[] DEFAULT '{}')
+RETURNS void LANGUAGE plpgsql AS $fn$
+DECLARE fk record; n bigint;
+BEGIN
+  FOR fk IN
+    SELECT c.conrelid AS child,
+           (SELECT string_agg(format('%I', a.attname), ',' ORDER BY k.ord)
+              FROM unnest(c.conkey) WITH ORDINALITY k(att, ord)
+              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.att) AS child_cols,
+           (SELECT string_agg(format('%I', a.attname), ',' ORDER BY k.ord)
+              FROM unnest(c.confkey) WITH ORDINALITY k(att, ord)
+              JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.att) AS parent_cols
+    FROM pg_constraint c
+    WHERE c.contype = 'f' AND c.confrelid = tbl AND c.conrelid <> tbl AND NOT c.conrelid = ANY (path)
+  LOOP
+    PERFORM pg_temp.purge(fk.child,
+      format('(%s) IN (SELECT %s FROM %s WHERE %s)', fk.child_cols, fk.parent_cols, tbl, cond),
+      path || tbl);
+  END LOOP;
+  EXECUTE format('DELETE FROM %s WHERE %s', tbl, cond);
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n > 0 THEN RAISE NOTICE 'replace: cleared % row(s) from %', n, tbl; END IF;
+END $fn$;
+
+DO $replace$
+DECLARE v_org uuid; v_cnt int;
+BEGIN
+  SELECT count(*) INTO v_cnt FROM organizations o
+   WHERE o.deleted_at IS NULL
+     AND (lower(o.name) = lower(current_setting('seed.org'))
+          OR lower(o.slug) = lower(current_setting('seed.org'))
+          OR o.id::text = lower(current_setting('seed.org')));
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'replace: % organizations match "%" — pass the org id', v_cnt, current_setting('seed.org');
+  END IF;
+  SELECT o.id INTO v_org FROM organizations o
+   WHERE o.deleted_at IS NULL
+     AND (lower(o.name) = lower(current_setting('seed.org'))
+          OR lower(o.slug) = lower(current_setting('seed.org'))
+          OR o.id::text = lower(current_setting('seed.org')));
+  IF EXISTS (SELECT 1 FROM orders x JOIN branches b ON b.id = x.branch_id WHERE b.org_id = v_org) THEN
+    RAISE EXCEPTION 'replace: this org has orders — it has sold, so its menu is not replaced. Nothing was changed.';
+  END IF;
+  -- Recipe lines are polymorphic (no FK to their owner): clear the ones owned
+  -- by this org's sizes, options and optional fields before their owners go.
+  DELETE FROM recipe_lines rl
+   WHERE (rl.owner_type = 'item_size' AND rl.owner_id IN
+           (SELECT s.id FROM menu_item_sizes s JOIN menu_items m ON m.id = s.menu_item_id WHERE m.org_id = v_org))
+      OR (rl.owner_type = 'modifier_option' AND rl.owner_id IN
+           (SELECT o.id FROM modifier_options o JOIN modifier_groups g ON g.id = o.group_id WHERE g.org_id = v_org))
+      OR rl.ingredient_id IN (SELECT id FROM org_ingredients WHERE org_id = v_org);
+  PERFORM pg_temp.purge('modifier_groups',  format('org_id = %L', v_org));
+  PERFORM pg_temp.purge('menu_items',       format('org_id = %L', v_org));
+  PERFORM pg_temp.purge('categories',       format('org_id = %L', v_org));
+  PERFORM pg_temp.purge('org_ingredients',  format('org_id = %L', v_org));
+  PERFORM pg_temp.purge('suppliers',        format('org_id = %L', v_org));
+  PERFORM pg_temp.purge('kitchen_stations', format('org_id = %L', v_org));
+END
+$replace$;
+\endif
 
 DO $seed$
 DECLARE
@@ -701,8 +783,13 @@ BEGIN
       v_factor := (s->>2)::numeric;
       IF v_label = 'one_size' THEN
         v_size := md5(v_item::text || ':one_size')::uuid;
+        -- Since 20260923010000 (price lives in sizes) inserting the item already
+        -- created this row, same stable id, from its base_price: keep it, with
+        -- the seed's price.
         INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort, is_active)
-        VALUES (v_size, v_item, 'one_size', (s->>1)::int, 0, true);
+        VALUES (v_size, v_item, 'one_size', (s->>1)::int, 0, true)
+        ON CONFLICT (id) DO UPDATE
+          SET price = EXCLUDED.price, sort = 0, is_active = true;
       ELSE
         v_size := gen_random_uuid();
         INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort, is_active)
