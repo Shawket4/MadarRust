@@ -161,8 +161,12 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "cash_movement" => "EXISTS (SELECT 1 FROM till_cash_movements x WHERE x.id = $ID)",
         "order" => "EXISTS (SELECT 1 FROM orders x WHERE x.id = $ID)",
         "refund" => "EXISTS (SELECT 1 FROM order_refunds x WHERE x.id = $ID)",
+        // An option of a CUSTOM group (no legacy type) is in the shim's view
+        // with `type` NULL but is not an add-on: old tills cannot carry it
+        // (`menu::handlers::AddonItem`). Its feed rows go out as deletes.
         "addon_item" => {
-            "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x.id))"
+            "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND x.type IS NOT NULL \
+                     AND sync_live_addon_item(x.id))"
         }
         "customer" => {
             "EXISTS (SELECT 1 FROM customers x WHERE x.id = $ID AND sync_live_customer(x))"

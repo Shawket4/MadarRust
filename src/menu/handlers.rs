@@ -165,6 +165,15 @@ pub struct ItemSize {
     pub is_active: bool,
 }
 
+// An add-on as the old wire knows it: an option of a group that has a legacy
+// type (`milk_type`, `coffee_type`, `extra`, …), which old tills require.
+//
+// Every reader of this shape filters `type IS NOT NULL`. Once the contract
+// shim has run, `addon_items` is a view over `modifier_options` that also
+// lists the options of a CUSTOM group (`legacy_addon_type` NULL, new clients
+// only) with `type` NULL — the order path prices every option through it, so
+// the view keeps them — and a NULL type decoded here was a 500 on every
+// `/sync/pull` of the org's branches.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonItem {
     pub id: Uuid,
@@ -1714,11 +1723,12 @@ pub async fn list_addon_items(
 
     // With a branch_id, default_price is branch-effective (override replaces it) and
     // branch-disabled addons are excluded. Without it ($3 NULL), the LEFT JOIN matches
-    // nothing → the plain org list (legacy contract).
+    // nothing → the plain org list (legacy contract). A custom group's options
+    // (type NULL) are not addons: see `AddonItem`.
     const FILTER: &str = "FROM addon_items a
          LEFT JOIN branch_addon_overrides bao
                 ON bao.addon_item_id = a.id AND bao.branch_id = $3
-         WHERE a.org_id = $1
+         WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::uuid IS NULL OR COALESCE(bao.is_available, true) = true)
            AND ($4::text IS NULL OR a.name ILIKE '%' || $4 || '%')";
@@ -1848,7 +1858,7 @@ pub async fn list_addon_catalog(
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
-         WHERE a.org_id = $1
+         WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
            AND ($5::bool IS NULL OR (bao.branch_id IS NOT NULL) = $5)",
@@ -1871,7 +1881,7 @@ pub async fn list_addon_catalog(
                 (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
-         WHERE a.org_id = $1
+         WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
            AND ($5::bool IS NULL OR (bao.branch_id IS NOT NULL) = $5)
@@ -3321,7 +3331,7 @@ async fn fetch_addon_item(pool: &PgPool, id: Uuid) -> Result<AddonItem, AppError
                   ORDER BY ingredient_name, org_ingredient_id
                   LIMIT 1) AS primary_ingredient_id
          FROM addon_items
-         WHERE id = $1",
+         WHERE id = $1 AND type IS NOT NULL",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -3431,7 +3441,7 @@ pub(crate) async fn addon_items_by_ids(
                 (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
-         WHERE a.org_id = $1 AND a.id = ANY($3)",
+         WHERE a.org_id = $1 AND a.id = ANY($3) AND a.type IS NOT NULL",
     )
     .bind(org_id)
     .bind(branch_id)

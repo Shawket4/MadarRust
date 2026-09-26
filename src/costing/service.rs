@@ -399,6 +399,8 @@ pub struct AddonCost {
 }
 
 /// Current ingredient-cost rollup for every active addon in an org, piastres.
+/// Add-ons only: a custom group's options (no legacy type) have no
+/// `addon_type` to report (see `menu::handlers::AddonItem`).
 ///
 /// `branch_id` selects whose actual cost to use (`Some` = that branch's actual
 /// cost with org-default fallback; `None` = org default / standard cost).
@@ -443,7 +445,7 @@ pub async fn org_addon_costs(
                   AND bi.branch_id = $2
             WHERE ai.addon_item_id = a.id
         ) c ON TRUE
-        WHERE a.org_id = $1 AND a.is_active = TRUE
+        WHERE a.org_id = $1 AND a.is_active = TRUE AND a.type IS NOT NULL
         ORDER BY a.name
         "#,
     )

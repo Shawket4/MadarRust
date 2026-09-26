@@ -389,6 +389,9 @@ impl Catalog {
             .collect();
         base_ids.sort();
         base_ids.dedup();
+        // A custom group's option (no legacy type: `a.type` NULL, see
+        // `menu::handlers::AddonItem`) is a candidate like any other, with no
+        // add-on type, so it never matches an inferred milk / coffee family.
         let candidates: Vec<(Uuid, Uuid, String, String, i32, Option<Uuid>, Option<Uuid>)> =
             if base_ids.is_empty() {
                 Vec::new()
@@ -401,7 +404,7 @@ impl Catalog {
                          SELECT mo.replaces_ingredient_id, mo.id
                            FROM modifier_options mo WHERE mo.replaces_ingredient_id = ANY($1)
                      )
-                     SELECT c.ing, a.id, a.name, a.type,
+                     SELECT c.ing, a.id, a.name, COALESCE(a.type, ''),
                             COALESCE(bao.price_override, a.default_price),
                             mo.group_id, mg.swap_category_id
                        FROM c
@@ -535,9 +538,10 @@ impl Catalog {
             Option<String>,
             Option<String>,
         );
+        // A custom group's option is sold like any other, with no add-on type.
         let rows: Vec<OptRow> = sqlx::query_as(
             "SELECT a.id, a.name, a.name_translations,
-                    COALESCE(bao.price_override, a.default_price), a.type,
+                    COALESCE(bao.price_override, a.default_price), COALESCE(a.type, ''),
                     mo.group_id, g.effect, g.swap_category_id, c.slug,
                     ri.id, ri.name, ri.unit::text
                FROM addon_items a
