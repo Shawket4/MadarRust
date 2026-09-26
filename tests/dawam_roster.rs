@@ -5321,3 +5321,248 @@ async fn a_day_put_from_one_branch_keeps_the_other_branchs_blocks(pool: PgPool) 
         .await;
     assert_eq!(shifts_on(&pool, f.a, d2).await, vec![b_morning]);
 }
+
+/// `a` works at A and B too (A stays their first branch).
+async fn also_at_b(pool: &PgPool, f: &F) {
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn overrides_on(pool: &PgPool, who: Uuid, on: NaiveDate) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2",
+    )
+    .bind(who)
+    .bind(on)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// BUG-4 / P7 [data loss]: "Back to pattern" on branch A's board deleted
+/// the person's shift at branch B too. A reset with `branch_id` puts only
+/// that branch's part of the date back on the pattern; the other branch's
+/// blocks stay. With no branch, only what the caller may edit is reset
+/// (an owner: the whole date, as before).
+#[sqlx::test]
+async fn back_to_pattern_at_one_branch_keeps_the_other_branchs_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    also_at_b(&pool, &f).await;
+    let a_late = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let a_early = block(&pool, &f, Some(f.br_a), "A early", t(6, 0), t(9, 0)).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(10, 0), t(13, 0)).await;
+    pattern(&pool, &f, f.a, a_late, None).await;
+    let d = today() + Duration::days(3);
+    let put = async |token: String, body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", token, body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    let set_up = async || {
+        put(
+            f.owner(),
+            json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a,
+                    "shifts": [{ "work_shift_id": a_early }] }),
+        )
+        .await;
+        put(
+            f.owner(),
+            json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                    "shifts": [{ "work_shift_id": b_morning }] }),
+        )
+        .await;
+        assert_eq!(shifts_on(&pool, f.a, d).await, vec![a_early, b_morning]);
+    };
+    set_up().await;
+
+    // A's board: A back on its pattern, B's morning kept.
+    let (s, out) = done(call!(
+        app,
+        "DELETE",
+        format!(
+            "/staff/schedules/days?employee_id={}&on_date={d}&branch_id={}",
+            f.a, f.br_a
+        ),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(
+        shifts_on(&pool, f.a, d).await,
+        vec![b_morning, a_late],
+        "{out}"
+    );
+    // B's board then: nothing of the date's own is left, so no rows at all.
+    let (s, out) = done(call!(
+        app,
+        "DELETE",
+        format!(
+            "/staff/schedules/days?employee_id={}&on_date={d}&branch_id={}",
+            f.a, f.br_b
+        ),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![a_late]);
+    assert_eq!(overrides_on(&pool, f.a, d).await, 0, "back on the pattern");
+    assert_eq!(out["follows_pattern"], json!(true), "{out}");
+
+    // With no branch, A's manager (who can't edit B) resets only A's part.
+    set_up().await;
+    let (s, out) = done(call!(
+        app,
+        "DELETE",
+        format!("/staff/schedules/days?employee_id={}&on_date={d}", f.a),
+        f.manager()
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_morning, a_late]);
+    // The owner, with no branch, resets the whole date, as before.
+    let (s, _) = done(call!(
+        app,
+        "DELETE",
+        format!("/staff/schedules/days?employee_id={}&on_date={d}", f.a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![a_late]);
+    assert_eq!(overrides_on(&pool, f.a, d).await, 0);
+
+    // A branch the person doesn't work at is refused.
+    refused!(
+        call!(
+            app,
+            "DELETE",
+            format!(
+                "/staff/schedules/days?employee_id={}&on_date={d}&branch_id={}",
+                f.b, f.br_b
+            ),
+            f.owner()
+        ),
+        400,
+        "EMPLOYEE_NOT_AT_BRANCH"
+    );
+}
+
+/// BUG-4 / P7: the board of branch A showed a person's shift at branch B as
+/// "Off". It stays out of `shifts` (a PUT from A never sends it) and is
+/// listed under `elsewhere`, with the branch's name.
+#[sqlx::test]
+async fn the_roster_lists_a_shift_at_another_branch_under_elsewhere(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    also_at_b(&pool, &f).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(10, 0), t(13, 0)).await;
+    let d = today() + Duration::days(3);
+    let (s, out) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] })
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    let (s, v) = done(call!(
+        app,
+        "GET",
+        format!("/staff/roster?branch_id={}&from={d}&to={d}", f.br_a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        v["shifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["employee_id"] != json!(f.a)),
+        "{v}"
+    );
+    let elsewhere = v["elsewhere"].as_array().expect("elsewhere");
+    assert_eq!(elsewhere.len(), 1, "{v}");
+    let e = &elsewhere[0];
+    assert_eq!(e["employee_id"], json!(f.a));
+    assert_eq!(e["date"], json!(d));
+    assert_eq!(e["branch_id"], json!(f.br_b));
+    assert_eq!(e["branch_name"], json!("B"));
+    assert_eq!(e["work_shift_id"], json!(b_morning));
+    assert_eq!(e["shift_name"], json!("B morning"));
+    assert_eq!(e["start_time"], json!("10:00:00"));
+    assert_eq!(e["end_time"], json!("13:00:00"));
+    // B's own board lists it as its shift, nothing elsewhere.
+    let (_, v) = done(call!(
+        app,
+        "GET",
+        format!("/staff/roster?branch_id={}&from={d}&to={d}", f.br_b),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(v["shifts"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["elsewhere"], json!([]), "{v}");
+}
+
+/// BUG-4 / P7: `date_sets` (what "Back to pattern" is offered on) are per
+/// board: a date changed at B only is not a change on A's board.
+#[sqlx::test]
+async fn date_sets_are_the_boards_own(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    also_at_b(&pool, &f).await;
+    let a_late = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(10, 0), t(13, 0)).await;
+    pattern(&pool, &f, f.a, a_late, None).await;
+    let d = today() + Duration::days(3);
+    let put = async |body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", f.owner(), body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    let sets = async |br: Uuid| -> Value {
+        let (s, v) = done(call!(
+            app,
+            "GET",
+            format!("/staff/roster?branch_id={br}&from={d}&to={d}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{v}");
+        v["date_sets"].clone()
+    };
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] }),
+    )
+    .await;
+    assert_eq!(
+        sets(f.br_a).await,
+        json!([]),
+        "A's part follows the pattern"
+    );
+    assert_eq!(
+        sets(f.br_b).await,
+        json!([{ "employee_id": f.a, "date": d, "day_off": false }])
+    );
+    // A day off from A's board: a change at A (a day off there), B's kept.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a, "shifts": [] })).await;
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_morning]);
+    assert_eq!(
+        sets(f.br_a).await,
+        json!([{ "employee_id": f.a, "date": d, "day_off": true }])
+    );
+    assert_eq!(
+        sets(f.br_b).await,
+        json!([{ "employee_id": f.a, "date": d, "day_off": false }])
+    );
+}

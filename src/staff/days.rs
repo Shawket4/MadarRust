@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::errors::AppError;
 use crate::staff::access::Subject;
 use crate::staff::dawam::{notify, week_start};
-use crate::staff::schedules::{ResolvedShift, resolve_range};
+use crate::staff::schedules::{ResolvedShift, pattern_range, resolve_range};
 
 const NIL: &str = "'00000000-0000-0000-0000-000000000000'::uuid";
 
@@ -289,20 +289,78 @@ pub(crate) async fn replace_day(
     Ok(())
 }
 
-/// Back to the pattern: the date's own set is dropped. Rows removed.
+/// Back to the pattern at the branches in `scope` (BUG-4): their blocks
+/// become the pattern's there, and the blocks worked at any other branch
+/// stay as they are, own times and all. When what stays is the pattern too,
+/// the date's own set is dropped and it follows the pattern again. `None` =
+/// every branch: the whole set goes. Whether anything changed.
 pub(crate) async fn reset_day(
     conn: &mut PgConnection,
+    org_id: Uuid,
     employee_id: Uuid,
     date: NaiveDate,
-) -> Result<u64, AppError> {
-    Ok(
-        sqlx::query("DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2")
-            .bind(employee_id)
-            .bind(date)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected(),
-    )
+    scope: Option<&[Uuid]>,
+    by: Option<Uuid>,
+) -> Result<bool, AppError> {
+    let drop_all = async |conn: &mut PgConnection| -> Result<bool, AppError> {
+        Ok(sqlx::query(
+            "DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2",
+        )
+        .bind(employee_id)
+        .bind(date)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected()
+            > 0)
+    };
+    let Some(scope) = scope else {
+        return drop_all(conn).await;
+    };
+    if day_rows(conn, employee_id, date).await?.is_empty() {
+        return Ok(false);
+    }
+    let here = |b: Option<Uuid>| b.is_none_or(|b| scope.contains(&b));
+    let kept: Vec<ResolvedShift> = resolve_range(&mut *conn, &[employee_id], date, date, None)
+        .await?
+        .into_iter()
+        .filter(|s| s.on_date == date && !here(s.branch_id))
+        .collect();
+    let pattern: Vec<ResolvedShift> = pattern_range(&mut *conn, &[employee_id], date, date, None)
+        .await?
+        .into_iter()
+        .filter(|s| s.on_date == date)
+        .collect();
+    let times = |s: &ResolvedShift| s.times_edited.then_some((s.start_time, s.end_time));
+    let mut stays: Vec<_> = kept
+        .iter()
+        .map(|s| (s.work_shift_id, s.branch_id, times(s)))
+        .collect();
+    let mut pattern_else: Vec<_> = pattern
+        .iter()
+        .filter(|s| !here(s.branch_id))
+        .map(|s| (s.work_shift_id, s.branch_id, None))
+        .collect();
+    stays.sort();
+    pattern_else.sort();
+    if stays == pattern_else {
+        return drop_all(conn).await;
+    }
+    let blocks: Vec<Block> = pattern
+        .iter()
+        .filter(|s| here(s.branch_id) && !kept.iter().any(|k| k.work_shift_id == s.work_shift_id))
+        .map(|s| Block {
+            work_shift_id: s.work_shift_id,
+            times: None,
+            branch_id: s.branch_id,
+        })
+        .chain(kept.iter().map(|s| Block {
+            work_shift_id: s.work_shift_id,
+            times: times(s),
+            branch_id: s.branch_id,
+        }))
+        .collect();
+    replace_day(conn, org_id, employee_id, date, &blocks, None, by).await?;
+    Ok(true)
 }
 
 /// Put one more block on a date; the rest of the day stays.
