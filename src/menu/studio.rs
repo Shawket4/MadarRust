@@ -124,8 +124,8 @@ pub struct ModifierGroupOut {
     pub options: Vec<ModifierOptionOut>,
 }
 
-/// A priced optional — a member of the item-private `Options` group
-/// (a modifier_group with `legacy_addon_type IS NULL` owned by this item).
+/// A priced optional — a member of the item's own `Options` group
+/// (what `PUT /menu-items/{id}/options` edits).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ItemOptionOut {
     pub id: Uuid,
@@ -260,7 +260,56 @@ pub struct GroupAttachInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PutModifierGroupsRequest {
-    pub groups: Vec<GroupAttachInput>,
+    /// The item's full set of reusable groups, in order. `[]` detaches every
+    /// group (the item then offers none). Omitted or `null` changes nothing,
+    /// so a partial update or an older client never detaches by accident.
+    /// The item's own priced options are not in this set: they belong to
+    /// `PUT /menu-items/{id}/options`.
+    #[serde(default)]
+    pub groups: Option<Vec<GroupAttachInput>>,
+}
+
+/// `g` (a `modifier_groups` row) is an item's own priced **Options** group, the
+/// one `PUT /menu-items/{id}/options` edits: untyped, holding no add-on, and
+/// either holding the item's optionals or named as that endpoint names it.
+///
+/// `legacy_addon_type IS NULL` alone is not enough: a CUSTOM reusable group
+/// (created with no legacy type) is untyped too, but its options are add-ons
+/// (`legacy_source = 'addon'`). Treating both alike is why a replace-set of an
+/// item's groups never detached a custom group, and why a custom group sorted
+/// first could be read (and rewritten) as the item's options.
+pub(crate) const ITEM_OPTIONS_GROUP: &str = "(g.legacy_addon_type IS NULL \
+     AND NOT EXISTS (SELECT 1 FROM modifier_options io \
+                      WHERE io.group_id = g.id AND io.legacy_source = 'addon') \
+     AND (g.name = 'Options' OR EXISTS (SELECT 1 FROM modifier_options io \
+                      WHERE io.group_id = g.id AND io.legacy_source = 'optional')))";
+
+/// The item's own Options group ([`ITEM_OPTIONS_GROUP`]) among its attached
+/// groups, if it has one. The one that holds the item's optionals wins, then
+/// one attached to no other item, then the item-private attachment kind, then
+/// attachment order.
+pub(crate) async fn item_options_group_id<'e, E>(
+    ex: E,
+    item_id: Uuid,
+) -> Result<Option<Uuid>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let sql = format!(
+        "SELECT g.id FROM menu_item_modifier_groups mimg \
+         JOIN modifier_groups g ON g.id = mimg.group_id \
+         WHERE mimg.menu_item_id = $1 AND {ITEM_OPTIONS_GROUP} \
+         ORDER BY EXISTS (SELECT 1 FROM modifier_options o \
+                           WHERE o.group_id = g.id AND o.legacy_source = 'optional') DESC, \
+                  EXISTS (SELECT 1 FROM menu_item_modifier_groups x \
+                           WHERE x.group_id = g.id AND x.menu_item_id <> $1), \
+                  mimg.legacy_origin IS DISTINCT FROM 'options', mimg.sort, g.id \
+         LIMIT 1"
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(item_id)
+        .fetch_optional(ex)
+        .await?)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -552,8 +601,10 @@ async fn build_studio_aggregate(
     }
 
     // ── Attached modifier groups (menu_item_modifier_groups → modifier_groups). ──
-    // The item's own `Options` group (legacy_addon_type IS NULL) is surfaced under
-    // `options`, NOT here; `modifier_groups` shows the reusable typed groups.
+    // The item's own `Options` group is surfaced under `options`, NOT here;
+    // `modifier_groups` shows every other attached group, typed or custom, which
+    // is exactly the set `PUT /menu-items/{id}/modifier-groups` replaces.
+    let options_group = item_options_group_id(pool, item_id).await?;
     let attach_rows: Vec<(
         Uuid,
         Uuid,
@@ -576,10 +627,11 @@ async fn build_studio_aggregate(
                 mimg.included_option_ids \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups mg ON mg.id = mimg.group_id \
-         WHERE mimg.menu_item_id = $1 AND mg.legacy_addon_type IS NOT NULL \
+         WHERE mimg.menu_item_id = $1 AND mg.id IS DISTINCT FROM $2 \
          ORDER BY mimg.sort, mg.name",
     )
     .bind(item_id)
+    .bind(options_group)
     .fetch_all(pool)
     .await?;
 
@@ -748,24 +800,13 @@ async fn load_group_options(
     Ok((by_group, opt_recipes))
 }
 
-/// Fetch the item-private priced optionals (its `Options` group: a modifier_group
-/// with `legacy_addon_type IS NULL` attached to exactly this item), hydrated with cost.
+/// Fetch the item-private priced optionals (its `Options` group, see
+/// [`ITEM_OPTIONS_GROUP`]), hydrated with cost.
 pub(crate) async fn fetch_item_options(
     pool: &PgPool,
     item_id: Uuid,
 ) -> Result<Vec<ItemOptionOut>, AppError> {
-    // The per-item Options group is the attached group whose legacy_addon_type IS NULL.
-    let group_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT mg.id FROM menu_item_modifier_groups mimg \
-         JOIN modifier_groups mg ON mg.id = mimg.group_id \
-         WHERE mimg.menu_item_id = $1 AND mg.legacy_addon_type IS NULL \
-         ORDER BY mimg.sort LIMIT 1",
-    )
-    .bind(item_id)
-    .fetch_optional(pool)
-    .await?;
-
-    let Some(group_id) = group_id else {
+    let Some(group_id) = item_options_group_id(pool, item_id).await? else {
         return Ok(Vec::new());
     };
 
@@ -1164,7 +1205,12 @@ pub async fn put_modifier_groups(
     require_same_org(&claims, Some(basics.org_id))?;
 
     let item_id = basics.id;
-    let attaches = body.into_inner().groups;
+    // Omitted (or null): nothing changes. Only an explicit list replaces the set,
+    // so an older client or a partial save can never detach groups by accident.
+    let Some(attaches) = body.into_inner().groups else {
+        let agg = build_studio_aggregate(pool.get_ref(), &basics).await?;
+        return Ok(HttpResponse::Ok().json(agg));
+    };
 
     // Reject duplicate group ids (UNIQUE(menu_item_id,group_id)).
     let mut seen = std::collections::HashSet::new();
@@ -1194,17 +1240,47 @@ pub async fn put_modifier_groups(
 
     let mut tx = pool.begin().await?;
 
-    // Delete-then-insert the reusable (typed) attachments for this item. The item's own
-    // `Options` group attachment (legacy_addon_type NULL) is owned by the options
-    // endpoint, so it is NOT touched here — only typed groups are replaced.
+    // The item's own `Options` group belongs to `PUT /menu-items/{id}/options`:
+    // this set neither detaches nor re-attaches it (listing it is a no-op).
+    let options_group = item_options_group_id(&mut *tx, item_id).await?;
+    let attaches: Vec<GroupAttachInput> = attaches
+        .into_iter()
+        .filter(|a| Some(a.group_id) != options_group)
+        .collect();
+
+    // Another item's own Options group is not a reusable group: attaching it would
+    // make both items edit one set of options. One already attached here (an old
+    // mistake) may stay, so the item can still be saved and can let go of it.
+    if !attaches.is_empty() {
+        let group_ids: Vec<Uuid> = attaches.iter().map(|a| a.group_id).collect();
+        let foreign: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT g.name FROM modifier_groups g \
+             WHERE g.id = ANY($1) AND {ITEM_OPTIONS_GROUP} \
+               AND NOT EXISTS (SELECT 1 FROM menu_item_modifier_groups m \
+                                WHERE m.group_id = g.id AND m.menu_item_id = $2) \
+             ORDER BY g.name LIMIT 1"
+        ))
+        .bind(&group_ids)
+        .bind(item_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(name) = foreign {
+            return Err(AppError::BadRequest(format!(
+                "\"{name}\" is another item's own options, not a group that can be attached"
+            )));
+        }
+    }
+
+    // Delete-then-insert every attachment except the item's Options group: typed
+    // and custom (untyped) groups alike, so an explicit `[]` detaches them all.
+    // The legacy shapes old tills read (addon slots, the allowed-addon list) are
+    // views over these rows, so nothing of the old links is left behind.
     sqlx::query(
-        "DELETE FROM menu_item_modifier_groups mimg \
-         USING modifier_groups mg \
-         WHERE mimg.group_id = mg.id \
-           AND mimg.menu_item_id = $1 \
-           AND mg.legacy_addon_type IS NOT NULL",
+        "DELETE FROM menu_item_modifier_groups \
+         WHERE menu_item_id = $1 AND group_id IS DISTINCT FROM $2",
     )
     .bind(item_id)
+    .bind(options_group)
     .execute(&mut *tx)
     .await?;
 
@@ -1230,11 +1306,57 @@ pub async fn put_modifier_groups(
         .await?;
     }
 
+    // An item that lists NO group means "never set up" to every till: it then
+    // falls back to the legacy rule for such items (an empty add-on allowlist
+    // offers every add-on of the org). So a set that leaves the item with no
+    // active group keeps the item's own Options group attached, empty if it has
+    // no options — what `PUT /options` would create. The item then reads as set
+    // up with nothing to offer, and a till shows no choices on it.
+    let any_active: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM menu_item_modifier_groups m \
+                          JOIN modifier_groups g ON g.id = m.group_id \
+                         WHERE m.menu_item_id = $1 AND g.is_active)",
+    )
+    .bind(item_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !any_active && options_group.is_none() {
+        create_item_options_group(&mut tx, basics.org_id, item_id).await?;
+    }
+
     bump_catalog_revision(&mut tx, basics.org_id).await?;
     tx.commit().await?;
 
     let agg = build_studio_aggregate(pool.get_ref(), &basics).await?;
     Ok(HttpResponse::Ok().json(agg))
+}
+
+/// Create the item's own (empty) `Options` group and attach it as the
+/// item-private kind, offering the whole group: options added later are
+/// appended to that list by the `modifier_options` trigger.
+pub(crate) async fn create_item_options_group(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: Uuid,
+    item_id: Uuid,
+) -> Result<Uuid, AppError> {
+    let g: Uuid = sqlx::query_scalar(
+        "INSERT INTO modifier_groups \
+             (org_id, name, selection_type, min_selections, is_required, legacy_addon_type) \
+         VALUES ($1, 'Options', 'multi', 0, false, NULL) RETURNING id",
+    )
+    .bind(org_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO menu_item_modifier_groups \
+             (menu_item_id, group_id, sort, included_option_ids, legacy_origin) \
+         VALUES ($1, $2, 0, mimg_all_option_ids($2), 'options')",
+    )
+    .bind(item_id)
+    .bind(g)
+    .execute(&mut **tx)
+    .await?;
+    Ok(g)
 }
 
 // ── Endpoint 5: POST /menu-items/{id}/duplicate ──────────────────────
@@ -1322,21 +1444,20 @@ pub async fn duplicate_item(
         .await?;
     }
 
-    // 3. Copy the item-private `Options` group (legacy_addon_type NULL) with a NEW group
+    // 3. Copy the item-private `Options` group ([`ITEM_OPTIONS_GROUP`]) with a NEW group
     //    + NEW option ids (a duplicate is a new item with no order history → fresh uuids,
     //    NOT stable), and clone each option's recipe_lines. Track old→new option ids so
     //    overrides that target options can be re-pointed.
     let mut option_map: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
 
+    let src_group_id = item_options_group_id(&mut *tx, src_item).await?;
     let src_options_group: Option<(Uuid, i32, Option<i32>, Option<i32>, Option<bool>)> =
         sqlx::query_as(
-            "SELECT mg.id, mimg.sort, mimg.min_override, mimg.max_override, mimg.is_required_override \
-             FROM menu_item_modifier_groups mimg \
-             JOIN modifier_groups mg ON mg.id = mimg.group_id \
-             WHERE mimg.menu_item_id = $1 AND mg.legacy_addon_type IS NULL \
-             ORDER BY mimg.sort LIMIT 1",
+            "SELECT group_id, sort, min_override, max_override, is_required_override \
+             FROM menu_item_modifier_groups WHERE menu_item_id = $1 AND group_id = $2",
         )
         .bind(src_item)
+        .bind(src_group_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -1426,11 +1547,10 @@ pub async fn duplicate_item(
         .await?;
     }
 
-    // 4. Copy the reusable (typed) group attachments. These reference SHARED reusable
-    //    groups (org-scoped, not per-item), so we keep the same group_id but must
-    //    re-map any included_option_ids that happen to point at copied option ids
-    //    (typed groups reference shared options → their ids are unchanged, so the
-    //    allowlist copies verbatim). Provenance copies too (filled by rule if absent).
+    // 4. Copy every other group attachment (typed or custom). These reference SHARED
+    //    reusable groups (org-scoped, not per-item), so we keep the same group_id; their
+    //    options are shared too (ids unchanged), so the allowlist copies verbatim.
+    //    Provenance copies too (filled by rule if absent).
     sqlx::query(
         "INSERT INTO menu_item_modifier_groups \
              (menu_item_id, group_id, sort, min_override, max_override, \
@@ -1442,10 +1562,11 @@ pub async fn duplicate_item(
                          mimg_default_origin(mimg.group_id, mimg.is_required_override)) \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups mg ON mg.id = mimg.group_id \
-         WHERE mimg.menu_item_id = $2 AND mg.legacy_addon_type IS NOT NULL",
+         WHERE mimg.menu_item_id = $2 AND mg.id IS DISTINCT FROM $3",
     )
     .bind(new_item)
     .bind(src_item)
+    .bind(src_group_id)
     .execute(&mut *tx)
     .await?;
 
@@ -1492,4 +1613,3 @@ async fn clone_overrides(
     .await?;
     Ok(())
 }
-

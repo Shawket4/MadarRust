@@ -683,7 +683,7 @@ async fn test_put_modifier_groups_replace_set(pool: PgPool) {
 
     // Attach g1 (with allowlist = [opt1]) and g2 with min/max/required overrides.
     let body = PutModifierGroupsRequest {
-        groups: vec![
+        groups: Some(vec![
             GroupAttachInput {
                 group_id: g1,
                 sort: 0,
@@ -700,7 +700,7 @@ async fn test_put_modifier_groups_replace_set(pool: PgPool) {
                 is_required_override: Some(true),
                 included_option_ids: None,
             },
-        ],
+        ]),
     };
     let resp = test::call_service(
         &app,
@@ -737,14 +737,14 @@ async fn test_put_modifier_groups_replace_set(pool: PgPool) {
 
     // Replace with just g2 → g1 detached (delete-then-insert).
     let body = PutModifierGroupsRequest {
-        groups: vec![GroupAttachInput {
+        groups: Some(vec![GroupAttachInput {
             group_id: g2,
             sort: 0,
             min_override: None,
             max_override: None,
             is_required_override: None,
             included_option_ids: None,
-        }],
+        }]),
     };
     let resp = test::call_service(
         &app,

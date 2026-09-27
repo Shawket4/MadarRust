@@ -108,6 +108,10 @@ pub struct GroupOut {
     pub swap_category_id: Option<Uuid>,
     pub swap_category_slug: Option<String>,
     pub options: Vec<GroupOptionOut>,
+    /// An item's own priced Options group (what `PUT /menu-items/{id}/options`
+    /// edits), not a reusable group: never offered for attaching to an item.
+    #[serde(default)]
+    pub is_item_options: bool,
 }
 
 // ── Request payloads ─────────────────────────────────────────────────
@@ -438,14 +442,16 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
         String,
         Option<Uuid>,
         Option<String>,
-    )> = sqlx::query_as(
+        bool,
+    )> = sqlx::query_as(&format!(
         "SELECT g.id, g.org_id, g.name, g.name_translations, g.selection_type, g.min_selections, \
                 g.max_selections, g.is_required, g.sort, g.is_active, g.legacy_addon_type, \
-                g.effect, g.swap_category_id, c.slug \
+                g.effect, g.swap_category_id, c.slug, {} \
          FROM modifier_groups g \
          LEFT JOIN ingredient_categories c ON c.id = g.swap_category_id \
          WHERE g.id = ANY($1) ORDER BY g.sort, g.name",
-    )
+        studio::ITEM_OPTIONS_GROUP
+    ))
     .bind(group_ids)
     .fetch_all(pool)
     .await?;
@@ -515,6 +521,7 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
                 effect,
                 swap_category_id,
                 swap_category_slug,
+                is_item_options,
             ) = r;
             GroupOut {
                 id,
@@ -532,6 +539,7 @@ async fn load_groups(pool: &PgPool, group_ids: &[Uuid]) -> Result<Vec<GroupOut>,
                 swap_category_id,
                 swap_category_slug,
                 options: opts_by_group.remove(&id).unwrap_or_default(),
+                is_item_options,
             }
         })
         .collect())
@@ -1538,44 +1546,14 @@ pub async fn put_item_options(
 
     let mut tx = pool.begin().await?;
 
-    // Resolve (or create) the item-private `Options` group: the attached group with
-    // legacy_addon_type IS NULL. If absent, create one and attach it via
-    // menu_item_modifier_groups as an item-private `options` attachment (old tills only
-    // charge/deduct optionals whose attachment says so) offering the whole group; options
-    // inserted below are appended to that list by the modifier_options trigger.
-    let group_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT mg.id FROM menu_item_modifier_groups mimg \
-         JOIN modifier_groups mg ON mg.id = mimg.group_id \
-         WHERE mimg.menu_item_id = $1 AND mg.legacy_addon_type IS NULL \
-         ORDER BY mimg.sort LIMIT 1",
-    )
-    .bind(item_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let group_id = match group_id {
+    // Resolve (or create) the item-private `Options` group (`studio::ITEM_OPTIONS_GROUP`:
+    // never a custom reusable group, whose options are add-ons). If absent, create one
+    // attached as an item-private `options` attachment (old tills only charge/deduct
+    // optionals whose attachment says so) offering the whole group; options inserted
+    // below are appended to that list by the modifier_options trigger.
+    let group_id = match studio::item_options_group_id(&mut *tx, item_id).await? {
         Some(g) => g,
-        None => {
-            // Create the per-item Options group (multi-select, no required min).
-            let g: Uuid = sqlx::query_scalar(
-                "INSERT INTO modifier_groups \
-                     (org_id, name, selection_type, min_selections, is_required, legacy_addon_type) \
-                 VALUES ($1, 'Options', 'multi', 0, false, NULL) RETURNING id",
-            )
-            .bind(org_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            sqlx::query(
-                "INSERT INTO menu_item_modifier_groups \
-                     (menu_item_id, group_id, sort, included_option_ids, legacy_origin) \
-                 VALUES ($1, $2, 0, mimg_all_option_ids($2), 'options')",
-            )
-            .bind(item_id)
-            .bind(g)
-            .execute(&mut *tx)
-            .await?;
-            g
-        }
+        None => studio::create_item_options_group(&mut tx, org_id, item_id).await?,
     };
 
     // Existing option ids in this group (to decide create/update/remove).
@@ -2031,4 +2009,3 @@ pub async fn get_item_cost(
 
     Ok(HttpResponse::Ok().json(out))
 }
-

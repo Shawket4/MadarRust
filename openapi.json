@@ -77429,6 +77429,10 @@
           "is_active": {
             "type": "boolean"
           },
+          "is_item_options": {
+            "type": "boolean",
+            "description": "An item's own priced Options group (what `PUT /menu-items/{id}/options`\nedits), not a reusable group: never offered for attaching to an item."
+          },
           "is_required": {
             "type": "boolean"
           },
@@ -77921,7 +77925,7 @@
       },
       "ItemOptionOut": {
         "type": "object",
-        "description": "A priced optional — a member of the item-private `Options` group\n(a modifier_group with `legacy_addon_type IS NULL` owned by this item).",
+        "description": "A priced optional — a member of the item's own `Options` group\n(what `PUT /menu-items/{id}/options` edits).",
         "required": [
           "id",
           "name",
@@ -89076,15 +89080,16 @@
       },
       "PutModifierGroupsRequest": {
         "type": "object",
-        "required": [
-          "groups"
-        ],
         "properties": {
           "groups": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/components/schemas/GroupAttachInput"
-            }
+            },
+            "description": "The item's full set of reusable groups, in order. `[]` detaches every\ngroup (the item then offers none). Omitted or `null` changes nothing,\nso a partial update or an older client never detaches by accident.\nThe item's own priced options are not in this set: they belong to\n`PUT /menu-items/{id}/options`."
           }
         }
       },
