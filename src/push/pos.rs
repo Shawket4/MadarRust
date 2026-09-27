@@ -241,20 +241,20 @@ mod tests {
             new_order_words("D-ARK-260924-0012", "outside", 24500, false),
             (
                 "New delivery order".to_string(),
-                "D-ARK-260924-0012 · Outside · 245.00 EGP".to_string()
+                "D-ARK-260924-0012 · Outside · EGP 245.00".to_string()
             )
         );
         assert_eq!(
             new_order_words("D-1", "in_mall", 1005, false).1,
-            "D-1 · In-Mall · 10.05 EGP"
+            "D-1 · In-Mall · EGP 10.05"
         );
         assert_eq!(
             new_order_words("D-1", "umbrella", 99, false).1,
-            "D-1 · Umbrella · 0.99 EGP"
+            "D-1 · Umbrella · EGP 0.99"
         );
         assert_eq!(
             new_order_words("D-1", "pickup", 0, false).1,
-            "D-1 · Pickup · 0.00 EGP"
+            "D-1 · Pickup · EGP 0.00"
         );
     }
 
@@ -264,20 +264,20 @@ mod tests {
             new_order_words("D-ARK-260924-0012", "outside", 24500, true),
             (
                 "طلب توصيل جديد".to_string(),
-                "D-ARK-260924-0012 · خارجي · 245.00 EGP".to_string()
+                "D-ARK-260924-0012 · خارجي · 245.00 ج.م".to_string()
             )
         );
         assert_eq!(
             new_order_words("D-1", "in_mall", 100, true).1,
-            "D-1 · داخل المول · 1.00 EGP"
+            "D-1 · داخل المول · 1.00 ج.م"
         );
         assert_eq!(
             new_order_words("D-1", "umbrella", 100, true).1,
-            "D-1 · المظلات · 1.00 EGP"
+            "D-1 · المظلات · 1.00 ج.م"
         );
         assert_eq!(
             new_order_words("D-1", "pickup", 100, true).1,
-            "D-1 · استلام · 1.00 EGP"
+            "D-1 · استلام · 1.00 ج.م"
         );
     }
 
@@ -285,7 +285,7 @@ mod tests {
     fn an_unknown_channel_shows_as_itself_rather_than_nothing() {
         assert_eq!(
             new_order_words("D-1", "drone", 100, false).1,
-            "D-1 · drone · 1.00 EGP"
+            "D-1 · drone · EGP 1.00"
         );
     }
 

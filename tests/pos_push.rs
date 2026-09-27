@@ -507,18 +507,21 @@ async fn the_words_follow_the_devices_language(pool: PgPool) {
 
     let reference = order["delivery_ref"].as_str().unwrap();
     let total = order["total"].as_i64().unwrap();
-    let money = format!("{}.{:02} EGP", total / 100, total % 100);
+    // Money as the inbox and every other screen show it: the currency first
+    // in English, `ج.م` after the figure in Arabic.
+    let figure = format!("{}.{:02}", total / 100, total % 100);
+    assert!(total < 100_000, "no thousands separator to spell out here");
     let en_msg = &fake::sent_to(&en)[0]["message"];
     assert_eq!(en_msg["notification"]["title"], "New delivery order");
     assert_eq!(
         en_msg["notification"]["body"],
-        format!("{reference} · In-Mall · {money}")
+        format!("{reference} · In-Mall · EGP {figure}")
     );
     let ar_msg = &fake::sent_to(&ar)[0]["message"];
     assert_eq!(ar_msg["notification"]["title"], "طلب توصيل جديد");
     assert_eq!(
         ar_msg["notification"]["body"],
-        format!("{reference} · داخل المول · {money}")
+        format!("{reference} · داخل المول · {figure} ج.م")
     );
 }
 

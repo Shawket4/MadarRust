@@ -206,7 +206,7 @@ fn month(x: &str, ar: bool) -> String {
 /// month ("Aug 2026"), `dates` as the days listed, and a shift changed on
 /// several days names them all (`staff.n_shift_changed_days`); `{kind}`
 /// resolves through a `<key>.kind_*` word first (falling back to the raw
-/// value); `*amount*` arguments render as piastres.
+/// value); `*amount*` arguments are piastres, shown as [`egp`] shows them.
 pub fn render(key: &str, args: &Value, ar: bool) -> Option<String> {
     let days: Vec<String> = args
         .get("dates")
@@ -228,15 +228,7 @@ pub fn render(key: &str, args: &Value, ar: bool) -> Option<String> {
     let mut s = form.or_else(|| word(key, ar))?.to_string();
     for (k, v) in args.as_object().into_iter().flatten() {
         let text = match (k.as_str(), v) {
-            (k, Value::Number(n)) if k.contains("amount") => {
-                let p = n.as_i64().unwrap_or(0);
-                format!(
-                    "{}{}.{:02} EGP",
-                    if p < 0 { "-" } else { "" },
-                    p.abs() / 100,
-                    p.abs() % 100
-                )
-            }
+            (k, Value::Number(n)) if k.contains("amount") => egp(n.as_i64().unwrap_or(0), ar),
             ("dates", _) => days.join(if ar { "، " } else { ", " }),
             ("date" | "week_start", Value::String(x)) => day(x, ar),
             ("month", Value::String(x)) => month(x, ar),
@@ -251,6 +243,38 @@ pub fn render(key: &str, args: &Value, ar: bool) -> Option<String> {
         s = s.replace(&format!("{{{k}}}"), &text);
     }
     Some(s)
+}
+
+/// Money in a push, exactly as the phone's inbox shows the same line
+/// (madar-core `dawam::egp`): the currency first in English (`EGP 1,500.00`),
+/// `ج.م` after the figure in Arabic (`1,500.00 ج.م`), thousands grouped, two
+/// decimals, a leading `-` when negative. A push and the inbox row it becomes
+/// must read the same; the phone's own tests pin these strings.
+pub fn egp(piastres: i64, ar: bool) -> String {
+    let body = format!(
+        "{}.{:02}",
+        group_thousands(piastres.abs() / 100),
+        piastres.abs() % 100
+    );
+    let sign = if piastres < 0 { "-" } else { "" };
+    if ar {
+        format!("{sign}{body} ج.م")
+    } else {
+        format!("{sign}EGP {body}")
+    }
+}
+
+/// `1500000` → `1,500,000` (madar-core `dawam::group`).
+fn group_thousands(n: i64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (ix, c) in s.chars().enumerate() {
+        if ix > 0 && (s.len() - ix).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 struct Fcm {
@@ -573,7 +597,11 @@ mod tests {
         let args = json!({ "reason": "Late", "amount": 5000 });
         assert_eq!(
             render("staff.n_deduction_added", &args, false).unwrap(),
-            "A deduction was added: Late (50.00 EGP)"
+            "A deduction was added: Late (EGP 50.00)"
+        );
+        assert_eq!(
+            render("staff.n_deduction_added", &args, true).unwrap(),
+            "اتضاف خصم: Late (50.00 ج.م)"
         );
         let args = json!({ "kind": "leave", "date": "2026-09-30" });
         assert!(
@@ -589,6 +617,81 @@ mod tests {
             "staff.n_flag_suspicious",
         ] {
             assert!(word(k, false).is_some() && word(k, true).is_some(), "{k}");
+        }
+    }
+
+    /// Money reads as the inbox reads it (madar-core `dawam::egp`), in both
+    /// languages. The grouped figures are the phone's own test strings
+    /// (`dawam.rs`: "Omar asked for a salary advance of EGP 1,500.00", and
+    /// "1,500.00 ج.م" in Arabic).
+    #[test]
+    fn money_reads_as_the_inbox_reads_it() {
+        for (p, en, ar) in [
+            (5000, "EGP 50.00", "50.00 ج.م"),
+            (0, "EGP 0.00", "0.00 ج.م"),
+            (99, "EGP 0.99", "0.99 ج.م"),
+            (1005, "EGP 10.05", "10.05 ج.م"),
+            (150_000, "EGP 1,500.00", "1,500.00 ج.م"),
+            (123_456_789, "EGP 1,234,567.89", "1,234,567.89 ج.م"),
+            (-5000, "-EGP 50.00", "-50.00 ج.م"),
+        ] {
+            assert_eq!(egp(p, false), en, "{p}");
+            assert_eq!(egp(p, true), ar, "{p}");
+        }
+        assert_eq!(
+            render(
+                "staff.n_advance_requested",
+                &json!({ "name": "Omar", "amount": 150_000 }),
+                false
+            )
+            .unwrap(),
+            "Omar asked for a salary advance of EGP 1,500.00"
+        );
+        assert!(
+            render(
+                "staff.n_advance_requested",
+                &json!({ "name": "عمر", "amount": 150_000 }),
+                true
+            )
+            .unwrap()
+            .contains("1,500.00 ج.م")
+        );
+    }
+
+    /// EVERY push whose words carry an `{amount}` shows it as the inbox does:
+    /// `EGP 50.00` in English, `50.00 ج.م` in Arabic, and never the old
+    /// `50.00 EGP`. A new money push is covered the day its words land.
+    #[test]
+    fn every_push_with_an_amount_reads_egp_first_in_english_and_the_inbox_form_in_arabic() {
+        let with_amount: Vec<&str> = words::WORDS
+            .iter()
+            .chain(pos::WORDS.iter())
+            .filter(|(_, en, ar)| en.contains("{amount}") || ar.contains("{amount}"))
+            .map(|(k, _, _)| *k)
+            .collect();
+        for k in [
+            "staff.n_adjustment_pending",
+            "staff.n_bonus_added",
+            "staff.n_deduction_added",
+            "staff.n_advance_approved",
+            "staff.n_advance_requested",
+            "pos.n_new_delivery",
+        ] {
+            assert!(with_amount.contains(&k), "{k} carries an amount");
+        }
+        let args = json!({
+            "amount": 5000, "name": "Amal", "by": "Omar", "reason": "Late",
+            "ref": "D-1", "channel": "Pickup",
+        });
+        for k in &with_amount {
+            let en = render(k, &args, false).unwrap();
+            let ar = render(k, &args, true).unwrap();
+            assert!(en.contains("EGP 50.00"), "{k}: {en}");
+            assert!(ar.contains("50.00 ج.م"), "{k}: {ar}");
+            for text in [&en, &ar] {
+                assert!(!text.contains("50.00 EGP"), "{k}: {text}");
+                assert!(!text.contains("{amount}"), "{k}: {text}");
+            }
         }
     }
 
