@@ -634,3 +634,65 @@ async fn item_reports_count_parts_as_their_items_and_never_the_header(pool: PgPo
         .unwrap();
     assert_eq!(b["quantity_sold"], 3);
 }
+
+/// Arabic slot names in the mix (owner, 2026-09-27): a slot that still
+/// exists reads the catalogue's `name_translations` (like its `name`); a
+/// slot deleted since reads what its sales stored; neither has any → `{}`.
+#[sqlx::test]
+async fn the_mix_carries_each_slot_s_arabic_name(pool: PgPool) {
+    let Seeded { s, today } = seed(&pool).await;
+    // Main and Drink carry Arabic in the catalogue; the parts sold as Drink
+    // also stored it, and the parts sold as Side stored an Arabic name the
+    // catalogue never had.
+    for (slot, ar) in [(s.slot_main, "الطبق الرئيسي"), (s.slot_drink, "مشروب")] {
+        sqlx::query("UPDATE combo_slots SET name_translations = $2 WHERE id = $1")
+            .bind(slot)
+            .bind(json!({"ar": ar}))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "UPDATE order_items SET combo_slot_name_translations = '{\"ar\": \"جانبي\"}' WHERE combo_slot_id = $1",
+    )
+    .bind(s.slot_side)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = app!(pool);
+    let uri = format!(
+        "/reports/bundles/combos/{}/mix?from={today}&to={today}&branch_id={}",
+        s.combo, s.branch
+    );
+    let (st, m) = get(&app, &uri, &s.admin_token()).await;
+    assert_eq!(st, 200, "{m}");
+    let names = |m: &Value| -> Vec<(Value, Value)> {
+        m["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| (x["name"].clone(), x["name_translations"].clone()))
+            .collect()
+    };
+    // Side exists but has no Arabic of its own: the catalogue has none, so the
+    // sale's is used.
+    assert_eq!(
+        names(&m),
+        vec![
+            (json!("Main"), json!({"ar": "الطبق الرئيسي"})),
+            (json!("Side"), json!({"ar": "جانبي"})),
+            (json!("Drink"), json!({"ar": "مشروب"})),
+        ]
+    );
+
+    // Main deleted from the combo: its sales' own names answer (none stored).
+    sqlx::query("DELETE FROM combo_slots WHERE id = $1")
+        .bind(s.slot_main)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, m) = get(&app, &uri, &s.admin_token()).await;
+    assert_eq!(st, 200, "{m}");
+    let got = names(&m);
+    assert!(got.contains(&(json!("Main"), json!({}))), "{got:?}");
+}

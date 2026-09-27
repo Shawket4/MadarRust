@@ -116,6 +116,11 @@ pub struct SnapshotLine {
     pub combo_slot_id: Option<Uuid>,
     #[serde(default)]
     pub combo_slot_name: Option<String>,
+    /// A part: the slot's names by language (`{}` otherwise, and on a
+    /// snapshot frozen before they were kept).
+    #[serde(default = "crate::combos::types::empty_object")]
+    #[schema(value_type = Object)]
+    pub combo_slot_name_translations: serde_json::Value,
     /// A header: P per combo unit.
     #[serde(default)]
     pub combo_unit_price: Option<i32>,
@@ -612,6 +617,7 @@ pub async fn resolve_cart_as(
             combo_line_id: None,
             combo_slot_id: None,
             combo_slot_name: None,
+            combo_slot_name_translations: serde_json::json!({}),
             combo_unit_price: None,
             combo_share: 0,
             combo_surcharge: 0,
@@ -786,6 +792,7 @@ async fn resolve_combo_line(
         combo_line_id: None,
         combo_slot_id: None,
         combo_slot_name: None,
+        combo_slot_name_translations: serde_json::json!({}),
         combo_unit_price: h.combo.unit_price,
         combo_share: 0,
         combo_surcharge: 0,
@@ -870,6 +877,7 @@ async fn resolve_combo_line(
             combo_line_id: part.combo.header_id,
             combo_slot_id: part.combo.slot_id,
             combo_slot_name: part.combo.slot_name.clone(),
+            combo_slot_name_translations: part.combo.slot_name_translations_or_empty(),
             combo_unit_price: None,
             combo_share: part.combo.share,
             combo_surcharge: part.combo.surcharge,
@@ -1186,9 +1194,11 @@ pub async fn apply_snapshot(
                  unit_price, quantity, line_total, notes, deductions_snapshot,
                  line_cost, unit_cost, cost_missing, price_flagged,
                  id, line_kind, combo_line_id, combo_slot_id, combo_slot_name,
-                 combo_unit_price, combo_share, combo_surcharge, deal_minor)
+                 combo_unit_price, combo_share, combo_surcharge, deal_minor,
+                 combo_slot_name_translations)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false,
-                       COALESCE($14, gen_random_uuid()), $15, $16, $17, $18, $19, $20, $21, $22)
+                       COALESCE($14, gen_random_uuid()), $15, $16, $17, $18, $19, $20, $21, $22,
+                       $23)
                RETURNING id"#,
         )
         .bind(order.id)
@@ -1213,6 +1223,7 @@ pub async fn apply_snapshot(
         .bind(line.combo_share)
         .bind(line.combo_surcharge)
         .bind(line.deal_minor)
+        .bind(&line.combo_slot_name_translations)
         .fetch_one(&mut **tx)
         .await?;
         row_of.insert(idx, item_id);

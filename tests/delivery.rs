@@ -257,6 +257,7 @@ mod kitchen_projection {
                 combo_line_id: None,
                 combo_slot_id: None,
                 combo_slot_name: None,
+                combo_slot_name_translations: serde_json::json!({}),
                 combo_unit_price: None,
                 combo_share: 0,
                 combo_surcharge: 0,

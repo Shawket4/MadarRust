@@ -328,6 +328,16 @@ async fn write_children(
     write_windows(&mut *conn, org, "combo_item_id", id, &body.windows).await
 }
 
+/// A slot's `name_translations` as stored: the object the client sent, or
+/// `{}` for a `null` (or any non-object) from a client that has none.
+fn slot_translations(s: &ComboSlotWrite) -> serde_json::Value {
+    if s.name_translations.is_object() {
+        s.name_translations.clone()
+    } else {
+        serde_json::json!({})
+    }
+}
+
 async fn write_slot(
     conn: &mut PgConnection,
     org: Uuid,
@@ -343,7 +353,7 @@ async fn write_slot(
         )
         .bind(sid)
         .bind(s.name.trim())
-        .bind(&s.name_translations)
+        .bind(slot_translations(s))
         .bind(s.sort)
         .bind(s.min)
         .bind(s.max)
@@ -361,7 +371,7 @@ async fn write_slot(
         .bind(org)
         .bind(combo)
         .bind(s.name.trim())
-        .bind(&s.name_translations)
+        .bind(slot_translations(s))
         .bind(s.sort)
         .bind(s.min)
         .bind(s.max)

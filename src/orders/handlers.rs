@@ -442,6 +442,14 @@ pub struct OrderItem {
     #[sqlx(default)]
     #[serde(default)]
     pub combo_slot_name: Option<String>,
+    /// A part: the slot's names by language at the sale (`{"ar": "مشروب"}`),
+    /// beside `combo_slot_name` as `name_translations` is beside `item_name`.
+    /// `{}` on any other line, and on a part whose slot had none; a reader
+    /// falls back to `combo_slot_name`. Additive.
+    #[sqlx(default)]
+    #[serde(default = "crate::combos::types::empty_object")]
+    #[schema(value_type = Object)]
+    pub combo_slot_name_translations: serde_json::Value,
     /// A header: P per combo unit, as charged.
     #[sqlx(default)]
     #[serde(default)]
@@ -3160,14 +3168,17 @@ pub(crate) async fn create_order_inner(
                  price_flagged, is_reward, reward_units, reward_covered,
                  staff_comp_minor, staff_drink_id,
                  id, line_kind, combo_line_id, combo_slot_id, combo_slot_name,
-                 combo_unit_price, combo_share, combo_surcharge, deal_minor)
+                 combo_unit_price, combo_share, combo_surcharge, deal_minor,
+                 combo_slot_name_translations)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                       $18, $19, COALESCE($20, gen_random_uuid()), $21, $22, $23, $24, $25, $26, $27, $28)
+                       $18, $19, COALESCE($20, gen_random_uuid()), $21, $22, $23, $24, $25, $26, $27, $28,
+                       $29)
                RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
                          unit_price, quantity, line_total, notes, deductions_snapshot,
                          line_cost, unit_cost, cost_missing,
                          is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id,
                          line_kind, combo_line_id, combo_slot_id, combo_slot_name,
+                         combo_slot_name_translations,
                          combo_unit_price, combo_share, combo_surcharge, deal_minor"#,
         )
         .bind(order.id)
@@ -3198,6 +3209,7 @@ pub(crate) async fn create_order_inner(
         .bind(resolved.combo.share)
         .bind(resolved.combo.surcharge)
         .bind(resolved.deal_minor)
+        .bind(resolved.combo.slot_name_translations_or_empty())
         .fetch_one(&mut *tx)
         .await?;
         row_of_input.entry(input_index).or_insert(order_item.id);
@@ -4426,6 +4438,7 @@ async fn fetch_order_items_full(
                 line_cost, unit_cost, cost_missing, \
                 is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id, \
                 line_kind, combo_line_id, combo_slot_id, combo_slot_name, \
+                combo_slot_name_translations, \
                 combo_unit_price, combo_share, combo_surcharge, deal_minor \
          FROM order_items WHERE order_id = $1 \
          ORDER BY COALESCE(combo_line_id, id), combo_line_id IS NOT NULL, id",
@@ -4494,6 +4507,7 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
                 line_cost, unit_cost, cost_missing, \
                 is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id, \
                 line_kind, combo_line_id, combo_slot_id, combo_slot_name, \
+                combo_slot_name_translations, \
                 combo_unit_price, combo_share, combo_surcharge, deal_minor \
          FROM order_items WHERE order_id = ANY($1) \
          ORDER BY COALESCE(combo_line_id, id), combo_line_id IS NOT NULL, id",

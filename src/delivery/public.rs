@@ -740,6 +740,36 @@ async fn public_combos_and_deals(
         })
         .collect();
     let members = crate::combos::load::category_members(&mut conn, org_id, &cats).await?;
+    // Choices this menu does not sell right now (switched off at the branch or
+    // on the channel, or an item choice whose item is inactive): shown greyed,
+    // never pickable (owner, 2026-09-27), so their names come from here.
+    let off_menu_ids: Vec<Uuid> = defs
+        .iter()
+        .flat_map(|d| d.slots.iter().flat_map(|s| s.choices.iter()))
+        .flat_map(|c| match (c.menu_item_id, c.category_id) {
+            (Some(i), _) => vec![i],
+            (None, Some(cat)) => members.get(&cat).cloned().unwrap_or_default(),
+            _ => vec![],
+        })
+        .filter(|i| !on_menu.contains(i))
+        .collect::<HashSet<Uuid>>()
+        .into_iter()
+        .collect();
+    let off_menu: HashMap<Uuid, (String, serde_json::Value, Option<String>, i32)> =
+        sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>, i32)>(
+            "SELECT mi.id, mi.name, mi.name_translations, \
+                    COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = mi.image_group_id AND a.variant = 'full' LIMIT 1), mi.image_url), \
+                    mi.base_price \
+               FROM menu_items mi \
+              WHERE mi.org_id = $1 AND mi.id = ANY($2) AND mi.kind = 'item' AND mi.deleted_at IS NULL",
+        )
+        .bind(org_id)
+        .bind(&off_menu_ids)
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|(id, name, tr, image, price)| (id, (name, tr, image, price)))
+        .collect();
 
     let mut out = HashMap::new();
     for def in &defs {
@@ -779,7 +809,29 @@ async fn public_combos_and_deals(
                         _ => vec![],
                     };
                     for item in items {
-                        if !on_menu.contains(&item) || !seen.insert(item) {
+                        if !on_menu.contains(&item) {
+                            // Greyed: its name, no sizes, never the default.
+                            if let Some((name, tr, image, price)) = off_menu.get(&item)
+                                && seen.insert(item)
+                            {
+                                choices.push(PublicComboChoice {
+                                    menu_item_id: item,
+                                    name: name.clone(),
+                                    name_translations: tr.clone(),
+                                    image_url: public_image_url(org_id, image.clone()),
+                                    base_price: *price,
+                                    included_size_label: c
+                                        .included_size_label
+                                        .clone()
+                                        .unwrap_or_else(|| "one_size".into()),
+                                    sizes: Vec::new(),
+                                    surcharge: c.surcharge,
+                                    available: false,
+                                });
+                            }
+                            continue;
+                        }
+                        if !seen.insert(item) {
                             continue;
                         }
                         let r = row_of[&item];
@@ -825,9 +877,16 @@ async fn public_combos_and_deals(
                             included_size_label: included,
                             sizes,
                             surcharge: c.surcharge,
+                            available: true,
                         });
                     }
                 }
+                // An unavailable item is never the default.
+                let default_on = s.default_item_id.filter(|d| {
+                    choices
+                        .iter()
+                        .any(|c: &PublicComboChoice| c.menu_item_id == *d && c.available)
+                });
                 PublicComboSlot {
                     id: s.id,
                     name: s.name.clone(),
@@ -835,8 +894,8 @@ async fn public_combos_and_deals(
                     sort: s.sort,
                     min: s.min,
                     max: s.max,
-                    default_item_id: s.default_item_id,
-                    default_size_label: s.default_size_label.clone(),
+                    default_item_id: default_on,
+                    default_size_label: default_on.and(s.default_size_label.clone()),
                     choices,
                 }
             })

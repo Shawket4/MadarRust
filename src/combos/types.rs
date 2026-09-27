@@ -20,7 +20,8 @@ fn all_days() -> i16 {
     127
 }
 
-fn empty_object() -> serde_json::Value {
+/// Serde default of a `*_translations` object: `{}`.
+pub fn empty_object() -> serde_json::Value {
     serde_json::json!({})
 }
 
@@ -423,7 +424,7 @@ pub struct PublicComboSize {
 }
 
 /// One concrete item a public combo slot offers (categories expanded to the
-/// items available on this channel and branch).
+/// category's active items), with whether this channel and branch sell it now.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct PublicComboChoice {
     pub menu_item_id: Uuid,
@@ -438,6 +439,13 @@ pub struct PublicComboChoice {
     pub sizes: Vec<PublicComboSize>,
     /// The choice's own surcharge, per pick unit.
     pub surcharge: i32,
+    /// `false`: the item is not sold on this menu right now (switched off at
+    /// the branch or on the channel, or inactive). The page shows it greyed
+    /// with "Unavailable" and never lets it be picked (an order that picks it
+    /// is refused `COMBO_ITEM_UNAVAILABLE`); it has no `sizes` and is never
+    /// the slot's default. Absent from an older server: available.
+    #[serde(default = "t")]
+    pub available: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
