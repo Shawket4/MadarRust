@@ -74690,7 +74690,7 @@
             "items": {
               "$ref": "#/components/schemas/DeliveryModifierGroup"
             },
-            "description": "The item's modifier groups (unified model), channel-effective. Empty ⇒\nthe customizer falls back to `addons` + `allowed_addon_ids`."
+            "description": "The item's modifier groups (unified model), channel-effective: every\nactive attached group, a group with no option here included (options\n`[]`). Non-empty ⇒ the item's add-ons are SET: the page offers only\nwhat these groups hold, and no \"show all\" (none at all when every\ngroup is empty). Empty ⇒ not set up in the unified model: the page\nfalls back to `addons` + `allowed_addon_ids`."
           },
           "name": {
             "type": "string"

@@ -320,8 +320,12 @@ pub struct DeliveryMenuItem {
     /// When non-empty the customizer filters the global catalog to these IDs by
     /// default, with a "show all" escape hatch. Empty = no restriction.
     pub allowed_addon_ids: Vec<Uuid>,
-    /// The item's modifier groups (unified model), channel-effective. Empty ⇒
-    /// the customizer falls back to `addons` + `allowed_addon_ids`.
+    /// The item's modifier groups (unified model), channel-effective: every
+    /// active attached group, a group with no option here included (options
+    /// `[]`). Non-empty ⇒ the item's add-ons are SET: the page offers only
+    /// what these groups hold, and no "show all" (none at all when every
+    /// group is empty). Empty ⇒ not set up in the unified model: the page
+    /// falls back to `addons` + `allowed_addon_ids`.
     pub modifier_groups: Vec<DeliveryModifierGroup>,
     /// `item` | `combo` (combos module). Additive.
     pub kind: String,
@@ -1052,8 +1056,13 @@ async fn load_default_milk(
 /// channel-effective (branch_channel → branch → channel → catalog default, per
 /// CONTRACT §3). Addon-sourced options only; `included_option_ids` honoured;
 /// effectively-unavailable options excluded (same convention as the flat addon
-/// catalog); groups left with no options are dropped. Returns an empty map for
-/// orgs not yet backfilled — callers treat that as "no unified groups".
+/// catalog). Every ACTIVE attached group is listed, even one left with no
+/// options (the item's own empty Options group after its groups were all
+/// detached): an item that lists a group has its add-ons SET, and the page
+/// offers only what its groups hold — never the org's whole add-on catalog,
+/// as the till reads it (`/catalog/sync` lists the same attachments). An item
+/// with no attachment at all is absent from the map — not set up in the
+/// unified model — and callers fall back to the legacy allowlist.
 async fn load_modifier_groups(
     pool: &PgPool,
     item_ids: &[Uuid],
@@ -1073,13 +1082,13 @@ async fn load_modifier_groups(
         String,            // selection_type
         i32,               // effective min
         Option<i32>,       // effective max
-        bool,              // effective required
-        Option<String>,    // legacy_addon_type
-        Uuid,              // option id
-        String,            // option name
-        serde_json::Value, // option name_translations
-        i32,               // effective price
-        bool,              // effective availability
+        bool,                      // effective required
+        Option<String>,            // legacy_addon_type
+        Option<Uuid>,              // option id (none: a group with no option here)
+        Option<String>,            // option name
+        Option<serde_json::Value>, // option name_translations
+        Option<i32>,               // effective price
+        Option<bool>,              // effective availability
     )> = sqlx::query_as(
         "SELECT mimg.menu_item_id, mimg.group_id, g.name, g.name_translations, \
                 g.selection_type, \
@@ -1092,8 +1101,9 @@ async fn load_modifier_groups(
                 COALESCE(bc.is_available, b.is_available, c.is_available, true)  AS is_available \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups g  ON g.id = mimg.group_id AND g.is_active = true \
-         JOIN modifier_options o ON o.group_id = g.id AND o.is_active = true \
+         LEFT JOIN modifier_options o ON o.group_id = g.id AND o.is_active = true \
                                 AND o.legacy_source = 'addon' \
+                                AND (mimg.included_option_ids IS NULL OR o.id = ANY(mimg.included_option_ids)) \
          LEFT JOIN menu_price_overrides bc \
                 ON bc.target_type = 'modifier_option' AND bc.target_id = o.id \
                AND bc.scope = 'branch_channel' AND bc.branch_id = $2 \
@@ -1105,7 +1115,6 @@ async fn load_modifier_groups(
                 ON c.target_type = 'modifier_option' AND c.target_id = o.id \
                AND c.scope = 'channel' AND c.channel = $3::delivery_channel \
          WHERE mimg.menu_item_id = ANY($1) \
-           AND (mimg.included_option_ids IS NULL OR o.id = ANY(mimg.included_option_ids)) \
          ORDER BY mimg.menu_item_id, mimg.sort, g.name, o.sort, o.name",
     )
     .bind(item_ids)
@@ -1133,9 +1142,6 @@ async fn load_modifier_groups(
         avail,
     ) in rows
     {
-        if !avail {
-            continue; // customer-facing: unavailable options are excluded entirely
-        }
         let groups = by_item.entry(item_id).or_default();
         let group = match groups.last_mut() {
             Some(g) if g.group_id == group_id => g,
@@ -1154,16 +1160,16 @@ async fn load_modifier_groups(
                 groups.last_mut().expect("just pushed")
             }
         };
-        group.options.push(DeliveryModifierOption {
-            option_id: oid,
-            name: oname,
-            name_translations: otrans,
-            price,
-        });
-    }
-    // Drop groups whose options all resolved unavailable.
-    for groups in by_item.values_mut() {
-        groups.retain(|g| !g.options.is_empty());
+        // The group stays listed; an option only when there is one and it
+        // is available (customer-facing: unavailable options are excluded).
+        if let (Some(option_id), Some(name), Some(price), Some(true)) = (oid, oname, price, avail) {
+            group.options.push(DeliveryModifierOption {
+                option_id,
+                name,
+                name_translations: otrans.unwrap_or_else(|| serde_json::json!({})),
+                price,
+            });
+        }
     }
     Ok(by_item)
 }

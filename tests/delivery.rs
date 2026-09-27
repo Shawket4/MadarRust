@@ -3070,6 +3070,92 @@ mod it {
         assert_eq!(options[0]["price"], 130, "branch_channel beats catalog 100");
     }
 
+    /// An item whose groups are SET lists them even when they hold nothing
+    /// (the till's reading, `/catalog/sync`): after "detach all", an item
+    /// keeps its own empty Options group, and one whose only option is off
+    /// here has an empty group too. The page reads a listed group as "these
+    /// are the item's add-ons" — none — and never falls back to the org's
+    /// whole add-on catalog. An item never set up in the unified model lists
+    /// none (the fallback signal), and an inactive group is not listed.
+    #[sqlx::test]
+    async fn public_menu_lists_an_items_empty_group_set_so_it_offers_no_addons(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, branch, teller).await;
+        let detached = seed_item(&pool, org, 500).await;
+        let all_off = seed_item(&pool, org, 600).await;
+        let never_set = seed_item(&pool, org, 700).await;
+        let group = |name: &'static str, active: bool| {
+            let pool = pool.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO modifier_groups (id, org_id, name, selection_type, min_selections, max_selections, is_required, is_active) \
+                     VALUES ($1,$2,$3,'multi',0,NULL,false,$4)",
+                )
+                .bind(id).bind(org).bind(name).bind(active)
+                .execute(&pool).await.unwrap();
+                id
+            }
+        };
+        let attach = |item: Uuid, g: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) VALUES ($1,$2,0)")
+                    .bind(item).bind(g).execute(&pool).await.unwrap();
+            }
+        };
+        // `detached`: its own Options group, no option in it; an old
+        // inactive group is still attached and must not show.
+        let options = group("Options", true).await;
+        attach(detached, options).await;
+        let old = group("Old extras", false).await;
+        attach(detached, old).await;
+        // `all_off`: an Extras group whose only option is off at this branch.
+        let extras = group("Extras", true).await;
+        let shot = Uuid::new_v4();
+        sqlx::query("INSERT INTO modifier_options (id, group_id, name, price, sort) VALUES ($1,$2,'Shot',100,0)")
+            .bind(shot).bind(extras).execute(&pool).await.unwrap();
+        attach(all_off, extras).await;
+        sqlx::query(
+            "INSERT INTO menu_price_overrides (scope, branch_id, target_type, target_id, is_available) \
+             VALUES ('branch',$1,'modifier_option',$2,false)",
+        )
+        .bind(branch).bind(shot).execute(&pool).await.unwrap();
+
+        let app = app!(&pool);
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        let groups_of = |id: Uuid| -> Vec<(String, usize)> {
+            b["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["id"] == id.to_string())
+                .unwrap_or_else(|| panic!("item {id} on the menu: {b}"))["modifier_groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| {
+                    (
+                        g["name"].as_str().unwrap().to_string(),
+                        g["options"].as_array().unwrap().len(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(groups_of(detached), vec![("Options".to_string(), 0)]);
+        assert_eq!(groups_of(all_off), vec![("Extras".to_string(), 0)]);
+        assert_eq!(groups_of(never_set), vec![]);
+    }
+
     #[sqlx::test]
     async fn public_menu_preview_returns_menu_when_channel_closed(pool: PgPool) {
         let org = seed_org(&pool).await;
