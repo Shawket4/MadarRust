@@ -787,3 +787,104 @@ async fn a_teller_cannot_edit_combos_deals_or_settings(pool: PgPool) {
     let (st, _) = call(&app, "GET", "/deals", &tok, None).await;
     assert_eq!(st, 200);
 }
+
+/// Arabic slot names (owner, 2026-09-27): a slot's `name_translations` is
+/// saved as sent, read back on the detail, replaced on an edit, and a client
+/// that sends none (omitted or `null`) still saves, with `{}`.
+#[sqlx::test]
+async fn a_slot_s_arabic_name_round_trips_and_a_client_without_one_still_saves(pool: PgPool) {
+    let s = shop(&pool).await;
+    let app = app!(pool);
+    let (st, c) = call(
+        &app,
+        "POST",
+        "/combos",
+        &s.admin_token(),
+        Some(new_combo(&s, 14000)),
+    )
+    .await;
+    assert_eq!(st, 201, "{c}");
+    let id = c["id"].as_str().unwrap().to_string();
+    // Drink was sent with Arabic, Main with nothing at all.
+    assert_eq!(c["slots"][1]["name"], "Drink");
+    assert_eq!(c["slots"][1]["name_translations"], json!({"ar": "مشروب"}));
+    assert_eq!(c["slots"][0]["name"], "Main");
+    assert_eq!(c["slots"][0]["name_translations"], json!({}));
+    let stored: Value = sqlx::query_scalar(
+        "SELECT name_translations FROM combo_slots WHERE combo_item_id = $1::uuid AND name = 'Drink'",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, json!({"ar": "مشروب"}));
+
+    // The detail reads it back.
+    let (st, got) = call(
+        &app,
+        "GET",
+        &format!("/combos/{id}"),
+        &s.admin_token(),
+        None,
+    )
+    .await;
+    assert_eq!(st, 200, "{got}");
+    assert_eq!(got["slots"][1]["name_translations"]["ar"], "مشروب");
+
+    // An edit replaces it: Main gains its Arabic, Drink's changes. Slots keep
+    // their ids, so this is an UPDATE of the same rows.
+    let mut body = new_combo(&s, 14000);
+    body["slots"][0]["id"] = got["slots"][0]["id"].clone();
+    body["slots"][0]["name_translations"] = json!({"ar": "الطبق الرئيسي"});
+    body["slots"][1]["id"] = got["slots"][1]["id"].clone();
+    body["slots"][1]["name_translations"] = json!({"ar": "المشروب"});
+    let (st, put) = call(
+        &app,
+        "PUT",
+        &format!("/combos/{id}"),
+        &s.admin_token(),
+        Some(body),
+    )
+    .await;
+    assert_eq!(st, 200, "{put}");
+    assert_eq!(put["slots"][0]["id"], got["slots"][0]["id"]);
+    assert_eq!(
+        put["slots"][0]["name_translations"],
+        json!({"ar": "الطبق الرئيسي"})
+    );
+    assert_eq!(
+        put["slots"][1]["name_translations"],
+        json!({"ar": "المشروب"})
+    );
+
+    // A client that knows nothing of slot translations: the key omitted on
+    // one slot, `null` on the other. It saves, and the slot reads `{}`.
+    let mut old = new_combo(&s, 14000);
+    old["slots"][0]["id"] = got["slots"][0]["id"].clone();
+    old["slots"][1]["id"] = got["slots"][1]["id"].clone();
+    old["slots"][1]["name_translations"] = Value::Null;
+    assert!(old["slots"][0].get("name_translations").is_none());
+    let (st, put) = call(
+        &app,
+        "PUT",
+        &format!("/combos/{id}"),
+        &s.admin_token(),
+        Some(old),
+    )
+    .await;
+    assert_eq!(st, 200, "{put}");
+    assert_eq!(put["slots"][0]["name_translations"], json!({}));
+    assert_eq!(put["slots"][1]["name_translations"], json!({}));
+
+    // And a brand-new combo from such a client.
+    let mut fresh = new_combo(&s, 9000);
+    fresh["name"] = json!("No Arabic");
+    for sl in fresh["slots"].as_array_mut().unwrap() {
+        sl.as_object_mut().unwrap().remove("name_translations");
+    }
+    let (st, c) = call(&app, "POST", "/combos", &s.admin_token(), Some(fresh)).await;
+    assert_eq!(st, 201, "{c}");
+    for sl in c["slots"].as_array().unwrap() {
+        assert_eq!(sl["name_translations"], json!({}), "{sl}");
+    }
+}

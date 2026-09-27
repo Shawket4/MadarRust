@@ -518,3 +518,149 @@ async fn each_part_earns_its_stamp_and_the_header_earns_none(pool: PgPool) {
         "Burger, Fries, Latte; never the Lunch deal itself"
     );
 }
+
+/// The slots' Arabic names as the fixture sets them: Main and Drink have one,
+/// Side has none.
+async fn arabic_slot_names(pool: &PgPool, s: &Shop) {
+    for (slot, ar) in [(s.slot_main, "الطبق الرئيسي"), (s.slot_drink, "مشروب")] {
+        sqlx::query("UPDATE combo_slots SET name_translations = $2 WHERE id = $1")
+            .bind(slot)
+            .bind(json!({"ar": ar}))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+/// Arabic slot names on a SOLD combo (owner, 2026-09-27): each part keeps the
+/// slot's names as they were at the sale in `combo_slot_name_translations`,
+/// beside `combo_slot_name`, on the answer, on `GET /orders/{id}` and on the
+/// till's `/sync/pull` order row. A slot with none, the header and a plain
+/// line carry `{}`. Renaming the slot afterwards does not rewrite the sale.
+#[sqlx::test]
+async fn a_sold_part_keeps_its_slot_s_arabic_name(pool: PgPool) {
+    let s = shop(&pool).await;
+    arabic_slot_names(&pool, &s).await;
+    let app = app!(pool);
+    let (st, v) = post_order(
+        &app,
+        &s.admin_token(),
+        s.order_body(json!([s.lunch_line(1), {"menu_item_id": s.cookie, "quantity": 1}])),
+    )
+    .await;
+    assert_eq!(st, 201, "{v:#}");
+    let expect = |items: &[Value], from: &str| {
+        for (item, slot, ar) in [
+            (s.burger, "Main", json!({"ar": "الطبق الرئيسي"})),
+            (s.fries, "Side", json!({})),
+            (s.latte, "Drink", json!({"ar": "مشروب"})),
+        ] {
+            let p = part(items, item);
+            assert_eq!(p["combo_slot_name"], slot, "{from}");
+            assert_eq!(p["combo_slot_name_translations"], ar, "{from}: {p:#}");
+        }
+        for l in items.iter().filter(|l| l["line_kind"] != "combo_part") {
+            assert_eq!(
+                l["combo_slot_name_translations"],
+                json!({}),
+                "{from}: {l:#}"
+            );
+        }
+    };
+    expect(&lines(&v), "POST /orders");
+
+    // The catalogue moves on; the sale does not.
+    sqlx::query("UPDATE combo_slots SET name_translations = '{\"ar\": \"عصير\"}' WHERE id = $1")
+        .bind(s.slot_drink)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let order_id = v["id"].as_str().unwrap().to_string();
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders/{order_id}"))
+        .insert_header(("Authorization", format!("Bearer {}", s.admin_token())))
+        .to_request();
+    let got: Value = test::call_and_read_body_json(&app, req).await;
+    expect(&lines(&got), "GET /orders/{id}");
+
+    let pull = madar_rust::sync::pull::pull_core(
+        &pool,
+        s.org,
+        &madar_rust::sync::pull::PullRequest {
+            branch_id: s.branch,
+            device_id: None,
+            types: Some(vec!["order".into()]),
+            limit: None,
+            ledger_page_size: None,
+            snapshot_cursor: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let row = pull.data["order"]
+        .iter()
+        .find(|r| r["id"] == order_id.as_str())
+        .expect("the sale is on the till's feed");
+    expect(row["items"].as_array().unwrap(), "/sync/pull");
+}
+
+/// Parts sold before the column existed are filled from the slot by
+/// 20261007100000 when the slot still has the name the sale stored; a
+/// renamed slot's part keeps `{}` (its new Arabic is not what was sold). The
+/// migration is idempotent, so it is re-run here over parts reset to `{}`.
+#[sqlx::test]
+async fn parts_sold_before_the_column_are_backfilled_from_their_slot(pool: PgPool) {
+    let s = shop(&pool).await;
+    arabic_slot_names(&pool, &s).await;
+    let app = app!(pool);
+    let (st, v) = post_order(
+        &app,
+        &s.admin_token(),
+        s.order_body(json!([s.lunch_line(1)])),
+    )
+    .await;
+    assert_eq!(st, 201, "{v:#}");
+    let order_id: Uuid = serde_json::from_value(v["id"].clone()).unwrap();
+    // As an older server stored them: no translations. Then Main is renamed.
+    sqlx::query("UPDATE order_items SET combo_slot_name_translations = '{}' WHERE order_id = $1")
+        .bind(order_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE combo_slots SET name = 'Burger' WHERE id = $1")
+        .bind(s.slot_main)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20261007100000_order_items_combo_slot_name_translations.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let got: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT combo_slot_name, combo_slot_name_translations FROM order_items \
+          WHERE order_id = $1 AND line_kind = 'combo_part' ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        got,
+        vec![
+            ("Main".to_string(), json!({})),
+            ("Side".to_string(), json!({})),
+            ("Drink".to_string(), json!({"ar": "مشروب"})),
+        ]
+    );
+    let header: Value = sqlx::query_scalar(
+        "SELECT combo_slot_name_translations FROM order_items WHERE order_id = $1 AND line_kind = 'combo'",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(header, json!({}));
+}

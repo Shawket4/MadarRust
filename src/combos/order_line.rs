@@ -74,6 +74,8 @@ pub struct LineCombo {
     pub header_id: Option<Uuid>,
     pub slot_id: Option<Uuid>,
     pub slot_name: Option<String>,
+    /// A part: the slot's `name_translations` at the sale (`None` = `{}`).
+    pub slot_name_translations: Option<serde_json::Value>,
     /// A header: P per combo unit, as charged.
     pub unit_price: Option<i32>,
     /// A part: its share of P and its surcharges, whole line, as charged.
@@ -83,6 +85,17 @@ pub struct LineCombo {
     pub expected: i32,
     /// A part: the kitchen's tag (C12).
     pub tag: Option<KitchenComboTag>,
+}
+
+impl LineCombo {
+    /// `order_items.combo_slot_name_translations` for this line: the slot's
+    /// names on a part, `{}` on anything else (the column is NOT NULL).
+    pub fn slot_name_translations_or_empty(&self) -> serde_json::Value {
+        self.slot_name_translations
+            .clone()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
 }
 
 /// What the order path knows about one menu item for combos and deals.
@@ -631,6 +644,7 @@ pub(crate) async fn resolve(
             header_id: Some(header_id),
             slot_id: Some(pick.slot_id),
             slot_name: slot.map(|s| s.name.clone()),
+            slot_name_translations: slot.map(|s| s.name_translations.clone()),
             unit_price: None,
             share,
             surcharge,

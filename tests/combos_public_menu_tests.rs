@@ -249,3 +249,151 @@ async fn a_combo_outside_its_window_or_with_an_empty_slot_is_hidden(pool: PgPool
     let (_, m) = get(&app, &qr).await;
     assert!(find(&m, s.combo).is_none());
 }
+
+/// Arabic slot names on both public menus: the storefront and the QR table
+/// menu carry each slot's `name_translations` (the page picks the Arabic in
+/// Arabic); a slot with none carries `{}`.
+#[sqlx::test]
+async fn both_public_menus_carry_each_slot_s_arabic_name(pool: PgPool) {
+    let s = shop(&pool).await;
+    let table = storefront(&pool, &s).await;
+    for (slot, ar) in [(s.slot_main, "الطبق الرئيسي"), (s.slot_drink, "مشروب")] {
+        sqlx::query("UPDATE combo_slots SET name_translations = $2 WHERE id = $1")
+            .bind(slot)
+            .bind(json!({"ar": ar}))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let app = app!(pool);
+    for uri in [
+        format!(
+            "/public/branches/{}/menu?channel=pickup&preview=true",
+            s.branch
+        ),
+        format!("/public/tables/{table}/menu"),
+    ] {
+        let (st, m) = get(&app, &uri).await;
+        assert_eq!(st, 200, "{uri}: {m}");
+        let slots = find(&m, s.combo).expect("the combo is on the menu")["combo"]["slots"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let names: Vec<(Value, Value)> = slots
+            .iter()
+            .map(|sl| (sl["name"].clone(), sl["name_translations"].clone()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                (json!("Main"), json!({"ar": "الطبق الرئيسي"})),
+                (json!("Side"), json!({})),
+                (json!("Drink"), json!({"ar": "مشروب"})),
+            ],
+            "{uri}"
+        );
+    }
+}
+
+/// Unavailable choices are shown greyed, not hidden (owner, 2026-09-27): a
+/// choice switched off at the branch stays in its slot with `available:
+/// false` and no sizes, on both public menus, and is never the default (the
+/// slot's default is cleared when it is the unavailable one). An item choice
+/// whose item was deactivated shows the same way; a deleted one does not.
+#[sqlx::test]
+async fn an_unavailable_choice_is_shown_greyed_and_never_the_default(pool: PgPool) {
+    let s = shop(&pool).await;
+    let table = storefront(&pool, &s).await;
+    // Cola (reached through the Drinks category) is off at this branch, and
+    // so is the Latte, the Drink slot's own default.
+    for item in [s.cola, s.latte] {
+        sqlx::query(
+            "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, is_available) VALUES ($1, $2, false)",
+        )
+        .bind(s.branch)
+        .bind(item)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // A second Drinks item keeps the slot sellable.
+    let tea = common::combos::item(&pool, s.org, s.drinks, "Tea", 2000).await;
+    let app = app!(pool);
+    for uri in [
+        format!(
+            "/public/branches/{}/menu?channel=pickup&preview=true",
+            s.branch
+        ),
+        format!("/public/tables/{table}/menu"),
+    ] {
+        let (st, m) = get(&app, &uri).await;
+        assert_eq!(st, 200, "{uri}: {m}");
+        let drink =
+            &find(&m, s.combo).expect("still on sale: Tea is available")["combo"]["slots"][2];
+        let choices: Vec<(Value, Value, usize)> = drink["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["menu_item_id"].clone(),
+                    c["available"].clone(),
+                    c["sizes"].as_array().map_or(0, Vec::len),
+                )
+            })
+            .collect();
+        // The Latte item choice first, then the category in name order.
+        assert_eq!(
+            choices,
+            vec![
+                (json!(s.latte), json!(false), 0),
+                (json!(s.cola), json!(false), 0),
+                (json!(tea), json!(true), 1),
+            ],
+            "{uri}: {drink:#}"
+        );
+        assert_eq!(drink["choices"][0]["name"], "Latte", "{uri}");
+        assert_eq!(drink["default_item_id"], Value::Null, "{uri}");
+        assert_eq!(drink["default_size_label"], Value::Null, "{uri}");
+        // The other slots are untouched: available, their defaults kept.
+        let main = &find(&m, s.combo).unwrap()["combo"]["slots"][0];
+        assert_eq!(main["choices"][0]["available"], true, "{uri}");
+        assert_eq!(main["default_item_id"], json!(s.burger), "{uri}");
+    }
+
+    // Deactivated (not deleted), the Latte item choice still shows greyed;
+    // deleted, it is gone.
+    sqlx::query("DELETE FROM branch_menu_overrides WHERE menu_item_id = $1")
+        .bind(s.latte)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE menu_items SET is_active = false WHERE id = $1")
+        .bind(s.latte)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let online = format!(
+        "/public/branches/{}/menu?channel=pickup&preview=true",
+        s.branch
+    );
+    let (_, m) = get(&app, &online).await;
+    let drink = &find(&m, s.combo).unwrap()["combo"]["slots"][2];
+    assert_eq!(drink["choices"][0]["menu_item_id"], json!(s.latte));
+    assert_eq!(drink["choices"][0]["available"], false);
+    sqlx::query("UPDATE menu_items SET deleted_at = now() WHERE id = $1")
+        .bind(s.latte)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (_, m) = get(&app, &online).await;
+    let drink = &find(&m, s.combo).unwrap()["combo"]["slots"][2];
+    assert!(
+        drink["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["menu_item_id"] != json!(s.latte)),
+        "{drink:#}"
+    );
+}

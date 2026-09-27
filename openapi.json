@@ -74690,7 +74690,7 @@
             "items": {
               "$ref": "#/components/schemas/DeliveryModifierGroup"
             },
-            "description": "The item's modifier groups (unified model), channel-effective. Empty ⇒\nthe customizer falls back to `addons` + `allowed_addon_ids`."
+            "description": "The item's modifier groups (unified model), channel-effective: every\nactive attached group, a group with no option here included (options\n`[]`). Non-empty ⇒ the item's add-ons are SET: the page offers only\nwhat these groups hold, and no \"show all\" (none at all when every\ngroup is empty). Empty ⇒ not set up in the unified model: the page\nfalls back to `addons` + `allowed_addon_ids`."
           },
           "name": {
             "type": "string"
@@ -81074,6 +81074,10 @@
           "name": {
             "type": "string"
           },
+          "name_translations": {
+            "type": "object",
+            "description": "The slot's names by language: the catalogue's when it has any, else\nwhat the sales stored (a deleted slot's). `{}` when neither has any."
+          },
           "picks": {
             "type": "array",
             "items": {
@@ -83283,6 +83287,10 @@
               "null"
             ],
             "description": "A part: the slot's name at the sale."
+          },
+          "combo_slot_name_translations": {
+            "type": "object",
+            "description": "A part: the slot's names by language at the sale (`{\"ar\": \"مشروب\"}`),\nbeside `combo_slot_name` as `name_translations` is beside `item_name`.\n`{}` on any other line, and on a part whose slot had none; a reader\nfalls back to `combo_slot_name`. Additive."
           },
           "combo_surcharge": {
             "type": "integer",
@@ -87720,7 +87728,7 @@
       },
       "PublicComboChoice": {
         "type": "object",
-        "description": "One concrete item a public combo slot offers (categories expanded to the\nitems available on this channel and branch).",
+        "description": "One concrete item a public combo slot offers (categories expanded to the\ncategory's active items), with whether this channel and branch sell it now.",
         "required": [
           "menu_item_id",
           "name",
@@ -87731,6 +87739,10 @@
           "surcharge"
         ],
         "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "`false`: the item is not sold on this menu right now (switched off at\nthe branch or on the channel, or inactive). The page shows it greyed\nwith \"Unavailable\" and never lets it be picked (an order that picks it\nis refused `COMBO_ITEM_UNAVAILABLE`); it has no `sizes` and is never\nthe slot's default. Absent from an older server: available."
+          },
           "base_price": {
             "type": "integer",
             "format": "int32",

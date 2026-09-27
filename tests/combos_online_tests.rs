@@ -342,3 +342,72 @@ async fn the_best_deal_is_applied_online_and_booked_on_the_order(pool: PgPool) {
     .unwrap();
     assert_eq!((units, cut), (2, 2000));
 }
+
+/// A greyed choice cannot be bought (owner, 2026-09-27): the storefront shows
+/// Cola unavailable, and an order that picks it anyway is refused
+/// `COMBO_ITEM_UNAVAILABLE`, while the same combo with an available pick goes
+/// through.
+#[sqlx::test]
+async fn an_unavailable_choice_is_refused_at_intake(pool: PgPool) {
+    let s = online_shop(&pool).await;
+    sqlx::query(
+        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, is_available) VALUES ($1, $2, false)",
+    )
+    .bind(s.branch)
+    .bind(s.cola)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = app!(pool);
+    let (st, m) = send(
+        &app,
+        test::TestRequest::get().uri(&format!(
+            "/public/branches/{}/menu?channel=in_mall&preview=true",
+            s.branch
+        )),
+    )
+    .await;
+    assert_eq!(st, 200, "{m}");
+    let combo = m["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == json!(s.combo))
+        .expect("the combo is on the menu");
+    let cola = combo["combo"]["slots"][2]["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["menu_item_id"] == json!(s.cola))
+        .expect("Cola is shown");
+    assert_eq!(cola["available"], false);
+
+    let with = |drink: Uuid| {
+        json!([{"menu_item_id": s.combo, "quantity": 1, "combo": {"picks": [
+            {"slot_id": s.slot_main, "menu_item_id": s.burger},
+            {"slot_id": s.slot_side, "menu_item_id": s.fries},
+            {"slot_id": s.slot_drink, "menu_item_id": drink},
+        ]}}])
+    };
+    let (st, b) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/delivery-orders")
+            .set_json(intake(&s, with(s.cola))),
+    )
+    .await;
+    assert_eq!(
+        (st, b["code"].as_str()),
+        (409, Some("COMBO_ITEM_UNAVAILABLE")),
+        "{b}"
+    );
+    assert_eq!(b["vars"]["menu_item_id"], json!(s.cola));
+    let (st, b) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/delivery-orders")
+            .set_json(intake(&s, with(s.latte))),
+    )
+    .await;
+    assert_eq!(st, 201, "{b}");
+}

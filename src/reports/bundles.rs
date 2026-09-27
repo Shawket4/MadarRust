@@ -100,6 +100,11 @@ pub struct MixSlot {
     /// `null` for parts whose slot was deleted since.
     pub slot_id: Option<Uuid>,
     pub name: String,
+    /// The slot's names by language: the catalogue's when it has any, else
+    /// what the sales stored (a deleted slot's). `{}` when neither has any.
+    #[serde(default = "crate::combos::types::empty_object")]
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
     pub picks: Vec<MixPick>,
 }
 
@@ -383,7 +388,8 @@ pub async fn combo_mix(
     }
     let sql = format!(
         "WITH s AS ({scoped}), rf AS ({REFUNDED}), \
-         p AS (SELECT oi.combo_slot_id, oi.combo_slot_name, oi.menu_item_id, oi.item_name, oi.size_label, \
+         p AS (SELECT oi.combo_slot_id, oi.combo_slot_name, oi.combo_slot_name_translations, \
+                      oi.menu_item_id, oi.item_name, oi.size_label, \
                       oi.quantity - COALESCE(rf.r, 0) AS units, \
                       oi.combo_surcharge * (oi.quantity - COALESCE(rf.r, 0)) / NULLIF(oi.quantity, 0)::numeric AS surcharge \
                  FROM order_items h JOIN s ON s.id = h.order_id \
@@ -391,6 +397,11 @@ pub async fn combo_mix(
                  LEFT JOIN rf ON rf.order_item_id = oi.id \
                 WHERE h.line_kind = 'combo' AND h.menu_item_id = $5) \
          SELECT p.combo_slot_id, COALESCE(MAX(cs.name), MAX(p.combo_slot_name), ''), \
+                COALESCE((ARRAY_AGG(cs.name_translations) \
+                            FILTER (WHERE cs.name_translations <> '{{}}'::jsonb))[1], \
+                         (ARRAY_AGG(p.combo_slot_name_translations) \
+                            FILTER (WHERE p.combo_slot_name_translations <> '{{}}'::jsonb))[1], \
+                         '{{}}'::jsonb), \
                 MIN(COALESCE(cs.sort, 2147483647)), p.menu_item_id, \
                 COALESCE(MAX(mi.name), MAX(p.item_name)), \
                 COALESCE((ARRAY_AGG(mi.name_translations))[1], '{{}}'::jsonb), p.size_label, \
@@ -405,6 +416,7 @@ pub async fn combo_mix(
     let raw: Vec<(
         Option<Uuid>,
         String,
+        serde_json::Value,
         i32,
         Option<Uuid>,
         String,
@@ -424,6 +436,7 @@ pub async fn combo_mix(
     for (
         slot_id,
         slot_name,
+        slot_name_translations,
         sort,
         menu_item_id,
         name,
@@ -448,6 +461,7 @@ pub async fn combo_mix(
                 MixSlot {
                     slot_id,
                     name: slot_name,
+                    name_translations: slot_name_translations,
                     picks: vec![pick],
                 },
             )),
