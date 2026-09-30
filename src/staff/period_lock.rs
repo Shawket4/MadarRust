@@ -7,6 +7,11 @@
 //! into the next open month as new lines (AD-10). Only a reopen (before anyone
 //! is paid) makes it a draft again.
 //!
+//! Clocking is exempt (owner, 30 Sep 2026): a check-in or out, a manager's or
+//! the till's punch and a location ping always go through, so paying a month
+//! early never stops its remaining shifts being worked. They move no money in
+//! a closed month — its payslip is frozen and the sweep prices nothing there.
+//!
 //! Every handler that touches money on a date asks here, so the rule lives in
 //! one place and every path — including the ones other modules own — answers
 //! the same way.

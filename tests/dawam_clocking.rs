@@ -2473,13 +2473,14 @@ async fn a_half_day_leave_no_show_is_priced_by_the_sweep(pool: PgPool) {
     );
 }
 
-/// Owner decision (BC-3, box Q-payroll-1): once a month is approved or paid,
-/// NO attendance is written into it — a check-in or out (live or queued
-/// offline), a manager's punch, a hand-entered record, a cover, a ping or
-/// its flags: 409 PERIOD_CLOSED and nothing written. The sweep marks and
-/// prices nothing there. Fixes go into the next month as pay lines.
+/// Clocking always works, whatever the month's payroll state (owner,
+/// 30 Sep 2026): a month paid early must not stop the rest of its shifts
+/// being opened and closed. A check-in, a ping, a check-out and a manager's
+/// punch all go through in a paid month. What moves money there is still
+/// refused — a hand-entered record and a cover answer 409 PERIOD_CLOSED —
+/// and the sweep marks no absence in it (its payslip is a frozen snapshot).
 #[sqlx::test]
-async fn nothing_is_written_into_a_closed_month(pool: PgPool) {
+async fn clocking_works_in_a_closed_month_but_edits_do_not(pool: PgPool) {
     let app = app!(pool);
     let f = seed(&pool, &tz_at(12)).await;
     let today = local(&pool, Utc::now(), &f.tz).await.date();
@@ -2512,57 +2513,9 @@ async fn nothing_is_written_into_a_closed_month(pool: PgPool) {
         let body: Value = test::read_body_json(resp).await;
         assert_eq!(body["code"], "PERIOD_CLOSED", "{what}: {body}");
     }
-    let records = || {
-        let pool = pool.clone();
-        let org = f.org;
-        async move {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM attendance_records WHERE org_id = $1",
-            )
-            .bind(org)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-        }
-    };
     let s = session(&pool, f.a).await;
-    closed(
-        call!(
-            app,
-            post,
-            "/staff/me/check-in",
-            phone(&s),
-            with(here(), json!({ "branch_id": f.branch }))
-        ),
-        "check-in",
-    )
-    .await;
-    let seen = Utc::now() - Duration::minutes(20);
-    closed(
-        call!(
-            app,
-            post,
-            "/staff/me/check-in",
-            phone(&s),
-            with(
-                here(),
-                json!({ "branch_id": f.branch, "offline": signed(&s, seen, Duration::minutes(5)) })
-            )
-        ),
-        "a queued check-in",
-    )
-    .await;
-    closed(
-        call!(
-            app,
-            post,
-            "/staff/attendance/punch",
-            owner_t(&f),
-            json!({ "employee_id": f.b, "reason": "Dead phone" })
-        ),
-        "a manager's punch",
-    )
-    .await;
+
+    // Edits that move money are still refused, and write nothing.
     closed(
         call!(
             app,
@@ -2589,49 +2542,54 @@ async fn nothing_is_written_into_a_closed_month(pool: PgPool) {
         "a cover",
     )
     .await;
-    assert_eq!(records().await, 0, "nothing written");
+    let records: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM attendance_records WHERE org_id = $1")
+            .bind(f.org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(records, 0, "no edit written");
 
-    // A shift already open when the month closed: its check-out and its
-    // pings are refused too, and nothing is flagged.
-    let open: Uuid = sqlx::query_scalar(
-        "INSERT INTO attendance_records (org_id, employee_id, branch_id, business_date, status, \
-             check_in_at, check_in_method) \
-         VALUES ($1, $2, $3, $4, 'present', now() - INTERVAL '30 minutes', 'mobile_gps') RETURNING id",
-    )
-    .bind(f.org)
-    .bind(f.a)
-    .bind(f.branch)
-    .bind(today)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    closed(
-        call!(
-            app,
-            post,
-            "/staff/me/pings",
-            phone(&s),
-            json!({ "latitude": AWAY, "longitude": LNG, "accuracy_meters": 9.0 })
-        ),
-        "a ping",
-    )
-    .await;
-    closed(
-        call!(app, post, "/staff/me/check-out", phone(&s), here()),
-        "check-out",
-    )
-    .await;
-    let (out, pings, flags): (Option<DateTime<Utc>>, i64, i64) = sqlx::query_as(
+    // Clocking goes through: in, a ping, out.
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/check-in",
+        phone(&s),
+        with(here(), json!({ "branch_id": f.branch }))
+    );
+    assert_eq!(resp.status(), 201, "check-in");
+    let resp = call!(
+        app,
+        post,
+        "/staff/me/pings",
+        phone(&s),
+        json!({ "latitude": LAT, "longitude": LNG, "accuracy_meters": 9.0 })
+    );
+    assert_eq!(resp.status(), 200, "a ping");
+    let resp = call!(app, post, "/staff/me/check-out", phone(&s), here());
+    assert_eq!(resp.status(), 200, "check-out");
+    let (out, pings): (Option<DateTime<Utc>>, i64) = sqlx::query_as(
         "SELECT a.check_out_at, \
-                (SELECT COUNT(*) FROM attendance_pings p WHERE p.attendance_record_id = a.id), \
-                (SELECT COUNT(*) FROM attendance_flags g WHERE g.attendance_record_id = a.id) \
-           FROM attendance_records a WHERE a.id = $1",
+                (SELECT COUNT(*) FROM attendance_pings p WHERE p.attendance_record_id = a.id) \
+           FROM attendance_records a WHERE a.employee_id = $1",
     )
-    .bind(open)
+    .bind(f.a)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!((out, pings, flags), (None, 0, 0));
+    assert!(out.is_some(), "the shift is closed");
+    assert_eq!(pings, 1, "the ping is kept");
+
+    // A manager's punch goes through too.
+    let resp = call!(
+        app,
+        post,
+        "/staff/attendance/punch",
+        owner_t(&f),
+        json!({ "employee_id": f.b, "reason": "Dead phone" })
+    );
+    assert_eq!(resp.status(), 200, "a manager's punch");
 
     // The sweep marks and prices nothing in it.
     madar_rust::staff::jobs::run_tick(&pool).await.unwrap();

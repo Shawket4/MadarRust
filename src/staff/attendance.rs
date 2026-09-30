@@ -1892,10 +1892,10 @@ pub async fn check_in(
         resolve_punch_shift(pool.get_ref(), employee_id, today, &tz, now).await?;
 
     check_window(shift.as_ref(), now)?;
-    // Nothing is written into an approved or paid month, live or queued
-    // (owner decision BC-3): 409 PERIOD_CLOSED, final for the outbox.
-    crate::staff::period_lock::assert_open(pool.get_ref(), org_id, business_date, "a check-in")
-        .await?;
+    // No payroll check: clocking in and out always works, whatever state the
+    // month's payroll is in (owner, 30 Sep 2026). An approved month's payslip
+    // is a frozen snapshot, so a punch recorded in it moves no money; edits
+    // (manual records, corrections, deletes) are still refused there.
     // A colleague is covering it: never paid twice (D1).
     refuse_if_covered(
         pool.get_ref(),
@@ -2142,14 +2142,7 @@ pub async fn check_out(
         code: "NOT_CLOCKED_IN",
         reason: "You are not checked in".into(),
     })?;
-    // Nothing is written into an approved or paid month (BC-3).
-    crate::staff::period_lock::assert_open(
-        pool.get_ref(),
-        org_id,
-        open.business_date,
-        "a check-out",
-    )
-    .await?;
+    // No payroll check: a check-out always closes the shift (see check_in).
 
     let settings = load_settings(pool.get_ref(), org_id, Some(open.branch_id)).await?;
     let distance = check_geofence(

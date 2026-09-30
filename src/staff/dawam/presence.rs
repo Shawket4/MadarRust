@@ -344,9 +344,9 @@ pub async fn ping(
             reason: "You are not clocked in.".into(),
         });
     };
-    // Nothing is written into an approved or paid month — not a ping, not
-    // its flags (owner decision BC-3).
-    crate::staff::period_lock::assert_open(pool, org_id, business_date, "a location ping").await?;
+    // No payroll check: a shift that can be clocked into can be tracked, in
+    // any month (owner, 30 Sep 2026). A flag moves money only through a
+    // deduction, and that is still refused in a closed month.
     let fence: (Option<f64>, Option<f64>, Option<i32>) =
         sqlx::query_as("SELECT latitude, longitude, geo_radius_meters FROM branches WHERE id = $1")
             .bind(branch_id)
@@ -1682,9 +1682,8 @@ pub(crate) async fn punch(
     .fetch_optional(pool)
     .await?;
     let (id, checked_in, flag_branch) = match open {
-        Some((id, record_branch, _, day)) => {
-            // Nothing is written into an approved or paid month (BC-3).
-            crate::staff::period_lock::assert_open(pool, org_id, day, "a punch").await?;
+        Some((id, record_branch, _, _)) => {
+            // No payroll check: a punch always works (see attendance::check_in).
             // The out-reason beside the in-reason, never over it (BC-1).
             sqlx::query(
                 "UPDATE attendance_records SET check_out_at = $5, check_out_method = $4, \
@@ -1706,7 +1705,6 @@ pub(crate) async fn punch(
                 crate::staff::attendance::resolve_punch_shift(pool, employee_id, today, &tz, at)
                     .await?;
             crate::staff::attendance::check_window(shift.as_ref(), at)?;
-            crate::staff::period_lock::assert_open(pool, org_id, business_date, "a punch").await?;
             // A colleague is covering it: never paid twice (D1).
             crate::staff::attendance::refuse_if_covered(
                 pool,
