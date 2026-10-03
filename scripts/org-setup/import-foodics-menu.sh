@@ -5,7 +5,8 @@
 #   scripts/org-setup/import-foodics-menu.sh --org <org-uuid> [--dir drops] [--db URL] [--dry-run]
 #                             [--replace-menu | --reset-org | --reset-activity]
 #                             [--keep-stock] [--reset-devices] [--reset-tables]
-#                             [--reset-loyalty] [--reset-qr] [--yes] [--yes-prod]
+#                             [--reset-loyalty] [--reset-qr] [--keep-dawam]
+#                             [--yes] [--yes-prod]
 #
 #   --replace-menu     hard-delete the org's menu (categories, items, modifier groups)
 #                      AND every row referencing it — orders, tickets, recipes,
@@ -42,6 +43,11 @@
 #                      birthday greetings, win-backs, pass cache and token aliases
 #                      (members and their history already go with --reset-activity).
 #   --reset-qr         also clear the org's QR short links.
+#   --keep-dawam       leave ALL of Dawam as it is: attendance, requests, leave
+#                      balances, payroll, advances and the rota stay (only the
+#                      POS side is reset). An expense advance paid from a till
+#                      keeps its record; only its link to the till's cash
+#                      movement (deleted with the till) is cleared.
 #   All three ask you to type the org name unless --yes or --dry-run.
 #
 # Expects in --dir (Foodics console exports, renamed):
@@ -68,10 +74,11 @@ reset_devices=off
 reset_tables=off
 reset_loyalty=off
 reset_qr=off
+keep_dawam=off
 do_import=on
 yes=0
 
-usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+usage() { sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -88,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --reset-tables) reset_tables=on; shift ;;
     --reset-loyalty) reset_loyalty=on; shift ;;
     --reset-qr) reset_qr=on; shift ;;
+    --keep-dawam) keep_dawam=on; shift ;;
     --yes) yes=1; shift ;;
     -h|--help) usage 0 ;;
     *) echo "unknown argument: $1" >&2; usage ;;
@@ -102,8 +110,8 @@ command -v psql >/dev/null || die "psql not found"
 modes=0
 for m in "$replace_menu" "$reset_org" "$reset_activity"; do [[ "$m" == on ]] && modes=$((modes + 1)); done
 [[ $modes -gt 1 ]] && die "use only one of --replace-menu, --reset-org, --reset-activity"
-for m in "$keep_stock" "$reset_devices" "$reset_tables" "$reset_loyalty" "$reset_qr"; do
-  [[ "$m" == on && "$reset_activity" != on ]] && die "--keep-stock/--reset-devices/--reset-tables/--reset-loyalty/--reset-qr need --reset-activity"
+for m in "$keep_stock" "$reset_devices" "$reset_tables" "$reset_loyalty" "$reset_qr" "$keep_dawam"; do
+  [[ "$m" == on && "$reset_activity" != on ]] && die "--keep-stock/--reset-devices/--reset-tables/--reset-loyalty/--reset-qr/--keep-dawam need --reset-activity"
 done
 if [[ "$db" == *prod* && $yes_prod -eq 0 ]]; then
   die "database URL looks like production; re-run with --yes-prod if intended"
@@ -162,6 +170,7 @@ if [[ "$reset_activity" == on ]]; then
   [[ "$reset_tables" == on ]] && extras+=", floor sections + tables"
   [[ "$reset_loyalty" == on ]] && extras+=", the loyalty setup"
   [[ "$reset_qr" == on ]] && extras+=", QR short links"
+  [[ "$keep_dawam" == on ]] && mode="${mode/, Dawam activity + rota/} (Dawam KEPT)"
   [[ -n "$extras" ]] && mode+=" AND${extras#,}"
   if [[ "$keep_stock" == on ]]; then mode+=" — stock levels carried over"; else mode+=" — stock levels go to 0"; fi
 fi
@@ -205,7 +214,7 @@ fi
     -v replace_menu="$replace_menu" -v reset_org="$reset_org" \
     -v reset_activity="$reset_activity" -v do_import="$do_import" \
     -v keep_stock="$keep_stock" -v reset_devices="$reset_devices" -v reset_tables="$reset_tables" \
-    -v reset_loyalty="$reset_loyalty" -v reset_qr="$reset_qr"
+    -v reset_loyalty="$reset_loyalty" -v reset_qr="$reset_qr" -v keep_dawam="$keep_dawam"
 
 if [[ "$final" == "ROLLBACK" ]]; then
   echo "Dry run: nothing was written."

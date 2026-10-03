@@ -6,20 +6,19 @@
 #   scripts/org-setup/reset-drops-on-prod.sh --apply    full-database backup on the server, then the
 #                                     real reset (you type the org name to confirm)
 #
-# It runs scripts/org-setup/import-foodics-menu.sh --reset-activity with the extras the owner
-# chose (2026-09-25/26): --keep-stock --reset-devices --reset-tables
-# --reset-loyalty --reset-qr. So:
-#   DELETED  orders, tickets, tills, refunds, bookings, the inventory ledger
-#            (today's stock levels carried over as opening counts), customers
-#            and loyalty members + history, loyalty setup, QR short links,
-#            devices (every till and staff phone signs in again), floor
-#            sections + tables, and all Dawam activity: attendance, requests,
-#            leave balances, payroll + payslips, advances, the rota.
-#   KEPT     branches, users/roles/permissions, the menu, recipes, ingredients,
-#            suppliers, payment methods, discounts, settings, and the Dawam
-#            setup: employees (salary, pay method, app access), their salary
-#            history, branches and documents, departments, leave types,
-#            holidays, shift templates.
+# It runs scripts/org-setup/import-foodics-menu.sh --reset-activity with the owner's flags
+# (2026-10-03): --keep-dawam --reset-loyalty. So:
+#   DELETED  orders, tickets, tills, refunds, bookings, the whole inventory
+#            ledger and every stocktake (every stock level goes to 0), customers
+#            and loyalty members + history, the loyalty setup, approvals, the
+#            POS changefeed and order numbering.
+#   KEPT     ALL of Dawam (attendance, requests, payroll, advances, the rota,
+#            staff phones), devices (tills stay signed in), floor sections +
+#            tables, QR short links (printed codes keep working), branches,
+#            users/roles/permissions, the menu, recipes, ingredients, suppliers,
+#            payment methods, discounts, settings.
+#   (2026-09-25/26 the owner also cleared devices, tables and QR links, and
+#   Dawam activity; Dawam has been live since, so it is kept now.)
 #
 # Env overrides: MADAR_PROD_SSH (root@187.124.33.153), DROPS_ORG (the Drops id).
 set -euo pipefail
@@ -32,11 +31,11 @@ apply=0
 case "${1:-}" in
   "") ;;
   --apply) apply=1 ;;
-  -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "unknown argument: $1 (use --apply, or nothing for a dry run)" >&2; exit 1 ;;
 esac
 
-flags=(--reset-activity --keep-stock --reset-devices --reset-tables --reset-loyalty --reset-qr)
+flags=(--reset-activity --keep-dawam --reset-loyalty)
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 dir="/tmp/reset-drops-$stamp"
 

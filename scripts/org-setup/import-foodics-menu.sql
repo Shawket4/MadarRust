@@ -111,6 +111,17 @@ $fn$;
 \o /dev/null
 -- Selling: tills first (their FK children are the orders, payments, refunds and
 -- occupancies), then the roots that can outlive a till.
+\if :keep_dawam
+-- An expense advance paid from a till points at the till's cash movement,
+-- which goes with the till (ON DELETE CASCADE would take the advance too).
+-- Keep the advance; drop only that link.
+UPDATE expense_advances SET till_movement_id = NULL
+ WHERE till_movement_id IN (
+   SELECT m.id FROM till_cash_movements m
+     JOIN tills t ON t.id = m.till_id
+     JOIN branches b ON b.id = t.branch_id
+    WHERE b.org_id = current_setting('app.org_id')::uuid);
+\endif
 SELECT pg_temp.purge_activity('tills', 'branch_id');
 SELECT pg_temp.purge_activity('orders', 'branch_id');
 SELECT pg_temp.purge_activity('open_tickets', 'branch_id');
@@ -135,6 +146,12 @@ SELECT pg_temp.purge_activity('loyalty_transactions');
 SELECT pg_temp.purge_activity('customers');
 SELECT pg_temp.purge_activity('loyalty_customers');
 
+-- Staff drinks poured from the pool: POS sales records (the pool's settings stay).
+SELECT pg_temp.purge_activity('staff_drinks');
+
+\if :keep_dawam
+-- --keep-dawam: Dawam stays exactly as it is.
+\else
 -- Dawam (the staff app): everything that HAPPENED, and the rota built on top
 -- of the setup. KEPT, as the setup: the employees themselves (profile, app
 -- access, department, job title, base salary, pay method/account, preferences),
@@ -175,8 +192,7 @@ SELECT pg_temp.purge_activity('staff_suggestion_cache');
 SELECT pg_temp.purge_activity('staff_learning_state');
 SELECT pg_temp.purge_activity('staff_fairness_audits');
 SELECT pg_temp.purge_activity('staff_preference_log');
--- Staff drinks poured from the pool (the pool's settings stay).
-SELECT pg_temp.purge_activity('staff_drinks');
+\endif
 
 -- Decisions, approvals and assistant history.
 SELECT pg_temp.purge_activity('approvals');
@@ -234,8 +250,12 @@ WHERE org_id = :'org'::uuid AND status IS DISTINCT FROM 'free';
 \if :reset_devices
 SELECT pg_temp.purge_activity('device_payment_methods');
 SELECT pg_temp.purge_activity('device_activation_codes');
+\if :keep_dawam
+-- Staff phones (and their push registrations) are Dawam's: kept.
+\else
 SELECT pg_temp.purge_activity('push_devices');
 SELECT pg_temp.purge_activity('staff_devices');
+\endif
 SELECT pg_temp.purge_activity('devices');
 \endif
 \if :reset_tables
