@@ -90581,6 +90581,31 @@
           }
         }
       },
+      "ReceiveTransferLine": {
+        "type": "object",
+        "description": "One line as it arrived.",
+        "required": [
+          "line_id",
+          "qty_received"
+        ],
+        "properties": {
+          "line_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qty_received": {
+            "type": "number",
+            "format": "double",
+            "description": "0 or more. More than sent needs `note`."
+          }
+        }
+      },
       "ReceiveTransferRequest": {
         "type": "object",
         "description": "`POST /inventory/transfers/{id}/receive`: every line, once. Closes it.",
@@ -90591,7 +90616,7 @@
           "lines": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ReceiveLineInput"
+              "$ref": "#/components/schemas/ReceiveTransferLine"
             }
           },
           "note": {

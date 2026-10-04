@@ -828,7 +828,7 @@ pub async fn receive_transfer(
     lock(&mut tx, *id, head.status.0).await?;
 
     let lines = move_lines(&mut tx, *id).await?;
-    let given: HashMap<Uuid, &madar_inventory::api::ReceiveLineInput> =
+    let given: HashMap<Uuid, &madar_inventory::api::ReceiveTransferLine> =
         body.lines.iter().map(|l| (l.line_id, l)).collect();
     if given.len() != body.lines.len()
         || given.len() != lines.len()

@@ -95,3 +95,24 @@ fn branch_settings_and_client_versions_are_documented() {
     assert!(update["old_bill_hours"].is_object() && update["standard_float"].is_object());
     assert!(doc["paths"]["/devices/client-versions"]["get"].is_object());
 }
+
+/// utoipa keys schemas by bare type name, so two types with one name merge
+/// silently and the spec describes the wrong body. madar-inventory's
+/// transfer-receive line once collided with purchasing's `ReceiveLineInput`.
+#[test]
+fn transfer_receive_body_is_its_own() {
+    let doc = doc();
+    let s = &doc["components"]["schemas"];
+    let item = s["ReceiveTransferRequest"]["properties"]["lines"]["items"]["$ref"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(
+        s[&item]["properties"].get("qty_received").is_some(),
+        "{item} is not the transfer receive line"
+    );
+    assert!(s["ReceiveLineInput"]["properties"].get("quantity_received").is_some());
+}
