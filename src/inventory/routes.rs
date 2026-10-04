@@ -1,4 +1,7 @@
-use crate::{auth::middleware::JwtMiddleware, inventory::handlers};
+use crate::{
+    auth::middleware::JwtMiddleware,
+    inventory::{handlers, transfers},
+};
 use actix_web::web;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -75,19 +78,44 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/branches/{branch_id}/waste",
                 web::get().to(handlers::list_waste),
             )
-            // ── Transfers (always auto-applied) ───────────────────────
-            .route("/transfers", web::post().to(handlers::create_transfer))
+            // ── Transfers: requested → draft → dispatched → received ──
+            .route("/transfers", web::post().to(transfers::create_transfer))
+            .route("/transfers/{id}", web::get().to(transfers::get_transfer))
             .route(
                 "/transfers/{id}",
-                web::patch().to(handlers::update_transfer),
+                web::patch().to(transfers::update_transfer),
             )
             .route(
-                "/transfers/{id}",
-                web::delete().to(handlers::delete_transfer),
+                "/transfers/{id}/accept",
+                web::post().to(transfers::accept_transfer),
+            )
+            .route(
+                "/transfers/{id}/decline",
+                web::post().to(transfers::decline_transfer),
+            )
+            .route(
+                "/transfers/{id}/dispatch",
+                web::post().to(transfers::dispatch_transfer),
+            )
+            .route(
+                "/transfers/{id}/receive",
+                web::post().to(transfers::receive_transfer),
+            )
+            .route(
+                "/transfers/{id}/cancel",
+                web::post().to(transfers::cancel_transfer),
             )
             .route(
                 "/branches/{branch_id}/transfers",
-                web::get().to(handlers::list_transfers),
+                web::get().to(transfers::list_transfers),
+            )
+            .route(
+                "/warehouses/{warehouse_id}/replenishment",
+                web::get().to(transfers::replenishment),
+            )
+            .route(
+                "/orgs/{org_id}/transfer-differences",
+                web::get().to(transfers::transfer_differences),
             ),
     );
 }

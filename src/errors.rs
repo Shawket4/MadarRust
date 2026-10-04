@@ -194,6 +194,12 @@ fn combo_guard(e: &sqlx::Error) -> Option<(u16, &'static str, &'static str)> {
             "That item can't be chosen here.",
         ),
         ("DEAL_INVALID", 400, "Check the deal."),
+        // migrations/20261008100000_warehouses.sql: a selling row at a warehouse.
+        (
+            "WAREHOUSE_CANNOT_SELL",
+            409,
+            "This is a warehouse; it holds stock and doesn't sell.",
+        ),
     ];
     GUARDS.iter().find_map(|(code, status, reason)| {
         msg.starts_with(&format!("{code}:"))

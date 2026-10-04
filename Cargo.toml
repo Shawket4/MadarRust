@@ -34,6 +34,11 @@ madar-dawam        = { git = "https://github.com/Shawket4/madar-shared", tag = "
 madar-catalog      = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.5.1" }
 # Which rewards a sale may take (strict here, trimming on the till), same tag.
 madar-loyalty      = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.5.1" }
+# Warehouses and stock transfers: the transfer lifecycle, the receive check,
+# replenishment and the API bodies (WAREHOUSE_DESIGN.md).
+# ponytail: pinned to v0.5.1 (which lacks this crate) only while dev/link.sh
+# links the local checkout; bump every madar-shared pin to v0.6.0 at release.
+madar-inventory    = { git = "https://github.com/Shawket4/madar-shared", tag = "v0.5.1", features = ["utoipa"] }
 actix-web = { version = "4", features = ["compress-brotli", "compress-gzip", "compress-zstd", "rustls-0_23"] }
 actix-cors         = "0.7"
 actix-multipart    = "0.8"
