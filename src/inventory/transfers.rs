@@ -214,10 +214,9 @@ struct Head {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct StatusText(TransferStatus);
-impl TryFrom<String> for StatusText {
-    type Error = std::convert::Infallible;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Ok(StatusText(parse_status(&s)))
+impl From<String> for StatusText {
+    fn from(s: String) -> Self {
+        StatusText(parse_status(&s))
     }
 }
 

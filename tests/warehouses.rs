@@ -128,7 +128,7 @@ macro_rules! call {
         test::call_service(
             &$app,
             test::TestRequest::$method()
-                .uri(&$uri)
+                .uri(&*$uri)
                 .insert_header(("Authorization", format!("Bearer {}", $tok)))
                 .to_request(),
         )
@@ -138,7 +138,7 @@ macro_rules! call {
         test::call_service(
             &$app,
             test::TestRequest::$method()
-                .uri(&$uri)
+                .uri(&*$uri)
                 .insert_header(("Authorization", format!("Bearer {}", $tok)))
                 .set_json($body)
                 .to_request(),
@@ -174,7 +174,7 @@ async fn world(pool: &PgPool) -> World {
 /// A draft of `qty` beans from the warehouse to the shop, by the owner.
 macro_rules! draft {
     ($app:expr, $w:expr, $qty:expr) => {{
-        let resp = call!($app, post, "/inventory/transfers".to_string(), $w.owner, json!({
+        let resp = call!($app, post, "/inventory/transfers", $w.owner, json!({
             "source_branch_id": $w.wh, "destination_branch_id": $w.shop,
             "lines": [{ "org_ingredient_id": $w.beans, "quantity": $qty }]
         }));
@@ -386,7 +386,7 @@ async fn requests_are_answered_by_the_sending_side(pool: PgPool) {
     let resp = call!(
         app,
         post,
-        "/inventory/transfers".to_string(),
+        "/inventory/transfers",
         mgr,
         json!({
             "source_branch_id": w.wh, "destination_branch_id": w.shop, "request": true,
@@ -403,7 +403,7 @@ async fn requests_are_answered_by_the_sending_side(pool: PgPool) {
     let resp = call!(
         app,
         post,
-        "/inventory/transfers".to_string(),
+        "/inventory/transfers",
         mgr,
         json!({
             "source_branch_id": w.wh, "destination_branch_id": w.shop,
@@ -570,7 +570,7 @@ async fn warehouse_limit_and_kind_change(pool: PgPool) {
     let resp = call!(
         app,
         post,
-        "/branches".to_string(),
+        "/branches",
         w.owner,
         json!({ "org_id": w.org, "name": "WH 2", "kind": "warehouse" })
     );
