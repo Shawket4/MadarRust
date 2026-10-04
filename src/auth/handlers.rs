@@ -382,7 +382,7 @@ pub async fn login(
                   AND deleted_at IS NULL
                 "#,
             )
-            .bind(email)
+            .bind(crate::auth::email::normalize(email))
             .bind(body.org_id)
             .fetch_optional(pool.get_ref())
             .await?

@@ -286,7 +286,8 @@ pub async fn create_user(
         }
     }
 
-    if let Some(email) = &body.email {
+    let email = body.email.as_deref().map(crate::auth::email::normalize);
+    if let Some(email) = &email {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1 AND deleted_at IS NULL)",
         )
@@ -350,7 +351,7 @@ pub async fn create_user(
     )
     .bind(body.org_id)
     .bind(&body.name)
-    .bind(&body.email)
+    .bind(&email)
     .bind(&body.phone)
     .bind(&body.role)
     .bind(password_hash)
@@ -677,7 +678,7 @@ pub async fn update_user(
     )
     .bind(*user_id)
     .bind(&body.name)
-    .bind(&body.email)
+    .bind(body.email.as_deref().map(crate::auth::email::normalize))
     .bind(&body.phone)
     .bind(&body.role)
     .bind(body.is_active)

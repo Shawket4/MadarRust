@@ -122,6 +122,65 @@ async fn test_login_email_password_success(pool: PgPool) {
     assert!(!body.token.is_empty());
 }
 
+/// "Admin@Test.com " is how a phone keyboard types the address: it must find
+/// the account, and the address is stored in one form however it was written.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_login_email_ignores_case_and_surrounding_space(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+    // Written raw, the way a seed or the demo writes it: the trigger normalizes.
+    sqlx::query(
+        "INSERT INTO users (org_id, name, role, email, password_hash)
+         VALUES ($1, 'Admin', 'org_admin'::user_role, '  Admin@Test.COM ', $2)",
+    )
+    .bind(org_id)
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stored: String =
+        sqlx::query_scalar("SELECT email FROM users WHERE org_id = $1 AND name = 'Admin'")
+            .bind(org_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, "admin@test.com");
+
+    for typed in ["admin@test.com", "Admin@test.com", " ADMIN@TEST.COM\t"] {
+        let req = test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(&json!({ "email": typed, "password": "password123" }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200, "signing in as {typed:?}");
+        let body: LoginResponse = test::read_body_json(resp).await;
+        assert_eq!(body.user.email.as_deref(), Some("admin@test.com"));
+    }
+
+    // The same address in another casing is the same address: a second active
+    // account cannot take it.
+    let dup = sqlx::query(
+        "INSERT INTO users (org_id, name, role, email, password_hash)
+         VALUES ($1, 'Admin 2', 'org_admin'::user_role, 'ADMIN@test.com', $2)",
+    )
+    .bind(org_id)
+    .bind(&hash)
+    .execute(&pool)
+    .await;
+    assert!(
+        dup.is_err(),
+        "a second account took the address in another casing"
+    );
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn test_login_email_wrong_password(pool: PgPool) {
     let app = test::init_service(
