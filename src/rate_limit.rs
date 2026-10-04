@@ -535,13 +535,23 @@ fn too_many<B>(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)] // serialized on purpose: see `ENV`
 mod tests {
     use super::*;
+
+    /// These tests set and read the same process-wide limit variables; run
+    /// in parallel they read each other's values. Each holds this for its
+    /// whole run (poison-tolerant, so one failure doesn't fail the rest).
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// An anonymous caller has no person, so the ADDRESS is the key, through the
     /// whole middleware stack: one address runs dry, another does not.
     #[actix_web::test]
     async fn anonymous_requests_are_keyed_by_address() {
+        let _env = env_lock();
         use actix_web::{App, HttpResponse, test, web};
         let app = test::init_service(
             App::new()
@@ -583,6 +593,7 @@ mod tests {
     /// address ceiling.
     #[actix_web::test]
     async fn many_accounts_share_one_address_ceiling() {
+        let _env = env_lock();
         use crate::auth::jwt::{JwtSecret, create_token};
         use crate::models::UserRole;
         use actix_web::{App, HttpResponse, test, web};
@@ -675,6 +686,7 @@ mod tests {
     /// scope); an anonymous caller is still keyed by address.
     #[actix_web::test]
     async fn people_behind_one_address_do_not_share_an_allowance() {
+        let _env = env_lock();
         use crate::auth::jwt::{JwtSecret, create_token};
         use crate::models::UserRole;
         use actix_web::{App, HttpResponse, test, web};
@@ -750,6 +762,7 @@ mod tests {
     /// 429 — worded "can't reach the server" (owner, Android, 2026-09-25).
     #[test]
     fn a_staff_phone_is_keyed_by_its_device_not_the_address() {
+        let _env = env_lock();
         use crate::auth::jwt::JwtSecret;
         use actix_web::{test, web};
         let secret = JwtSecret("limiter-key-test-secret".into());
@@ -790,6 +803,7 @@ mod tests {
     /// The owner's request (2026-09-25): every allowance doubled.
     #[test]
     fn the_defaults_are_the_doubled_allowances() {
+        let _env = env_lock();
         assert_eq!(GLOBAL_PER_MINUTE, 400.0);
         assert_eq!(PER_ADDRESS_PER_MINUTE, 20_000.0);
         assert_eq!(EXPORT_MAX, 10);
@@ -828,6 +842,7 @@ mod tests {
     /// Every variable is documented in `.env.example` with its default.
     #[test]
     fn every_limit_is_documented_with_its_default() {
+        let _env = env_lock();
         let doc = include_str!("../.env.example");
         let mut want = vec![
             format!("MADAR_RATE_LIMIT_PER_MINUTE={GLOBAL_PER_MINUTE}"),
@@ -854,6 +869,7 @@ mod tests {
     /// no other test.)
     #[test]
     fn every_limit_is_read_from_the_environment() {
+        let _env = env_lock();
         // SAFETY: this test's own process; nothing else reads these.
         unsafe {
             std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "33");
@@ -894,6 +910,7 @@ mod tests {
     /// OTP limiter refuses the third call from one address.
     #[actix_web::test]
     async fn a_route_governor_takes_its_numbers_from_the_environment() {
+        let _env = env_lock();
         use actix_web::{App, HttpResponse, test, web};
         // SAFETY: this test's own process; nothing else reads it.
         unsafe {
@@ -926,6 +943,7 @@ mod tests {
 
     #[test]
     fn the_bucket_refills_rather_than_opening_on_the_minute() {
+        let _env = env_lock();
         // A fixed window has a cliff — the same request that worked a second
         // ago fails for up to a minute, with no way to tell how long. Tokens
         // come back continuously instead.
@@ -947,6 +965,7 @@ mod tests {
 
     #[test]
     fn the_allowance_is_per_person_and_recovers() {
+        let _env = env_lock();
         // Distinct keys do not spend each other's allowance — a shop behind one
         // office router is one address and several people.
         for i in 0..export_max() {
@@ -976,6 +995,7 @@ mod tests {
     /// stack: the limiter inside CORS.
     #[actix_web::test]
     async fn a_rate_limited_answer_carries_cors_headers() {
+        let _env = env_lock();
         use actix_governor::{Governor, GovernorConfigBuilder};
         use actix_web::{App, HttpResponse, http::StatusCode, test, web};
         let gov = GovernorConfigBuilder::default()
@@ -1067,6 +1087,7 @@ mod tests {
     /// throttled export (iOS device checks, 2026-09-25).
     #[actix_web::test]
     async fn each_limiter_names_itself_in_the_code() {
+        let _env = env_lock();
         use crate::auth::jwt::{JwtSecret, create_token};
         use crate::models::UserRole;
         use actix_web::{App, HttpResponse, http::StatusCode, test, web};
