@@ -163,9 +163,8 @@ pub enum ReplayOp {
         teller_id: Uuid,
         item_id: Uuid,
     },
-    // Held-order (teller parked-cart) ops. All idempotent on the CLIENT-minted
-    // held-order id; a park that loses a table race applies WITHOUT the table
-    // (never dead-letters — see held_orders::handlers).
+    // There are no held-order ops: a parked cart is device-local on the till,
+    // and only its claim on a table replays (`HoldTable` / `ReleaseTable`).
     // Floor ops shared by tellers (held orders) and waiters (their tickets).
     // Per-occupant permissions are enforced inside the cores.
     SwapTables {
