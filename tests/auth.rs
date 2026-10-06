@@ -449,6 +449,11 @@ async fn test_login_pin_teller_refused_at_a_branch_they_are_not_allowed_at(pool:
         403,
         "a teller listed only at branch A must not sign in at branch B"
     );
+    // Coded, so the till can say why instead of a bare "no permission"; the
+    // sentence old tablets match on is unchanged.
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "PIN_WRONG_BRANCH");
+    assert_eq!(body["error"], "You can't sign in at a till in this branch");
 
     // The one failed sign-in with an identity (§3.4): counted per person in the
     // owner's review queue. A second try is the same item, attempts = 2.
