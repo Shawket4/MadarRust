@@ -58,7 +58,7 @@ fn lines(v: &Value) -> Vec<Value> {
     v["items"].as_array().cloned().unwrap_or_default()
 }
 
-fn part<'a>(items: &'a [Value], item: Uuid) -> &'a Value {
+fn part(items: &[Value], item: Uuid) -> &Value {
     items
         .iter()
         .find(|l| l["line_kind"] == "combo_part" && l["menu_item_id"] == item.to_string())

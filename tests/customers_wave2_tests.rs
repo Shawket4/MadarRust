@@ -1712,8 +1712,10 @@ async fn the_order_now_link_follows_the_env_and_the_shop(pool: PgPool) {
 
     // First on the back of the card; Google gets it as a button instead.
     let settings = madar_rust::loyalty::settings::LoyaltySettings::defaults(s.org, None);
-    let mut copy = madar_rust::loyalty::wallet::CardCopy::default();
-    copy.order_now_url = madar_rust::loyalty::wallet::order_now_for(&pool, &me).await;
+    let mut copy = madar_rust::loyalty::wallet::CardCopy {
+        order_now_url: madar_rust::loyalty::wallet::order_now_for(&pool, &me).await,
+        ..Default::default()
+    };
     let back = madar_rust::loyalty::wallet::back_of_card(&me, &settings, &copy);
     assert_eq!(back[0].key, "ordernow");
     assert_eq!(back[0].value, "https://order.example/now/tok-link-1");
@@ -2453,7 +2455,15 @@ async fn the_references_backfill_links_seeded_rows(pool: PgPool) {
         .await
         .unwrap();
     // Delivery orders: (org, branch, name, phone, address, created days ago).
-    let deliveries: [(Uuid, Uuid, &str, &str, Option<&str>, i32); 6] = [
+    type Deliveries = [(
+        Uuid,
+        Uuid,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        i32,
+    ); 6];
+    let deliveries: Deliveries = [
         (
             org,
             branch,

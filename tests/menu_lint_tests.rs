@@ -330,7 +330,8 @@ async fn lint_endpoint_shape_and_auth(pool: PgPool) {
 }
 
 /// Operator run against a restored prod copy:
-/// `DATABASE_URL_DROPS=postgres://…/drops LINT_ORG=<uuid> cargo nextest run -E 'test(lint_restored_db)' --run-ignored only`
+/// `DATABASE_URL_DROPS=postgres://…/drops LINT_ORG=<uuid> cargo nextest run --features operator-tests -E 'test(lint_restored_db)' --run-ignored only`
+#[cfg(feature = "operator-tests")]
 #[tokio::test]
 #[ignore]
 async fn lint_restored_db() {

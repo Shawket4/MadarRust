@@ -188,7 +188,7 @@ async fn the_first_round_claims_the_table_the_party_is_sitting_at(pool: PgPool) 
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "table_id": table,
                 "guest_count": 2,
@@ -238,7 +238,7 @@ async fn a_ticket_must_carry_at_least_one_item(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "table_id": table, "items": []
             }))
             .to_request(),
@@ -276,7 +276,7 @@ async fn a_round_will_not_claim_a_table_nobody_has_bussed(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "table_id": table,
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
@@ -326,7 +326,7 @@ async fn waiter_fire_bump_settle_end_to_end(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "items": [{ "menu_item_id": item, "quantity": 2 }]
             }))
@@ -426,7 +426,7 @@ async fn waiter_fire_bump_settle_end_to_end(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{ticket_id}/settle"))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
-            .set_json(&serde_json::json!({ "shift_id": shift, "payment_method": "cash" }))
+            .set_json(serde_json::json!({ "shift_id": shift, "payment_method": "cash" }))
             .to_request(),
     )
     .await;
@@ -489,7 +489,7 @@ async fn waiter_fire_bump_settle_end_to_end(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{ticket_id}/settle"))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
-            .set_json(&serde_json::json!({ "shift_id": shift, "payment_method": "cash" }))
+            .set_json(serde_json::json!({ "shift_id": shift, "payment_method": "cash" }))
             .to_request(),
     )
     .await;
@@ -510,7 +510,7 @@ async fn fire_requires_open_shift_at_branch(pool: PgPool) {
     let resp = test::call_service(&app, test::TestRequest::post()
         .uri("/open-tickets")
         .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-        .set_json(&serde_json::json!({ "branch_id": branch, "items": [{ "menu_item_id": item, "quantity": 1 }] }))
+        .set_json(serde_json::json!({ "branch_id": branch, "items": [{ "menu_item_id": item, "quantity": 1 }] }))
         .to_request()).await;
     assert_eq!(resp.status(), 409, "no open shift → cannot fire");
 }
@@ -875,7 +875,7 @@ async fn fire_derives_stable_kitchen_ids_from_round_key(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "idempotency_key": Uuid::new_v4(),
                 "round_idempotency_key": round_idem,
@@ -930,7 +930,7 @@ async fn replay_bump_idempotent_and_attributed(pool: PgPool) {
     let resp = test::call_service(&app, test::TestRequest::post()
         .uri("/open-tickets")
         .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-        .set_json(&serde_json::json!({ "branch_id": branch, "items": [{ "menu_item_id": item, "quantity": 1 }] }))
+        .set_json(serde_json::json!({ "branch_id": branch, "items": [{ "menu_item_id": item, "quantity": 1 }] }))
         .to_request()).await;
     assert_eq!(resp.status(), 201);
     let ticket_id = test::read_body_json::<OpenTicketView, _>(resp).await.id;
@@ -1209,9 +1209,8 @@ async fn fired_events_carry_their_origin(pool: PgPool) {
         fired.data["origin"]["round_idempotency_key"],
         round1.to_string()
     );
-    assert_eq!(
+    assert!(
         fired.data["ticket_ref"].is_string(),
-        true,
         "the view stays top-level"
     );
     let kitchen = evs
@@ -1371,7 +1370,7 @@ async fn a_reward_on_a_ticket_covers_the_line_it_names(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "items": [{ "menu_item_id": cheap, "quantity": 1 }]
             }))
@@ -1387,7 +1386,7 @@ async fn a_reward_on_a_ticket_covers_the_line_it_names(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{ticket_id}/rounds"))
             .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "items": [{ "menu_item_id": latte, "quantity": 1 }]
             }))
             .to_request(),
@@ -1416,7 +1415,7 @@ async fn a_reward_on_a_ticket_covers_the_line_it_names(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{ticket_id}/settle"))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "shift_id": shift,
                 "payment_method": "cash",
                 "loyalty_customer_id": member,
@@ -1483,7 +1482,7 @@ async fn a_ticket_reward_without_a_line_id_is_refused(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
             }))
@@ -1497,7 +1496,7 @@ async fn a_ticket_reward_without_a_line_id_is_refused(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{}/settle", view.id))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "shift_id": shift,
                 "payment_method": "cash",
                 "loyalty_redemptions": [{ "item_index": 0 }]
@@ -1594,7 +1593,7 @@ async fn voiding_a_ticket_tears_down_everything_it_held(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "table_id": table, "booking_id": booking,
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
             }))
@@ -1625,7 +1624,7 @@ async fn voiding_a_ticket_tears_down_everything_it_held(pool: PgPool) {
             .uri(&format!("/open-tickets/{ticket}/void"))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
             .set_json(
-                &serde_json::json!({ "reason": "wrong_order", "note": "rang the wrong table" }),
+                serde_json::json!({ "reason": "wrong_order", "note": "rang the wrong table" }),
             )
             .to_request(),
     )
@@ -1693,7 +1692,7 @@ async fn voiding_a_ticket_tears_down_everything_it_held(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{ticket}/void"))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
-            .set_json(&serde_json::json!({ "reason": "other", "note": "retry" }))
+            .set_json(serde_json::json!({ "reason": "other", "note": "retry" }))
             .to_request(),
     )
     .await;
@@ -1749,7 +1748,7 @@ async fn the_bill_the_till_sees_is_the_bill_the_books_record(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "table_id": table,
                 "discount_type": "percentage", "discount_value": "0.10",
                 "items": [{ "menu_item_id": item, "quantity": 2 }]
@@ -1785,7 +1784,7 @@ async fn the_bill_the_till_sees_is_the_bill_the_books_record(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{ticket}/settle"))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "shift_id": shift, "payment_method": "cash", "total_amount": 2000
             }))
             .to_request(),
@@ -1813,7 +1812,7 @@ async fn the_bill_the_till_sees_is_the_bill_the_books_record(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{ticket}/settle"))
             .insert_header(("Authorization", format!("Bearer {teller_t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "shift_id": shift, "payment_method": "cash",
                 "total_amount": view.bill.total,
                 "payment_splits": [
@@ -1915,7 +1914,7 @@ async fn a_cashier_inherits_clears_or_replaces_the_waiters_discount(pool: PgPool
             test::TestRequest::post()
                 .uri("/open-tickets")
                 .insert_header(("Authorization", format!("Bearer {waiter_t}")))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "branch_id": branch,
                     "discount_type": "percentage", "discount_value": "0.10",
                     "items": [{ "menu_item_id": item, "quantity": 2 }]
@@ -2015,7 +2014,7 @@ async fn a_line_comes_off_the_bill_and_off_the_board(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "table_id": table,
                 "items": [
@@ -2056,7 +2055,7 @@ async fn a_line_comes_off_the_bill_and_off_the_board(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{}/items/{big_line}/void", view.id))
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({ "reason": "customer_request" }))
+            .set_json(serde_json::json!({ "reason": "customer_request" }))
             .to_request(),
     )
     .await;
@@ -2115,7 +2114,7 @@ async fn voiding_a_voided_line_does_not_take_the_money_twice(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "table_id": table,
                 "items": [
@@ -2139,7 +2138,7 @@ async fn voiding_a_voided_line_does_not_take_the_money_twice(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{}/items/{line}/void", view.id))
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({ "reason": "wrong_order" }))
+            .set_json(serde_json::json!({ "reason": "wrong_order" }))
             .to_request()
     };
     assert_eq!(test::call_service(&app, void()).await.status(), 200);
@@ -2171,7 +2170,7 @@ async fn a_line_void_names_its_reason(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "table_id": table,
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
             }))
@@ -2247,7 +2246,7 @@ async fn a_settled_bill_has_no_lines_to_void(pool: PgPool) {
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "table_id": table,
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
             }))
@@ -2266,7 +2265,7 @@ async fn a_settled_bill_has_no_lines_to_void(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{}/settle", view.id))
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "shift_id": shift, "payment_method": "cash", "total_amount": 2850
             }))
             .to_request(),
@@ -2279,7 +2278,7 @@ async fn a_settled_bill_has_no_lines_to_void(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/open-tickets/{}/items/{line}/void", view.id))
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({ "reason": "quality_issue" }))
+            .set_json(serde_json::json!({ "reason": "quality_issue" }))
             .to_request(),
     )
     .await;
@@ -2321,7 +2320,7 @@ async fn a_scan_opens_the_bill_and_the_next_scan_joins_it(pool: PgPool) {
     let send = |qty: i32, key: Uuid| {
         test::TestRequest::post()
             .uri("/public/table-orders")
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "table_id": table,
                 "idempotency_key": key,
                 "items": [{ "menu_item_id": item, "quantity": qty }]
@@ -2392,7 +2391,7 @@ async fn a_customer_cannot_price_their_own_order(pool: PgPool) {
         &app,
         test::TestRequest::post()
             .uri("/public/table-orders")
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "table_id": table,
                 "items": [{
                     "menu_item_id": item, "quantity": 2,
@@ -2422,7 +2421,7 @@ async fn a_scan_with_no_till_open_is_told_so(pool: PgPool) {
         &app,
         test::TestRequest::post()
             .uri("/public/table-orders")
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "table_id": table,
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
             }))
@@ -2488,7 +2487,7 @@ async fn a_resent_scan_does_not_order_twice(pool: PgPool) {
     let send = || {
         test::TestRequest::post()
             .uri("/public/table-orders")
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "table_id": table,
                 "idempotency_key": key,
                 "items": [{ "menu_item_id": item, "quantity": 2 }]
@@ -2520,7 +2519,7 @@ async fn a_scan_mid_meal_shows_what_the_table_has_ordered(pool: PgPool) {
     let send = |qty: i32| {
         test::TestRequest::post()
             .uri("/public/table-orders")
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "table_id": table,
                 "idempotency_key": Uuid::new_v4(),
                 "items": [{ "menu_item_id": item, "quantity": qty }]
@@ -2588,7 +2587,7 @@ async fn only_the_first_order_takes_the_table(pool: PgPool) {
     let send = || {
         test::TestRequest::post()
             .uri("/public/table-orders")
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "table_id": table,
                 "idempotency_key": Uuid::new_v4(),
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
@@ -2639,7 +2638,7 @@ async fn the_guest_principal_is_not_one_of_the_staff(pool: PgPool) {
         &app,
         test::TestRequest::post()
             .uri("/public/table-orders")
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "table_id": table,
                 "items": [{ "menu_item_id": item, "quantity": 1 }]
             }))
@@ -2711,7 +2710,7 @@ async fn fire_bill(
         test::TestRequest::post()
             .uri("/open-tickets")
             .insert_header(("Authorization", format!("Bearer {t}")))
-            .set_json(&serde_json::json!({ "branch_id": branch, "table_id": table,
+            .set_json(serde_json::json!({ "branch_id": branch, "table_id": table,
             "items": [{ "menu_item_id": item, "quantity": 2 }] }))
             .to_request(),
     )
@@ -2754,7 +2753,7 @@ async fn a_bill_keeps_the_policy_it_was_opened_under(pool: PgPool) {
     assert!(view.bill.service_charge_taxable && !view.bill.tax_inclusive);
     let settle = test::call_service(&app, test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle"))
         .insert_header(("Authorization", format!("Bearer {t}")))
-        .set_json(&serde_json::json!({ "till_id": shift, "payment_method": "cash", "total_amount": 2508 }))
+        .set_json(serde_json::json!({ "till_id": shift, "payment_method": "cash", "total_amount": 2508 }))
         .to_request()).await;
     assert_eq!(settle.status(), 200);
     let order: Order = test::read_body_json(settle).await;
@@ -2782,7 +2781,7 @@ async fn waiving_the_service_charge_needs_the_permission(pool: PgPool) {
             .uri(&format!("/open-tickets/{ticket}/settle"))
             .insert_header(("Authorization", format!("Bearer {}", token(who, org, role))))
             .set_json(
-                &serde_json::json!({ "till_id": shift, "payment_method": "cash",
+                serde_json::json!({ "till_id": shift, "payment_method": "cash",
                 "total_amount": total, "waive_service_charge": true }),
             )
             .to_request()
@@ -2886,7 +2885,7 @@ async fn a_settle_without_a_waiver_keeps_the_service_charge(pool: PgPool) {
     let app = app!(pool);
     let r = test::call_service(&app, test::TestRequest::post().uri(&format!("/open-tickets/{ticket}/settle"))
         .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
-        .set_json(&serde_json::json!({ "shift_id": shift, "payment_method": "cash", "total_amount": 2508 }))
+        .set_json(serde_json::json!({ "shift_id": shift, "payment_method": "cash", "total_amount": 2508 }))
         .to_request()).await;
     assert_eq!(r.status(), 200);
     let order: Order = test::read_body_json(r).await;

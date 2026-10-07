@@ -475,7 +475,7 @@ async fn test_update_org(pool: PgPool) {
     let req = test::TestRequest::patch()
         .uri(&format!("/orgs/{}", org_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "name": "Updated Name",
             "slug": "updated-slug"
         }))
@@ -520,7 +520,7 @@ async fn test_update_org_conflict(pool: PgPool) {
     let req = test::TestRequest::patch()
         .uri(&format!("/orgs/{}", org1_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "slug": "slug-2"
         }))
         .to_request();
@@ -849,7 +849,7 @@ async fn a_rate_comes_back_as_a_json_number(pool: PgPool) {
         test::TestRequest::patch()
             .uri(&format!("/orgs/{}", org_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "tax_rate": 0.14,
                 "service_charge_rate": 0.12,
             }))
@@ -897,7 +897,7 @@ async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
             test::TestRequest::patch()
                 .uri(&format!("/orgs/{}", org_id))
                 .insert_header(("Authorization", format!("Bearer {}", token)))
-                .set_json(&serde_json::json!({"tax_rate": bad}))
+                .set_json(serde_json::json!({"tax_rate": bad}))
                 .to_request(),
         )
         .await;
@@ -919,7 +919,7 @@ async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
         test::TestRequest::patch()
             .uri(&format!("/orgs/{}", org_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({"tax_rate": 0.2}))
+            .set_json(serde_json::json!({"tax_rate": 0.2}))
             .to_request(),
     )
     .await;

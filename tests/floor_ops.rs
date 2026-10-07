@@ -442,7 +442,7 @@ async fn ticket_fire_drops_occupied_table_and_move_conflicts(pool: PgPool) {
         test::TestRequest::patch()
             .uri(&format!("/open-tickets/{}/table", ticket2.id))
             .insert_header(("Authorization", format!("Bearer {w}")))
-            .set_json(&serde_json::json!({ "table_id": t1 }))
+            .set_json(serde_json::json!({ "table_id": t1 }))
             .to_request(),
     )
     .await;
@@ -1874,7 +1874,7 @@ async fn a_bill_swaps_with_a_waiting_party_instead_of_wiping_it(pool: PgPool) {
         test::TestRequest::patch()
             .uri(&format!("/open-tickets/{}/table", bill.id))
             .insert_header(("Authorization", format!("Bearer {w}")))
-            .set_json(&serde_json::json!({ "table_id": t2 }))
+            .set_json(serde_json::json!({ "table_id": t2 }))
             .to_request(),
     )
     .await;

@@ -140,6 +140,12 @@ pub mod fake {
         counter: Arc<Mutex<u32>>,
     }
 
+    impl Default for FakeShortLinkProvider {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl FakeShortLinkProvider {
         pub fn new() -> Self {
             Self {

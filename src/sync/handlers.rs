@@ -33,6 +33,10 @@ pub struct ReleaseReplay {
 /// when the backlog flushes. The `request` payloads are the SAME bodies the live
 /// routes accept (idempotency keys ride inside them), so a replayed op dedups
 /// server-side exactly like a lost-response retry on the live endpoint.
+// The largest op is a whole sale's request. One is decoded per replayed op
+// and matched field by field across the replay handlers; boxing those fields
+// would only add indirection to every arm.
+#[allow(clippy::large_enum_variant)]
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ReplayOp {
@@ -935,7 +939,6 @@ pub async fn replay(
     // The target must belong to the bearer's org — block any cross-org replay.
     let op_branch = op_branch_must_be_in_org(pool.get_ref(), &op, token_org).await?;
     // A spot view unlocked by a verified approval names who unlocked it.
-    let mut op = op;
     if let (
         ReplayOp::SpotReportView { request, .. },
         Some(a),
@@ -1067,7 +1070,7 @@ pub(crate) async fn verify_approval(
         .map_err(|e| e.to_string())?;
     let req = match server_req.filter(|r| r.cap == cap.id()) {
         // The act's own figures: an approval minted for less does not stretch.
-        Some(r) => r.clone(),
+        Some(r) => *r,
         None => {
             let mut req = madar_authz::Request::of(cap);
             req.amount = a.amount_minor;
@@ -1210,6 +1213,7 @@ async fn dead_preset_of(
 /// Never fails the request: the op has already committed, and losing the
 /// owner's notice is far better than 500-ing a sale that is now on the books
 /// and making the tablet retry a write it has already applied.
+#[allow(clippy::too_many_arguments)] // one argument per column of the flag row
 pub(crate) async fn record_replay_flags(
     pool: &PgPool,
     org_id: Uuid,
@@ -1280,21 +1284,21 @@ async fn stamp_sync_seq(
     result: Result<HttpResponse, AppError>,
 ) -> Result<HttpResponse, AppError> {
     let mut resp = result?;
-    if let Some(branch) = branch {
-        if resp.status().is_success() {
-            let seq: Option<i64> = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0, 200)")
-                .bind(branch)
-                .fetch_one(pool)
-                .await
-                .ok();
-            if let Some(seq) = seq.filter(|s| *s > 0) {
-                if let Ok(v) = actix_web::http::header::HeaderValue::from_str(&seq.to_string()) {
-                    resp.headers_mut().insert(
-                        actix_web::http::header::HeaderName::from_static("x-madar-sync-seq"),
-                        v,
-                    );
-                }
-            }
+    if let Some(branch) = branch
+        && resp.status().is_success()
+    {
+        let seq: Option<i64> = sqlx::query_scalar("SELECT sync_safe_horizon($1, 0, 200)")
+            .bind(branch)
+            .fetch_one(pool)
+            .await
+            .ok();
+        if let Some(seq) = seq.filter(|s| *s > 0)
+            && let Ok(v) = actix_web::http::header::HeaderValue::from_str(&seq.to_string())
+        {
+            resp.headers_mut().insert(
+                actix_web::http::header::HeaderName::from_static("x-madar-sync-seq"),
+                v,
+            );
         }
     }
     Ok(resp)

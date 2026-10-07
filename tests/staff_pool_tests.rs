@@ -168,7 +168,7 @@ async fn a_teller_without_the_grant_is_refused_before_the_body_is_read(pool: PgP
                 "Authorization",
                 format!("Bearer {}", token(teller, org, UserRole::Teller)),
             ))
-            .set_json(&drink_body(
+            .set_json(drink_body(
                 Uuid::new_v4(),
                 branch,
                 item,
@@ -195,7 +195,7 @@ async fn a_teller_without_the_grant_is_refused_before_the_body_is_read(pool: PgP
                 "Authorization",
                 format!("Bearer {}", token(teller, org, UserRole::Teller)),
             ))
-            .set_json(&json!({"branch_id": branch}))
+            .set_json(json!({"branch_id": branch}))
             .to_request(),
     )
     .await;
@@ -222,7 +222,7 @@ async fn a_granted_teller_records_one_and_the_note_is_kept(pool: PgPool) {
                 "Authorization",
                 format!("Bearer {}", token(teller, org, UserRole::Teller)),
             ))
-            .set_json(&drink_body(
+            .set_json(drink_body(
                 id,
                 branch,
                 item,
@@ -260,7 +260,7 @@ async fn the_live_route_refuses_a_drink_with_no_note(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/staff-pool/drinks")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&drink_body(
+                .set_json(drink_body(
                     Uuid::new_v4(),
                     branch,
                     item,
@@ -291,7 +291,7 @@ async fn an_item_off_the_list_and_an_empty_list_are_both_refused_live(pool: PgPo
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&drink_body(
+            .set_json(drink_body(
                 Uuid::new_v4(),
                 branch,
                 cake,
@@ -310,7 +310,7 @@ async fn an_item_off_the_list_and_an_empty_list_are_both_refused_live(pool: PgPo
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&drink_body(
+            .set_json(drink_body(
                 Uuid::new_v4(),
                 branch,
                 latte,
@@ -377,7 +377,7 @@ async fn an_overspend_lands_on_replay_and_is_flagged_never_refused(pool: PgPool)
             test::TestRequest::post()
                 .uri("/sync/replay")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&replay_envelope(
+                .set_json(replay_envelope(
                     teller,
                     drink_body(
                         Uuid::new_v4(),
@@ -427,7 +427,7 @@ async fn replaying_the_same_drink_twice_spends_one(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/sync/replay")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&replay_envelope(
+                .set_json(replay_envelope(
                     teller,
                     drink_body(id, branch, item, "Sara", "2026-09-19T09:00:00Z"),
                 ))
@@ -458,7 +458,7 @@ async fn a_teller_with_no_grant_still_lands_the_drink_on_replay_and_is_flagged(p
                 "Authorization",
                 format!("Bearer {}", token(teller, org, UserRole::Teller)),
             ))
-            .set_json(&replay_envelope(
+            .set_json(replay_envelope(
                 teller,
                 drink_body(Uuid::new_v4(), branch, item, "Sara", "2026-09-19T09:00:00Z"),
             ))
@@ -489,7 +489,7 @@ async fn replay_refuses_only_the_one_thing_it_cannot_store_a_blank_note(pool: Pg
                 "Authorization",
                 format!("Bearer {}", token(teller, org, UserRole::Teller)),
             ))
-            .set_json(&replay_envelope(
+            .set_json(replay_envelope(
                 teller,
                 drink_body(Uuid::new_v4(), branch, item, "   ", "2026-09-19T09:00:00Z"),
             ))
@@ -520,7 +520,7 @@ async fn an_item_that_left_the_list_while_the_till_was_offline_lands_and_is_flag
                 "Authorization",
                 format!("Bearer {}", token(teller, org, UserRole::Teller)),
             ))
-            .set_json(&replay_envelope(
+            .set_json(replay_envelope(
                 teller,
                 drink_body(Uuid::new_v4(), branch, tea, "Omar", "2026-09-19T09:00:00Z"),
             ))
@@ -559,7 +559,7 @@ async fn the_pool_resets_on_the_branch_business_day_not_midnight_utc(pool: PgPoo
             test::TestRequest::post()
                 .uri("/sync/replay")
                 .insert_header(("Authorization", format!("Bearer {b}")))
-                .set_json(&replay_envelope(
+                .set_json(replay_envelope(
                     teller,
                     drink_body(Uuid::new_v4(), branch, item, "shift", at),
                 ))
@@ -613,7 +613,7 @@ async fn the_report_lists_the_drinks_with_their_notes_newest_first(pool: PgPool)
             test::TestRequest::post()
                 .uri("/staff-pool/drinks")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&drink_body(Uuid::new_v4(), branch, item, note, at))
+                .set_json(drink_body(Uuid::new_v4(), branch, item, note, at))
                 .to_request(),
         )
         .await;
@@ -705,7 +705,7 @@ async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) 
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&drink_body(
+            .set_json(drink_body(
                 drink_id,
                 branch,
                 item,

@@ -675,7 +675,8 @@ pub(crate) async fn add_round_inner(
         ));
     }
 
-    let ticket: Option<(Uuid, Uuid, String, Option<Uuid>, Option<String>)> = sqlx::query_as(
+    type TicketRow = Option<(Uuid, Uuid, String, Option<Uuid>, Option<String>)>;
+    let ticket: TicketRow = sqlx::query_as(
         "SELECT branch_id, org_id, status::text, table_id, ticket_ref FROM open_tickets WHERE id = $1",
     )
     .bind(id)

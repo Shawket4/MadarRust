@@ -232,12 +232,12 @@ pub(crate) async fn create_spot_view_inner(
         .then(|| body.printed_at.unwrap_or_else(Utc::now));
     let id = body.id.unwrap_or_else(Uuid::new_v4);
     let existing = fetch(pool, id).await?;
-    if let Some(e) = &existing {
-        if e.till_id != till_id {
-            return Err(AppError::Conflict(
-                "A spot view with this id belongs to another till".into(),
-            ));
-        }
+    if let Some(e) = &existing
+        && e.till_id != till_id
+    {
+        return Err(AppError::Conflict(
+            "A spot view with this id belongs to another till".into(),
+        ));
     }
     // Live: only an open till's live report is a spot report. Replay: it was
     // open when viewed (the close is gated behind it on the device).

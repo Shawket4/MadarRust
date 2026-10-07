@@ -158,7 +158,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/users")
         .insert_header(("Authorization", format!("Bearer {}", super_token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "E2E Org Admin",
             "email": "e2eadmin@example.com",
@@ -178,7 +178,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/branches")
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "Downtown Branch",
             "timezone": "Africa/Cairo"
@@ -192,7 +192,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/branches")
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "Subway Branch",
             "timezone": "Africa/Cairo"
@@ -207,7 +207,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/users")
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "Happy POS Teller",
             "role": "teller",
@@ -235,13 +235,13 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
         .iter()
         .find(|m| m.resource == "categories" && m.action == "create")
         .unwrap();
-    assert_eq!(cat_write.effective, false);
+    assert!(!cat_write.effective);
 
     // STEP 1.6: Grant custom permission override to Teller
     let req = test::TestRequest::put()
         .uri(&format!("/permissions/user/{}", teller_user_id))
         .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "resource": "categories",
             "action": "create",
             "granted": true
@@ -262,7 +262,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
         .find(|m| m.resource == "categories" && m.action == "create")
         .unwrap();
     assert_eq!(cat_write_updated.user_override, Some(true));
-    assert_eq!(cat_write_updated.effective, true);
+    assert!(cat_write_updated.effective);
 
     // STEP 1.7: Log in / operate as the Teller user
     let teller_token = generate_token(
@@ -284,7 +284,7 @@ async fn test_e2e_merchant_setup_and_operation_happy_path(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/categories")
         .insert_header(("Authorization", format!("Bearer {}", teller_token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "Beverages"
         }))
@@ -362,7 +362,7 @@ async fn test_e2e_tenant_and_role_isolation_security_violation_path(pool: PgPool
     let req = test::TestRequest::put()
         .uri(&format!("/permissions/user/{}", teller_b_id))
         .insert_header(("Authorization", format!("Bearer {}", token_admin_a)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "resource": "inventory",
             "action": "create",
             "granted": true
@@ -391,7 +391,7 @@ async fn test_e2e_tenant_and_role_isolation_security_violation_path(pool: PgPool
     let req = test::TestRequest::put()
         .uri("/permissions/roles")
         .insert_header(("Authorization", format!("Bearer {}", token_teller_b)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "role": "teller",
             "resource": "permissions",
             "action": "update",
@@ -479,7 +479,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/categories")
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "org_id": org_id,
                     "name": "Beverages"
                 }))
@@ -495,7 +495,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/categories")
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "org_id": org_id,
                     "name": "Bakery"
                 }))
@@ -513,7 +513,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/menu-items")
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "org_id": org_id,
                     "category_id": beverages_cat.id,
                     "name": "Espresso Macchiato",
@@ -533,7 +533,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/menu-items")
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "org_id": org_id,
                     "category_id": bakery_cat.id,
                     "name": "Croissant",
@@ -553,7 +553,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri(&format!("/menu-items/{}/sizes", espresso_id))
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "label": "medium",
                     "price_override": 400
                 }))
@@ -570,7 +570,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/addon-items")
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "org_id": org_id,
                     "name": "Vanilla Syrup",
                     "addon_type": "syrup",
@@ -589,7 +589,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri(&format!("/inventory/orgs/{}/catalog", org_id))
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "name": "Espresso Beans",
                     "unit": "g",
                     "category_id": ingredient_cat(&pool, org_id, "coffee_bean").await,
@@ -607,7 +607,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri(&format!("/inventory/orgs/{}/catalog", org_id))
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "name": "Whole Milk",
                     "unit": "ml",
                     "category_id": ingredient_cat(&pool, org_id, "milk").await,
@@ -625,7 +625,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri(&format!("/inventory/orgs/{}/catalog", org_id))
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "name": "Croissant Dough",
                     "unit": "pcs",
                     "category_id": ingredient_cat(&pool, org_id, "general").await,
@@ -643,7 +643,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri(&format!("/inventory/orgs/{}/catalog", org_id))
                 .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "name": "Vanilla Flavor",
                     "unit": "ml",
                     "category_id": ingredient_cat(&pool, org_id, "general").await,
@@ -671,7 +671,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/recipes/drinks/{}", espresso_id))
             .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "size_label": "medium",
                 "org_ingredient_id": espresso_beans.id,
                 "ingredient_name": "Espresso Beans",
@@ -688,7 +688,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/recipes/drinks/{}", espresso_id))
             .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "size_label": "medium",
                 "org_ingredient_id": whole_milk.id,
                 "ingredient_name": "Whole Milk",
@@ -706,7 +706,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/recipes/drinks/{}", croissant_id))
             .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "size_label": "one_size",
                 "org_ingredient_id": croissant_dough.id,
                 "ingredient_name": "Croissant Dough",
@@ -724,7 +724,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/recipes/addons/{}", vanilla_addon.id))
             .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "org_ingredient_id": vanilla_flavor.id,
                 "ingredient_name": "Vanilla Flavor",
                 "ingredient_unit": "ml",
@@ -742,7 +742,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             test::TestRequest::post()
                 .uri(&format!("/shifts/branches/{}/open", branch_id))
                 .insert_header(("Authorization", format!("Bearer {}", teller_token)))
-                .set_json(&serde_json::json!({
+                .set_json(serde_json::json!({
                     "opening_cash": 2000
                 }))
                 .to_request(),
@@ -976,7 +976,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/shifts/{}/cash-movements", shift.id))
             .insert_header(("Authorization", format!("Bearer {}", teller_token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "amount": 1000,
                 "note": "change depot"
             }))

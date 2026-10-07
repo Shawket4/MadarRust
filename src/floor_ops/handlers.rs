@@ -1054,7 +1054,7 @@ pub async fn table_history(
     };
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
-    let rows: Vec<(
+    type Rows = Vec<(
         Uuid,
         Option<String>,
         DateTime<Utc>,
@@ -1067,7 +1067,8 @@ pub async fn table_history(
         Option<i32>,
         DateTime<Utc>,
         Option<Uuid>,
-    )> = sqlx::query_as(
+    )>;
+    let rows: Rows = sqlx::query_as(
         "SELECT t.id, t.ticket_ref, t.opened_at, COALESCE(t.settled_at, t.voided_at), \
                 t.status::text, \
                 t.customer_name, \

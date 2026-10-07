@@ -563,7 +563,8 @@ pub async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     branch_id: Uuid,
     device_id: Option<Uuid>,
 ) -> Result<Option<i32>, sqlx::Error> {
-    let rows: Vec<(String, Option<Uuid>, DateTime<Utc>, Option<i32>)> = sqlx::query_as(
+    type Rows = Vec<(String, Option<Uuid>, DateTime<Utc>, Option<i32>)>;
+    let rows: Rows = sqlx::query_as(
         "(SELECT status::text, device_id, opened_at, closing_cash_declared FROM tills \
            WHERE branch_id = $1 AND status IN ('closed','force_closed') \
              AND closing_cash_declared IS NOT NULL AND device_id = $2 \
@@ -632,7 +633,7 @@ pub(crate) async fn open_bills_notice<'e, E: sqlx::PgExecutor<'e>>(
 }
 
 fn last_till_warning(notice: &OpenBillsNotice, other_open: bool) -> Option<LastTillWarning> {
-    (!other_open && (notice.open_bills_count > 0 || notice.seated_tables_count > 0)).then(|| {
+    (!other_open && (notice.open_bills_count > 0 || notice.seated_tables_count > 0)).then_some({
         LastTillWarning {
             is_last_open_till: true,
             open_bills_count: notice.open_bills_count,
@@ -926,7 +927,7 @@ pub async fn open_till_inner(
     // discrepancy reads as tampering, and the reverse (flagged with a NULL
     // reason, which is what a stale client produced) reads as a blank note.
     let was_edited = expected_opening.is_some_and(|exp| exp != body.opening_cash);
-    let edit_reason = body.edit_reason.as_deref().filter(|_| was_edited);
+    let _edit_reason = body.edit_reason.as_deref().filter(|_| was_edited);
     if !actor.replay && was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
         return Err(AppError::BadRequest(
             "Opening cash differs from your last declared closing cash; edit_reason is required."

@@ -1022,7 +1022,7 @@ async fn a_device_that_already_synced_the_empty_snapshot_heals_on_its_next_pull(
             .unwrap_or(true),
         "the device starts out short, as the field does"
     );
-    let cursor = first.next.unwrap_or_else(|| 0);
+    let cursor = first.next.unwrap_or(0);
 
     // The fix lands (the migration runs this for every branch).
     let healed: i32 = sqlx::query_scalar("SELECT sync_backfill_branch($1)")

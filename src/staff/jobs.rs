@@ -601,9 +601,9 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
     for row in missing {
         let off = async {
             let key = (row.org_id, row.branch_id);
-            if !rules.contains_key(&key) {
+            if let std::collections::hash_map::Entry::Vacant(e) = rules.entry(key) {
                 let s = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
-                rules.insert(key, s);
+                e.insert(s);
             }
             let adjustments = crate::staff::attendance::adjustments_for(
                 pool,

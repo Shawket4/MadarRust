@@ -7,6 +7,7 @@
 //!   saving_unit 6000. Its line_total 17500, unit_price 0.
 //! - line 1, Croissant × 2: 11000, deal cut 2000 ("any 2 bites for 90").
 //! - line 2, Cookie: 4000 (the croissants are the better chunk).
+//!
 //! items_total 32500, deal_discount 2000, total_after_deals 30500.
 
 mod common;

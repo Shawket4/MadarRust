@@ -706,7 +706,8 @@ async fn backfill_with_shared_files_rerun_is_noop(pool: PgPool) {
         .unwrap();
     assert_eq!(groups, 2);
     let snapshot = |pool: PgPool| async move {
-        let rows: Vec<(String, String, Option<Uuid>, bool, Option<i64>)> = sqlx::query_as(
+        type Rows = Vec<(String, String, Option<Uuid>, bool, Option<i64>)>;
+        let rows: Rows = sqlx::query_as(
             "SELECT source_id, status, group_id, deduped, stored_bytes FROM asset_backfill_items ORDER BY source_table, source_id, source_field")
             .fetch_all(&pool).await.unwrap();
         let assets: Vec<(Uuid, String, String)> =

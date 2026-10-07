@@ -1837,7 +1837,7 @@ async fn test_void_is_idempotent_no_double_restock(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&simple_order(branch_id, shift_id, menu_item_id))
+            .set_json(simple_order(branch_id, shift_id, menu_item_id))
             .to_request(),
     )
     .await;
@@ -1989,7 +1989,7 @@ async fn test_order_rejected_on_closed_shift(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&simple_order(branch_id, shift_id, menu_item_id))
+            .set_json(simple_order(branch_id, shift_id, menu_item_id))
             .to_request(),
     )
     .await;
@@ -3095,7 +3095,7 @@ async fn test_order_on_closed_shift_files_nothing(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&simple_order(branch_id, shift_id, item))
+            .set_json(simple_order(branch_id, shift_id, item))
             .to_request(),
     )
     .await;
@@ -3156,7 +3156,7 @@ async fn test_two_open_shifts_route_orders_correctly(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&simple_order(branch_1, shift_2, item))
+            .set_json(simple_order(branch_1, shift_2, item))
             .to_request(),
     )
     .await;
@@ -3200,7 +3200,7 @@ async fn test_teller_cannot_post_order_to_another_tellers_shift(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token_2)))
-            .set_json(&simple_order(branch_id, shift_1, item))
+            .set_json(simple_order(branch_id, shift_1, item))
             .to_request(),
     )
     .await;
@@ -3247,7 +3247,7 @@ async fn test_order_cannot_target_shift_in_another_org(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token_a)))
-            .set_json(&simple_order(branch_b, shift_b, item_a))
+            .set_json(simple_order(branch_b, shift_b, item_a))
             .to_request(),
     )
     .await;
@@ -3388,7 +3388,7 @@ async fn test_void_voided_at_guard(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&simple_order(branch_id, shift_id, item_id))
+            .set_json(simple_order(branch_id, shift_id, item_id))
             .to_request(),
     )
     .await;
@@ -3409,7 +3409,7 @@ async fn test_void_voided_at_guard(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&simple_order(branch_id, shift_id, item_id))
+            .set_json(simple_order(branch_id, shift_id, item_id))
             .to_request(),
     )
     .await;
@@ -3663,7 +3663,7 @@ async fn ring_up_a_sale(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid, Uuid, String)
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {token}")))
-            .set_json(&simple_order(branch_id, shift_id, menu_item_id))
+            .set_json(simple_order(branch_id, shift_id, menu_item_id))
             .to_request(),
     )
     .await;
@@ -3972,7 +3972,7 @@ async fn test_void_reason_from_an_old_till_is_read_not_refused(pool: PgPool) {
             test::TestRequest::post()
                 .uri(&format!("/orders/{order_id}/void"))
                 .insert_header(("Authorization", format!("Bearer {token}")))
-                .set_json(&serde_json::json!({ "reason": reason }))
+                .set_json(serde_json::json!({ "reason": reason }))
                 .to_request(),
         )
         .await;

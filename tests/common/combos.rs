@@ -218,6 +218,7 @@ pub async fn combo_item(pool: &PgPool, org: Uuid, cat: Uuid, name: &str, price: 
     id
 }
 
+#[allow(clippy::too_many_arguments)] // one argument per column of the row
 pub async fn slot(
     pool: &PgPool,
     org: Uuid,
@@ -245,6 +246,7 @@ pub async fn slot(
 }
 
 /// An item choice (`menu_item_id`) or a category choice (`category_id`).
+#[allow(clippy::too_many_arguments)] // one argument per column of the row
 pub async fn choice(
     pool: &PgPool,
     org: Uuid,

@@ -243,13 +243,13 @@ pub async fn create_code(
     // A handful of tries: a collision with another live code is a unique
     // violation, and the space is a hundred million.
     for _ in 0..8 {
-        let inserted: Result<CodeRow, sqlx::Error> = sqlx::query_as(&format!(
+        let inserted: Result<CodeRow, sqlx::Error> = sqlx::query_as(
             "INSERT INTO device_activation_codes
                  (org_id, branch_id, code, label, kind, created_by, expires_at)
              VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(hours => $7))
              RETURNING id, branch_id, code, label, kind, created_at, expires_at,
-                       used_at, used_by_device, revoked_at"
-        ))
+                       used_at, used_by_device, revoked_at",
+        )
         .bind(org)
         .bind(body.branch_id)
         .bind(new_code())

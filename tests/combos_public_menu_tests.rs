@@ -63,7 +63,7 @@ async fn storefront(pool: &PgPool, s: &Shop) -> Uuid {
     .unwrap()
 }
 
-fn find<'a>(menu: &'a Value, id: Uuid) -> Option<&'a Value> {
+fn find(menu: &Value, id: Uuid) -> Option<&Value> {
     menu["items"]
         .as_array()
         .unwrap()

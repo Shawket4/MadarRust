@@ -1451,7 +1451,8 @@ fn check_setting_ranges(body: &PutAttendanceSettingsRequest) -> Result<(), AppEr
     }
     // (field, value, min, min inclusive, max, max inclusive)
     let d = |v: i64| Decimal::from(v);
-    let ranges: [(&str, Option<Decimal>, Decimal, bool, Decimal, bool); 13] = [
+    type Ranges = [(&'static str, Option<Decimal>, Decimal, bool, Decimal, bool); 13];
+    let ranges: Ranges = [
         (
             "overtime_day_multiplier",
             body.overtime_day_multiplier,

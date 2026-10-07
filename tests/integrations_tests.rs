@@ -285,7 +285,7 @@ async fn username_match_is_case_insensitive(pool: PgPool) {
     let app = app(pool).await;
 
     let req = test::TestRequest::get()
-        .uri(&"/integrations/analytics/orders?from=2026-06-01&to=2026-06-01".to_string())
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
         .insert_header(("Authorization", basic("PARTNER", &secret)))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), StatusCode::OK);
@@ -414,7 +414,7 @@ async fn excludes_voided_and_refunded_and_reports_order_money_only(pool: PgPool)
 
     let app = app(pool).await;
     let req = test::TestRequest::get()
-        .uri(&"/integrations/analytics/orders?from=2026-06-01&to=2026-06-01".to_string())
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
         .insert_header(("Authorization", basic("partner", &secret)))
         .to_request();
     let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
@@ -536,7 +536,7 @@ async fn branch_timezone_falls_back_to_the_org(pool: PgPool) {
     let app = app(pool).await;
 
     let req = test::TestRequest::get()
-        .uri(&"/integrations/analytics/orders?from=2026-06-01&to=2026-06-01".to_string())
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
         .insert_header(("Authorization", basic("partner", &secret)))
         .to_request();
     let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
@@ -552,7 +552,7 @@ async fn empty_window_returns_zeroes_not_an_error(pool: PgPool) {
     let app = app(pool).await;
 
     let req = test::TestRequest::get()
-        .uri(&"/integrations/analytics/orders?from=2026-06-01&to=2026-06-01".to_string())
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
         .insert_header(("Authorization", basic("partner", &secret)))
         .to_request();
     let body: serde_json::Value = test::call_and_read_body_json(&app, req).await;
@@ -627,7 +627,7 @@ async fn rejects_a_backwards_window_and_bad_paging(pool: PgPool) {
         "from=2026-06-01&to=2026-06-02&offset=-1",
     ] {
         let req = test::TestRequest::get()
-            .uri(&"/integrations/analytics/orders?{qs}".to_string())
+            .uri("/integrations/analytics/orders?{qs}")
             .insert_header(("Authorization", basic("partner", &secret)))
             .to_request();
         assert_eq!(
@@ -830,7 +830,7 @@ async fn create_returns_the_secret_once_and_it_authenticates(pool: PgPool) {
 
     // The issued secret really does open the analytics endpoint.
     let req = test::TestRequest::get()
-        .uri(&"/integrations/analytics/orders?from=2026-06-01&to=2026-06-01".to_string())
+        .uri("/integrations/analytics/orders?from=2026-06-01&to=2026-06-01")
         .insert_header(("Authorization", basic("rue-one-ninety", &secret)))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), StatusCode::OK);

@@ -901,13 +901,13 @@ pub(crate) async fn publish_fired(
             BranchEvent::new(Topic::Tickets, event_type, &with_origin(&view, origin)),
         );
     }
-    if let Some(kt_id) = kitchen_ticket_id {
-        if let Ok(Some(view)) = crate::kitchen::kitchen_ticket_view(pool, kt_id).await {
-            hub.publish(
-                branch_id,
-                BranchEvent::new(Topic::Kitchen, "kitchen.fired", &with_origin(&view, origin)),
-            );
-        }
+    if let Some(kt_id) = kitchen_ticket_id
+        && let Ok(Some(view)) = crate::kitchen::kitchen_ticket_view(pool, kt_id).await
+    {
+        hub.publish(
+            branch_id,
+            BranchEvent::new(Topic::Kitchen, "kitchen.fired", &with_origin(&view, origin)),
+        );
     }
 }
 

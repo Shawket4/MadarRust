@@ -285,7 +285,7 @@ mod http {
         let req = test::TestRequest::post()
             .uri(&format!("/branches/{branch_id}/tables"))
             .insert_header(("Authorization", format!("Bearer {tok}")))
-            .set_json(&serde_json::json!({ "label": "Table 1" }))
+            .set_json(serde_json::json!({ "label": "Table 1" }))
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 201, "create table");
@@ -318,7 +318,7 @@ mod http {
             test::TestRequest::post()
                 .uri(&format!("/branches/{branch_id}/tables"))
                 .insert_header(("Authorization", format!("Bearer {tok}")))
-                .set_json(&serde_json::json!({ "label": "Table 2" }))
+                .set_json(serde_json::json!({ "label": "Table 2" }))
                 .to_request(),
         )
         .await;
@@ -329,7 +329,7 @@ mod http {
             test::TestRequest::post()
                 .uri(&format!("/branches/{branch_id}/tables"))
                 .insert_header(("Authorization", format!("Bearer {tok}")))
-                .set_json(&serde_json::json!({ "label": "Table 2" }))
+                .set_json(serde_json::json!({ "label": "Table 2" }))
                 .to_request(),
         )
         .await;
@@ -352,7 +352,7 @@ mod http {
             test::TestRequest::post()
                 .uri(&format!("/branches/{branch_id}/tables"))
                 .insert_header(("Authorization", format!("Bearer {tok}")))
-                .set_json(&serde_json::json!({ "label": "To Delete" }))
+                .set_json(serde_json::json!({ "label": "To Delete" }))
                 .to_request(),
         )
         .await;
@@ -462,7 +462,7 @@ mod http {
                 test::TestRequest::post()
                     .uri("/qr/links")
                     .insert_header(("Authorization", format!("Bearer {tok}")))
-                    .set_json(&serde_json::json!({ "label": "bad", "path": bad }))
+                    .set_json(serde_json::json!({ "label": "bad", "path": bad }))
                     .to_request(),
             )
             .await;
@@ -474,7 +474,7 @@ mod http {
             test::TestRequest::post()
                 .uri("/qr/links")
                 .insert_header(("Authorization", format!("Bearer {tok}")))
-                .set_json(&serde_json::json!({ "label": "good", "path": "/menu?p=1" }))
+                .set_json(serde_json::json!({ "label": "good", "path": "/menu?p=1" }))
                 .to_request(),
         )
         .await;

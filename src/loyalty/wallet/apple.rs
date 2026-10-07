@@ -235,6 +235,9 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
     }
 }
 
+/// `(org, picture URL, colour)` → the strip's files, `(name, PNG bytes)`.
+type StripCache = moka::future::Cache<(Uuid, String, String), Arc<Vec<(String, Vec<u8>)>>>;
+
 /// The shop's photograph, sized for the pass's strip — cached per org.
 ///
 /// These bytes depend ONLY on the org's picture and its foreground colour, not
@@ -247,9 +250,7 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
 /// The key carries the picture's URL and the colour, so changing either in the
 /// dashboard yields a different key and the next press rebuilds. The TTL is the
 /// backstop for a picture replaced at the same URL.
-static STRIP_CACHE: LazyLock<
-    moka::future::Cache<(Uuid, String, String), Arc<Vec<(String, Vec<u8>)>>>,
-> = LazyLock::new(|| {
+static STRIP_CACHE: LazyLock<StripCache> = LazyLock::new(|| {
     moka::future::Cache::builder()
         // Each entry is three PNGs — a few hundred KB. A few dozen orgs is the
         // whole tenancy, so this is small and bounded either way.
@@ -1620,9 +1621,10 @@ pub(crate) mod tests {
     /// assertion tells you whether a scrim is heavy-handed.
     ///
     ///     MADAR_STRIP_PREVIEW=photo.jpg \
-    ///       cargo test --lib apple::tests::preview_strip -- --ignored --nocapture
+    ///       cargo test --lib apple::tests::preview_strip -- --nocapture
+    ///
+    /// Without the variable it does nothing, so it runs (and passes) with the rest.
     #[test]
-    #[ignore = "writes a preview to look at"]
     fn preview_strip() {
         let Some(path) = std::env::var("MADAR_STRIP_PREVIEW").ok() else {
             println!("set MADAR_STRIP_PREVIEW=/path/to/photo.jpg to render one");

@@ -347,10 +347,12 @@ fn global_per_minute() -> f64 {
         .unwrap_or(GLOBAL_PER_MINUTE)
 }
 
+/// Per client key: `(tokens, last refill, capacity)` (see [`BUCKETS`]).
+type Buckets = std::collections::HashMap<String, (f64, std::time::Instant, f64)>;
+
 /// `(tokens, last refill)` per client.
-static BUCKETS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant, f64)>>,
-> = std::sync::LazyLock::new(Default::default);
+static BUCKETS: std::sync::LazyLock<std::sync::Mutex<Buckets>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// The ceiling for one ADDRESS across every account behind it. The person
 /// bucket is what an honest till spends; this one stops a single address from

@@ -227,6 +227,6 @@ mod tests {
             delay_after(BRANCH_FREE_ATTEMPTS + 1, BRANCH_FREE_ATTEMPTS),
             5
         );
-        assert!(BRANCH_FREE_ATTEMPTS > FREE_ATTEMPTS);
+        const { assert!(BRANCH_FREE_ATTEMPTS > FREE_ATTEMPTS) };
     }
 }

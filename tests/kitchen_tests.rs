@@ -147,7 +147,7 @@ async fn station_crud_and_single_default(pool: PgPool) {
                 .uri("/kitchen/stations")
                 .insert_header(("Authorization", format!("Bearer {t}")))
                 .set_json(
-                    &serde_json::json!({ "branch_id": branch, "name": name, "is_default": def }),
+                    serde_json::json!({ "branch_id": branch, "name": name, "is_default": def }),
                 )
                 .to_request(),
         )

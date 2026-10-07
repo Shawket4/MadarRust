@@ -250,42 +250,6 @@ fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{AppError, status_for_sqlstate};
-    use actix_web::ResponseError;
-    use actix_web::http::StatusCode;
-
-    #[test]
-    fn row_not_found_maps_to_404() {
-        // `fetch_one` on a missing row must surface as 404, not 500.
-        let resp = AppError::from(sqlx::Error::RowNotFound).error_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn classifies_sqlstates() {
-        assert_eq!(status_for_sqlstate(Some("23505")), StatusCode::CONFLICT); // unique
-        assert_eq!(status_for_sqlstate(Some("23503")), StatusCode::CONFLICT); // foreign key
-        assert_eq!(status_for_sqlstate(Some("23P01")), StatusCode::CONFLICT); // exclusion
-        assert_eq!(status_for_sqlstate(Some("23514")), StatusCode::BAD_REQUEST); // check
-        assert_eq!(status_for_sqlstate(Some("23502")), StatusCode::BAD_REQUEST); // not null
-        assert_eq!(status_for_sqlstate(Some("22003")), StatusCode::BAD_REQUEST); // numeric overflow
-        assert_eq!(status_for_sqlstate(Some("22P02")), StatusCode::BAD_REQUEST); // invalid text/enum
-        assert_eq!(status_for_sqlstate(Some("22021")), StatusCode::BAD_REQUEST); // bad encoding / NUL
-        assert_eq!(status_for_sqlstate(Some("2201X")), StatusCode::BAD_REQUEST); // offset out of range
-        assert_eq!(
-            status_for_sqlstate(Some("40P01")),
-            StatusCode::INTERNAL_SERVER_ERROR
-        ); // deadlock
-        assert_eq!(
-            status_for_sqlstate(Some("08006")),
-            StatusCode::INTERNAL_SERVER_ERROR
-        ); // connection failure
-        assert_eq!(status_for_sqlstate(None), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-}
-
 impl actix_web::ResponseError for AppError {
     fn error_response(&self) -> HttpResponse {
         let body = ErrorBody {
@@ -380,5 +344,41 @@ impl IntoResponses for AppErrorResponse {
             ),
             ("500".to_string(), err("Internal server error")),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppError, status_for_sqlstate};
+    use actix_web::ResponseError;
+    use actix_web::http::StatusCode;
+
+    #[test]
+    fn row_not_found_maps_to_404() {
+        // `fetch_one` on a missing row must surface as 404, not 500.
+        let resp = AppError::from(sqlx::Error::RowNotFound).error_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn classifies_sqlstates() {
+        assert_eq!(status_for_sqlstate(Some("23505")), StatusCode::CONFLICT); // unique
+        assert_eq!(status_for_sqlstate(Some("23503")), StatusCode::CONFLICT); // foreign key
+        assert_eq!(status_for_sqlstate(Some("23P01")), StatusCode::CONFLICT); // exclusion
+        assert_eq!(status_for_sqlstate(Some("23514")), StatusCode::BAD_REQUEST); // check
+        assert_eq!(status_for_sqlstate(Some("23502")), StatusCode::BAD_REQUEST); // not null
+        assert_eq!(status_for_sqlstate(Some("22003")), StatusCode::BAD_REQUEST); // numeric overflow
+        assert_eq!(status_for_sqlstate(Some("22P02")), StatusCode::BAD_REQUEST); // invalid text/enum
+        assert_eq!(status_for_sqlstate(Some("22021")), StatusCode::BAD_REQUEST); // bad encoding / NUL
+        assert_eq!(status_for_sqlstate(Some("2201X")), StatusCode::BAD_REQUEST); // offset out of range
+        assert_eq!(
+            status_for_sqlstate(Some("40P01")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        ); // deadlock
+        assert_eq!(
+            status_for_sqlstate(Some("08006")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        ); // connection failure
+        assert_eq!(status_for_sqlstate(None), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

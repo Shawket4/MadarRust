@@ -1712,7 +1712,7 @@ async fn a_redemption_cap_counts_items_not_lines(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/orders")
         .insert_header(("Authorization", format!("Bearer {jwt}")))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "branch_id": branch, "shift_id": shift, "payment_method": "cash",
             "idempotency_key": Uuid::new_v4(),
             "loyalty_customer_id": member,
@@ -1737,7 +1737,7 @@ async fn a_redemption_cap_counts_items_not_lines(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/orders")
         .insert_header(("Authorization", format!("Bearer {jwt}")))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "branch_id": branch, "shift_id": shift, "payment_method": "cash",
             "idempotency_key": Uuid::new_v4(),
             "loyalty_customer_id": member,
@@ -1802,7 +1802,7 @@ async fn an_unset_ceiling_is_the_dearest_reward_and_follows_the_catalogue(pool: 
         let req = test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {jwt}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "shift_id": shift, "payment_method": "cash",
                 "idempotency_key": key,
                 "items": [{ "menu_item_id": espresso, "quantity": 1 }]
@@ -1820,7 +1820,7 @@ async fn an_unset_ceiling_is_the_dearest_reward_and_follows_the_catalogue(pool: 
         let req = test::TestRequest::post()
             .uri("/loyalty/award")
             .insert_header(("Authorization", format!("Bearer {jwt}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "order_id": order_id,
                 "token": "Mderivedcap000000001"
             }))
@@ -1949,7 +1949,7 @@ async fn earning_stops_at_the_balance_cap_without_failing_the_sale(pool: PgPool)
         let req = test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {jwt}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "shift_id": shift, "payment_method": "cash",
                 "idempotency_key": key,
                 "items": [{ "menu_item_id": latte, "quantity": 1 }]
@@ -1967,7 +1967,7 @@ async fn earning_stops_at_the_balance_cap_without_failing_the_sale(pool: PgPool)
         let req = test::TestRequest::post()
             .uri("/loyalty/award")
             .insert_header(("Authorization", format!("Bearer {jwt}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch, "order_id": order_id,
                 "token": "Mbalancecap000000001"
             }))

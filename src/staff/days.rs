@@ -657,12 +657,13 @@ pub(crate) async fn clear_stale_absences(
             .into_iter()
             .map(|s| (s.work_shift_id, s.scheduled_start_at, s.scheduled_end_at))
             .collect();
-    let candidates: Vec<(
+    type Candidates = Vec<(
         Uuid,
         Option<Uuid>,
         Option<DateTime<Utc>>,
         Option<DateTime<Utc>>,
-    )> = sqlx::query_as(
+    )>;
+    let candidates: Candidates = sqlx::query_as(
         "SELECT a.id, a.work_shift_id, a.scheduled_start_at, a.scheduled_end_at \
                FROM attendance_records a \
               WHERE a.employee_id = $1 AND a.business_date = $2 \

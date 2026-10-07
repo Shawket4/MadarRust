@@ -146,7 +146,7 @@ pub async fn refunds_audit(
     let org_id = org_id.into_inner();
     let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(r.amount), 0)::bigint
         FROM order_refunds r
@@ -155,7 +155,7 @@ pub async fn refunds_audit(
           AND ($2::timestamptz IS NULL OR r.issued_at >= $2)
           AND ($3::timestamptz IS NULL OR r.issued_at <= $3)
         "#,
-    ))
+    )
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -163,8 +163,7 @@ pub async fn refunds_audit(
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(r#"
         SELECT r.reason AS label, COUNT(*)::bigint AS count, COALESCE(SUM(r.amount), 0)::bigint AS amount_minor
         FROM order_refunds r
         JOIN branches b ON b.id = r.branch_id
@@ -173,8 +172,7 @@ pub async fn refunds_audit(
           AND ($3::timestamptz IS NULL OR r.issued_at <= $3)
         GROUP BY r.reason
         ORDER BY count DESC
-        "#,
-    ))
+        "#)
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -182,8 +180,7 @@ pub async fn refunds_audit(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(r.amount), 0)::bigint AS amount_minor
         FROM order_refunds r
         JOIN branches b ON b.id = r.branch_id
@@ -194,8 +191,7 @@ pub async fn refunds_audit(
         GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
-        "#,
-    ))
+        "#)
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -236,7 +232,7 @@ pub async fn voids_audit(
     let org_id = org_id.into_inner();
     let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(o.total_amount), 0)::bigint
         FROM orders o
@@ -245,7 +241,7 @@ pub async fn voids_audit(
           AND ($2::timestamptz IS NULL OR o.voided_at >= $2)
           AND ($3::timestamptz IS NULL OR o.voided_at <= $3)
         "#,
-    ))
+    )
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -253,7 +249,7 @@ pub async fn voids_audit(
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(
         r#"
         SELECT COALESCE(o.void_reason::text, 'unspecified') AS label,
                COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor,
@@ -266,7 +262,7 @@ pub async fn voids_audit(
         GROUP BY o.void_reason
         ORDER BY count DESC
         "#,
-    ))
+    )
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -274,8 +270,7 @@ pub async fn voids_audit(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
@@ -286,8 +281,7 @@ pub async fn voids_audit(
         GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
-        "#,
-    ))
+        "#)
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)

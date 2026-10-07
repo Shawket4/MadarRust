@@ -7,7 +7,7 @@
 //! only when someone asks for it — [`every_preset_runs_against_the_real_schema`]
 //! is what turns that into a build failure.
 
-use actix_web::{App, test, web};
+use actix_web::test;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;

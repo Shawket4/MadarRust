@@ -1496,11 +1496,11 @@ async fn seed_till(
     Uuid::new_v4()
 }
 
-/// Several tills may be open at one branch at once (one per drawer), but a single
-/// till holds only one open shift — the per-till index, not the branch, is the guard.
+// Several tills may be open at one branch at once (one per drawer), but a single
+// till holds only one open shift — the per-till index, not the branch, is the guard.
 
-/// Cash continuity is per-TILL (the drawer), not per teller: a handover keeps the
-/// float. A fresh, never-used till has no carryover.
+// Cash continuity is per-TILL (the drawer), not per teller: a handover keeps the
+// float. A fresh, never-used till has no carryover.
 
 // ── Cash movement kinds ───────────────────────────────────────
 
@@ -1697,7 +1697,7 @@ async fn test_correction_must_stay_on_its_shift(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/shifts/{}/cash-movements", shift_a))
             .insert_header(("Authorization", format!("Bearer {}", token_a)))
-            .set_json(&movement_json(-400, Some("pay_out"), None))
+            .set_json(movement_json(-400, Some("pay_out"), None))
             .to_request(),
     )
     .await;
@@ -1709,7 +1709,7 @@ async fn test_correction_must_stay_on_its_shift(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/shifts/{}/cash-movements", shift_b))
             .insert_header(("Authorization", format!("Bearer {}", token_b)))
-            .set_json(&movement_json(400, Some("correction"), Some(on_a.id)))
+            .set_json(movement_json(400, Some("correction"), Some(on_a.id)))
             .to_request(),
     )
     .await;
@@ -1888,7 +1888,7 @@ async fn test_branch_manager_works_the_till(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/shifts/{}/cash-movements", managers_shift.id))
             .insert_header(("Authorization", format!("Bearer {}", manager_token)))
-            .set_json(&movement_json(-250, Some("pay_out"), None))
+            .set_json(movement_json(-250, Some("pay_out"), None))
             .to_request(),
     )
     .await;

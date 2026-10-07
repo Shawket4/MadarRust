@@ -1341,7 +1341,7 @@ mod it {
             &app,
             test::TestRequest::post()
                 .uri("/public/delivery-orders")
-                .set_json(&intake_body(
+                .set_json(intake_body(
                     branch,
                     "in_mall",
                     json!([{ "menu_item_id": item, "quantity": 2 }]),
@@ -1514,7 +1514,7 @@ mod it {
             &app,
             test::TestRequest::post()
                 .uri("/public/delivery-orders")
-                .set_json(&intake_body(
+                .set_json(intake_body(
                     branch,
                     "pickup",
                     json!([{ "menu_item_id": item, "quantity": 1 }]),
@@ -1691,13 +1691,14 @@ mod it {
         // Forward jump received → out_for_delivery (skips confirmed/preparing/ready).
         let (st, b) = set("out_for_delivery").await;
         assert_eq!(st, StatusCode::OK, "forward jump: {b}");
-        let (status, c_at, p_at, r_at, o_at): (
+        type Row = (
             String,
             Option<chrono::DateTime<chrono::Utc>>,
             Option<chrono::DateTime<chrono::Utc>>,
             Option<chrono::DateTime<chrono::Utc>>,
             Option<chrono::DateTime<chrono::Utc>>,
-        ) = sqlx::query_as(
+        );
+        let (status, c_at, p_at, r_at, o_at): Row = sqlx::query_as(
             "SELECT status::text, confirmed_at, preparing_at, ready_at, out_for_delivery_at
              FROM delivery_orders WHERE id=$1",
         )
@@ -1851,7 +1852,7 @@ mod it {
         // The list row carries the lightweight channel flag (for badges + KPIs)…
         assert_eq!(row["delivery_channel"], "in_mall");
         // …but NOT the full address block (detail-only).
-        assert!(row.get("delivery").map_or(true, |v| v.is_null()));
+        assert!(row.get("delivery").is_none_or(|v| v.is_null()));
     }
 
     #[sqlx::test]
@@ -1908,7 +1909,7 @@ mod it {
             "dine-in must have no channel flag"
         );
         assert!(
-            o.get("delivery").map_or(true, |v| v.is_null()),
+            o.get("delivery").is_none_or(|v| v.is_null()),
             "dine-in must have no delivery block"
         );
     }

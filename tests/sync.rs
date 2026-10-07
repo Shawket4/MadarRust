@@ -769,7 +769,7 @@ async fn a_live_till_on_the_old_build_can_still_sell(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "shift_id": shift,
                 "payment_method": "cash",
@@ -835,7 +835,7 @@ async fn a_converted_discount_still_has_to_add_up(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "shift_id": shift,
                 "payment_method": "cash",

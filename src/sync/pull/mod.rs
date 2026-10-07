@@ -540,7 +540,7 @@ async fn full_paged(
             from: cursor.window_from.clone(),
         }),
         asset_bundle,
-        snapshot_cursor: has_more.then(|| SnapshotCursor {
+        snapshot_cursor: has_more.then_some(SnapshotCursor {
             after_seq: last_seq,
             ..cursor
         }),

@@ -135,11 +135,10 @@ pub async fn create_payment_method(
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| {
-        if let sqlx::Error::Database(db_err) = &e {
-            if db_err.constraint() == Some("org_payment_methods_org_id_name_key") {
+        if let sqlx::Error::Database(db_err) = &e
+            && db_err.constraint() == Some("org_payment_methods_org_id_name_key") {
                 return AppError::Conflict("A payment method with this name already exists for the organization".into());
             }
-        }
         AppError::from(e)
     })?;
 
@@ -223,11 +222,10 @@ pub async fn update_payment_method(
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
-        if let sqlx::Error::Database(db_err) = &e {
-            if db_err.constraint() == Some("org_payment_methods_org_id_name_key") {
+        if let sqlx::Error::Database(db_err) = &e
+            && db_err.constraint() == Some("org_payment_methods_org_id_name_key") {
                 return AppError::Conflict("A payment method with this name already exists".into());
             }
-        }
         AppError::from(e)
     })?;
 

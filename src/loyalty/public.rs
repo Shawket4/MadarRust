@@ -376,13 +376,6 @@ fn png_ok(bytes: Bytes) -> HttpResponse {
         .body(bytes)
 }
 
-fn png_response(img: image::DynamicImage) -> Result<HttpResponse, AppError> {
-    let mut buf = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png)
-        .map_err(|_| AppError::Internal)?;
-    Ok(png_ok(Bytes::from(buf.into_inner())))
-}
-
 /// A reward as the signup page lists it: what it is, and what it costs.
 #[derive(Serialize, ToSchema)]
 pub struct PublicReward {
