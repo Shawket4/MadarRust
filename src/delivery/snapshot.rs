@@ -1328,7 +1328,9 @@ async fn apply_one_deductions(
                 org_ingredient_id: ing_id,
                 movement_type: "sale",
                 quantity: -d.quantity,
-                unit_cost: d.cost_per_unit.map(|c| c.round() as i64),
+                unit_cost: d
+                    .cost_per_unit
+                    .and_then(crate::inventory::movements::exact_cost),
                 reason: None,
                 source_type: Some("order"),
                 source_id: Some(order_id),
@@ -1413,7 +1415,9 @@ pub async fn record_waste(
                 org_ingredient_id: ing_id,
                 movement_type: "waste",
                 quantity: -d.quantity,
-                unit_cost: d.cost_per_unit.map(|c| c.round() as i64),
+                unit_cost: d
+                    .cost_per_unit
+                    .and_then(crate::inventory::movements::exact_cost),
                 reason: Some("order_cancelled"),
                 source_type: Some("delivery_order"),
                 source_id: Some(delivery_order_id),

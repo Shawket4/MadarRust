@@ -3368,7 +3368,9 @@ pub(crate) async fn create_order_inner(
                     org_ingredient_id: ing_id,
                     movement_type: "sale",
                     quantity: -deduction.quantity,
-                    unit_cost: deduction.cost_per_unit.map(|c| c.round() as i64),
+                    unit_cost: deduction
+                        .cost_per_unit
+                        .and_then(crate::inventory::movements::exact_cost),
                     reason: None,
                     source_type: Some("order"),
                     source_id: Some(order.id),
@@ -4082,7 +4084,7 @@ pub async fn void_order_inner(
             let unit_cost = d
                 .get("cost_per_unit")
                 .and_then(|v| v.as_f64())
-                .map(|c| c.round() as i64);
+                .and_then(crate::inventory::movements::exact_cost);
 
             // Reverse the sale deduction (back into stock) through the ledger.
             crate::inventory::movements::record_movement(

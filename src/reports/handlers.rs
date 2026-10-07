@@ -2114,7 +2114,7 @@ pub async fn branch_consumption(
         SELECT m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                (-SUM(m.quantity))::float8 AS consumed_qty,
                CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
-                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS consumed_value
+                    ELSE round(SUM(-m.quantity * COALESCE(m.unit_cost_exact, m.unit_cost)))::bigint END AS consumed_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         WHERE m.branch_id = ANY($1)
@@ -2166,7 +2166,7 @@ pub async fn branch_waste_report(
                m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                (-SUM(m.quantity))::float8 AS waste_qty,
                CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
-                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS waste_value
+                    ELSE round(SUM(-m.quantity * COALESCE(m.unit_cost_exact, m.unit_cost)))::bigint END AS waste_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         WHERE m.branch_id = ANY($1)
@@ -2212,7 +2212,7 @@ pub async fn org_consumption(
         SELECT m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                (-SUM(m.quantity))::float8 AS consumed_qty,
                CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
-                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS consumed_value
+                    ELSE round(SUM(-m.quantity * COALESCE(m.unit_cost_exact, m.unit_cost)))::bigint END AS consumed_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
@@ -2259,7 +2259,7 @@ pub async fn org_waste_report(
                m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                (-SUM(m.quantity))::float8 AS waste_qty,
                CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
-                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS waste_value
+                    ELSE round(SUM(-m.quantity * COALESCE(m.unit_cost_exact, m.unit_cost)))::bigint END AS waste_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
@@ -2320,7 +2320,7 @@ pub async fn branch_shrinkage(
                m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                (-SUM(m.quantity))::float8 AS shrinkage_qty,
                CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
-                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS shrinkage_value
+                    ELSE round(SUM(-m.quantity * COALESCE(m.unit_cost_exact, m.unit_cost)))::bigint END AS shrinkage_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         WHERE m.branch_id = ANY($1) AND m.type = 'stock_count' AND m.quantity < 0
@@ -2366,7 +2366,7 @@ pub async fn org_shrinkage(
                m.org_ingredient_id, oi.name AS ingredient_name, oi.unit::text AS unit,
                (-SUM(m.quantity))::float8 AS shrinkage_qty,
                CASE WHEN bool_or(m.unit_cost IS NULL) THEN NULL
-                    ELSE round(SUM(-m.quantity * m.unit_cost))::bigint END AS shrinkage_value
+                    ELSE round(SUM(-m.quantity * COALESCE(m.unit_cost_exact, m.unit_cost)))::bigint END AS shrinkage_value
         FROM inventory_movements m
         JOIN org_ingredients oi ON oi.id = m.org_ingredient_id
         JOIN branches b ON b.id = m.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
@@ -2406,7 +2406,7 @@ pub struct SupplierSpendRow {
 const SUPPLIER_SPEND_SELECT: &str = r#"
     SELECT gr.supplier_id, COALESCE(s.name, 'Unknown supplier') AS supplier_name,
            COUNT(DISTINCT gr.purchase_order_id)::bigint AS orders,
-           COALESCE(ROUND(SUM(grl.quantity * COALESCE(grl.unit_cost, 0))), 0)::bigint AS total_spend
+           COALESCE(SUM(COALESCE(grl.line_cost, ROUND(grl.quantity * grl.unit_cost))), 0)::bigint AS total_spend
     FROM goods_receipts gr
     JOIN goods_receipt_lines grl ON grl.goods_receipt_id = gr.id
     LEFT JOIN suppliers s ON s.id = gr.supplier_id

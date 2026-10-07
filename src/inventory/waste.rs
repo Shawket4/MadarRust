@@ -404,7 +404,7 @@ pub async fn record_waste_inner(
                 org_ingredient_id: *ing,
                 movement_type: "waste",
                 quantity: -*qty,
-                unit_cost: cost.map(|c| c.round() as i64),
+                unit_cost: cost.and_then(crate::inventory::movements::exact_cost),
                 reason: Some(req.reason.as_str()),
                 source_type: Some("waste"),
                 source_id: Some(req.id),

@@ -1346,7 +1346,7 @@ const INV_MEASURES: &[Meas] = &[
     Meas {
         id: "movement_cost",
         label: "Value",
-        expr: "COALESCE(ROUND(SUM(ABS(im.quantity) * COALESCE(im.unit_cost,0))),0)::bigint",
+        expr: "COALESCE(ROUND(SUM(ABS(im.quantity) * COALESCE(im.unit_cost_exact,im.unit_cost,0))),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Value of the stock moved, at the cost recorded on the movement.",
@@ -1875,7 +1875,7 @@ const PUR_MEASURES: &[Meas] = &[
     Meas {
         id: "purchase_cost",
         label: "Spend",
-        expr: "COALESCE(ROUND(SUM(COALESCE(pol.quantity_received,0) * COALESCE(pol.unit_cost,0))),0)::bigint",
+        expr: "COALESCE(ROUND(SUM(COALESCE(pol.quantity_received,0) * pol.line_cost / NULLIF(pol.quantity_ordered,0))),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Money spent on goods actually received.",
@@ -1883,7 +1883,7 @@ const PUR_MEASURES: &[Meas] = &[
     Meas {
         id: "ordered_cost",
         label: "Committed",
-        expr: "COALESCE(ROUND(SUM(pol.quantity_ordered * COALESCE(pol.unit_cost,0))),0)::bigint",
+        expr: "COALESCE(SUM(pol.line_cost),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Value of what was ordered, received or not.",
@@ -1891,7 +1891,7 @@ const PUR_MEASURES: &[Meas] = &[
     Meas {
         id: "avg_unit_cost",
         label: "Avg unit cost",
-        expr: "COALESCE(ROUND(AVG(pol.unit_cost)),0)::bigint",
+        expr: "COALESCE(ROUND(AVG(pol.unit_cost_exact)),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Average purchase price per unit.",

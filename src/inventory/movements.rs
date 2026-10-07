@@ -12,6 +12,7 @@
 //! negative (a sale on an ingredient that was never counted, or oversold); the
 //! movement is flagged `below_zero` and the caller decides whether to warn.
 
+use rust_decimal::Decimal;
 use sqlx::PgExecutor;
 use uuid::Uuid;
 
@@ -25,13 +26,29 @@ pub struct MovementParams<'a> {
     /// An `inventory_movement_type` enum value, e.g. "sale", "purchase_in".
     pub movement_type: &'a str,
     pub quantity: f64,
-    /// Piastres per unit at movement time; `None` ⟺ unknown (never 0).
-    pub unit_cost: Option<i64>,
+    /// Piastres per unit at movement time, EXACT; `None` ⟺ unknown (never 0).
+    /// Written whole as `unit_cost_exact` and rounded into the legacy bigint
+    /// `unit_cost` (a gram of milk at 4.568 piastres is not 5).
+    pub unit_cost: Option<Decimal>,
     pub reason: Option<&'a str>,
     pub source_type: Option<&'a str>,
     pub source_id: Option<Uuid>,
     pub note: Option<&'a str>,
     pub created_by: Option<Uuid>,
+}
+
+/// Decimal places of a PIASTRE kept on a cost per unit (`cost_per_unit` is
+/// numeric(20,6)): 1e-8 EGP, far below anything an invoice can express.
+pub const COST_DP: u32 = 6;
+
+/// An exact cost per unit from a float the caller holds (a deduction's
+/// `cost_per_unit`), kept at [`COST_DP`] instead of rounded to whole piastres.
+pub fn exact_cost(piastres: f64) -> Option<Decimal> {
+    piastres
+        .is_finite()
+        .then(|| Decimal::from_f64_retain(piastres))
+        .flatten()
+        .map(|d| d.round_dp(COST_DP))
 }
 
 /// What the ledger reports back once the trigger has applied the movement.
@@ -57,9 +74,10 @@ where
         r#"
             INSERT INTO inventory_movements
                 (branch_id, org_ingredient_id, type, quantity,
-                 unit_cost, reason, source_type, source_id, note, created_by)
+                 unit_cost, reason, source_type, source_id, note, created_by,
+                 unit_cost_exact)
             VALUES ($1, $2, $3::inventory_movement_type, $4,
-                    $5, $6, $7, $8, $9, $10)
+                    $5, $6, $7, $8, $9, $10, $11)
             RETURNING id, branch_stock_id, balance_after::float8, below_zero
             "#,
     )
@@ -67,12 +85,13 @@ where
     .bind(p.org_ingredient_id)
     .bind(p.movement_type)
     .bind(p.quantity)
-    .bind(p.unit_cost)
+    .bind(p.unit_cost.map(crate::costing::service::round_piastres))
     .bind(p.reason)
     .bind(p.source_type)
     .bind(p.source_id)
     .bind(p.note)
     .bind(p.created_by)
+    .bind(p.unit_cost.map(|c| c.round_dp(COST_DP)))
     .fetch_one(executor)
     .await?;
     Ok(PostedMovement {

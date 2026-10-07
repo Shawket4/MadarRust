@@ -719,7 +719,7 @@ pub(crate) async fn post_refund_waste(
             let unit_cost = d
                 .get("cost_per_unit")
                 .and_then(|v| v.as_f64())
-                .map(|c| c.round() as i64);
+                .and_then(crate::inventory::movements::exact_cost);
             for (kind, signed, reason) in
                 [("refund_restock", q, None), ("waste", -q, Some("refund"))]
             {

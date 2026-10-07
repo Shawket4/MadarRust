@@ -77125,6 +77125,14 @@
           "ingredient_name": {
             "type": "string"
           },
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres this delivery cost (negative for a return); null when unknown."
+          },
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
@@ -77147,7 +77155,15 @@
               "null"
             ],
             "format": "int64",
-            "description": "Piastres per base stock unit (actual)."
+            "description": "Piastres per base stock unit (actual), rounded to whole piastres."
+          },
+          "unit_cost_exact": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Piastres per base stock unit at full precision."
           }
         }
       },
@@ -84490,10 +84506,17 @@
         "required": [
           "org_ingredient_id",
           "purchase_unit",
-          "quantity_ordered",
-          "unit_cost"
+          "quantity_ordered"
         ],
         "properties": {
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres for the whole line, as invoiced. Preferred: the unit cost is\nderived from it exactly (12 000 g for 548.16 EGP is 4.568 piastres/g,\nwhere a whole-piastre unit cost made it 5 and the order 600.00)."
+          },
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
@@ -84506,9 +84529,12 @@
             "format": "double"
           },
           "unit_cost": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "Piastres per purchase unit."
+            "description": "Piastres per purchase unit, for clients that predate `line_cost`.\nIgnored when `line_cost` is sent; one of the two is required."
           },
           "units_per_purchase_unit": {
             "type": [
@@ -88583,7 +88609,9 @@
           "units_per_purchase_unit",
           "quantity_ordered",
           "quantity_received",
-          "unit_cost"
+          "unit_cost",
+          "unit_cost_exact",
+          "line_cost"
         ],
         "properties": {
           "id": {
@@ -88592,6 +88620,11 @@
           },
           "ingredient_name": {
             "type": "string"
+          },
+          "line_cost": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Piastres for the whole line, as on the supplier's invoice. The unit\ncost is derived from it, never the other way round."
           },
           "org_ingredient_id": {
             "type": "string",
@@ -88619,7 +88652,12 @@
           "unit_cost": {
             "type": "integer",
             "format": "int64",
-            "description": "Piastres per PURCHASE unit."
+            "description": "Piastres per PURCHASE unit, rounded to whole piastres (older readers;\nthe truth is `line_cost`, the precise figure `unit_cost_exact`)."
+          },
+          "unit_cost_exact": {
+            "type": "number",
+            "format": "double",
+            "description": "Piastres per PURCHASE unit, exact: `line_cost / quantity_ordered`."
           },
           "units_per_purchase_unit": {
             "type": "number",
@@ -89714,6 +89752,14 @@
           "quantity_received"
         ],
         "properties": {
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional ACTUAL invoice total (piastres) for what this delivery brought,\nwhen it differs from the ordered price. Preferred over `unit_cost`.\nDrives weighted-average cost + the ledger; omitted (with `unit_cost`)\n⟹ the ordered line total, pro rata to the quantity received."
+          },
           "line_id": {
             "type": "string",
             "format": "uuid"
@@ -89728,7 +89774,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Optional ACTUAL invoice cost (piastres per purchase unit) for this\ndelivery, when it differs from the ordered price. Drives weighted-average\ncost + the ledger; omitted ⟹ the PO line's ordered cost is used."
+            "description": "Optional ACTUAL invoice cost in piastres per purchase unit (older\nclients). Ignored when `line_cost` is sent."
           }
         }
       },

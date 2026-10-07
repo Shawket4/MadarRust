@@ -54,7 +54,7 @@ pub fn blend_weighted_cost(
         }
         _ => received_unit_cost,
     }
-    .round_dp(2)
+    .round_dp(crate::inventory::movements::COST_DP)
 }
 
 /// Apply weighted moving-average costing for a SINGLE BRANCH after receiving
@@ -104,14 +104,16 @@ pub async fn apply_weighted_average_cost(
         return Ok(cur_cost.unwrap_or(received_unit_cost));
     }
 
-    // Blend and keep 2 dp. cost_per_unit is numeric(15,2) PIASTRES and
+    // Blend and keep 6 dp. cost_per_unit is numeric(20,6) PIASTRES and
     // deliberately holds sub-piastre cost, so we must NOT round to whole
     // piastres — doing so silently drove cheap-per-base-unit ingredients (e.g.
-    // 0.40 piastres/g) to 0 ("free") and lost precision on every blend.
+    // 0.40 piastres/g) to 0 ("free") and lost precision on every blend. Two
+    // dp still lost a fraction of a piastre per gram, which a 12 kg delivery
+    // turns into whole pounds.
     let new_cost = blend_weighted_cost(prior_on_hand, cur_cost, received_qty, received_unit_cost);
 
     // Only roll a new branch epoch when this branch's per-unit cost moved.
-    if branch_cost.map(|c| c.round_dp(2)) != Some(new_cost) {
+    if branch_cost.map(|c| c.round_dp(crate::inventory::movements::COST_DP)) != Some(new_cost) {
         // Persist the branch's actual cost (creating the row if the branch isn't
         // tracking this ingredient yet; the caller's stock upsert then adds qty).
         sqlx::query(
@@ -527,11 +529,17 @@ mod unit_tests {
     }
 
     #[test]
-    fn blend_rounds_to_two_dp() {
-        // 1 @ 1 + 2 @ 2 = 5/3 = 1.6666… → 1.67.
+    fn blend_rounds_to_six_dp() {
+        // 1 @ 1 + 2 @ 2 = 5/3 = 1.666666… → 1.666667 (it was 1.67: on 12 kg of
+        // a gram-priced ingredient that third of a piastre is 40 EGP).
         assert_eq!(
             blend_weighted_cost(dec!(1), Some(dec!(1)), dec!(2), dec!(2)),
-            dec!(1.67)
+            dec!(1.666667)
+        );
+        // The milk on the screenshot: 548.16 EGP for 12 000 g stays 4.568/g.
+        assert_eq!(
+            blend_weighted_cost(Decimal::ZERO, None, dec!(12000), dec!(4.568)),
+            dec!(4.568)
         );
     }
 
