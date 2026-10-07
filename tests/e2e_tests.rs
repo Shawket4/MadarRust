@@ -425,7 +425,9 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             .configure(madar_rust::tills::legacy_routes::configure)
             .configure(madar_rust::orders::routes::configure)
             .configure(madar_rust::discounts::routes::configure)
-            .configure(|cfg| madar_rust::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
+            .configure(|cfg| {
+                madar_rust::reports::routes::configure(cfg, web::Data::new(pool.clone()))
+            }),
     )
     .await;
 
@@ -1031,7 +1033,9 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
             .configure(madar_rust::stocktakes::routes::configure)
             .configure(madar_rust::tills::legacy_routes::configure)
             .configure(madar_rust::orders::routes::configure)
-            .configure(|cfg| madar_rust::reports::routes::configure(cfg, web::Data::new(pool.clone()))),
+            .configure(|cfg| {
+                madar_rust::reports::routes::configure(cfg, web::Data::new(pool.clone()))
+            }),
     )
     .await;
 

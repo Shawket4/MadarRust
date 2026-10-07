@@ -7,4 +7,3 @@ pub mod public;
 pub mod routes;
 pub mod slugs;
 pub mod social;
-

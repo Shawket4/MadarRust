@@ -943,7 +943,9 @@ mod branded {
     use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 
     use madar_rust::orgs::branding::{self, OrgBrand, Palette};
-    use madar_rust::qr_card::brand::{CardBrand, MAX_LOGO_PX, MIN_LOGO_PX, card_brand, prepare_logo};
+    use madar_rust::qr_card::brand::{
+        CardBrand, MAX_LOGO_PX, MIN_LOGO_PX, card_brand, prepare_logo,
+    };
     use madar_rust::qr_card::{
         PAPER, QrCardOptions, TEAL, TEAL_LIGHT, render, render_qr_card_png, render_qr_card_svg,
     };

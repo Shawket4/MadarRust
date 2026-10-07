@@ -5,10 +5,10 @@ mod common;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::assets::AssetStore;
-use madar_rust::assets::backfill::{BackfillOptions, prune, run};
 use common::assets::{schema, seed_item, seed_org};
 use common::{photo_png, tmp_store};
+use madar_rust::assets::AssetStore;
+use madar_rust::assets::backfill::{BackfillOptions, prune, run};
 
 struct Fx {
     _d: tempfile::TempDir,

@@ -356,20 +356,26 @@ async fn test_offline_auth_bundle_includes_an_all_branches_owner(pool: PgPool) {
     // A registered, unretired device of that branch — the bundle is branch-scoped
     // by this header.
     let device_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO devices (id, org_id, branch_id, code, kind) VALUES ($1,$2,$3,'D01','pos')")
-        .bind(device_id)
-        .bind(org_id)
-        .bind(branch_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO devices (id, org_id, branch_id, code, kind) VALUES ($1,$2,$3,'D01','pos')",
+    )
+    .bind(device_id)
+    .bind(org_id)
+    .bind(branch_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // The teller: branch-assigned the legacy way (the control — always worked).
     let teller = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Sayed','teller'::user_role,'h')")
         .bind(teller).bind(org_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1,$2)")
-        .bind(teller).bind(branch_id).execute(&pool).await.unwrap();
+        .bind(teller)
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // The owner: a PIN, NO legacy branch row, an all-branches role assignment.
     let owner = Uuid::new_v4();

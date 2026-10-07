@@ -23,7 +23,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 fn id(label: &str) -> Uuid {
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("staff-input:{label}").as_bytes())
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("staff-input:{label}").as_bytes(),
+    )
 }
 
 fn vectors_out() -> std::path::PathBuf {
@@ -226,7 +229,11 @@ async fn the_shared_input_is_the_servers(pool: PgPool) {
         groups,
         [id("syrup"), id("sauce"), id("listed")].map(|g| g.to_string())
     );
-    assert_eq!(latte.groups.len(), 7, "every active attached group is loaded");
+    assert_eq!(
+        latte.groups.len(),
+        7,
+        "every active attached group is loaded"
+    );
 
     if std::env::var("MADAR_WRITE_STAFF_INPUT_VECTORS").is_ok() {
         std::fs::write(

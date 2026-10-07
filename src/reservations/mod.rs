@@ -13,7 +13,6 @@
 pub mod floor;
 pub mod routes;
 
-
 /// Resolve a branch's org id (and confirm it's live).
 pub(crate) async fn resolve_branch_org(
     pool: &sqlx::PgPool,

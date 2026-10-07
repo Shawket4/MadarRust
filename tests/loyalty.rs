@@ -3341,7 +3341,9 @@ macro_rules! reward_app {
             App::new()
                 .app_data(p)
                 .app_data(s)
-                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
                 .configure(madar_rust::orders::routes::configure)
                 .configure(madar_rust::tickets::routes::configure)
                 .configure(madar_rust::refunds::routes::configure)
@@ -3607,7 +3609,10 @@ async fn the_second_till_to_spend_the_last_reward_is_told_under_the_lock(pool: P
         false,
     )
     .await;
-    assert!(matches!(live, Err(madar_rust::errors::AppError::Conflict(_))));
+    assert!(matches!(
+        live,
+        Err(madar_rust::errors::AppError::Conflict(_))
+    ));
     drop(tx);
     let mut tx = pool.begin().await.unwrap();
     let replayed = madar_rust::loyalty::redeem::record(
@@ -3869,8 +3874,10 @@ async fn the_birthday_preview_is_routed_and_forgetting_a_member_is_in_the_spec(p
     let shop = reward_shop(&pool, 0).await;
     let admin = seed_user(&pool, shop.org, "org_admin").await;
     let app = reward_app!(pool);
-    let settings =
-        serde_json::to_value(madar_rust::loyalty::settings::LoyaltySettings::defaults(shop.org, None)).unwrap();
+    let settings = serde_json::to_value(madar_rust::loyalty::settings::LoyaltySettings::defaults(
+        shop.org, None,
+    ))
+    .unwrap();
     let req = test::TestRequest::post()
         .uri("/loyalty/birthday-preview")
         .insert_header((
@@ -3970,7 +3977,9 @@ async fn a_reward_sale_reads_back_in_the_order_the_ledger_and_the_report(pool: P
     assert_eq!(latte["reward_units"], 2);
     assert_eq!(latte["reward_covered"], 10_000);
 
-    let ledger = madar_rust::loyalty::model::ledger(&pool, shop.member, 10).await.unwrap();
+    let ledger = madar_rust::loyalty::model::ledger(&pool, shop.member, 10)
+        .await
+        .unwrap();
     let redeem = ledger.iter().find(|e| e.kind == "redeem").unwrap();
     assert_eq!(redeem.created_by, Some(shop.teller));
     assert!(redeem.created_by_name.is_some());
@@ -4943,7 +4952,9 @@ async fn a_replayed_sale_earns_exactly_what_the_live_one_did(pool: PgPool) {
             .app_data(s)
             // `/sync/replay` publishes to the realtime hub on its way through, so
             // the hub has to be here or the drain 500s before any earning runs.
-            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .app_data(web::Data::new(
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            ))
             .configure(madar_rust::orders::routes::configure)
             .configure(madar_rust::sync::routes::configure)
             .configure(madar_rust::loyalty::routes::configure),

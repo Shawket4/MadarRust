@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::sync::pull::{ALL_TYPES, PullRequest, checksum::checksum_of, pull_core};
 use madar_rust::auth::jwt::{JwtSecret, create_token};
 use madar_rust::models::UserRole;
+use madar_rust::sync::pull::{ALL_TYPES, PullRequest, checksum::checksum_of, pull_core};
 
 struct Shop {
     org: Uuid,
@@ -460,7 +460,9 @@ async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
     .await
     .unwrap();
 
-    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool)
+        .await
+        .unwrap();
     assert!(report.deletes_emitted >= 1, "{report:?}");
     assert!(report.tombstones_purged >= 1, "{report:?}");
     assert_eq!(op(pool.clone()).await, "delete");
@@ -965,7 +967,9 @@ async fn the_sweep_re_emits_live_rows_the_feed_never_heard_of(pool: PgPool) {
         "the hole is real: the snapshot shows no methods"
     );
 
-    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool)
+        .await
+        .unwrap();
     assert!(
         report.upserts_emitted >= 1,
         "the sweep noticed the missing row: {report:?}"
@@ -1127,7 +1131,9 @@ async fn a_restored_branch_is_short_until_the_sweep_catches_it(pool: PgPool) {
     assert!(short >= 1, "the restored branch really is short");
 
     // The sweep closes it, with nobody touching the device.
-    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool)
+        .await
+        .unwrap();
     assert!(report.upserts_emitted >= short, "{report:?}");
     let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
@@ -1160,19 +1166,41 @@ async fn a_discount_on_the_feed_parses_on_a_shipped_till(pool: PgPool) {
     let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
         .unwrap();
-    let rows = resp.data.get("discount").expect("discounts are in the feed");
+    let rows = resp
+        .data
+        .get("discount")
+        .expect("discounts are in the feed");
     let d = rows.first().expect("the seeded discount");
 
     // Stored as the fraction 0.1; a shipped till must read the integer 10.
-    assert_eq!(d["dtype"], "percentage", "the generated model reads `dtype`");
-    assert_eq!(d["type"], "percentage", "and `type` stays for anything that read it");
-    assert_eq!(d["value"], 10, "the legacy integer a shipped till deserialises");
+    assert_eq!(
+        d["dtype"], "percentage",
+        "the generated model reads `dtype`"
+    );
+    assert_eq!(
+        d["type"], "percentage",
+        "and `type` stays for anything that read it"
+    );
+    assert_eq!(
+        d["value"], 10,
+        "the legacy integer a shipped till deserialises"
+    );
     assert!(
         (d["value_rate"].as_f64().unwrap() - 0.1).abs() < 1e-9,
         "the fraction stays available for clients that know to ask"
     );
     // Required by the generated model; their absence is what failed the parse.
-    for k in ["id", "org_id", "name", "is_active", "created_at", "updated_at"] {
-        assert!(!d[k].is_null(), "`{k}` must be present for the strict model");
+    for k in [
+        "id",
+        "org_id",
+        "name",
+        "is_active",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(
+            !d[k].is_null(),
+            "`{k}` must be present for the strict model"
+        );
     }
 }

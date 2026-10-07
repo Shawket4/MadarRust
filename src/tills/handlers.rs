@@ -580,18 +580,17 @@ pub async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     .await?;
     let tills: Vec<madar_till::carryover::ClosedTill> = rows
         .into_iter()
-        .map(|(status, device, opened_at, declared)| madar_till::carryover::ClosedTill {
-            status,
-            device_id: device.map(|d| d.to_string()),
-            opened_at: opened_at.to_rfc3339(),
-            closing_cash_declared: declared.map(i64::from),
-        })
+        .map(
+            |(status, device, opened_at, declared)| madar_till::carryover::ClosedTill {
+                status,
+                device_id: device.map(|d| d.to_string()),
+                opened_at: opened_at.to_rfc3339(),
+                closing_cash_declared: declared.map(i64::from),
+            },
+        )
         .collect();
     let device = device_id.map(|d| d.to_string());
-    Ok(
-        madar_till::carryover::last_close_declared(&tills, device.as_deref())
-            .map(|c| c as i32),
-    )
+    Ok(madar_till::carryover::last_close_declared(&tills, device.as_deref()).map(|c| c as i32))
 }
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
@@ -603,7 +602,9 @@ where
     A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
 {
     let mut conn = exec.acquire().await?;
-    Ok(crate::tills::rows::load(&mut conn, till_id).await?.system_cash())
+    Ok(crate::tills::rows::load(&mut conn, till_id)
+        .await?
+        .system_cash())
 }
 
 /// Branch bill counts (open bills notice / last-till warning / close snapshot).

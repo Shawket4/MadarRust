@@ -7,8 +7,8 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::menu::lint::{LintIssue, LintSeverity, lint_org};
 use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::menu::lint::{LintIssue, LintSeverity, lint_org};
 use madar_rust::models::UserRole;
 
 async fn org(pool: &PgPool) -> Uuid {
@@ -374,8 +374,15 @@ async fn staff_token(
         .await
         .unwrap();
     }
-    madar_rust::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
-        .unwrap()
+    madar_rust::auth::jwt::create_token(
+        &JwtSecret("secret".into()),
+        user,
+        Some(org),
+        kind,
+        None,
+        24,
+    )
+    .unwrap()
 }
 
 /// `GET /menu/lint` is `menu.items.read`: refused to a person denied it, served to

@@ -2146,13 +2146,12 @@ async fn a_till_advance_is_dated_by_the_branchs_business_day(pool: PgPool) {
                     "expense_advance_to": f.a, "created_at": at })
         );
         assert_eq!(resp.status(), 201, "{zone:?}");
-        let given: chrono::NaiveDate = sqlx::query_scalar(
-            "SELECT given_on FROM expense_advances WHERE purpose = $1",
-        )
-        .bind(format!("Milk {at}"))
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let given: chrono::NaiveDate =
+            sqlx::query_scalar("SELECT given_on FROM expense_advances WHERE purpose = $1")
+                .bind(format!("Milk {at}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(given.to_string(), day, "{zone:?} {at}");
     }
 }

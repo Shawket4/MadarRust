@@ -2553,13 +2553,21 @@ async fn the_has_recipe_filter_needs_recipes_read(pool: PgPool) {
     let filtered = format!("/costing/catalog?org_id={org_id}&has_recipe=false");
 
     let t = generate_teller_token(teller, org_id);
-    assert_eq!(test::call_service(&app, get(t.clone(), plain)).await.status(), 200);
     assert_eq!(
-        test::call_service(&app, get(t, filtered.clone())).await.status(),
+        test::call_service(&app, get(t.clone(), plain))
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        test::call_service(&app, get(t, filtered.clone()))
+            .await
+            .status(),
         403,
         "a teller holds no recipes.read"
     );
-    let resp = test::call_service(&app, get(generate_org_admin_token(owner, org_id), filtered)).await;
+    let resp =
+        test::call_service(&app, get(generate_org_admin_token(owner, org_id), filtered)).await;
     assert_eq!(resp.status(), 200);
     let page: PaginatedMenuItems = test::read_body_json(resp).await;
     assert_eq!(page.total, 1, "the burger has no recipe yet");

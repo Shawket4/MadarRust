@@ -1217,8 +1217,7 @@ async fn store_group_tx(
 /// Test hook: `store_group` for these orgs fails after writing its files.
 /// Compiled only with `debug_assertions` -- never in a release build.
 #[cfg(debug_assertions)]
-pub static FAIL_BEFORE_COMMIT: std::sync::Mutex<Vec<Uuid>> =
-    std::sync::Mutex::new(Vec::new());
+pub static FAIL_BEFORE_COMMIT: std::sync::Mutex<Vec<Uuid>> = std::sync::Mutex::new(Vec::new());
 
 async fn find_group_by_source(
     pool: &PgPool,

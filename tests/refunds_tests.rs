@@ -926,7 +926,8 @@ async fn a_replayed_refund_logs_its_waste_once(pool: PgPool) {
     body["till_id"] = json!(t.shift_id);
     body["client_ref"] = json!(Uuid::new_v4());
     body["issued_at"] = json!(chrono::Utc::now() - chrono::Duration::hours(2));
-    let req: madar_rust::refunds::handlers::CreateRefundRequest = serde_json::from_value(body).unwrap();
+    let req: madar_rust::refunds::handlers::CreateRefundRequest =
+        serde_json::from_value(body).unwrap();
     for expected in [201, 200] {
         let resp = madar_rust::refunds::handlers::create_refund_inner(
             madar_rust::db::Db::bypass(&pool),
@@ -981,7 +982,13 @@ async fn seed_manager(pool: &PgPool, org: Uuid, branch: Uuid, limits: Option<Val
 async fn the_live_route_enforces_the_refund_cap(pool: PgPool) {
     let app = app!(pool);
     let till = seed_till(&pool).await;
-    grant_refunds(&pool, till.org_id, till.teller_id, Some(json!({"max_amount": 100}))).await;
+    grant_refunds(
+        &pool,
+        till.org_id,
+        till.teller_id,
+        Some(json!({"max_amount": 100})),
+    )
+    .await;
 
     assert_eq!(
         post_refund(&app, &till.token, &refund_body(till.order_id, 50))
@@ -1006,7 +1013,13 @@ async fn the_live_route_enforces_the_refund_cap(pool: PgPool) {
 async fn a_managers_live_approval_carries_an_over_cap_refund(pool: PgPool) {
     let app = app!(pool);
     let till = seed_till(&pool).await;
-    grant_refunds(&pool, till.org_id, till.teller_id, Some(json!({"max_amount": 100}))).await;
+    grant_refunds(
+        &pool,
+        till.org_id,
+        till.teller_id,
+        Some(json!({"max_amount": 100})),
+    )
+    .await;
     let manager = seed_manager(&pool, till.org_id, till.branch_id, None).await;
     // A manager who is himself capped at 100 cannot approve a 150 refund: the
     // approval is judged on the SERVER's figure, not the one it names.

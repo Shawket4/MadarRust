@@ -515,8 +515,14 @@ mod tests {
         let saturday_0030 = at("2026-09-18T21:30:00Z");
         let this_week = |now| Period::preset(PeriodPreset::ThisWeek).resolve(cairo(), now);
         let last_week = |now| Period::preset(PeriodPreset::LastWeek).resolve(cairo(), now);
-        assert_eq!(this_week(friday_2330).from, Some(at("2026-09-11T21:00:00Z")));
-        assert_eq!(this_week(saturday_0030).from, Some(at("2026-09-18T21:00:00Z")));
+        assert_eq!(
+            this_week(friday_2330).from,
+            Some(at("2026-09-11T21:00:00Z"))
+        );
+        assert_eq!(
+            this_week(saturday_0030).from,
+            Some(at("2026-09-18T21:00:00Z"))
+        );
         let lw = last_week(saturday_0030);
         assert_eq!(lw.from, Some(at("2026-09-11T21:00:00Z")));
         assert!(lw.to.unwrap() < at("2026-09-18T21:00:00Z"));

@@ -164,7 +164,9 @@ macro_rules! app {
             App::new()
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(secret()))
-                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
                 .configure(routes::configure),
         )
         .await
@@ -195,7 +197,10 @@ where
     let status = resp.status().as_u16();
     if status >= 400 {
         let body = test::read_body(resp).await;
-        eprintln!("VOID {order} -> {status}: {}", String::from_utf8_lossy(&body));
+        eprintln!(
+            "VOID {order} -> {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
     }
     status
 }
@@ -242,13 +247,12 @@ async fn the_live_route_enforces_own_only_and_the_age_window(pool: PgPool) {
     );
 
     // Refused means refused: neither sale moved.
-    let voided: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM orders WHERE id = ANY($1) AND status = 'voided'",
-    )
-    .bind(vec![stale, theirs])
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let voided: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM orders WHERE id = ANY($1) AND status = 'voided'")
+            .bind(vec![stale, theirs])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(voided, 0);
 }
 

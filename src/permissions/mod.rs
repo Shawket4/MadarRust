@@ -4,7 +4,6 @@ pub mod handlers;
 pub mod routes;
 pub mod seeder;
 
-
 /// Single source of truth for every permission resource the system knows about.
 ///
 /// MUST match the `permission_resource` DB enum, minus the retired labels below.

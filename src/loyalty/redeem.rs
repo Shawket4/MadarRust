@@ -210,9 +210,9 @@ fn refused(r: madar_loyalty::Refusal, member_name: &str) -> AppError {
         } else {
             format!("Only {max} rewards per order here; this order claims {claimed}")
         }),
-        R::BalanceShort { balance, spent } => {
-            AppError::Conflict(format!("{member_name} has {balance}; those rewards cost {spent}"))
-        }
+        R::BalanceShort { balance, spent } => AppError::Conflict(format!(
+            "{member_name} has {balance}; those rewards cost {spent}"
+        )),
     }
 }
 

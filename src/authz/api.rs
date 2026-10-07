@@ -1451,7 +1451,11 @@ async fn review_authority(
     let Some(a) = approval else {
         // The plain path, untouched.
         super::require::require(pool, claims, Cap::ApprovalsReview, None).await?;
-        return Ok(ReviewAuthority { reviewer: me, branch_scope: None, approval: None });
+        return Ok(ReviewAuthority {
+            reviewer: me,
+            branch_scope: None,
+            approval: None,
+        });
     };
     let eff = super::require::effective_for_claims(pool, claims, None).await?;
     let decision = madar_authz::decide(&eff, &madar_authz::Request::of(Cap::ApprovalsReview));
@@ -1473,7 +1477,11 @@ async fn review_authority(
     )
     .await?;
     if outright {
-        return Ok(ReviewAuthority { reviewer: me, branch_scope: None, approval: None });
+        return Ok(ReviewAuthority {
+            reviewer: me,
+            branch_scope: None,
+            approval: None,
+        });
     }
     Ok(ReviewAuthority {
         reviewer: a.approver_id,
@@ -1484,8 +1492,12 @@ async fn review_authority(
 
 /// The approver's own name, for the note that records who cleared a flag.
 async fn approver_label(pool: &sqlx::PgPool, approver: Uuid) -> String {
-    let name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM users WHERE id = $1").bind(approver).fetch_optional(pool).await.ok().flatten();
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM users WHERE id = $1")
+        .bind(approver)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
     match name {
         Some(n) if !n.trim().is_empty() => format!("{n} ({approver})"),
         _ => approver.to_string(),
@@ -1668,18 +1680,24 @@ pub async fn bulk_review_flags(
     let org = org_of(&req, &claims)?;
     // Permission FIRST, before the id list is even looked at — the bearer's
     // own `approvals.review`, or a verified one-time approval for it.
-    let authority =
-        review_authority(pool.get_ref(), &claims, org, body.approval.clone()).await?;
+    let authority = review_authority(pool.get_ref(), &claims, org, body.approval.clone()).await?;
     let me = authority.reviewer;
     let note = match authority.approval.as_ref() {
         // The note is the server's word, not the till's: it names the person
         // who actually approved, whatever the client sent along.
         Some(a) => {
             let who = approver_label(pool.get_ref(), a.approver_id).await;
-            Some(match body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-                Some(n) => format!("{n} \u{2014} approved by {who}"),
-                None => format!("approved by {who}"),
-            })
+            Some(
+                match body
+                    .note
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                {
+                    Some(n) => format!("{n} \u{2014} approved by {who}"),
+                    None => format!("approved by {who}"),
+                },
+            )
         }
         None => body.note.clone(),
     };
