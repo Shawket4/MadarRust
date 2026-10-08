@@ -8,8 +8,6 @@
 #   conf.d/madar-markdown.conf            map: $md_suffix is ".md" when Accept names
 #                                         text/markdown, "" otherwise
 server {
-    listen 80;
-    listen [::]:80;
     server_name legal.madar-pos.cloud;
 
     # Served by nginx directly, NOT proxied anywhere — renewals depend on it.
@@ -33,6 +31,17 @@ server {
     # include and the CSP. Keep the three copies of the CSP identical.
     include snippets/madar-security-headers.conf;
     add_header Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'" always;
+
+    # Compression. This nginx has gzip_static compiled in but no brotli module,
+    # so: serve the .gz produced at build time when the client accepts it (best
+    # ratio, no per-request CPU), and fall back to compressing on the fly.
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 6;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    gzip_static on;
 
     error_page 404 /404.html;
     location = /404.html { internal; }
@@ -68,4 +77,36 @@ server {
 
     access_log /var/log/nginx/legal-madar.access.log;
     error_log  /var/log/nginx/legal-madar.error.log;
+
+    listen 443 ssl; # managed by Certbot
+    listen [::]:443 ssl; # managed by Certbot
+    ssl_certificate /etc/nginx/ssl/cloudflare-origin/cert.pem; # Cloudflare Origin CA (proxied host, valid to 2041)
+    ssl_certificate_key /etc/nginx/ssl/cloudflare-origin/key.pem; # Cloudflare Origin CA
+
+    # Restore the real client IP. Rate limits are per IP; without this every
+    # customer arrives as a Cloudflare address and shares one budget.
+    include /etc/nginx/cloudflare-real-ip.conf;
+
+    # Origin lockdown: this hostname is proxied, so legitimate traffic can only
+    # arrive from Cloudflare. The origin IP is publicly known, so without this
+    # anyone can address the box directly and skip the edge's rate limiting and
+    # WAF. NEVER add this to a DNS-only vhost (api, demo-api, sentry) or another
+    # tenant's config -- they are reached directly by design.
+    include /etc/nginx/cloudflare-only.conf;
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name legal.madar-pos.cloud;
+
+    # ACME first, and as a LOCATION rather than certbot default server-level
+    # `if (...) return 301`. An `if` runs in the rewrite phase before location
+    # matching, so it swallows /.well-known/ too - which silently breaks any
+    # future webroot renewal. Location matching lets this win instead.
+    location /.well-known/acme-challenge/ { root /var/www/letsencrypt; try_files $uri =404; }
+
+    location / { return 301 https://$host$request_uri; }
 }
