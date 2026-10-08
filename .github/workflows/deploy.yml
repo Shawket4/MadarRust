@@ -105,7 +105,12 @@ jobs:
     environment: production
 
     steps:
+      # Full history: the sitemap's <lastmod> and each page's dateModified are
+      # the source file's last commit, and a shallow clone has only one commit,
+      # so every page would claim to have changed in this deploy.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Render the documents
         run: python3 legal/build.py
@@ -120,6 +125,10 @@ jobs:
                      employee-privacy-notice data-retention delete-account \
                      security index; do
             [ -s "$doc.html" ] || { echo "::error::$doc.html missing or empty"; exit 1; }
+            [ -s "$doc.md" ] || { echo "::error::$doc.md missing or empty"; exit 1; }
+          done
+          for f in 404.html robots.txt sitemap.xml llms.txt; do
+            [ -s "$f" ] || { echo "::error::$f missing or empty"; exit 1; }
           done
           # Each page carries its own <title>; a truncated render loses it.
           grep -q "<title" privacy-policy.html || { echo "::error::privacy-policy.html looks truncated"; exit 1; }
@@ -142,7 +151,7 @@ jobs:
             'rm -rf /var/www/madar-legal.prev && cp -a /var/www/madar-legal /var/www/madar-legal.prev 2>/dev/null || true'
 
           scp -i ~/.ssh/deploy_key -P ${{ secrets.SSH_PORT }} \
-            legal/dist/*.html legal/dist/*.gz \
+            legal/dist/*.html legal/dist/*.md legal/dist/*.txt legal/dist/*.xml legal/dist/*.gz \
             ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/var/www/madar-legal/
 
           # scp preserves ownership only on files that already existed. A NEW
