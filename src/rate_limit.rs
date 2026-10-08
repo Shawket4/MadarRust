@@ -1,9 +1,10 @@
 //! Shared rate-limiting helpers.
 //!
-//! `PeerIpOrLocalhost` keys the `actix-governor` limiter by the client's peer
-//! IP, falling back to 127.0.0.1 when no socket address is available (actix
-//! test utilities don't supply a real peer addr). Shared so the auth and
-//! public-menu endpoints limit on the same key type.
+//! Every limit kept per address asks [`client_ip`] who is calling: the
+//! socket's peer, or the `X-Real-IP` that a trusted proxy (nginx, through the
+//! Docker bridge) forwards. `PeerIpOrLocalhost` keys the `actix-governor`
+//! limiters by it, falling back to 127.0.0.1 when no socket address is
+//! available (actix test utilities don't supply a real peer addr).
 
 use actix_governor::governor::NotUntil;
 use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
@@ -29,6 +30,75 @@ fn governor_refusal(
     }))
 }
 
+// ── Who is calling ───────────────────────────────────────────────────────────
+
+/// The proxies whose `X-Real-IP` is believed: loopback (nginx on the same host
+/// as a bare backend) and the container's default gateway, which is the Docker
+/// bridge that nginx's connections arrive through via Docker's port proxy
+/// (`172.21.0.1` on the box). `MADAR_TRUSTED_PROXIES` (comma-separated
+/// addresses) replaces the set when it is not that. Nothing else is trusted:
+/// another container on the network, or anything that reaches the port some
+/// other way, is keyed by its own address whatever header it sends.
+static TRUSTED_PROXIES: std::sync::LazyLock<Vec<IpAddr>> = std::sync::LazyLock::new(|| {
+    if let Ok(list) = std::env::var("MADAR_TRUSTED_PROXIES")
+        && !list.trim().is_empty()
+    {
+        return list
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+    }
+    let mut trusted = vec![
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    if let Some(gw) = std::fs::read_to_string("/proc/net/route")
+        .ok()
+        .and_then(|t| default_gateway(&t))
+    {
+        trusted.push(gw);
+    }
+    trusted
+});
+
+/// The IPv4 default gateway in a `/proc/net/route` table: the row whose
+/// destination is `00000000`, its gateway in the kernel's little-endian hex.
+#[doc(hidden)]
+pub fn default_gateway(route_table: &str) -> Option<IpAddr> {
+    route_table.lines().skip(1).find_map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.get(1) != Some(&"00000000") {
+            return None;
+        }
+        let gw = u32::from_str_radix(cols.get(2)?, 16).ok()?;
+        (gw != 0).then(|| IpAddr::V4(Ipv4Addr::from(gw.to_le_bytes())))
+    })
+}
+
+/// The caller's address, for every limit that is kept per address.
+///
+/// The socket's peer, unless the peer is a trusted proxy ([`TRUSTED_PROXIES`])
+/// that says who it is forwarding in `X-Real-IP`. On the box every request
+/// reaches the container through Docker's port proxy, so the peer alone is the
+/// same address for every visitor, and each "per IP" allowance (the OTP ones
+/// included) was one allowance shared by the whole platform. nginx SETS the
+/// header on every vhost (`proxy_set_header X-Real-IP $remote_addr`), so a
+/// value a client sends never gets through it; behind Cloudflare `$remote_addr`
+/// is already the visitor (`cloudflare-real-ip.conf`), and `api.` is DNS-only.
+pub fn client_ip(req: &ServiceRequest) -> Option<IpAddr> {
+    let peer = req.peer_addr()?.ip();
+    if TRUSTED_PROXIES.contains(&peer)
+        && let Some(forwarded) = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+    {
+        return Some(forwarded);
+    }
+    Some(peer)
+}
+
 /// Rate limiting is ON by default. Set `MADAR_DISABLE_RATE_LIMIT=1` (or `=true`)
 /// to turn it off — used by the local API-fuzz harness (scripts/api-fuzz.sh) so
 /// the fuzzer isn't throttled to a wall of 429s. Never set this in production.
@@ -47,10 +117,7 @@ impl KeyExtractor for PeerIpOrLocalhost {
     type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
 
     fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
-        Ok(req
-            .peer_addr()
-            .map(|s| s.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+        Ok(client_ip(req).unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
     }
 
     fn exceed_rate_limit_response(
@@ -452,10 +519,10 @@ fn take_token_at(key: &str, per_minute: f64) -> bool {
     true
 }
 
-/// The caller's address (`unknown` without a socket).
+/// The caller's address (`unknown` without a socket). See [`client_ip`].
 fn address_of(req: &actix_web::dev::ServiceRequest) -> String {
-    req.peer_addr()
-        .map(|s| s.ip().to_string())
+    client_ip(req)
+        .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -494,11 +561,7 @@ fn limiter_key(req: &actix_web::dev::ServiceRequest) -> String {
         })
         .and_then(|c| c.user_id_safe().ok())
         .map(|id| id.to_string())
-        .unwrap_or_else(|| {
-            req.peer_addr()
-                .map(|s| s.ip().to_string())
-                .unwrap_or_else(|| "unknown".into())
-        })
+        .unwrap_or_else(|| address_of(req))
 }
 
 /// One gate for every request: a general token bucket, and a much tighter
