@@ -65,6 +65,11 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "the API host's own description and where its public spec is; says nothing about any shop",
     ),
     (
+        "GET",
+        "/.well-known/mcp/server-card.json",
+        "the MCP server card: the tool list tools/list already gives anyone",
+    ),
+    (
         "POST",
         "/mcp",
         "the MCP server: read-only tools over the /public/ endpoints, which are public already",

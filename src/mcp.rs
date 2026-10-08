@@ -320,10 +320,37 @@ pub async fn get() -> HttpResponse {
         .finish()
 }
 
+/// The MCP server card: how to reach this server and what it offers, built from
+/// the same tool list `tools/list` answers with, so the two cannot disagree. The
+/// marketing site's /.well-known/mcp/server-card.json redirects here.
+#[utoipa::path(get, path = "/.well-known/mcp/server-card.json", tag = "public",
+    operation_id = "mcp_server_card",
+    responses((status = 200, description = "The MCP server card", content_type = "application/json")))]
+pub async fn server_card() -> HttpResponse {
+    HttpResponse::Ok()
+        .insert_header(("Cache-Control", "public, max-age=3600"))
+        .json(json!({
+            "$schema": "https://static.modelcontextprotocol.io/schemas/mcp-server-card/v1.json",
+            "version": "1.0",
+            "protocolVersion": PROTOCOLS[0],
+            "serverInfo": { "name": "madar-pos", "title": "Madar POS", "version": env!("CARGO_PKG_VERSION") },
+            "description": "Read-only tools for cafés and restaurants that run on Madar POS: a shop's details, menu, table availability and order status, and how to reach Madar.",
+            "transport": { "type": "streamable-http", "endpoint": "https://api.madar-pos.cloud/mcp" },
+            "capabilities": { "tools": { "listChanged": false } },
+            "authentication": { "required": false },
+            "tools": tools(),
+            "documentation": "https://get.madar-pos.cloud/en/developers/",
+        }))
+}
+
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/mcp")
             .route(web::post().to(post))
             .route(web::get().to(get)),
+    )
+    .route(
+        "/.well-known/mcp/server-card.json",
+        web::get().to(server_card),
     );
 }

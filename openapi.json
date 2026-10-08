@@ -41,6 +41,23 @@
         }
       }
     },
+    "/.well-known/mcp/server-card.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "The MCP server card: how to reach this server and what it offers, built from\nthe same tool list `tools/list` answers with, so the two cannot disagree. The\nmarketing site's /.well-known/mcp/server-card.json redirects here.",
+        "operationId": "mcp_server_card",
+        "responses": {
+          "200": {
+            "description": "The MCP server card",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
     "/addon-items": {
       "get": {
         "tags": [

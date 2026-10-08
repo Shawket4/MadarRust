@@ -65,6 +65,12 @@ jobs:
             -c "CREATE ROLE sufrix NOLOGIN" || echo "role sufrix already present"
       - name: test (blocking gate)
         run: cargo test --lib
+      # openapi.json is the contract the dashboard and the POS generate their
+      # clients from, so it must say what the code says: regenerate and compare.
+      - name: openapi.json is up to date
+        run: |
+          cargo run --quiet --bin export-openapi -- /tmp/openapi.json
+          diff -q openapi.json /tmp/openapi.json || { echo "::error::openapi.json is stale: run cargo run --bin export-openapi and commit it"; exit 1; }
 
   # ── Mutation testing: adaptive on PRs (only the changed lines) ──────────────
   mutants:

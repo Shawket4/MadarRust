@@ -197,6 +197,32 @@ async fn failures_are_results(pool: PgPool) {
     }
 }
 
+/// The server card lists exactly the tools the server answers with.
+#[sqlx::test]
+async fn the_server_card_matches_the_server(pool: PgPool) {
+    let app = app!(pool);
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/.well-known/mcp/server-card.json")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let card: Value = test::read_body_json(resp).await;
+    let (_, listed) = rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(card["tools"], listed["result"]["tools"]);
+    assert_eq!(card["transport"]["type"], "streamable-http");
+    assert_eq!(
+        card["transport"]["endpoint"],
+        "https://api.madar-pos.cloud/mcp"
+    );
+}
+
 #[sqlx::test]
 async fn about_madar(pool: PgPool) {
     let app = app!(pool);
