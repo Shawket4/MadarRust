@@ -38,6 +38,7 @@ pub mod integrations;
 pub mod inventory;
 pub mod kitchen;
 pub mod loyalty;
+pub mod mcp;
 pub mod menu;
 pub mod menu_unification;
 pub mod models;

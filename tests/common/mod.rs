@@ -52,4 +52,5 @@ pub mod assets;
 pub mod combos;
 pub mod employees;
 pub mod members;
+pub mod shops;
 pub mod sizes;

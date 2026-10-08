@@ -462,6 +462,7 @@ paths(
         crate::tenant_shell::shell,
         crate::public_api::root,
         crate::public_api::openapi_json,
+        crate::mcp::post,
         crate::orgs::links_page::get_links_page,
         crate::orgs::links_page::put_links_page,
         crate::qr_card::handlers::org_links_qr,

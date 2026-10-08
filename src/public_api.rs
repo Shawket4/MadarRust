@@ -158,6 +158,7 @@ pub async fn root() -> HttpResponse {
                             Endpoints under /public/ need no account; everything else is for a shop's \
                             own staff and apps.",
             "openapi": format!("{SERVER}/openapi.json"),
+            "mcp": format!("{SERVER}/mcp"),
             "website": SITE,
             "contact": CONTACT_EMAIL,
         }))

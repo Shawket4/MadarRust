@@ -21566,6 +21566,37 @@
         ]
       }
     },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "One JSON-RPC message in, one answer out (a notification gets 202 and no body).",
+        "operationId": "mcp",
+        "requestBody": {
+          "description": "One JSON-RPC 2.0 message (MCP Streamable HTTP)",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The JSON-RPC answer",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "202": {
+            "description": "A notification, accepted"
+          }
+        }
+      }
+    },
     "/menu-item-sizes/{size_id}/base": {
       "put": {
         "tags": [
