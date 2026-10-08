@@ -18,6 +18,11 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
         "/health",
         web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }),
     )
+    // `GET /` and `GET /openapi.json`: what this host is, for someone who
+    // did not sign in.
+    .configure(crate::public_api::configure)
+    // A shop page's HTML, asked for by nginx on the shop's own host.
+    .configure(crate::tenant_shell::configure)
     .configure(auth::routes::configure)
     .configure(orgs::routes::configure)
     .configure(users::routes::configure)

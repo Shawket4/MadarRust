@@ -123,6 +123,8 @@ async fn run() -> std::io::Result<()> {
     let read_pool = web::Data::new(read_pool);
     // Optional per-org menu cache; a no-op unless MENU_CACHE_TTL_SECS>0.
     let menu_cache = web::Data::new(menu::cache::MenuCache::from_env());
+    // Where the shop apps' entry HTML is mounted, for the tenant shell.
+    let shell_config = web::Data::new(madar_rust::tenant_shell::ShellConfig::from_env());
     let jwt_secret = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
     // Per-process org-suspension cache, consulted by JwtMiddleware on every
     // authenticated request. Registering it is what arms the kill-switch.
@@ -280,6 +282,7 @@ async fn run() -> std::io::Result<()> {
             .wrap(sentry_middleware.clone())
             .app_data(pool.clone())
             .app_data(menu_cache.clone())
+            .app_data(shell_config.clone())
             .app_data(jwt_secret.clone())
             .app_data(org_status.clone())
             .app_data(realtime_bus.clone())
@@ -300,7 +303,10 @@ async fn run() -> std::io::Result<()> {
                 madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
             // Every API route. The route-coverage guard mounts exactly this.
-            .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone()));
+            .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone()))
+            // An address nothing serves says so in the API's own shape, not
+            // with an empty body.
+            .default_service(web::to(madar_rust::public_api::not_found));
 
         // App Review's sign-in, only when both of its env vars are set.
         if let Some(review) = &review_login {

@@ -24,6 +24,23 @@
     }
   ],
   "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "What this host is, for a person or an agent that opens it.",
+        "operationId": "api_root",
+        "responses": {
+          "200": {
+            "description": "The API's name and where its documentation is",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
     "/addon-items": {
       "get": {
         "tags": [
@@ -27088,6 +27105,23 @@
         ]
       }
     },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "The public part of this API as OpenAPI 3.1.",
+        "operationId": "public_openapi",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document of the `/public/` endpoints",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
     "/orders": {
       "get": {
         "tags": [
@@ -35409,6 +35443,56 @@
                   "$ref": "#/components/schemas/ErrorBody"
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    "/public/tenant-shell": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "A shop page's HTML: the app entry with the shop's head and noscript.",
+        "description": "Called by nginx for page requests on a shop's own host. Public by nature:\nit returns what the shop's public pages and the public JSON endpoints\nalready show.",
+        "operationId": "public_tenant_shell",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "description": "The shop's host, e.g. `rue.madar-pos.cloud`. nginx sends it as the\n`X-Shell-Host` header; the query parameter is for tests and probes.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The page's path and query, e.g. `/order/menu?branch=…`. nginx sends it\nas the `X-Shell-Path` header.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The page's HTML",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "404": {
+            "description": "No such shop, or a path its apps don't route",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "503": {
+            "description": "The app entry isn't deployed here (nginx serves the static file)",
+            "content": {
+              "text/html": {}
             }
           }
         }
@@ -100538,6 +100622,10 @@
     {
       "name": "orgs",
       "description": "Organization CRUD. Super-admin only."
+    },
+    {
+      "name": "public",
+      "description": "What the API host says about itself: its root and the public subset of this spec."
     },
     {
       "name": "branches",

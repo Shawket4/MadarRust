@@ -5,9 +5,29 @@
 //! test utilities don't supply a real peer addr). Shared so the auth and
 //! public-menu endpoints limit on the same key type.
 
+use actix_governor::governor::NotUntil;
+use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
 use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::dev::ServiceRequest;
+use actix_web::{HttpResponse, HttpResponseBuilder};
 use std::net::{IpAddr, Ipv4Addr};
+
+/// A route governor's 429 in the API's own shape (`ErrorBody` plus the wait),
+/// instead of actix-governor's plain-text sentence. The governor has already
+/// set `Retry-After`.
+fn governor_refusal(
+    negative: &NotUntil<QuantaInstant>,
+    mut response: HttpResponseBuilder,
+) -> HttpResponse {
+    let wait = negative
+        .wait_time_from(DefaultClock::default().now())
+        .as_secs();
+    response.json(serde_json::json!({
+        "error": "Too many requests just now. This will clear in a moment.",
+        "code": "RATE_LIMITED",
+        "retry_after_seconds": wait,
+    }))
+}
 
 /// Rate limiting is ON by default. Set `MADAR_DISABLE_RATE_LIMIT=1` (or `=true`)
 /// to turn it off — used by the local API-fuzz harness (scripts/api-fuzz.sh) so
@@ -32,6 +52,14 @@ impl KeyExtractor for PeerIpOrLocalhost {
             .map(|s| s.ip())
             .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
     }
+
+    fn exceed_rate_limit_response(
+        &self,
+        negative: &NotUntil<QuantaInstant>,
+        response: HttpResponseBuilder,
+    ) -> HttpResponse {
+        governor_refusal(negative, response)
+    }
 }
 
 /// Keys a limiter by the `{token}` segment of the matched route, so a budget
@@ -54,6 +82,14 @@ impl KeyExtractor for PathToken {
         // much memory one costs. Real tokens are far shorter than this.
         let end = token.char_indices().nth(96).map_or(token.len(), |(i, _)| i);
         Ok(token[..end].to_string())
+    }
+
+    fn exceed_rate_limit_response(
+        &self,
+        negative: &NotUntil<QuantaInstant>,
+        response: HttpResponseBuilder,
+    ) -> HttpResponse {
+        governor_refusal(negative, response)
     }
 }
 

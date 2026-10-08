@@ -48,6 +48,15 @@ impl MenuCache {
         *self.versions.read().unwrap().get(&org).unwrap_or(&0)
     }
 
+    /// The org's menu version: changes on every menu write while the cache is
+    /// on, so another cache can key on it. Always 0 when the cache is off.
+    pub fn version_of(&self, org: Uuid) -> u64 {
+        if !self.enabled {
+            return 0;
+        }
+        self.version(org)
+    }
+
     /// Drop an org's cached menu by bumping its version. Call on every write that
     /// can change a menu/category listing for the org.
     pub fn invalidate(&self, org: Uuid) {
