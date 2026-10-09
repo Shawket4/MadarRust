@@ -651,6 +651,31 @@ async fn warehouse_limit_and_kind_change(pool: PgPool) {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], json!(w.shop));
     assert_eq!(rows[0]["kind"], json!("warehouse"));
+
+    // A client that predates warehouses (a POS picking its branch) asks
+    // without the flag and sees only branches; the dashboards ask for both.
+    let ids = |rows: Vec<serde_json::Value>| {
+        let mut v: Vec<String> = rows
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    let resp = call!(app, get, format!("/branches?org_id={}", w.org), w.owner);
+    assert_eq!(
+        ids(test::read_body_json(resp).await),
+        vec![w.wh.to_string()]
+    );
+    let resp = call!(
+        app,
+        get,
+        format!("/branches?org_id={}&include_warehouses=true", w.org),
+        w.owner
+    );
+    let mut both = vec![w.wh.to_string(), w.shop.to_string()];
+    both.sort();
+    assert_eq!(ids(test::read_body_json(resp).await), both);
 }
 
 /// Someone who works at one shop picks the other side from every location,
