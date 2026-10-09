@@ -5743,10 +5743,19 @@
           {
             "name": "kind",
             "in": "query",
-            "description": "Only this kind; omitted = branches and warehouses.",
+            "description": "Only this kind. Omitted: selling branches, plus warehouses when\n`include_warehouses` is set.",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/BranchKind"
+            }
+          },
+          {
+            "name": "include_warehouses",
+            "in": "query",
+            "description": "Also list warehouses (when `kind` is omitted). Off by default so a\nclient that predates warehouses (POS and KDS device setup, the staff\napp) never offers one as a branch to sell from.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],

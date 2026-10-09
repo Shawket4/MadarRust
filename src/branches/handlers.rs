@@ -116,8 +116,14 @@ pub struct Branch {
 pub struct ListBranchesQuery {
     /// Organization whose branches to list. Must match the caller's JWT org.
     pub org_id: Uuid,
-    /// Only this kind; omitted = branches and warehouses.
+    /// Only this kind. Omitted: selling branches, plus warehouses when
+    /// `include_warehouses` is set.
     pub kind: Option<BranchKind>,
+    /// Also list warehouses (when `kind` is omitted). Off by default so a
+    /// client that predates warehouses (POS and KDS device setup, the staff
+    /// app) never offers one as a branch to sell from.
+    #[serde(default)]
+    pub include_warehouses: bool,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -263,6 +269,11 @@ pub async fn list_branches(
     // used to imply (managers and tellers by assignment, everyone else the whole
     // org, which quietly showed waiters and kitchen users every branch).
     let scope = crate::authz::scope::branch_scope(pool.get_ref(), &claims).await?;
+    let only_kind = match (query.kind, query.include_warehouses) {
+        (Some(kind), _) => Some(kind.as_str()),
+        (None, true) => None,
+        (None, false) => Some(BranchKind::Branch.as_str()),
+    };
     let branches = if let crate::authz::scope::BranchScope::Only(ids) = &scope {
         sqlx::query_as::<_, Branch>(
             r#"
@@ -281,7 +292,7 @@ pub async fn list_branches(
         )
         .bind(query.org_id)
         .bind(ids)
-        .bind(query.kind.map(BranchKind::as_str))
+        .bind(only_kind)
         .fetch_all(pool.get_ref())
         .await?
     } else {
@@ -301,7 +312,7 @@ pub async fn list_branches(
             "#,
         )
         .bind(query.org_id)
-        .bind(query.kind.map(BranchKind::as_str))
+        .bind(only_kind)
         .fetch_all(pool.get_ref())
         .await?
     };
