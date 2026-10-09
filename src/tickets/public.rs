@@ -130,6 +130,7 @@ pub struct TableOrderRequest {
     pub idempotency_key: Option<Uuid>,
 }
 
+/// The table behind a QR code: its label, its branch, and whether the branch is taking orders now.
 #[utoipa::path(get, path = "/public/tables/{id}", tag = "open_tickets",
     operation_id = "public_table",
     params(("id" = Uuid, Path, description = "Table ID, from the QR")),

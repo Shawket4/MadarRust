@@ -92,11 +92,38 @@ async fn the_spec_is_the_public_part_and_complete() {
     assert_eq!(spec["info"]["title"], "Madar POS public API");
     assert_eq!(spec["info"]["contact"]["email"], "shawket.4@icloud.com");
     assert_eq!(spec["servers"][0]["url"], "https://api.madar-pos.cloud");
+    // The contract's version and its policy, for agents deciding to integrate.
+    assert_eq!(spec["info"]["version"], "1");
+    let about = spec["info"]["description"].as_str().unwrap();
+    for promise in [
+        "Deprecation",
+        "Sunset",
+        "six months",
+        "RateLimit-Policy",
+        "Retry-After",
+    ] {
+        assert!(about.contains(promise), "the policy names {promise}");
+    }
+    assert_eq!(
+        spec["externalDocs"]["url"],
+        "https://get.madar-pos.cloud/en/developers/"
+    );
 
     let paths = spec["paths"].as_object().unwrap();
     assert!(paths.len() > 10, "{}", paths.len());
-    for p in paths.keys() {
+    for (p, ops) in paths {
         assert!(p.starts_with("/public/"), "{p} is not public");
+        // Self-describing for agents: a doc comment on the handler is its summary.
+        for (method, op) in ops.as_object().unwrap() {
+            assert!(
+                op["operationId"].is_string(),
+                "{method} {p} has no operationId"
+            );
+            assert!(
+                op["summary"].as_str().is_some_and(|s| !s.is_empty()),
+                "{method} {p} has no summary: add a /// line above its #[utoipa::path]"
+            );
+        }
     }
     assert!(!paths.contains_key("/public/tenant-shell"));
     assert!(paths.contains_key("/public/orgs/links"));

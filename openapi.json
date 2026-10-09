@@ -32156,6 +32156,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "A shop's branches that take table bookings online.",
+        "description": "`org_id` names the shop. Only active branches with booking switched on are listed.",
         "operationId": "booking_branches",
         "parameters": [
           {
@@ -32250,6 +32252,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "Book a table at a branch.",
+        "description": "Answers 201 with the booking. The time must be a free slot after the branch's lead time. Where the branch's `require_otp` is on, send the `device_token` from `/public/otp/verify`.",
         "operationId": "create_public_booking",
         "requestBody": {
           "content": {
@@ -32340,6 +32344,7 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "A booking, by the manage token from its confirmation link.",
         "operationId": "get_public_booking",
         "parameters": [
           {
@@ -32429,6 +32434,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "Change a booking's time, party size or notes, by its manage token.",
+        "description": "Only a confirmed booking, and only until the branch's lead time before it starts; after that, 409.",
         "operationId": "update_public_booking",
         "parameters": [
           {
@@ -32530,6 +32537,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "Cancel a booking, by its manage token.",
+        "description": "Cancelling a booking that is already cancelled returns it unchanged. A party already seated is the venue's to cancel.",
         "operationId": "cancel_public_booking",
         "parameters": [
           {
@@ -32621,6 +32630,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A shop's branches that take online orders, with each channel's hours and settings.",
+        "description": "`org_id` names the shop. With `browse=true` every active branch is listed, for a read-only menu.",
         "operationId": "public_branches",
         "parameters": [
           {
@@ -32727,6 +32738,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "A branch's booking rules: party sizes, slot length, lead time and how far ahead.",
+        "description": "`require_otp` says whether a booking needs a phone verified through `/public/otp/verify`.",
         "operationId": "booking_info",
         "parameters": [
           {
@@ -32819,6 +32832,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "The free booking times at a branch for one date and party size.",
+        "description": "Refused when the branch takes no online bookings, or the date or party size is outside its rules.",
         "operationId": "booking_slots",
         "parameters": [
           {
@@ -33031,6 +33046,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "The delivery fee and zone for a point, before ordering.",
+        "description": "Needs `lat`, `lng` and `channel`. `status` says whether the branch delivers there; the fee is in piastres.",
         "operationId": "delivery_quote",
         "parameters": [
           {
@@ -33148,6 +33165,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A branch's menu for one ordering channel, with prices in piastres.",
+        "description": "`channel` is `in_mall`, `outside`, `umbrella` or `pickup`. `preview=true` shows a channel's menu while it is closed, and `channel=dine_in&preview=true` gives the read-only dine-in menu. Nothing can be ordered from a preview.",
         "operationId": "public_menu",
         "parameters": [
           {
@@ -33260,6 +33279,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "Place an online order (delivery or pickup) at a branch.",
+        "description": "Answers 201 with the order; follow it at `/public/delivery-orders/{id}/track`. The server prices the cart in piastres. Where the branch requires a verified phone (the default), send the `device_token` from `/public/otp/verify`.",
         "operationId": "create_delivery_order",
         "requestBody": {
           "content": {
@@ -33350,6 +33371,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A customer's past orders at a shop, by their verified phone.",
+        "description": "Needs `phone` and the `device_token` from `/public/otp/verify`; a phone number alone unlocks nothing.",
         "operationId": "guest_order_history",
         "parameters": [
           {
@@ -33463,6 +33486,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A customer's saved delivery addresses at a shop, by their verified phone.",
+        "description": "Needs `phone` and the `device_token` from `/public/otp/verify`.",
         "operationId": "guest_past_locations",
         "parameters": [
           {
@@ -33588,6 +33613,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "An online order's status, timeline and totals, from the id in its tracking link.",
+        "description": "Amounts are in piastres.",
         "operationId": "track_delivery_order",
         "parameters": [
           {
@@ -33679,6 +33706,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "A rewards card: the member's balance, progress to the next reward, rewards and wallet links.",
+        "description": "The token is the one on the card's barcode.",
         "operationId": "loyalty_card",
         "parameters": [
           {
@@ -33863,6 +33892,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "Save a card holder's choices: no marketing messages, and the language to write in.",
+        "description": "The card's own token is the key. Answers 204.",
         "operationId": "set_loyalty_card_preferences",
         "parameters": [
           {
@@ -34043,6 +34074,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "Join a shop's rewards programme.",
+        "description": "Where `require_otp` is on, send the `device_token` from `/public/otp/verify`; until the phone is proven the answer carries no card.",
         "operationId": "loyalty_join",
         "requestBody": {
           "content": {
@@ -34133,6 +34166,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "What a rewards programme's join page shows: its brand, rewards and what joining asks for.",
+        "description": "Name the shop with `org_id`, or a branch with `branch_id` from its counter code.",
         "operationId": "loyalty_join_info",
         "parameters": [
           {
@@ -34321,6 +34356,8 @@
         "tags": [
           "order-now"
         ],
+        "summary": "\"Order now\" from a wallet card: the member's last branch and channel, to prefill an order.",
+        "description": "The card's token alone shows only a first name and a masked phone. With a `device_token` for the member's current phone it gives the full prefill and saved addresses.",
         "operationId": "order_now_context",
         "parameters": [
           {
@@ -34421,6 +34458,8 @@
         "tags": [
           "order-now"
         ],
+        "summary": "Merge the profile that already holds the new phone into this card's profile.",
+        "description": "The answer to a `PHONE_BELONGS_TO_ANOTHER` refusal from replace-identity, with the same proofs. This card's customer is the one kept.",
         "operationId": "order_now_combine",
         "parameters": [
           {
@@ -34522,6 +34561,8 @@
         "tags": [
           "order-now"
         ],
+        "summary": "Change the phone number on a card's customer profile.",
+        "description": "Needs proof of both phones: `device_token` for the current one and `new_phone_device_token` for the new one. At most two changes in 30 days.",
         "operationId": "order_now_replace_identity",
         "parameters": [
           {
@@ -34940,6 +34981,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "Send a 4-digit code by WhatsApp to verify a phone number.",
+        "description": "One live code per phone per minute (409 otherwise). Check it with `/public/otp/verify`.",
         "operationId": "otp_request",
         "requestBody": {
           "content": {
@@ -35030,6 +35073,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "Check a WhatsApp code and get a `device_token` that proves the phone.",
+        "description": "Ordering, booking, the rewards card and order history take this token where a shop asks for a verified phone. A code allows five tries.",
         "operationId": "otp_verify",
         "requestBody": {
           "content": {
@@ -35212,6 +35257,7 @@
         "tags": [
           "open_tickets"
         ],
+        "summary": "The table behind a QR code: its label, its branch, and whether the branch is taking orders now.",
         "operationId": "public_table",
         "parameters": [
           {

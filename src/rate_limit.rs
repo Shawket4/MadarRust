@@ -486,13 +486,9 @@ fn per_address_per_minute() -> f64 {
         .unwrap_or(PER_ADDRESS_PER_MINUTE)
 }
 
-/// Spend a token for `key` from the general bucket. False when it is empty.
-fn take_token(key: &str) -> bool {
-    take_token_at(key, global_per_minute())
-}
-
-/// Spend a token for `key` from a bucket of `per_minute`, refilling first.
-fn take_token_at(key: &str, per_minute: f64) -> bool {
+/// Spend a token for `key` from a bucket of `per_minute`, refilling first: the
+/// tokens left, or `Err` with the tokens there are (fewer than one).
+fn take_token_at(key: &str, per_minute: f64) -> Result<f64, f64> {
     let per_second = per_minute / 60.0;
     let now = std::time::Instant::now();
     let mut map = BUCKETS.lock().unwrap_or_else(|e| e.into_inner());
@@ -513,10 +509,41 @@ fn take_token_at(key: &str, per_minute: f64) -> bool {
     entry.1 = now;
     if refilled < 1.0 {
         entry.0 = refilled;
-        return false;
+        return Err(refilled);
     }
     entry.0 = refilled - 1.0;
-    true
+    Ok(entry.0)
+}
+
+/// Whole seconds until a bucket of `per_minute` holding `tokens` has one again.
+fn seconds_to_a_token(tokens: f64, per_minute: f64) -> u64 {
+    ((1.0 - tokens) / (per_minute / 60.0)).ceil().max(1.0) as u64
+}
+
+/// The caller's bucket in the IETF RateLimit header fields
+/// (draft-ietf-httpapi-ratelimit-headers): its quota over a 60-second window,
+/// the requests left, and the seconds until it is full again.
+fn set_rate_limit_headers(
+    headers: &mut actix_web::http::header::HeaderMap,
+    per_minute: f64,
+    left: f64,
+) {
+    use actix_web::http::header::{HeaderName, HeaderValue};
+    let full_in = ((per_minute - left) / (per_minute / 60.0)).ceil().max(0.0) as u64;
+    for (name, value) in [
+        (
+            "ratelimit-policy",
+            format!("\"caller\";q={};w=60", per_minute as u64),
+        ),
+        (
+            "ratelimit",
+            format!("\"caller\";r={};t={full_in}", left.floor() as u64),
+        ),
+    ] {
+        if let Ok(v) = HeaderValue::from_str(&value) {
+            headers.insert(HeaderName::from_static(name), v);
+        }
+    }
 }
 
 /// The caller's address (`unknown` without a socket). See [`client_ip`].
@@ -580,6 +607,8 @@ pub async fn throttle_exports(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| matches!(v, "1" | "true"));
 
+    // The general bucket after this request, for the RateLimit headers.
+    let mut left = None;
     if rate_limiting_enabled() {
         // Per PERSON, not per address: a shop behind one office router is one
         // address and several people, and throttling them as one would make the
@@ -602,21 +631,41 @@ pub async fn throttle_exports(
                     ),
                 ));
             }
-        } else if !take_token(&key)
-            || (key != address_of(&req)
-                && !take_token_at(
-                    &format!("addr:{}", address_of(&req)),
-                    per_address_per_minute(),
-                ))
-        {
-            return Ok(too_many(
-                req,
-                "RATE_LIMITED",
-                "Too many requests just now. This will clear in a moment.".into(),
-            ));
+        } else {
+            let per_minute = global_per_minute();
+            let address = address_of(&req);
+            // The address bucket is spent only when the person's allowed it.
+            let refused = match take_token_at(&key, per_minute) {
+                Err(tokens) => Some(seconds_to_a_token(tokens, per_minute)),
+                Ok(l) => {
+                    left = Some((per_minute, l));
+                    let per_address = per_address_per_minute();
+                    (key != address)
+                        .then(|| take_token_at(&format!("addr:{address}"), per_address).err())
+                        .flatten()
+                        .map(|tokens| seconds_to_a_token(tokens, per_address))
+                }
+            };
+            if let Some(wait) = refused {
+                let mut res = too_many(
+                    req,
+                    "RATE_LIMITED",
+                    "Too many requests just now. This will clear in a moment.".into(),
+                );
+                set_rate_limit_headers(res.headers_mut(), per_minute, 0.0);
+                res.headers_mut().insert(
+                    actix_web::http::header::RETRY_AFTER,
+                    actix_web::http::header::HeaderValue::from(wait),
+                );
+                return Ok(res);
+            }
         }
     }
-    next.call(req).await.map(|r| r.map_into_left_body())
+    let mut res = next.call(req).await?.map_into_left_body();
+    if let Some((per_minute, l)) = left {
+        set_rate_limit_headers(res.headers_mut(), per_minute, l);
+    }
+    Ok(res)
 }
 
 /// The 429, as a RESPONSE rather than an error: an `Err` from a middleware
@@ -1025,6 +1074,65 @@ mod tests {
         assert_eq!(third, actix_web::http::StatusCode::TOO_MANY_REQUESTS);
     }
 
+    /// Every answer says what is left of the caller's bucket (the IETF
+    /// RateLimit fields), and the refusal says when to come back.
+    #[actix_web::test]
+    async fn answers_carry_the_rate_limit_headers() {
+        use actix_web::{App, HttpResponse, test, web};
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .route("/public/ping", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+        let per_minute = global_per_minute() as u64;
+        let call = || {
+            test::TestRequest::get()
+                .uri("/public/ping")
+                .peer_addr("10.9.3.1:4000".parse().unwrap())
+                .to_request()
+        };
+        let header = |h: &actix_web::http::header::HeaderMap, name: &str| {
+            h.get(name).map(|v| v.to_str().unwrap().to_string())
+        };
+
+        let first = test::call_service(&app, call()).await;
+        assert_eq!(
+            header(first.headers(), "ratelimit-policy").as_deref(),
+            Some(format!("\"caller\";q={per_minute};w=60").as_str())
+        );
+        assert_eq!(
+            header(first.headers(), "ratelimit").as_deref(),
+            Some(format!("\"caller\";r={};t=1", per_minute - 1).as_str()),
+            "one spent, back within a second"
+        );
+        let second = test::call_service(&app, call()).await;
+        assert!(
+            header(second.headers(), "ratelimit")
+                .unwrap()
+                .starts_with(&format!("\"caller\";r={};", per_minute - 2))
+        );
+
+        for _ in 2..per_minute {
+            test::call_service(&app, call()).await;
+        }
+        let refused = match test::try_call_service(&app, call()).await {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(refused.status().as_u16(), 429);
+        assert!(
+            header(refused.headers(), "ratelimit")
+                .unwrap()
+                .starts_with("\"caller\";r=0;")
+        );
+        let wait: u64 = header(refused.headers(), "retry-after")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&wait), "{wait}");
+    }
+
     #[test]
     fn the_bucket_refills_rather_than_opening_on_the_minute() {
         // A fixed window has a cliff — the same request that worked a second
@@ -1033,17 +1141,23 @@ mod tests {
         let key = "bucket-test";
         let per_minute = global_per_minute();
         for _ in 0..per_minute as usize {
-            assert!(take_token(key));
+            assert!(take_token_at(key, per_minute).is_ok());
         }
-        assert!(!take_token(key), "the bucket is empty");
+        assert!(
+            take_token_at(key, per_minute).is_err(),
+            "the bucket is empty"
+        );
 
         // One and a half tokens' time later there is one token, not a whole
         // window's.
         let token_ms = 60_000.0 / per_minute;
         BUCKETS.lock().unwrap().get_mut(key).unwrap().1 -=
             std::time::Duration::from_millis((token_ms * 1.5) as u64);
-        assert!(take_token(key), "one token has come back");
-        assert!(!take_token(key), "and only one");
+        assert!(
+            take_token_at(key, per_minute).is_ok(),
+            "one token has come back"
+        );
+        assert!(take_token_at(key, per_minute).is_err(), "and only one");
     }
 
     #[test]

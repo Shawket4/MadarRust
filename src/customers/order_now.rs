@@ -157,6 +157,9 @@ async fn last_order(
     .await?)
 }
 
+/// "Order now" from a wallet card: the member's last branch and channel, to prefill an order.
+///
+/// The card's token alone shows only a first name and a masked phone. With a `device_token` for the member's current phone it gives the full prefill and saved addresses.
 #[utoipa::path(get, path = "/public/order-now/{token}", tag = "order-now",
     operation_id = "order_now_context",
     params(("token" = String, Path, description = "Member token (the card's QR)"), OrderNowQuery),
@@ -447,6 +450,9 @@ async fn check_limits(
     Ok(())
 }
 
+/// Change the phone number on a card's customer profile.
+///
+/// Needs proof of both phones: `device_token` for the current one and `new_phone_device_token` for the new one. At most two changes in 30 days.
 #[utoipa::path(post, path = "/public/order-now/{token}/replace-identity", tag = "order-now",
     operation_id = "order_now_replace_identity", request_body = ReplaceIdentityRequest,
     params(("token" = String, Path, description = "Member token")),
@@ -498,6 +504,9 @@ pub async fn replace_identity(
     respond(pool, member.id, false).await
 }
 
+/// Merge the profile that already holds the new phone into this card's profile.
+///
+/// The answer to a `PHONE_BELONGS_TO_ANOTHER` refusal from replace-identity, with the same proofs. This card's customer is the one kept.
 #[utoipa::path(post, path = "/public/order-now/{token}/combine", tag = "order-now",
     operation_id = "order_now_combine", request_body = ReplaceIdentityRequest,
     params(("token" = String, Path, description = "Member token — this customer survives")),

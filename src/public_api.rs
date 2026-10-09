@@ -110,16 +110,28 @@ pub fn public_subset(full: &Value) -> Value {
         "openapi": full["openapi"],
         "info": {
             "title": "Madar POS public API",
-            "version": full["info"]["version"],
+            // The contract's version, not the server build's: see the policy below.
+            "version": "1",
             "description": "The endpoints a café's own pages use without an account: \
                             its brand and links page, branches and menus, delivery and \
                             table ordering, order tracking, bookings and the rewards card. \
                             Every call names the shop (`slug` or an id); there is no \
                             cross-shop listing. Madar POS is a point of sale for cafés \
-                            and restaurants in Egypt: https://get.madar-pos.cloud/",
+                            and restaurants in Egypt: https://get.madar-pos.cloud/\n\n\
+                            **Versioning.** This is version 1. Changes within it only add \
+                            (new endpoints, new optional fields). A breaking change comes \
+                            at a new path; the old endpoint keeps working for at least six \
+                            months after it is marked `deprecated` here, and meanwhile \
+                            answers with `Deprecation` (RFC 9745) and `Sunset` (RFC 8594) \
+                            headers and a `Link` to its replacement.\n\n\
+                            **Rate limits.** Every answer carries `RateLimit-Policy` and \
+                            `RateLimit` (draft-ietf-httpapi-ratelimit-headers): the \
+                            caller's quota per 60-second window, what is left, and the \
+                            seconds until it is full again. A 429 carries `Retry-After`.",
             "contact": { "name": "Madar POS", "email": CONTACT_EMAIL, "url": SITE },
             "license": full["info"]["license"],
         },
+        "externalDocs": { "description": "Guide, versioning policy and the MCP server", "url": format!("{SITE}en/developers/") },
         "servers": [{ "url": SERVER, "description": "Production" }],
         "tags": tags,
         "paths": paths,
