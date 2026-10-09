@@ -55,7 +55,9 @@ pub struct ProcessingGroupRef {
 #[serde(untagged)]
 pub enum AssetGroupRef {
     Processing(ProcessingGroupRef),
-    Ready(ReadyGroupRef),
+    // Boxed: a ready group carries every variant's URLs (~400 bytes) and a
+    // processing one a job id; the JSON is the same either way.
+    Ready(Box<ReadyGroupRef>),
 }
 
 impl AssetGroupRef {
@@ -67,7 +69,7 @@ impl AssetGroupRef {
     }
     pub fn ready(&self) -> Option<&ReadyGroupRef> {
         match self {
-            Self::Ready(r) => Some(r),
+            Self::Ready(r) => Some(r.as_ref()),
             _ => None,
         }
     }
@@ -122,7 +124,7 @@ fn build(rows: &[sqlx::postgres::PgRow], ttl: Duration) -> HashMap<Uuid, AssetGr
             if v.variants.thumb.is_none() {
                 v.variants.thumb = v.variants.tile.clone();
             }
-            (k, AssetGroupRef::Ready(v))
+            (k, AssetGroupRef::Ready(Box::new(v)))
         })
         .collect()
 }

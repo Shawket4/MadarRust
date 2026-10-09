@@ -3368,7 +3368,9 @@ pub(crate) async fn create_order_inner(
                     org_ingredient_id: ing_id,
                     movement_type: "sale",
                     quantity: -deduction.quantity,
-                    unit_cost: deduction.cost_per_unit.map(|c| c.round() as i64),
+                    unit_cost: deduction
+                        .cost_per_unit
+                        .and_then(crate::inventory::movements::exact_cost),
                     reason: None,
                     source_type: Some("order"),
                     source_id: Some(order.id),
@@ -3440,7 +3442,6 @@ pub(crate) async fn create_order_inner(
         actor.replay,
     )
     .await?;
-    let mut order = order;
     if let Some(why) = &redemption_refused {
         // Recorded, flagged, and said out loud — never a lost sale.
         sqlx::query(
@@ -4082,7 +4083,7 @@ pub async fn void_order_inner(
             let unit_cost = d
                 .get("cost_per_unit")
                 .and_then(|v| v.as_f64())
-                .map(|c| c.round() as i64);
+                .and_then(crate::inventory::movements::exact_cost);
 
             // Reverse the sale deduction (back into stock) through the ledger.
             crate::inventory::movements::record_movement(
@@ -4917,6 +4918,43 @@ pub async fn export_orders(
     }))
 }
 
+/// Refuse a table-less till sale where the organisation requires one.
+///
+/// Silent — and free — for every shop that has not switched it on: one query
+/// that answers false and returns.
+async fn require_table_if_the_shop_says_so(
+    pool: &sqlx::PgPool,
+    branch_id: Uuid,
+) -> Result<(), AppError> {
+    let required: bool = sqlx::query_scalar(
+        "SELECT o.require_table_for_orders \
+           FROM branches b JOIN organizations o ON o.id = b.org_id \
+          WHERE b.id = $1 AND b.deleted_at IS NULL",
+    )
+    .bind(branch_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    if !required {
+        return Ok(());
+    }
+    // Only where there is a floor to seat somebody on.
+    let has_tables: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM branch_tables WHERE branch_id = $1 AND is_active)",
+    )
+    .bind(branch_id)
+    .fetch_one(pool)
+    .await?;
+    if !has_tables {
+        return Ok(());
+    }
+    Err(AppError::Conflict(
+        "This shop puts every dine-in sale on a table. Seat the party from the \
+         floor, add their items, then settle."
+            .into(),
+    ))
+}
+
 #[cfg(test)]
 mod wire_tests {
     use super::*;
@@ -4956,41 +4994,4 @@ mod wire_tests {
         let vn = serde_json::to_value(&opt_none).unwrap();
         assert!(vn["quantity_deducted"].is_null());
     }
-}
-
-/// Refuse a table-less till sale where the organisation requires one.
-///
-/// Silent — and free — for every shop that has not switched it on: one query
-/// that answers false and returns.
-async fn require_table_if_the_shop_says_so(
-    pool: &sqlx::PgPool,
-    branch_id: Uuid,
-) -> Result<(), AppError> {
-    let required: bool = sqlx::query_scalar(
-        "SELECT o.require_table_for_orders \
-           FROM branches b JOIN organizations o ON o.id = b.org_id \
-          WHERE b.id = $1 AND b.deleted_at IS NULL",
-    )
-    .bind(branch_id)
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or(false);
-    if !required {
-        return Ok(());
-    }
-    // Only where there is a floor to seat somebody on.
-    let has_tables: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM branch_tables WHERE branch_id = $1 AND is_active)",
-    )
-    .bind(branch_id)
-    .fetch_one(pool)
-    .await?;
-    if !has_tables {
-        return Ok(());
-    }
-    Err(AppError::Conflict(
-        "This shop puts every dine-in sale on a table. Seat the party from the \
-         floor, add their items, then settle."
-            .into(),
-    ))
 }

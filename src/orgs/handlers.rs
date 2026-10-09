@@ -867,6 +867,8 @@ pub async fn update_org(
     {
         cache.invalidate(*org_id);
     }
+    // Its name, slug, logo and socials are on its pages.
+    crate::tenant_shell::invalidate(*org_id);
 
     Ok(HttpResponse::Ok().json(org))
 }

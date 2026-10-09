@@ -1284,7 +1284,7 @@ async fn decide_cover_record(
             "No cover waiting here.",
         ));
     };
-    access::require_at(pool, &claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
+    access::require_at(pool, claims, org_id, Cap::HrShiftCoverConfirm, branch_id).await?;
     if Some(by) == coverer_user || Some(by) == owner_user {
         return Err(AppError::Coded {
             status: 403,

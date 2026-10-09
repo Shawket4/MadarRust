@@ -452,12 +452,11 @@ async fn a_live_waste_over_the_limit_with_a_managers_pin_is_allowed(pool: PgPool
     )
     .await;
     assert_eq!(r.status(), 201, "{}", r.status());
-    let approver: Uuid =
-        sqlx::query_scalar("SELECT approver_user_id FROM approvals WHERE id = $1")
-            .bind(approval_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let approver: Uuid = sqlx::query_scalar("SELECT approver_user_id FROM approvals WHERE id = $1")
+        .bind(approval_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(approver, manager);
 }
 

@@ -169,7 +169,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(madar_dawam::vectors::DAWAM).unwrap();
         for s in v["stamps"].as_array().unwrap() {
             let stamp: OfflineStamp = serde_json::from_value(s.clone()).unwrap();
-            assert_eq!(serde_json::to_value(&stamp).unwrap()["elapsed_ms"], s["elapsed_ms"]);
+            assert_eq!(
+                serde_json::to_value(&stamp).unwrap()["elapsed_ms"],
+                s["elapsed_ms"]
+            );
         }
         // A well-formed anchor that is not ours still dates nothing.
         for a in v["anchors"].as_array().unwrap() {

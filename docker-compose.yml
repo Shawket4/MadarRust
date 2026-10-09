@@ -36,8 +36,14 @@ services:
       # They live outside the deploy directory (root-only, 700/600) so nothing
       # a deploy copies into /opt/madar-rust can touch them.
       - /etc/madar/secrets:/run/secrets:ro
+      # The shop apps' web roots, read-only: the tenant shell (src/tenant_shell.rs)
+      # writes each shop into these entry files for page requests on its host.
+      - /var/www/madar-loyalty:/app/shells/loyalty:ro
+      - /var/www/madar-order-shop:/app/shells/order:ro
+      - /var/www/madar-reservations-shop:/app/shells/book:ro
     env_file: .env
     environment:
+      MADAR_SHELL_DIR: /app/shells
       # Override localhost URLs from .env with container-network addresses
       OSRM_URL: http://osrm:5000
       SHLINK_BASE_URL: http://shlink:8080

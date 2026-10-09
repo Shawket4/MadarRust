@@ -95,6 +95,7 @@ async fn till(pool: &PgPool, branch: Uuid, who: Uuid) -> Uuid {
     .unwrap()
 }
 
+#[allow(clippy::too_many_arguments)] // one argument per column of the rows
 async fn option(
     pool: &PgPool,
     org: Uuid,

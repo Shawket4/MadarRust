@@ -382,7 +382,7 @@ pub async fn login(
                   AND deleted_at IS NULL
                 "#,
             )
-            .bind(email)
+            .bind(crate::auth::email::normalize(email))
             .bind(body.org_id)
             .fetch_optional(pool.get_ref())
             .await?
@@ -523,9 +523,14 @@ pub async fn login(
                     device_id.as_deref(),
                 )
                 .await;
-                return Err(AppError::Forbidden(
-                    "You can't sign in at a till in this branch".into(),
-                ));
+                // Coded, so the till says WHY (a correct PIN at the wrong
+                // branch, or a tablet the dashboard moved) instead of a bare
+                // "no permission". The sentence is unchanged for old tablets.
+                return Err(AppError::Coded {
+                    status: 403,
+                    code: "PIN_WRONG_BRANCH",
+                    reason: "You can't sign in at a till in this branch".into(),
+                });
             }
 
             // A correct PIN ends the run of failures for this device and shop.

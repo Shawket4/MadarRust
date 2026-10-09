@@ -95,9 +95,7 @@ pub async fn system_totals_by_method(
             .into_iter()
             .map(|m| MethodTotal {
                 method: m.method,
-                payment_method_id: m
-                    .payment_method_id
-                    .and_then(|id| Uuid::parse_str(&id).ok()),
+                payment_method_id: m.payment_method_id.and_then(|id| Uuid::parse_str(&id).ok()),
                 is_cash: m.is_cash,
                 system_total: m.system_total,
                 order_count: m.order_count,

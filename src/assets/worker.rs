@@ -194,6 +194,15 @@ async fn process(
     if !superseded && purpose == AssetPurpose::OrgLogo {
         post_attach_logo(pool, store, &outcome, target.id).await;
     }
+    if !superseded
+        && matches!(
+            purpose,
+            AssetPurpose::OrgLogo | AssetPurpose::LoyaltyCardImage
+        )
+    {
+        // The shop's pages name its logo and cover.
+        crate::tenant_shell::invalidate(target.id);
+    }
     Ok(pos_id)
 }
 

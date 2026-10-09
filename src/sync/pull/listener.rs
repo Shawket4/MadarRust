@@ -85,10 +85,10 @@ async fn run(pool: &PgPool, hub: &BranchEventHub) -> Result<(), sqlx::Error> {
         let now = Instant::now();
         if let Ok(n) = next {
             let n = n?;
-            if let Ok(branch) = Uuid::parse_str(n.payload()) {
-                if debounce.on_notify(branch, now) {
-                    publish(hub, branch);
-                }
+            if let Ok(branch) = Uuid::parse_str(n.payload())
+                && debounce.on_notify(branch, now)
+            {
+                publish(hub, branch);
             }
         }
         for branch in debounce.due(now) {

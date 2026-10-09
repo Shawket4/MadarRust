@@ -39,8 +39,7 @@ async fn postgres_places_every_shift_as_the_crate_does(pool: PgPool) {
 
 #[sqlx::test]
 async fn a_percentage_of_a_salary_is_the_crates_in_sql_and_here(pool: PgPool) {
-    let vectors: Vec<PercentVector> =
-        serde_json::from_str(madar_dawam::vectors::PERCENT).unwrap();
+    let vectors: Vec<PercentVector> = serde_json::from_str(madar_dawam::vectors::PERCENT).unwrap();
     assert!(vectors.len() >= 100);
     // An org with no settings row: `dawam_advance_cap` takes 50 %.
     let org = uuid::Uuid::new_v4();

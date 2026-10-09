@@ -103,7 +103,7 @@ async fn test_create_user_success(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/users")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "New Teller",
             "role": "teller",
@@ -198,7 +198,7 @@ async fn test_create_user_forbidden_promotion(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/users")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "Sneaky Admin",
             "role": "super_admin",
@@ -229,7 +229,7 @@ async fn test_create_user_teller_requires_pin(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/users")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "No Pin Teller",
             "role": "teller"
@@ -325,7 +325,7 @@ async fn test_update_user(pool: PgPool) {
     let req = test::TestRequest::patch()
         .uri(&format!("/users/{}", user_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "name": "Updated Name"
         }))
         .to_request();
@@ -400,7 +400,7 @@ async fn test_assign_unassign_branch(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri(&format!("/users/{}/branches", target_user_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "branch_id": branch_id
         }))
         .to_request();
@@ -470,7 +470,7 @@ async fn test_assign_branch_cross_org_forbidden(pool: PgPool) {
         test::TestRequest::post()
             .uri(&format!("/users/{}/branches", target_b))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({"branch_id": branch_b}))
+            .set_json(serde_json::json!({"branch_id": branch_b}))
             .to_request(),
     )
     .await;
@@ -522,7 +522,7 @@ async fn test_branch_manager_cannot_reset_org_admin_password(pool: PgPool) {
         test::TestRequest::patch()
             .uri(&format!("/users/{}", victim))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({"password": "pwned"}))
+            .set_json(serde_json::json!({"password": "pwned"}))
             .to_request(),
     )
     .await;

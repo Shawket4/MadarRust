@@ -563,7 +563,8 @@ pub async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     branch_id: Uuid,
     device_id: Option<Uuid>,
 ) -> Result<Option<i32>, sqlx::Error> {
-    let rows: Vec<(String, Option<Uuid>, DateTime<Utc>, Option<i32>)> = sqlx::query_as(
+    type Rows = Vec<(String, Option<Uuid>, DateTime<Utc>, Option<i32>)>;
+    let rows: Rows = sqlx::query_as(
         "(SELECT status::text, device_id, opened_at, closing_cash_declared FROM tills \
            WHERE branch_id = $1 AND status IN ('closed','force_closed') \
              AND closing_cash_declared IS NOT NULL AND device_id = $2 \
@@ -580,18 +581,17 @@ pub async fn last_close_declared<'e, E: sqlx::PgExecutor<'e>>(
     .await?;
     let tills: Vec<madar_till::carryover::ClosedTill> = rows
         .into_iter()
-        .map(|(status, device, opened_at, declared)| madar_till::carryover::ClosedTill {
-            status,
-            device_id: device.map(|d| d.to_string()),
-            opened_at: opened_at.to_rfc3339(),
-            closing_cash_declared: declared.map(i64::from),
-        })
+        .map(
+            |(status, device, opened_at, declared)| madar_till::carryover::ClosedTill {
+                status,
+                device_id: device.map(|d| d.to_string()),
+                opened_at: opened_at.to_rfc3339(),
+                closing_cash_declared: declared.map(i64::from),
+            },
+        )
         .collect();
     let device = device_id.map(|d| d.to_string());
-    Ok(
-        madar_till::carryover::last_close_declared(&tills, device.as_deref())
-            .map(|c| c as i32),
-    )
+    Ok(madar_till::carryover::last_close_declared(&tills, device.as_deref()).map(|c| c as i32))
 }
 
 /// Expected cash in a till's drawer: float + cash tenders + cash tips (not
@@ -603,7 +603,9 @@ where
     A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
 {
     let mut conn = exec.acquire().await?;
-    Ok(crate::tills::rows::load(&mut conn, till_id).await?.system_cash())
+    Ok(crate::tills::rows::load(&mut conn, till_id)
+        .await?
+        .system_cash())
 }
 
 /// Branch bill counts (open bills notice / last-till warning / close snapshot).
@@ -631,7 +633,7 @@ pub(crate) async fn open_bills_notice<'e, E: sqlx::PgExecutor<'e>>(
 }
 
 fn last_till_warning(notice: &OpenBillsNotice, other_open: bool) -> Option<LastTillWarning> {
-    (!other_open && (notice.open_bills_count > 0 || notice.seated_tables_count > 0)).then(|| {
+    (!other_open && (notice.open_bills_count > 0 || notice.seated_tables_count > 0)).then_some({
         LastTillWarning {
             is_last_open_till: true,
             open_bills_count: notice.open_bills_count,
@@ -925,7 +927,7 @@ pub async fn open_till_inner(
     // discrepancy reads as tampering, and the reverse (flagged with a NULL
     // reason, which is what a stale client produced) reads as a blank note.
     let was_edited = expected_opening.is_some_and(|exp| exp != body.opening_cash);
-    let edit_reason = body.edit_reason.as_deref().filter(|_| was_edited);
+    let _edit_reason = body.edit_reason.as_deref().filter(|_| was_edited);
     if !actor.replay && was_edited && body.edit_reason.as_deref().unwrap_or("").trim().is_empty() {
         return Err(AppError::BadRequest(
             "Opening cash differs from your last declared closing cash; edit_reason is required."

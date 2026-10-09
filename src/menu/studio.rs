@@ -908,7 +908,7 @@ async fn fetch_availability(
             }
         })
         .collect();
-    branches.sort_by(|a, b| a.branch_id.cmp(&b.branch_id));
+    branches.sort_by_key(|a| a.branch_id);
 
     Ok(AvailabilityOut {
         org_active,

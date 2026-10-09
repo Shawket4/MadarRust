@@ -11,7 +11,7 @@
 //!   `hr.staff.edit` — the same rights as the covers list and the employee.
 
 use actix_web::{App, test, web};
-use chrono::{Duration, NaiveTime, Utc};
+use chrono::{Duration, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;

@@ -737,6 +737,7 @@ pub async fn put_links_page(
             .await?;
     }
     tx.commit().await?;
+    crate::tenant_shell::invalidate(org_id);
 
     Ok(HttpResponse::Ok().json(settings_view(pool.get_ref(), org_id).await?))
 }
@@ -757,6 +758,22 @@ pub async fn public_links(
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
     let org_id = resolve_org(pool, &query).await?;
+    let page = public_links_page(pool, org_id).await?;
+    Ok(HttpResponse::Ok()
+        // A minute: short enough that a shop checking its own edit sees it,
+        // long enough that a bio link shared to a crowd is one request each
+        // for most of them, not a query storm.
+        .insert_header(("Cache-Control", "public, max-age=60"))
+        .json(page))
+}
+
+/// The links page of a resolved shop: what `GET /public/orgs/links` returns,
+/// for the tenant shell (`crate::tenant_shell`) too, so the HTML a crawler reads
+/// and the page a guest sees are built from the same answer.
+pub(crate) async fn public_links_page(
+    pool: &PgPool,
+    org_id: Uuid,
+) -> Result<PublicLinksPage, AppError> {
     let slug: Option<Option<String>> = sqlx::query_scalar(
         "SELECT slug FROM organizations WHERE id = $1 AND is_active AND deleted_at IS NULL",
     )
@@ -847,21 +864,16 @@ pub async fn public_links(
         None
     };
 
-    Ok(HttpResponse::Ok()
-        // A minute: short enough that a shop checking its own edit sees it,
-        // long enough that a bio link shared to a crowd is one request each
-        // for most of them, not a query storm.
-        .insert_header(("Cache-Control", "public, max-age=60"))
-        .json(PublicLinksPage {
-            brand: brand_of(org_id, slug, org),
-            tagline_en: stored.tagline_en,
-            tagline_ar: stored.tagline_ar,
-            cover_image_url,
-            items,
-            socials,
-            branches,
-            loyalty_mode,
-        }))
+    Ok(PublicLinksPage {
+        brand: brand_of(org_id, slug, org),
+        tagline_en: stored.tagline_en,
+        tagline_ar: stored.tagline_ar,
+        cover_image_url,
+        items,
+        socials,
+        branches,
+        loyalty_mode,
+    })
 }
 
 #[cfg(test)]

@@ -10,8 +10,6 @@
 
 use actix_web::{App, test, web};
 use chrono::{Duration, NaiveTime, Timelike, Utc};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -356,7 +354,7 @@ async fn check_in(
     lng: f64,
 ) -> actix_web::dev::ServiceResponse {
     let req = authed(test::TestRequest::post().uri("/staff/me/check-in"), token)
-        .set_json(&json!({ "branch_id": branch, "latitude": lat, "longitude": lng }))
+        .set_json(json!({ "branch_id": branch, "latitude": lat, "longitude": lng }))
         .to_request();
     test::call_service(app, req).await
 }
@@ -632,7 +630,7 @@ async fn clocking_straight_back_out_is_a_half_day_not_an_absence(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
         .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     let body: serde_json::Value = test::read_body_json(resp).await;
@@ -654,7 +652,7 @@ async fn checking_out_without_checking_in_is_a_404(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
         .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 404);
 }
@@ -774,7 +772,7 @@ async fn check_out_closes_the_day_and_records_worked_minutes(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
         .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -987,7 +985,7 @@ async fn a_department_holding_employees_cannot_be_deleted(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/departments")
         .auth(&token)
-        .set_json(&json!({ "name": "Kitchen" }))
+        .set_json(json!({ "name": "Kitchen" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 201);
@@ -1045,7 +1043,7 @@ async fn approving_leave_asks_paid_or_unpaid_and_writes_no_balance(pool: PgPool)
     let req = test::TestRequest::post()
         .uri("/staff/me/requests")
         .auth(&employee_token)
-        .set_json(&json!({
+        .set_json(json!({
             "kind": "leave",
             "leave_type_id": leave_type,
             "on_date": "2026-09-01",
@@ -1219,7 +1217,7 @@ async fn generate(
 ) -> actix_web::dev::ServiceResponse {
     let req = test::TestRequest::post()
         .uri(&format!("/staff/payroll/periods/{period}/generate"))
-        .auth(&token)
+        .auth(token)
         .to_request();
     test::call_service(app, req).await
 }
@@ -1600,7 +1598,7 @@ async fn a_paid_period_cannot_be_regenerated(pool: PgPool) {
     let req = test::TestRequest::patch()
         .uri(&format!("/staff/payroll/periods/{period}/status"))
         .auth(&token)
-        .set_json(&json!({ "status": "paid" }))
+        .set_json(json!({ "status": "paid" }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 409);
     let req = test::TestRequest::patch()
@@ -1609,7 +1607,7 @@ async fn a_paid_period_cannot_be_regenerated(pool: PgPool) {
             f.employee
         ))
         .auth(&token)
-        .set_json(&json!({ "method": "cash" }))
+        .set_json(json!({ "method": "cash" }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 200);
 
@@ -1820,8 +1818,8 @@ async fn check_out(
 ) -> actix_web::dev::ServiceResponse {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
-        .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .auth(token)
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     test::call_service(app, req).await
 }
@@ -2352,7 +2350,7 @@ async fn attendance_coordinates_are_wiped_once_their_month_is_approved(pool: PgP
         .expect("the wipe should succeed");
 
     // The approved month keeps everything payroll needs, minus the coordinates.
-    let (lat, lng, out_lat, out_lng, checked_in, distance, method): (
+    type Row = (
         Option<f64>,
         Option<f64>,
         Option<f64>,
@@ -2360,7 +2358,8 @@ async fn attendance_coordinates_are_wiped_once_their_month_is_approved(pool: PgP
         Option<chrono::DateTime<chrono::Utc>>,
         Option<f64>,
         Option<String>,
-    ) = sqlx::query_as(
+    );
+    let (lat, lng, out_lat, out_lng, checked_in, distance, method): Row = sqlx::query_as(
         "SELECT check_in_latitude, check_in_longitude, check_out_latitude, \
                 check_out_longitude, check_in_at, check_in_distance_meters, check_in_method \
            FROM attendance_records WHERE id = $1",

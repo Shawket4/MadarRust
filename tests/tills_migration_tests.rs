@@ -39,7 +39,6 @@ const B1: &str = "00000000-0000-4000-8000-0000000000b1";
 const B2: &str = "00000000-0000-4000-8000-0000000000b2";
 const B3: &str = "00000000-0000-4000-8000-0000000000b3"; // other org
 const T1: &str = "00000000-0000-4000-8000-0000000000a1";
-const T2: &str = "00000000-0000-4000-8000-0000000000a2";
 const U3: &str = "00000000-0000-4000-8000-0000000000a3"; // other org
 const E1: &str = "00000000-0000-4000-8000-0000000000e1";
 const S1: &str = "00000000-0000-4000-8000-00000000c001";
@@ -839,7 +838,7 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
         .await
         .expect("rework up to the feed");
     let stamp =
-        format!("(SELECT installed_on FROM _sqlx_migrations WHERE version = 20260914090300)");
+        "(SELECT installed_on FROM _sqlx_migrations WHERE version = 20260914090300)".to_string();
     let ledger_at_stamp = format!(
         "SELECT count(*) FROM sync_changes WHERE type IN ('till','cash_movement','order','refund') AND changed_at = {stamp}"
     );

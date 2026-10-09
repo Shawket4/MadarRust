@@ -357,7 +357,9 @@ async fn legacy_delete_shift_route(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(JwtSecret(SECRET.into())))
-            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .app_data(web::Data::new(
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            ))
             .configure(madar_rust::tills::legacy_routes::configure)
             .configure(madar_rust::orders::routes::configure),
     )

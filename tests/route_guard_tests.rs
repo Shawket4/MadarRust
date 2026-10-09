@@ -60,6 +60,29 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "load balancer / uptime probe; says nothing",
     ),
     (
+        "GET",
+        "/",
+        "the API host's own description and where its public spec is; says nothing about any shop",
+    ),
+    ("HEAD", "/", "same as GET"),
+    (
+        "GET",
+        "/.well-known/mcp/server-card.json",
+        "the MCP server card: the tool list tools/list already gives anyone",
+    ),
+    ("HEAD", "/.well-known/mcp/server-card.json", "same as GET"),
+    (
+        "POST",
+        "/mcp",
+        "the MCP server: read-only tools over the /public/ endpoints, which are public already",
+    ),
+    (
+        "GET",
+        "/openapi.json",
+        "the spec of the /public/ endpoints only, which are public already",
+    ),
+    ("HEAD", "/openapi.json", "same as GET"),
+    (
         "POST",
         "/auth/login",
         "the sign-in itself (email+password or PIN); rate limited",
@@ -244,6 +267,12 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "/public/orgs/links",
         "the shop's links page: brand, socials, enabled modules, custom links, branches",
     ),
+    (
+        "GET",
+        "/public/tenant-shell",
+        "a shop page's HTML for nginx: the links page and menu that the public endpoints already serve",
+    ),
+    ("HEAD", "/public/tenant-shell", "same as GET"),
     // ── Loyalty card (the member's own unguessable token) ──
     (
         "GET",

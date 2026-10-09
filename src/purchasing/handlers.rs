@@ -8,7 +8,7 @@ use crate::{
     auth::jwt::Claims,
     costing::service::{apply_weighted_average_cost, round_piastres},
     errors::{AppError, AppErrorResponse},
-    inventory::movements::{MovementParams, record_movement},
+    inventory::movements::{COST_DP, MovementParams, record_movement},
     models::UserRole,
     permissions::checker::check_permission,
 };
@@ -41,8 +41,15 @@ pub struct PurchaseOrderLine {
     pub units_per_purchase_unit: f64,
     pub quantity_ordered: f64,
     pub quantity_received: f64,
-    /// Piastres per PURCHASE unit.
+    /// Piastres per PURCHASE unit, rounded to whole piastres (older readers;
+    /// the truth is `line_cost`, the precise figure `unit_cost_exact`).
     pub unit_cost: i64,
+    /// Piastres per PURCHASE unit, exact: `line_cost / quantity_ordered`.
+    #[schema(value_type = f64)]
+    pub unit_cost_exact: Decimal,
+    /// Piastres for the whole line, as on the supplier's invoice. The unit
+    /// cost is derived from it, never the other way round.
+    pub line_cost: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -102,8 +109,15 @@ pub struct POLineInput {
     /// inventory unit (the factor is derived from the ingredient's base unit).
     pub units_per_purchase_unit: Option<f64>,
     pub quantity_ordered: f64,
-    /// Piastres per purchase unit.
-    pub unit_cost: i64,
+    /// Piastres for the whole line, as invoiced. Preferred: the unit cost is
+    /// derived from it exactly (12 000 g for 548.16 EGP is 4.568 piastres/g,
+    /// where a whole-piastre unit cost made it 5 and the order 600.00).
+    #[serde(default)]
+    pub line_cost: Option<i64>,
+    /// Piastres per purchase unit, for clients that predate `line_cost`.
+    /// Ignored when `line_cost` is sent; one of the two is required.
+    #[serde(default)]
+    pub unit_cost: Option<i64>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -119,9 +133,14 @@ pub struct CreatePurchaseOrderRequest {
 pub struct ReceiveLineInput {
     pub line_id: Uuid,
     pub quantity_received: f64,
-    /// Optional ACTUAL invoice cost (piastres per purchase unit) for this
-    /// delivery, when it differs from the ordered price. Drives weighted-average
-    /// cost + the ledger; omitted ⟹ the PO line's ordered cost is used.
+    /// Optional ACTUAL invoice total (piastres) for what this delivery brought,
+    /// when it differs from the ordered price. Preferred over `unit_cost`.
+    /// Drives weighted-average cost + the ledger; omitted (with `unit_cost`)
+    /// ⟹ the ordered line total, pro rata to the quantity received.
+    #[serde(default)]
+    pub line_cost: Option<i64>,
+    /// Optional ACTUAL invoice cost in piastres per purchase unit (older
+    /// clients). Ignored when `line_cost` is sent.
     pub unit_cost: Option<i64>,
 }
 
@@ -369,9 +388,8 @@ pub async fn create_order(
                 "quantity_ordered must be greater than 0".into(),
             ));
         }
-        if line.unit_cost < 0 {
-            return Err(AppError::BadRequest("unit_cost cannot be negative".into()));
-        }
+        let (line_cost, unit_cost_exact) =
+            line_costs(line.quantity_ordered, line.line_cost, line.unit_cost)?;
 
         // Validate ingredient belongs to org + resolve its base unit and pack.
         let ing: Option<(String, Option<String>, Option<rust_decimal::Decimal>)> = sqlx::query_as(
@@ -423,15 +441,17 @@ pub async fn create_order(
         sqlx::query(
             "INSERT INTO purchase_order_lines \
                  (purchase_order_id, org_ingredient_id, purchase_unit, units_per_purchase_unit, \
-                  quantity_ordered, unit_cost) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                  quantity_ordered, unit_cost, line_cost, unit_cost_exact) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(order.id)
         .bind(line.org_ingredient_id)
         .bind(&line.purchase_unit)
         .bind(factor)
         .bind(line.quantity_ordered)
-        .bind(line.unit_cost)
+        .bind(round_piastres(unit_cost_exact))
+        .bind(line_cost)
+        .bind(unit_cost_exact)
         .execute(&mut *tx)
         .await?;
     }
@@ -610,9 +630,10 @@ pub async fn receive_order(
 
     let mut tx = pool.get_ref().begin().await?;
 
-    // (po_line_id, org_ingredient_id, base-unit qty, piastres/stock-unit) for the
-    // goods-receipt record created at the end of this delivery.
-    let mut receipt_lines: Vec<(Uuid, Uuid, f64, i64)> = Vec::new();
+    // (po_line_id, org_ingredient_id, base-unit qty, exact piastres/stock-unit,
+    // piastres for the delivery) for the goods-receipt record created at the
+    // end of this delivery.
+    let mut receipt_lines: Vec<(Uuid, Uuid, f64, Decimal, i64)> = Vec::new();
 
     // Lock the PO row and re-check status INSIDE the tx: two concurrent receives
     // must not both pass the status gate and double-apply stock/WAC (V7).
@@ -633,16 +654,16 @@ pub async fn receive_order(
         }
 
         // Load + lock the line (and verify it belongs to this PO).
-        let line: Option<(Uuid, f64, i64, f64, f64)> = sqlx::query_as(
-            "SELECT org_ingredient_id, units_per_purchase_unit::float8, unit_cost, \
-                    quantity_ordered::float8, quantity_received::float8 \
+        let line: Option<(Uuid, f64, i64, Decimal, f64, f64)> = sqlx::query_as(
+            "SELECT org_ingredient_id, units_per_purchase_unit::float8, line_cost, \
+                    quantity_ordered, quantity_ordered::float8, quantity_received::float8 \
              FROM purchase_order_lines WHERE id = $1 AND purchase_order_id = $2 FOR UPDATE",
         )
         .bind(recv.line_id)
         .bind(*id)
         .fetch_optional(&mut *tx)
         .await?;
-        let (ing_id, factor, unit_cost, qty_ordered, qty_received_so_far) =
+        let (ing_id, factor, ordered_line_cost, qty_ordered_dec, qty_ordered, qty_received_so_far) =
             line.ok_or_else(|| {
                 AppError::BadRequest("Line does not belong to this purchase order".into())
             })?;
@@ -659,30 +680,29 @@ pub async fn receive_order(
             )));
         }
 
-        // Price variance: the ACTUAL invoice cost (if supplied on the receive)
-        // overrides the ordered cost for WAC + the ledger. Negative is rejected.
-        if let Some(actual) = recv.unit_cost
-            && actual < 0
-        {
-            return Err(AppError::BadRequest("unit_cost cannot be negative".into()));
-        }
-        let unit_cost = recv.unit_cost.unwrap_or(unit_cost);
+        // What this delivery cost, in piastres. Price variance: the ACTUAL
+        // invoice (if supplied on the receive) overrides the ordered price for
+        // WAC + the ledger; otherwise the ordered line total, pro rata.
+        let delivery_cost = delivery_cost(
+            recv.quantity_received,
+            recv.line_cost,
+            recv.unit_cost,
+            ordered_line_cost,
+            qty_ordered_dec,
+        )?;
 
         let stock_qty = recv.quantity_received * factor;
-        // Piastres per base stock unit — kept at 2 dp so a cheap-per-base-unit
-        // ingredient (e.g. 400 piastres/kg = 0.40/g) is NOT rounded down to 0
-        // ("free") before it reaches the numeric(15,2) cost_per_unit (V10).
-        let cost_per_stock_unit_dec: Decimal = if factor > 0.0 {
-            (Decimal::from(unit_cost) / Decimal::from_f64_retain(factor).unwrap_or(Decimal::ONE))
-                .round_dp(2)
-        } else {
-            Decimal::from(unit_cost)
-        };
         let stock_qty_dec = Decimal::from_f64_retain(stock_qty)
             .unwrap_or(Decimal::ZERO)
             .round_dp(3);
-        // The movement ledger unit_cost is a bigint column → whole-piastre snapshot.
-        let cost_per_stock_unit = round_piastres(cost_per_stock_unit_dec);
+        // Piastres per base stock unit, EXACT (6 dp): the delivery's cost over
+        // the stock it brought. A cheap-per-gram ingredient keeps its fraction
+        // of a piastre all the way into cost_per_unit and the ledger (V10).
+        let cost_per_stock_unit_dec = if stock_qty_dec > Decimal::ZERO {
+            (delivery_cost / stock_qty_dec).round_dp(COST_DP)
+        } else {
+            Decimal::ZERO
+        };
 
         // Weighted-average cost must read PRIOR on-hand → before adding stock.
         apply_weighted_average_cost(
@@ -704,7 +724,7 @@ pub async fn receive_order(
                 org_ingredient_id: ing_id,
                 movement_type: "purchase_in",
                 quantity: stock_qty,
-                unit_cost: Some(cost_per_stock_unit),
+                unit_cost: Some(cost_per_stock_unit_dec),
                 reason: None,
                 source_type: Some("purchase"),
                 source_id: Some(*id),
@@ -723,7 +743,13 @@ pub async fn receive_order(
         .execute(&mut *tx)
         .await?;
 
-        receipt_lines.push((recv.line_id, ing_id, stock_qty, cost_per_stock_unit));
+        receipt_lines.push((
+            recv.line_id,
+            ing_id,
+            stock_qty,
+            cost_per_stock_unit_dec,
+            round_piastres(delivery_cost),
+        ));
     }
 
     // Resulting status from the lines' received-vs-ordered totals: fully
@@ -782,17 +808,20 @@ pub async fn receive_order(
         .bind(claims.user_id())
         .fetch_one(&mut *tx)
         .await?;
-        for (po_line_id, ing_id, stock_qty, unit_cost) in &receipt_lines {
+        for (po_line_id, ing_id, stock_qty, unit_cost, line_cost) in &receipt_lines {
             sqlx::query(
                 "INSERT INTO goods_receipt_lines \
-                     (goods_receipt_id, purchase_order_line_id, org_ingredient_id, quantity, unit_cost) \
-                 VALUES ($1, $2, $3, $4, $5)"
+                     (goods_receipt_id, purchase_order_line_id, org_ingredient_id, quantity, \
+                      unit_cost, unit_cost_exact, line_cost) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(receipt_id)
             .bind(po_line_id)
             .bind(ing_id)
             .bind(stock_qty)
+            .bind(round_piastres(*unit_cost))
             .bind(unit_cost)
+            .bind(line_cost)
             .execute(&mut *tx)
             .await?;
         }
@@ -1000,8 +1029,13 @@ pub struct GoodsReceiptLine {
     /// Base stock units received (+) or returned (−).
     #[schema(value_type = f64)]
     pub quantity: f64,
-    /// Piastres per base stock unit (actual).
+    /// Piastres per base stock unit (actual), rounded to whole piastres.
     pub unit_cost: Option<i64>,
+    /// Piastres per base stock unit at full precision.
+    #[schema(value_type = Option<f64>)]
+    pub unit_cost_exact: Option<Decimal>,
+    /// Piastres this delivery cost (negative for a return); null when unknown.
+    pub line_cost: Option<i64>,
 }
 
 #[derive(serde::Serialize, ToSchema)]
@@ -1160,7 +1194,13 @@ pub async fn create_return(
             line.org_ingredient_id,
         )
         .await?;
-        let unit_cost = line.unit_cost.or(branch_cost);
+        if line.unit_cost.is_some_and(|c| c < 0) {
+            return Err(AppError::BadRequest("unit_cost cannot be negative".into()));
+        }
+        let unit_cost = line.unit_cost.map(Decimal::from).or(branch_cost);
+        let quantity_dec = Decimal::from_f64_retain(line.quantity)
+            .unwrap_or(Decimal::ZERO)
+            .round_dp(3);
 
         record_movement(
             &mut *tx,
@@ -1181,13 +1221,15 @@ pub async fn create_return(
 
         sqlx::query(
             "INSERT INTO goods_receipt_lines \
-                 (goods_receipt_id, org_ingredient_id, quantity, unit_cost) \
-             VALUES ($1, $2, $3, $4)",
+                 (goods_receipt_id, org_ingredient_id, quantity, unit_cost, unit_cost_exact, line_cost) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(receipt_id)
         .bind(line.org_ingredient_id)
         .bind(-line.quantity)
+        .bind(unit_cost.map(round_piastres))
         .bind(unit_cost)
+        .bind(unit_cost.map(|c| round_piastres(-(c * quantity_dec))))
         .execute(&mut *tx)
         .await?;
     }
@@ -1207,6 +1249,68 @@ pub async fn create_return(
 
 // ── Helpers ───────────────────────────────────────────────────
 
+/// Piastres per stock unit can be a fraction; a line total is whole piastres.
+const LINE_COST_DP: u32 = 8;
+
+fn quantity_dec(q: f64) -> Decimal {
+    Decimal::from_f64_retain(q)
+        .unwrap_or(Decimal::ZERO)
+        .round_dp(3)
+}
+
+/// A purchase line's `(line_cost, unit_cost_exact)` from what the client sent.
+/// The invoice total is the truth: given, the unit cost is derived from it
+/// exactly; only an older client's per-unit price is multiplied out instead.
+pub(crate) fn line_costs(
+    quantity_ordered: f64,
+    line_cost: Option<i64>,
+    unit_cost: Option<i64>,
+) -> Result<(i64, Decimal), AppError> {
+    let qty = quantity_dec(quantity_ordered);
+    match (line_cost, unit_cost) {
+        (Some(lc), _) if lc < 0 => Err(AppError::BadRequest("line_cost cannot be negative".into())),
+        (Some(lc), _) if qty > Decimal::ZERO => {
+            Ok((lc, (Decimal::from(lc) / qty).round_dp(LINE_COST_DP)))
+        }
+        (Some(_), _) => Err(AppError::BadRequest(
+            "quantity_ordered must be greater than 0".into(),
+        )),
+        (None, Some(uc)) if uc < 0 => {
+            Err(AppError::BadRequest("unit_cost cannot be negative".into()))
+        }
+        (None, Some(uc)) => Ok((round_piastres(Decimal::from(uc) * qty), Decimal::from(uc))),
+        (None, None) => Err(AppError::BadRequest(
+            "each line needs its cost: line_cost (the invoice total for the line)".into(),
+        )),
+    }
+}
+
+/// Piastres one delivery cost: the actual invoice total if given, else an
+/// older client's actual per-unit price × the quantity, else the ORDERED line
+/// total pro rata to the quantity received (so receiving all of it costs
+/// exactly what was ordered, not a rounded unit price × the quantity).
+pub(crate) fn delivery_cost(
+    quantity_received: f64,
+    line_cost: Option<i64>,
+    unit_cost: Option<i64>,
+    ordered_line_cost: i64,
+    quantity_ordered: Decimal,
+) -> Result<Decimal, AppError> {
+    let qty = quantity_dec(quantity_received);
+    match (line_cost, unit_cost) {
+        (Some(lc), _) if lc < 0 => Err(AppError::BadRequest("line_cost cannot be negative".into())),
+        (Some(lc), _) => Ok(Decimal::from(lc)),
+        (None, Some(uc)) if uc < 0 => {
+            Err(AppError::BadRequest("unit_cost cannot be negative".into()))
+        }
+        (None, Some(uc)) => Ok(Decimal::from(uc) * qty),
+        (None, None) if quantity_ordered > Decimal::ZERO => {
+            Ok(Decimal::from(ordered_line_cost) * qty / quantity_ordered)
+        }
+        (None, None) => Ok(Decimal::ZERO),
+    }
+}
+
 async fn fetch_lines<'e, E>(executor: E, po_id: Uuid) -> Result<Vec<PurchaseOrderLine>, AppError>
 where
     E: sqlx::PgExecutor<'e>,
@@ -1216,7 +1320,8 @@ where
         SELECT l.id, l.purchase_order_id, l.org_ingredient_id,
                oi.name AS ingredient_name, oi.unit::text AS unit,
                l.purchase_unit, l.units_per_purchase_unit::float8,
-               l.quantity_ordered::float8, l.quantity_received::float8, l.unit_cost
+               l.quantity_ordered::float8, l.quantity_received::float8, l.unit_cost,
+               l.unit_cost_exact, l.line_cost
         FROM purchase_order_lines l
         JOIN org_ingredients oi ON oi.id = l.org_ingredient_id
         WHERE l.purchase_order_id = $1
@@ -1300,12 +1405,16 @@ async fn fetch_receipts_where(
         return Ok(Vec::new());
     }
     let ids: Vec<Uuid> = headers.iter().map(|h| h.id).collect();
-    let line_rows: Vec<(Uuid, GoodsReceiptLine)> = sqlx::query_as::<
-        _,
-        (Uuid, Uuid, Option<Uuid>, Uuid, String, f64, Option<i64>),
-    >(
+    #[derive(sqlx::FromRow)]
+    struct L {
+        goods_receipt_id: Uuid,
+        #[sqlx(flatten)]
+        line: GoodsReceiptLine,
+    }
+    let line_rows: Vec<(Uuid, GoodsReceiptLine)> = sqlx::query_as::<_, L>(
         "SELECT grl.goods_receipt_id, grl.id, grl.purchase_order_line_id, grl.org_ingredient_id, \
-                oi.name AS ingredient_name, grl.quantity::float8, grl.unit_cost \
+                oi.name AS ingredient_name, grl.quantity::float8 AS quantity, grl.unit_cost, \
+                grl.unit_cost_exact, grl.line_cost \
          FROM goods_receipt_lines grl \
          JOIN org_ingredients oi ON oi.id = grl.org_ingredient_id \
          WHERE grl.goods_receipt_id = ANY($1) ORDER BY oi.name",
@@ -1314,19 +1423,7 @@ async fn fetch_receipts_where(
     .fetch_all(pool)
     .await?
     .into_iter()
-    .map(|(rid, id, pol, ing, name, qty, cost)| {
-        (
-            rid,
-            GoodsReceiptLine {
-                id,
-                purchase_order_line_id: pol,
-                org_ingredient_id: ing,
-                ingredient_name: name,
-                quantity: qty,
-                unit_cost: cost,
-            },
-        )
-    })
+    .map(|r| (r.goods_receipt_id, r.line))
     .collect();
 
     Ok(headers
@@ -1342,6 +1439,8 @@ async fn fetch_receipts_where(
                     ingredient_name: l.ingredient_name.clone(),
                     quantity: l.quantity,
                     unit_cost: l.unit_cost,
+                    unit_cost_exact: l.unit_cost_exact,
+                    line_cost: l.line_cost,
                 })
                 .collect();
             GoodsReceipt {

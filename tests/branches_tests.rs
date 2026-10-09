@@ -79,7 +79,7 @@ async fn a_branch_rate_comes_back_as_a_json_number(pool: PgPool) {
         test::TestRequest::post()
             .uri("/branches")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "org_id": org_id,
                 "name": "Inherits",
                 "address": "1 High St",
@@ -97,7 +97,7 @@ async fn a_branch_rate_comes_back_as_a_json_number(pool: PgPool) {
         test::TestRequest::put()
             .uri(&format!("/branches/{branch_id}"))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "tax_rate": 0.14,
                 "service_charge_rate": 0.125,
             }))
@@ -136,7 +136,7 @@ async fn test_create_branch_success(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/branches")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": org_id,
             "name": "Downtown Branch",
             "address": "123 Main St",
@@ -168,7 +168,7 @@ async fn test_create_branch_unauthorized(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/branches")
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": Uuid::new_v4(),
             "name": "Hacker Branch"
         }))
@@ -194,7 +194,7 @@ async fn test_create_branch_foreign_key_missing(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/branches")
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "org_id": missing_org_id,
             "name": "Nowhere Branch"
         }))
@@ -375,7 +375,7 @@ async fn test_update_branch(pool: PgPool) {
     let req = test::TestRequest::put()
         .uri(&format!("/branches/{}", branch_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "name": "Updated Name",
             "printer_ip": null // This should clear the printer_ip
         }))
@@ -554,7 +554,7 @@ async fn test_create_branch_rejects_invalid_timezone(pool: PgPool) {
         test::TestRequest::post()
             .uri("/branches")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "org_id": org_id,
                 "name": "Bad TZ Branch",
                 "timezone": "Africa/Cairo' UNION SELECT version() --"
@@ -570,7 +570,7 @@ async fn test_create_branch_rejects_invalid_timezone(pool: PgPool) {
         test::TestRequest::post()
             .uri("/branches")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "org_id": org_id,
                 "name": "Good TZ Branch",
                 "timezone": "America/New_York"
@@ -615,7 +615,7 @@ async fn test_branch_inherits_org_timezone(pool: PgPool) {
         test::TestRequest::post()
             .uri("/branches")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({ "org_id": org_id, "name": "Inheriting Branch" }))
+            .set_json(serde_json::json!({ "org_id": org_id, "name": "Inheriting Branch" }))
             .to_request(),
     )
     .await;
@@ -632,7 +632,7 @@ async fn test_branch_inherits_org_timezone(pool: PgPool) {
         test::TestRequest::post()
             .uri("/branches")
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "org_id": org_id, "name": "Explicit Branch", "timezone": "America/New_York"
             }))
             .to_request(),
@@ -744,7 +744,7 @@ async fn the_table_rule_resolves_branch_first_and_null_inherits(pool: PgPool) {
         test::TestRequest::post()
             .uri("/branches")
             .insert_header(("Authorization", format!("Bearer {token}")))
-            .set_json(&serde_json::json!({ "org_id": org_id, "name": "Counter" }))
+            .set_json(serde_json::json!({ "org_id": org_id, "name": "Counter" }))
             .to_request(),
     )
     .await;

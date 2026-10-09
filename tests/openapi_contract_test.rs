@@ -114,5 +114,9 @@ fn transfer_receive_body_is_its_own() {
         s[&item]["properties"].get("qty_received").is_some(),
         "{item} is not the transfer receive line"
     );
-    assert!(s["ReceiveLineInput"]["properties"].get("quantity_received").is_some());
+    assert!(
+        s["ReceiveLineInput"]["properties"]
+            .get("quantity_received")
+            .is_some()
+    );
 }

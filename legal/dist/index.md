@@ -1,0 +1,14 @@
+# Madar POS legal documents
+
+Legal documents for Madar POS, the café and restaurant point of sale: privacy, terms, data processing, security and data retention.
+
+Each document states its version and effective date; earlier versions remain available on request.
+
+- [Privacy Policy](https://legal.madar-pos.cloud/privacy-policy.md): How Madar handles personal data of diners, loyalty members and restaurant staff: what is collected, who receives it, where it is stored, and your rights. Version 1.7, effective 2026-09-16.
+- [Terms of Service](https://legal.madar-pos.cloud/terms-of-service.md): Terms between Madar and restaurants using its hosted point-of-sale service: accounts, acceptable use, data, availability, fees, termination and liability. Version 1.0, effective 2026-09-01.
+- [Data Processing Agreement](https://legal.madar-pos.cloud/dpa.md): Data Processing Agreement between Madar as processor and the restaurant as controller: obligations, security, sub-processors, audit, breach and transfers. Version 1.1, effective 2026-09-14.
+- [Sub-processors](https://legal.madar-pos.cloud/subprocessors.md): Third parties that process personal data for Madar's customers, including Hostinger, Cloudflare, Google, WhatsApp and Apple: what each receives and where. Version 1.6, effective 2026-09-16.
+- [Employee Privacy Notice](https://legal.madar-pos.cloud/employee-privacy-notice.md): What the Dawam staff app records about restaurant employees, including GPS location at clock-in and clock-out, who sees it, retention and your rights. Version 1.2, effective 2026-09-14.
+- [Data Retention](https://legal.madar-pos.cloud/data-retention.md): How long Madar keeps each kind of record: orders and payroll for 5 years, attendance GPS coordinates for 90 days, error reports for 30 days, and backups. Version 1.4, effective 2026-09-14.
+- [Delete Your Account](https://legal.madar-pos.cloud/delete-account.md): How to delete a Madar account or have personal data removed, for account holders, diners, loyalty members and Dawam employees, and which records are kept. Version 1.1, effective 2026-09-08.
+- [Security](https://legal.madar-pos.cloud/security.md): How the Madar platform protects data: database-level tenant isolation, single-person admin access, encryption, SSH-key server access and verified backups. Version 1.3, effective 2026-09-16.

@@ -167,7 +167,11 @@ pub async fn record_inner(
 
     // Idempotency first: a retry must never spend a second drink.
     if let Some(existing) = fetch(pool, req.id).await? {
-        return Ok(Recorded { drink: existing, flags: Vec::new(), deduplicated: true });
+        return Ok(Recorded {
+            drink: existing,
+            flags: Vec::new(),
+            deduplicated: true,
+        });
     }
 
     let recorded_at = req.recorded_at.unwrap_or_else(Utc::now);
@@ -252,14 +256,22 @@ pub async fn record_inner(
     .await?;
 
     match drink {
-        Some(d) => Ok(Recorded { drink: d, flags, deduplicated: false }),
+        Some(d) => Ok(Recorded {
+            drink: d,
+            flags,
+            deduplicated: false,
+        }),
         // Another connection won the race on the same client-minted id: that is
         // the same drink, not a second one.
         None => {
             let existing = fetch(pool, req.id)
                 .await?
                 .ok_or_else(|| AppError::Internal)?;
-            Ok(Recorded { drink: existing, flags: Vec::new(), deduplicated: true })
+            Ok(Recorded {
+                drink: existing,
+                flags: Vec::new(),
+                deduplicated: true,
+            })
         }
     }
 }

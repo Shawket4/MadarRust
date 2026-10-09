@@ -505,6 +505,9 @@ mod backfill_tests {
 
         // Unknown org → NotFound.
         let err = backfill_cost_snapshots(&pool, BackfillScope::Org(Uuid::new_v4()), true).await;
-        assert!(matches!(err, Err(madar_rust::errors::AppError::NotFound(_))));
+        assert!(matches!(
+            err,
+            Err(madar_rust::errors::AppError::NotFound(_))
+        ));
     }
 }

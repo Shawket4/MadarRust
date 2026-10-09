@@ -1,13 +1,103 @@
 //! Shared rate-limiting helpers.
 //!
-//! `PeerIpOrLocalhost` keys the `actix-governor` limiter by the client's peer
-//! IP, falling back to 127.0.0.1 when no socket address is available (actix
-//! test utilities don't supply a real peer addr). Shared so the auth and
-//! public-menu endpoints limit on the same key type.
+//! Every limit kept per address asks [`client_ip`] who is calling: the
+//! socket's peer, or the `X-Real-IP` that a trusted proxy (nginx, through the
+//! Docker bridge) forwards. `PeerIpOrLocalhost` keys the `actix-governor`
+//! limiters by it, falling back to 127.0.0.1 when no socket address is
+//! available (actix test utilities don't supply a real peer addr).
 
+use actix_governor::governor::NotUntil;
+use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
 use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::dev::ServiceRequest;
+use actix_web::{HttpResponse, HttpResponseBuilder};
 use std::net::{IpAddr, Ipv4Addr};
+
+/// A route governor's 429 in the API's own shape (`ErrorBody` plus the wait),
+/// instead of actix-governor's plain-text sentence. The governor has already
+/// set `Retry-After`.
+fn governor_refusal(
+    negative: &NotUntil<QuantaInstant>,
+    mut response: HttpResponseBuilder,
+) -> HttpResponse {
+    let wait = negative
+        .wait_time_from(DefaultClock::default().now())
+        .as_secs();
+    response.json(serde_json::json!({
+        "error": "Too many requests just now. This will clear in a moment.",
+        "code": "RATE_LIMITED",
+        "retry_after_seconds": wait,
+    }))
+}
+
+// ── Who is calling ───────────────────────────────────────────────────────────
+
+/// The proxies whose `X-Real-IP` is believed: loopback (nginx on the same host
+/// as a bare backend) and the container's default gateway, which is the Docker
+/// bridge that nginx's connections arrive through via Docker's port proxy
+/// (`172.21.0.1` on the box). `MADAR_TRUSTED_PROXIES` (comma-separated
+/// addresses) replaces the set when it is not that. Nothing else is trusted:
+/// another container on the network, or anything that reaches the port some
+/// other way, is keyed by its own address whatever header it sends.
+static TRUSTED_PROXIES: std::sync::LazyLock<Vec<IpAddr>> = std::sync::LazyLock::new(|| {
+    if let Ok(list) = std::env::var("MADAR_TRUSTED_PROXIES")
+        && !list.trim().is_empty()
+    {
+        return list
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+    }
+    let mut trusted = vec![
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    if let Some(gw) = std::fs::read_to_string("/proc/net/route")
+        .ok()
+        .and_then(|t| default_gateway(&t))
+    {
+        trusted.push(gw);
+    }
+    trusted
+});
+
+/// The IPv4 default gateway in a `/proc/net/route` table: the row whose
+/// destination is `00000000`, its gateway in the kernel's little-endian hex.
+#[doc(hidden)]
+pub fn default_gateway(route_table: &str) -> Option<IpAddr> {
+    route_table.lines().skip(1).find_map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.get(1) != Some(&"00000000") {
+            return None;
+        }
+        let gw = u32::from_str_radix(cols.get(2)?, 16).ok()?;
+        (gw != 0).then(|| IpAddr::V4(Ipv4Addr::from(gw.to_le_bytes())))
+    })
+}
+
+/// The caller's address, for every limit that is kept per address.
+///
+/// The socket's peer, unless the peer is a trusted proxy ([`TRUSTED_PROXIES`])
+/// that says who it is forwarding in `X-Real-IP`. On the box every request
+/// reaches the container through Docker's port proxy, so the peer alone is the
+/// same address for every visitor, and each "per IP" allowance (the OTP ones
+/// included) was one allowance shared by the whole platform. nginx SETS the
+/// header on every vhost (`proxy_set_header X-Real-IP $remote_addr`), so a
+/// value a client sends never gets through it; behind Cloudflare `$remote_addr`
+/// is already the visitor (`cloudflare-real-ip.conf`), and `api.` is DNS-only.
+pub fn client_ip(req: &ServiceRequest) -> Option<IpAddr> {
+    let peer = req.peer_addr()?.ip();
+    if TRUSTED_PROXIES.contains(&peer)
+        && let Some(forwarded) = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+    {
+        return Some(forwarded);
+    }
+    Some(peer)
+}
 
 /// Rate limiting is ON by default. Set `MADAR_DISABLE_RATE_LIMIT=1` (or `=true`)
 /// to turn it off — used by the local API-fuzz harness (scripts/api-fuzz.sh) so
@@ -27,10 +117,15 @@ impl KeyExtractor for PeerIpOrLocalhost {
     type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
 
     fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
-        Ok(req
-            .peer_addr()
-            .map(|s| s.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+        Ok(client_ip(req).unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+    }
+
+    fn exceed_rate_limit_response(
+        &self,
+        negative: &NotUntil<QuantaInstant>,
+        response: HttpResponseBuilder,
+    ) -> HttpResponse {
+        governor_refusal(negative, response)
     }
 }
 
@@ -54,6 +149,14 @@ impl KeyExtractor for PathToken {
         // much memory one costs. Real tokens are far shorter than this.
         let end = token.char_indices().nth(96).map_or(token.len(), |(i, _)| i);
         Ok(token[..end].to_string())
+    }
+
+    fn exceed_rate_limit_response(
+        &self,
+        negative: &NotUntil<QuantaInstant>,
+        response: HttpResponseBuilder,
+    ) -> HttpResponse {
+        governor_refusal(negative, response)
     }
 }
 
@@ -347,10 +450,12 @@ fn global_per_minute() -> f64 {
         .unwrap_or(GLOBAL_PER_MINUTE)
 }
 
+/// Per client key: `(tokens, last refill, capacity)` (see [`BUCKETS`]).
+type Buckets = std::collections::HashMap<String, (f64, std::time::Instant, f64)>;
+
 /// `(tokens, last refill)` per client.
-static BUCKETS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant, f64)>>,
-> = std::sync::LazyLock::new(Default::default);
+static BUCKETS: std::sync::LazyLock<std::sync::Mutex<Buckets>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// The ceiling for one ADDRESS across every account behind it. The person
 /// bucket is what an honest till spends; this one stops a single address from
@@ -381,13 +486,9 @@ fn per_address_per_minute() -> f64 {
         .unwrap_or(PER_ADDRESS_PER_MINUTE)
 }
 
-/// Spend a token for `key` from the general bucket. False when it is empty.
-fn take_token(key: &str) -> bool {
-    take_token_at(key, global_per_minute())
-}
-
-/// Spend a token for `key` from a bucket of `per_minute`, refilling first.
-fn take_token_at(key: &str, per_minute: f64) -> bool {
+/// Spend a token for `key` from a bucket of `per_minute`, refilling first: the
+/// tokens left, or `Err` with the tokens there are (fewer than one).
+fn take_token_at(key: &str, per_minute: f64) -> Result<f64, f64> {
     let per_second = per_minute / 60.0;
     let now = std::time::Instant::now();
     let mut map = BUCKETS.lock().unwrap_or_else(|e| e.into_inner());
@@ -408,16 +509,47 @@ fn take_token_at(key: &str, per_minute: f64) -> bool {
     entry.1 = now;
     if refilled < 1.0 {
         entry.0 = refilled;
-        return false;
+        return Err(refilled);
     }
     entry.0 = refilled - 1.0;
-    true
+    Ok(entry.0)
 }
 
-/// The caller's address (`unknown` without a socket).
+/// Whole seconds until a bucket of `per_minute` holding `tokens` has one again.
+fn seconds_to_a_token(tokens: f64, per_minute: f64) -> u64 {
+    ((1.0 - tokens) / (per_minute / 60.0)).ceil().max(1.0) as u64
+}
+
+/// The caller's bucket in the IETF RateLimit header fields
+/// (draft-ietf-httpapi-ratelimit-headers): its quota over a 60-second window,
+/// the requests left, and the seconds until it is full again.
+fn set_rate_limit_headers(
+    headers: &mut actix_web::http::header::HeaderMap,
+    per_minute: f64,
+    left: f64,
+) {
+    use actix_web::http::header::{HeaderName, HeaderValue};
+    let full_in = ((per_minute - left) / (per_minute / 60.0)).ceil().max(0.0) as u64;
+    for (name, value) in [
+        (
+            "ratelimit-policy",
+            format!("\"caller\";q={};w=60", per_minute as u64),
+        ),
+        (
+            "ratelimit",
+            format!("\"caller\";r={};t={full_in}", left.floor() as u64),
+        ),
+    ] {
+        if let Ok(v) = HeaderValue::from_str(&value) {
+            headers.insert(HeaderName::from_static(name), v);
+        }
+    }
+}
+
+/// The caller's address (`unknown` without a socket). See [`client_ip`].
 fn address_of(req: &actix_web::dev::ServiceRequest) -> String {
-    req.peer_addr()
-        .map(|s| s.ip().to_string())
+    client_ip(req)
+        .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -456,11 +588,7 @@ fn limiter_key(req: &actix_web::dev::ServiceRequest) -> String {
         })
         .and_then(|c| c.user_id_safe().ok())
         .map(|id| id.to_string())
-        .unwrap_or_else(|| {
-            req.peer_addr()
-                .map(|s| s.ip().to_string())
-                .unwrap_or_else(|| "unknown".into())
-        })
+        .unwrap_or_else(|| address_of(req))
 }
 
 /// One gate for every request: a general token bucket, and a much tighter
@@ -479,6 +607,8 @@ pub async fn throttle_exports(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| matches!(v, "1" | "true"));
 
+    // The general bucket after this request, for the RateLimit headers.
+    let mut left = None;
     if rate_limiting_enabled() {
         // Per PERSON, not per address: a shop behind one office router is one
         // address and several people, and throttling them as one would make the
@@ -501,21 +631,41 @@ pub async fn throttle_exports(
                     ),
                 ));
             }
-        } else if !take_token(&key)
-            || (key != address_of(&req)
-                && !take_token_at(
-                    &format!("addr:{}", address_of(&req)),
-                    per_address_per_minute(),
-                ))
-        {
-            return Ok(too_many(
-                req,
-                "RATE_LIMITED",
-                "Too many requests just now. This will clear in a moment.".into(),
-            ));
+        } else {
+            let per_minute = global_per_minute();
+            let address = address_of(&req);
+            // The address bucket is spent only when the person's allowed it.
+            let refused = match take_token_at(&key, per_minute) {
+                Err(tokens) => Some(seconds_to_a_token(tokens, per_minute)),
+                Ok(l) => {
+                    left = Some((per_minute, l));
+                    let per_address = per_address_per_minute();
+                    (key != address)
+                        .then(|| take_token_at(&format!("addr:{address}"), per_address).err())
+                        .flatten()
+                        .map(|tokens| seconds_to_a_token(tokens, per_address))
+                }
+            };
+            if let Some(wait) = refused {
+                let mut res = too_many(
+                    req,
+                    "RATE_LIMITED",
+                    "Too many requests just now. This will clear in a moment.".into(),
+                );
+                set_rate_limit_headers(res.headers_mut(), per_minute, 0.0);
+                res.headers_mut().insert(
+                    actix_web::http::header::RETRY_AFTER,
+                    actix_web::http::header::HeaderValue::from(wait),
+                );
+                return Ok(res);
+            }
         }
     }
-    next.call(req).await.map(|r| r.map_into_left_body())
+    let mut res = next.call(req).await?.map_into_left_body();
+    if let Some((per_minute, l)) = left {
+        set_rate_limit_headers(res.headers_mut(), per_minute, l);
+    }
+    Ok(res)
 }
 
 /// The 429, as a RESPONSE rather than an error: an `Err` from a middleware
@@ -941,6 +1091,65 @@ mod tests {
         assert_eq!(third, actix_web::http::StatusCode::TOO_MANY_REQUESTS);
     }
 
+    /// Every answer says what is left of the caller's bucket (the IETF
+    /// RateLimit fields), and the refusal says when to come back.
+    #[actix_web::test]
+    async fn answers_carry_the_rate_limit_headers() {
+        use actix_web::{App, HttpResponse, test, web};
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .route("/public/ping", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+        let per_minute = global_per_minute() as u64;
+        let call = || {
+            test::TestRequest::get()
+                .uri("/public/ping")
+                .peer_addr("10.9.3.1:4000".parse().unwrap())
+                .to_request()
+        };
+        let header = |h: &actix_web::http::header::HeaderMap, name: &str| {
+            h.get(name).map(|v| v.to_str().unwrap().to_string())
+        };
+
+        let first = test::call_service(&app, call()).await;
+        assert_eq!(
+            header(first.headers(), "ratelimit-policy").as_deref(),
+            Some(format!("\"caller\";q={per_minute};w=60").as_str())
+        );
+        assert_eq!(
+            header(first.headers(), "ratelimit").as_deref(),
+            Some(format!("\"caller\";r={};t=1", per_minute - 1).as_str()),
+            "one spent, back within a second"
+        );
+        let second = test::call_service(&app, call()).await;
+        assert!(
+            header(second.headers(), "ratelimit")
+                .unwrap()
+                .starts_with(&format!("\"caller\";r={};", per_minute - 2))
+        );
+
+        for _ in 2..per_minute {
+            test::call_service(&app, call()).await;
+        }
+        let refused = match test::try_call_service(&app, call()).await {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(refused.status().as_u16(), 429);
+        assert!(
+            header(refused.headers(), "ratelimit")
+                .unwrap()
+                .starts_with("\"caller\";r=0;")
+        );
+        let wait: u64 = header(refused.headers(), "retry-after")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&wait), "{wait}");
+    }
+
     #[test]
     fn the_bucket_refills_rather_than_opening_on_the_minute() {
         let _env = env_lock();
@@ -950,17 +1159,23 @@ mod tests {
         let key = "bucket-test";
         let per_minute = global_per_minute();
         for _ in 0..per_minute as usize {
-            assert!(take_token(key));
+            assert!(take_token_at(key, per_minute).is_ok());
         }
-        assert!(!take_token(key), "the bucket is empty");
+        assert!(
+            take_token_at(key, per_minute).is_err(),
+            "the bucket is empty"
+        );
 
         // One and a half tokens' time later there is one token, not a whole
         // window's.
         let token_ms = 60_000.0 / per_minute;
         BUCKETS.lock().unwrap().get_mut(key).unwrap().1 -=
             std::time::Duration::from_millis((token_ms * 1.5) as u64);
-        assert!(take_token(key), "one token has come back");
-        assert!(!take_token(key), "and only one");
+        assert!(
+            take_token_at(key, per_minute).is_ok(),
+            "one token has come back"
+        );
+        assert!(take_token_at(key, per_minute).is_err(), "and only one");
     }
 
     #[test]

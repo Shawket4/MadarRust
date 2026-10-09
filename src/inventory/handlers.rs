@@ -1608,12 +1608,14 @@ pub async fn branch_unit_cost<'e, E>(
     executor: E,
     branch_id: Uuid,
     org_ingredient_id: Uuid,
-) -> Result<Option<i64>, AppError>
+) -> Result<Option<Decimal>, AppError>
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let cost: Option<f64> = sqlx::query_scalar(
-        "SELECT COALESCE(bs.cost_per_unit, oi.cost_per_unit)::float8 \
+    // Exact (numeric(20,6) piastres): the ledger keeps it whole and rounds
+    // only its legacy bigint column.
+    let cost: Option<Decimal> = sqlx::query_scalar(
+        "SELECT COALESCE(bs.cost_per_unit, oi.cost_per_unit) \
          FROM org_ingredients oi \
          LEFT JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = $2 \
          WHERE oi.id = $1",
@@ -1623,7 +1625,7 @@ where
     .fetch_optional(executor)
     .await?
     .flatten();
-    Ok(cost.map(|c| c.round() as i64))
+    Ok(cost)
 }
 
 async fn require_branch_access(

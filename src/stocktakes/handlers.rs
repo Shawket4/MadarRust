@@ -591,7 +591,8 @@ pub async fn finalize_stocktake(
                     org_ingredient_id: ing_id,
                     movement_type: "stock_count",
                     quantity: delta,
-                    unit_cost,
+                    // The count snapshotted whole piastres (stocktake_items.unit_cost).
+                    unit_cost: unit_cost.map(rust_decimal::Decimal::from),
                     reason: variance_reason.as_deref(),
                     source_type: Some("stocktake"),
                     source_id: Some(*id),

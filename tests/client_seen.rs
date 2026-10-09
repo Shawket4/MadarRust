@@ -1,4 +1,3 @@
-
 mod common;
 
 use madar_rust::client_seen::forget_throttle;
@@ -12,8 +11,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::client_seen::*;
 use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::client_seen::*;
 use madar_rust::models::UserRole;
 
 const SECRET: &str = "test_secret";
@@ -443,7 +442,9 @@ macro_rules! telemetry_app {
                 .wrap(actix_web::middleware::from_fn(record))
                 .app_data(web::Data::new($pool.clone()))
                 .app_data(web::Data::new(JwtSecret(SECRET.into())))
-                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
                 .configure(madar_rust::auth::routes::configure)
                 .configure(madar_rust::tills::legacy_routes::configure)
                 .configure(madar_rust::devices::routes::configure)
@@ -452,7 +453,9 @@ macro_rules! telemetry_app {
                 .configure(madar_rust::orders::routes::configure)
                 .configure(madar_rust::refunds::routes::configure)
                 .configure(madar_rust::menu::routes::configure)
-                .configure(|c| madar_rust::reports::routes::configure(c, web::Data::new($pool.clone()))),
+                .configure(|c| {
+                    madar_rust::reports::routes::configure(c, web::Data::new($pool.clone()))
+                }),
         )
         .await
     };
@@ -702,7 +705,9 @@ async fn handler_sites_report_their_kind() {
     })
     .await;
     let (_, untouched) = collect_hits(async {
-        madar_rust::tills::legacy_routes::legacy_error(madar_rust::errors::AppError::NotFound("x".into()))
+        madar_rust::tills::legacy_routes::legacy_error(madar_rust::errors::AppError::NotFound(
+            "x".into(),
+        ))
     })
     .await;
     assert_eq!(

@@ -4032,8 +4032,14 @@ async fn attendance_correction_reasons_carry_codes(pool: PgPool) {
             .map(|e| e["code"].clone())
             .unwrap_or_else(|| panic!("no {label} in {r}"))
     };
-    assert_eq!(code_of("Approved punch correction request"), "correction_request");
+    assert_eq!(
+        code_of("Approved punch correction request"),
+        "correction_request"
+    );
     assert_eq!(code_of("unspecified"), "unspecified");
     assert_eq!(code_of("Auto-closed: no checkout recorded"), "auto_closed");
-    assert!(code_of("forgot to check out").is_null(), "typed by a person");
+    assert!(
+        code_of("forgot to check out").is_null(),
+        "typed by a person"
+    );
 }

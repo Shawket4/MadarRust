@@ -56,8 +56,9 @@ mod tests {
     /// The live round-trip, for a human with a real key.
     ///
     /// Ignored by default: it talks to Google. Run it deliberately with
-    /// `cargo test -- --ignored --test-threads=1` and a real
-    /// `GOOGLE_TRANSLATE_API_KEY`, never as part of the suite.
+    /// `cargo test --features operator-tests -- --ignored --test-threads=1` and
+    /// a real `GOOGLE_TRANSLATE_API_KEY`, never as part of the suite.
+    #[cfg(feature = "operator-tests")]
     #[tokio::test]
     #[ignore = "hits the live Google Translate API"]
     async fn live_translation_fills_a_missing_language() {

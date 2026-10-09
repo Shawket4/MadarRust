@@ -248,7 +248,8 @@ async fn the_data_migration_keeps_every_staff_record(pool: PgPool) {
 
     // One employee per profile, plus one for the history without a profile —
     // each keeping its user's id and linked to that user.
-    let people: Vec<(Uuid, Option<Uuid>, String, Option<String>, bool, String)> = sqlx::query_as(
+    type People = Vec<(Uuid, Option<Uuid>, String, Option<String>, bool, String)>;
+    let people: People = sqlx::query_as(
         "SELECT id, user_id, name, phone, app_access, employment_status FROM employees ORDER BY name",
     )
     .fetch_all(&db)

@@ -166,6 +166,12 @@ url                = "2"
 unicode-normalization = "0.1"
 bytes              = "1"
 
+[features]
+# Operator runs kept beside the suites they belong to: a lint over a restored
+# prod copy and a live Google Translate round trip. A plain test run neither
+# builds nor lists them; `--features operator-tests -- --ignored <name>`.
+operator-tests = []
+
 [profile.release]
 lto = true
 codegen-units = 1
@@ -275,3 +281,4 @@ path = "src/lib.rs"
 [[bin]]
 name = "authz-parity"
 path = "src/bin/authz_parity.rs"
+

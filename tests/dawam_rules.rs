@@ -391,13 +391,7 @@ async fn file(
 ) -> Value {
     let mut b = body;
     b["employee_id"] = json!(who);
-    let (st, row) = send!(
-        *app,
-        "POST",
-        "/staff/requests".to_string(),
-        f.owner_token(),
-        b
-    );
+    let (st, row) = send!(*app, "POST", "/staff/requests", f.owner_token(), b);
     assert_eq!(st, 201, "{row}");
     row
 }
@@ -416,7 +410,7 @@ async fn decide(
         *app,
         "PATCH",
         format!("/staff/requests/{}/decision", id.as_str().unwrap()),
-        token.to_string(),
+        token,
         body
     )
 }
@@ -517,7 +511,7 @@ async fn leave_types_and_balances_are_gone_from_the_api(pool: PgPool) {
         ("GET", "/staff/leave/balances"),
         ("PUT", "/staff/leave/balances"),
     ] {
-        let resp = call!(app, m, uri.to_string(), f.owner_token(), json!({}));
+        let resp = call!(app, m, uri, f.owner_token(), json!({}));
         assert_eq!(resp.status(), 404, "{m} {uri} is retired (RQ-2, RQ-3)");
     }
 }
@@ -575,7 +569,7 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     let (st, b) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-08-20" })
     );
@@ -589,7 +583,7 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     // month_closed, so clients offer Reject, not Approve.
     assert_eq!(b["vars"]["paid"], json!(false), "{b}");
     assert_eq!(b["vars"]["date"], json!("2026-08-20"), "{b}");
-    let (_, list) = send!(app, "GET", "/staff/requests".to_string(), f.owner_token());
+    let (_, list) = send!(app, "GET", "/staff/requests", f.owner_token());
     let row = list
         .as_array()
         .unwrap()
@@ -606,7 +600,7 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-07-25", "end_date": "2026-08-02" })
     );
@@ -670,7 +664,7 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/attendance".to_string(),
+        "/staff/attendance",
         f.owner_token(),
         json!({ "employee_id": f.e, "branch_id": f.a, "business_date": "2026-08-11", "status": "absent", "reason": "r" })
     );
@@ -691,7 +685,7 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     let (st, b) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-08-21" })
     );
@@ -700,7 +694,7 @@ async fn an_approved_month_is_closed_to_requests_and_manual_edits(pool: PgPool) 
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-09-02" })
     );
@@ -718,7 +712,7 @@ async fn the_owners_own_request_is_approved_as_it_is_filed(pool: PgPool) {
     let (st, row) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone,
         json!({ "kind": "late_arrival", "on_date": "2026-09-10", "to_time": "10:00:00" })
     );
@@ -753,7 +747,7 @@ async fn a_self_approved_leave_must_say_paid_or_unpaid(pool: PgPool) {
     let (st, body) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         json!({ "kind": "leave", "on_date": "2026-09-14" })
     );
@@ -767,7 +761,7 @@ async fn a_self_approved_leave_must_say_paid_or_unpaid(pool: PgPool) {
     let (st, body) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e_owner, "kind": "leave", "on_date": "2026-09-14" })
     );
@@ -780,7 +774,7 @@ async fn a_self_approved_leave_must_say_paid_or_unpaid(pool: PgPool) {
     let (st, row) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone,
         json!({ "kind": "leave", "on_date": "2026-09-14", "is_paid": false })
     );
@@ -795,7 +789,7 @@ async fn a_self_approved_leave_must_say_paid_or_unpaid(pool: PgPool) {
     let (st, row) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         format!("{}|{}", e.token, e.device),
         json!({ "kind": "leave", "on_date": "2026-09-15" })
     );
@@ -815,7 +809,7 @@ async fn a_managers_own_request_goes_to_the_owner_not_to_a_peer(pool: PgPool) {
     let (st, row) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         json!({ "kind": "early_departure", "on_date": "2026-09-10", "from_time": "16:00:00", "reason": "." })
     );
@@ -992,7 +986,7 @@ async fn an_excuse_is_paid_by_the_rule_of_its_branch_and_unpaid_time_is_deducted
     let (st, b) = send!(
         app,
         "PUT",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         f.owner_token(),
         json!({ "branch_id": f.a, "excused_time_paid_default": true })
     );
@@ -1443,7 +1437,7 @@ async fn a_night_shifts_times_after_midnight_land_on_the_next_morning(pool: PgPo
     let (st, corr) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone,
         json!({ "kind": "correction", "on_date": d, "attendance_record_id": rec, "to_time": "05:00:00" })
     );
@@ -1615,7 +1609,7 @@ async fn the_sweep_never_writes_back_a_day_a_manager_deleted(pool: PgPool) {
     let (st, b) = send!(
         app,
         "POST",
-        "/staff/attendance".to_string(),
+        "/staff/attendance",
         f.owner_token(),
         json!({ "employee_id": f.e, "branch_id": f.a, "business_date": d, "work_shift_id": f.day_shift, "status": "present", "reason": "course counts as work" })
     );
@@ -1729,7 +1723,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let (st, b) = send!(
         app,
         "PUT",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         owner.clone(),
         json!({ "branch_id": f.a, "overtime_mode": "automatic" })
     );
@@ -1746,7 +1740,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let (st, _) = send!(
         app,
         "PUT",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         owner.clone(),
         json!({ "absence_deduction_days": 2 })
     );
@@ -1763,7 +1757,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let biz = body(call!(
         app,
         "GET",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         owner.clone()
     ))
     .await;
@@ -1773,7 +1767,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let (st, _) = send!(
         app,
         "PUT",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         owner.clone(),
         json!({ "branch_id": f.a, "period_start_day": 1 })
     );
@@ -1781,7 +1775,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let (st, _) = send!(
         app,
         "PUT",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         owner.clone(),
         json!({ "inherit": ["overtime_mode"] })
     );
@@ -1791,7 +1785,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let (st, b) = send!(
         app,
         "PUT",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         owner.clone(),
         json!({ "branch_id": f.a, "inherit": ["overtime_mode"], "working_days_per_month": 26 })
     );
@@ -1801,7 +1795,7 @@ async fn a_branch_override_inherits_every_rule_it_does_not_set(pool: PgPool) {
     let list = body(call!(
         app,
         "GET",
-        "/staff/attendance/settings/branches".to_string(),
+        "/staff/attendance/settings/branches",
         owner.clone()
     ))
     .await;
@@ -1835,12 +1829,7 @@ async fn a_manager_sees_the_rules_of_their_branches_and_changes_none(pool: PgPoo
     let app = app!(pool);
     let f = seed(&pool).await;
     let mgr = f.mgr_token();
-    let (st, b) = send!(
-        app,
-        "GET",
-        "/staff/attendance/settings".to_string(),
-        mgr.clone()
-    );
+    let (st, b) = send!(app, "GET", "/staff/attendance/settings", mgr.clone());
     assert_eq!(st, 200, "the business's rules: {b}");
     let (st, _) = send!(
         app,
@@ -1859,7 +1848,7 @@ async fn a_manager_sees_the_rules_of_their_branches_and_changes_none(pool: PgPoo
     let list = body(call!(
         app,
         "GET",
-        "/staff/attendance/settings/branches".to_string(),
+        "/staff/attendance/settings/branches",
         mgr.clone()
     ))
     .await;
@@ -1901,7 +1890,7 @@ async fn a_manager_sees_the_rules_of_their_branches_and_changes_none(pool: PgPoo
     let (st, _) = send!(
         app,
         "GET",
-        "/staff/attendance/settings".to_string(),
+        "/staff/attendance/settings",
         format!("{}|{}", s.token, s.device)
     );
     assert_eq!(st, 403);
@@ -1938,7 +1927,7 @@ async fn a_mission_needs_a_title_or_a_note(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "mission", "on_date": "2026-09-10", "reason": "  " })
     );
@@ -1946,7 +1935,7 @@ async fn a_mission_needs_a_title_or_a_note(pool: PgPool) {
     let (st, row) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "mission", "on_date": "2026-09-10", "reason": "Bank" })
     );
@@ -1955,7 +1944,7 @@ async fn a_mission_needs_a_title_or_a_note(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-09-12", "is_half_day": true, "leave_half": "middle" })
     );
@@ -1963,7 +1952,7 @@ async fn a_mission_needs_a_title_or_a_note(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-09-12", "leave_half": "first" })
     );
@@ -1971,7 +1960,7 @@ async fn a_mission_needs_a_title_or_a_note(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "leave", "on_date": "2026-09-12", "work_shift_id": f.day_shift })
     );
@@ -1979,7 +1968,7 @@ async fn a_mission_needs_a_title_or_a_note(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "late_arrival", "on_date": "2026-09-12", "to_time": "10:00:00", "work_shift_id": Uuid::new_v4() })
     );
@@ -2089,7 +2078,7 @@ async fn deciding_a_holiday_takes_back_the_sweeps_absence_and_dismissing_restore
     let (st, _) = send!(
         app,
         "PUT",
-        "/staff/holidays/2026-05-02".to_string(),
+        "/staff/holidays/2026-05-02",
         f.owner_token(),
         json!({ "decision": "holiday" })
     );
@@ -2167,7 +2156,7 @@ async fn a_holiday_in_an_approved_month_cant_be_decided(pool: PgPool) {
     let (st, b) = send!(
         app,
         "PUT",
-        "/staff/holidays/2026-05-01".to_string(),
+        "/staff/holidays/2026-05-01",
         f.owner_token(),
         json!({ "decision": "holiday" })
     );
@@ -2205,7 +2194,7 @@ async fn a_split_day_takes_one_late_arrival_per_shift_and_a_night_keeps_one(pool
     let (st, b) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.e, "kind": "late_arrival", "on_date": d, "to_time": "09:45:00" })
     );
@@ -2224,7 +2213,7 @@ async fn a_split_day_takes_one_late_arrival_per_shift_and_a_night_keeps_one(pool
     let (st, b) = send!(
         app,
         "POST",
-        "/staff/requests".to_string(),
+        "/staff/requests",
         f.owner_token(),
         json!({ "employee_id": f.x, "kind": "excuse", "on_date": d, "from_time": "01:30:00", "to_time": "03:00:00" })
     );
@@ -2261,7 +2250,7 @@ async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         json!({ "kind": "correction", "on_date": d, "work_shift_id": f.night, "from_time": "09:00:00", "to_time": "17:00:00" })
     );
@@ -2269,7 +2258,7 @@ async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         json!({ "kind": "correction", "on_date": "2099-01-01", "work_shift_id": f.day_shift, "from_time": "09:00:00" })
     );
@@ -2277,7 +2266,7 @@ async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         json!({ "kind": "correction", "on_date": d, "from_time": "09:00:00" })
     );
@@ -2286,7 +2275,7 @@ async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
     let (st, corr) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         json!({ "kind": "correction", "on_date": d, "work_shift_id": f.day_shift, "from_time": "09:05:00", "to_time": "17:00:00", "reason": "My phone died" })
     );
@@ -2295,7 +2284,7 @@ async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
     let (st, _) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         json!({ "kind": "correction", "on_date": d, "work_shift_id": f.day_shift, "from_time": "09:00:00" })
     );
@@ -2310,7 +2299,13 @@ async fn a_correction_can_fix_a_rostered_shift_with_no_record(pool: PgPool) {
     .await;
     assert_eq!(st, 200, "{b}");
     let rec: Uuid = b["attendance_record_id"].as_str().unwrap().parse().unwrap();
-    let (cin, cout, late, method): (Option<DateTime<Utc>>, Option<DateTime<Utc>>, i32, Option<String>) = sqlx::query_as(
+    type Row = (
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+        i32,
+        Option<String>,
+    );
+    let (cin, cout, late, method): Row = sqlx::query_as(
         "SELECT check_in_at, check_out_at, late_minutes, check_in_method FROM attendance_records WHERE id = $1",
     )
     .bind(rec)
@@ -2370,7 +2365,7 @@ async fn every_request_says_whether_the_caller_may_decide_it(pool: PgPool) {
     };
 
     // The manager of A: decides Eman, not their own, never sees B.
-    let (st, list) = send!(app, "GET", "/staff/requests".to_string(), f.mgr_token());
+    let (st, list) = send!(app, "GET", "/staff/requests", f.mgr_token());
     assert_eq!(st, 200, "{list}");
     assert_eq!(flags(&list, &e_req["id"]), Some((false, true)));
     assert_eq!(
@@ -2380,13 +2375,13 @@ async fn every_request_says_whether_the_caller_may_decide_it(pool: PgPool) {
     );
     assert_eq!(flags(&list, &x_req["id"]), None, "another branch");
     // A peer manager can't decide a manager's request; the owner can.
-    let (_, list) = send!(app, "GET", "/staff/requests".to_string(), f.peer_token());
+    let (_, list) = send!(app, "GET", "/staff/requests", f.peer_token());
     assert_eq!(
         flags(&list, &mgr_req["id"]),
         Some((false, false)),
         "a peer is not above them"
     );
-    let (_, list) = send!(app, "GET", "/staff/requests".to_string(), f.owner_token());
+    let (_, list) = send!(app, "GET", "/staff/requests", f.owner_token());
     assert_eq!(flags(&list, &mgr_req["id"]), Some((false, true)));
     assert_eq!(flags(&list, &x_req["id"]), Some((false, true)));
 
@@ -2409,7 +2404,7 @@ async fn every_request_says_whether_the_caller_may_decide_it(pool: PgPool) {
     let (st, mine) = send!(
         app,
         "GET",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         format!("{}|{}", s.token, s.device)
     );
     assert_eq!(st, 200);
@@ -2534,13 +2529,7 @@ async fn request_refusals_carry_codes(pool: PgPool) {
     let body = json!({ "employee_id": f.e, "kind": "excuse", "on_date": "2026-09-11",
                        "from_time": "12:00:00", "to_time": "13:00:00" });
     file(&app, &f, f.e, body.clone()).await;
-    let (st, b) = send!(
-        app,
-        "POST",
-        "/staff/requests".to_string(),
-        f.owner_token(),
-        body
-    );
+    let (st, b) = send!(app, "POST", "/staff/requests", f.owner_token(), body);
     assert_eq!(
         (st, b["code"].clone()),
         (409, json!("OVERLAPPING_REQUEST")),
@@ -2585,7 +2574,7 @@ async fn a_request_names_who_decided_and_who_cancelled_it(pool: PgPool) {
         let id = row["id"].clone();
         let app = &app;
         async move {
-            let (st, list) = send!(*app, "GET", "/staff/me/requests".to_string(), phone);
+            let (st, list) = send!(*app, "GET", "/staff/me/requests", phone);
             assert_eq!(st, 200, "{list}");
             list.as_array()
                 .unwrap()
@@ -2599,7 +2588,7 @@ async fn a_request_names_who_decided_and_who_cancelled_it(pool: PgPool) {
     assert_eq!(r["decided_by_name"], "Mona", "{r}");
     assert_eq!(r["cancelled_by_name"], "Omar", "{r}");
     // The dashboard's list names them too.
-    let (st, list) = send!(app, "GET", "/staff/requests".to_string(), f.owner_token());
+    let (st, list) = send!(app, "GET", "/staff/requests", f.owner_token());
     assert_eq!(st, 200, "{list}");
     let r = list
         .as_array()
@@ -2743,12 +2732,12 @@ async fn already_decided_and_overlap_refusals_are_coded(pool: PgPool) {
     let (st, b) = send!(
         app,
         "POST",
-        "/staff/me/requests".to_string(),
+        "/staff/me/requests",
         phone.clone(),
         excuse.clone()
     );
     assert_eq!(st, 201, "{b}");
-    let (st, b) = send!(app, "POST", "/staff/me/requests".to_string(), phone, excuse);
+    let (st, b) = send!(app, "POST", "/staff/me/requests", phone, excuse);
     assert_eq!(
         (st, b["code"].clone()),
         (409, json!("OVERLAPPING_REQUEST")),

@@ -111,7 +111,7 @@ async fn test_login_email_password_success(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({ "email": "admin@test.com", "password": "password123" }))
+        .set_json(json!({ "email": "admin@test.com", "password": "password123" }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -120,6 +120,65 @@ async fn test_login_email_password_success(pool: PgPool) {
     let body: LoginResponse = test::read_body_json(resp).await;
     assert_eq!(body.user.email.as_deref(), Some("admin@test.com"));
     assert!(!body.token.is_empty());
+}
+
+/// "Admin@Test.com " is how a phone keyboard types the address: it must find
+/// the account, and the address is stored in one form however it was written.
+#[sqlx::test(migrations = "./migrations")]
+async fn test_login_email_ignores_case_and_surrounding_space(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+
+    let org_id = seed_org(&pool).await;
+    let hash = bcrypt::hash("password123", bcrypt::DEFAULT_COST).unwrap();
+    // Written raw, the way a seed or the demo writes it: the trigger normalizes.
+    sqlx::query(
+        "INSERT INTO users (org_id, name, role, email, password_hash)
+         VALUES ($1, 'Admin', 'org_admin'::user_role, '  Admin@Test.COM ', $2)",
+    )
+    .bind(org_id)
+    .bind(&hash)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stored: String =
+        sqlx::query_scalar("SELECT email FROM users WHERE org_id = $1 AND name = 'Admin'")
+            .bind(org_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, "admin@test.com");
+
+    for typed in ["admin@test.com", "Admin@test.com", " ADMIN@TEST.COM\t"] {
+        let req = test::TestRequest::post()
+            .uri("/auth/login")
+            .set_json(json!({ "email": typed, "password": "password123" }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200, "signing in as {typed:?}");
+        let body: LoginResponse = test::read_body_json(resp).await;
+        assert_eq!(body.user.email.as_deref(), Some("admin@test.com"));
+    }
+
+    // The same address in another casing is the same address: a second active
+    // account cannot take it.
+    let dup = sqlx::query(
+        "INSERT INTO users (org_id, name, role, email, password_hash)
+         VALUES ($1, 'Admin 2', 'org_admin'::user_role, 'ADMIN@test.com', $2)",
+    )
+    .bind(org_id)
+    .bind(&hash)
+    .execute(&pool)
+    .await;
+    assert!(
+        dup.is_err(),
+        "a second account took the address in another casing"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -149,7 +208,7 @@ async fn test_login_email_wrong_password(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({ "email": "admin@test.com", "password": "wrongpassword" }))
+        .set_json(json!({ "email": "admin@test.com", "password": "wrongpassword" }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -183,7 +242,7 @@ async fn test_login_disabled_account(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({ "email": "dis@test.com", "password": "password123" }))
+        .set_json(json!({ "email": "dis@test.com", "password": "password123" }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -202,7 +261,7 @@ async fn test_login_missing_both_email_and_pin(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({ "org_id": Uuid::new_v4() }))
+        .set_json(json!({ "org_id": Uuid::new_v4() }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -245,7 +304,7 @@ async fn test_login_pin_success(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "name": "Teller One",
             "pin": "1234",
             "branch_id": branch_id
@@ -283,7 +342,7 @@ async fn test_login_pin_wrong_pin(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "name": "Teller One",
             "pin": "0000",
             "branch_id": branch_id
@@ -306,7 +365,7 @@ async fn test_login_pin_missing_branch_id_returns_400(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({ "name": "Teller One", "pin": "1234" }))
+        .set_json(json!({ "name": "Teller One", "pin": "1234" }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -330,7 +389,7 @@ async fn test_login_pin_invalid_branch_returns_401(pool: PgPool) {
     // branch_id that doesn't exist in DB
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "name": "Teller One",
             "pin": "1234",
             "branch_id": Uuid::new_v4()
@@ -372,7 +431,7 @@ async fn test_login_pin_teller_refused_at_a_branch_they_are_not_allowed_at(pool:
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "name": "Teller One",
             "pin": "1234",
             "branch_id": branch_b
@@ -390,12 +449,17 @@ async fn test_login_pin_teller_refused_at_a_branch_they_are_not_allowed_at(pool:
         403,
         "a teller listed only at branch A must not sign in at branch B"
     );
+    // Coded, so the till can say why instead of a bare "no permission"; the
+    // sentence old tablets match on is unchanged.
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "PIN_WRONG_BRANCH");
+    assert_eq!(body["error"], "You can't sign in at a till in this branch");
 
     // The one failed sign-in with an identity (§3.4): counted per person in the
     // owner's review queue. A second try is the same item, attempts = 2.
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({"name": "Teller One", "pin": "1234", "branch_id": branch_b}))
+        .set_json(json!({"name": "Teller One", "pin": "1234", "branch_id": branch_b}))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 403);
     let (n, attempts): (i64, Option<i32>) = sqlx::query_as(
@@ -412,7 +476,7 @@ async fn test_login_pin_teller_refused_at_a_branch_they_are_not_allowed_at(pool:
     // ...and at the branch they ARE allowed at, they sign in normally.
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "name": "Teller One",
             "pin": "1234",
             "branch_id": branch_a
@@ -453,7 +517,7 @@ async fn wrong_pins_earn_a_growing_delay_and_a_correct_one_clears_it(pool: PgPoo
         test::TestRequest::post()
             .uri("/auth/login")
             .insert_header((madar_rust::tickets::DEVICE_ID_HEADER, "tablet-1"))
-            .set_json(&json!({"name": "Patient One", "pin": pin, "branch_id": branch_id}))
+            .set_json(json!({"name": "Patient One", "pin": pin, "branch_id": branch_id}))
             .to_request()
     };
 
@@ -537,7 +601,7 @@ async fn a_pin_alone_signs_the_right_person_in(pool: PgPool) {
     let attempt = |pin: &str| {
         test::TestRequest::post()
             .uri("/auth/login")
-            .set_json(&json!({"pin": pin, "branch_id": branch_id}))
+            .set_json(json!({"pin": pin, "branch_id": branch_id}))
             .to_request()
     };
 
@@ -597,7 +661,7 @@ async fn old_tablets_without_a_device_id_are_never_delayed(pool: PgPool) {
     for _ in 0..10 {
         let req = test::TestRequest::post()
             .uri("/auth/login")
-            .set_json(&json!({"name": "Nobody", "pin": "000000", "branch_id": branch_id}))
+            .set_json(json!({"name": "Nobody", "pin": "000000", "branch_id": branch_id}))
             .to_request();
         assert_eq!(test::call_service(&app, req).await.status(), 401);
     }
@@ -646,7 +710,7 @@ async fn a_successful_pin_login_backfills_the_fingerprint(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({"name": "Fingerprint Me", "pin": "1234", "branch_id": branch_id}))
+        .set_json(json!({"name": "Fingerprint Me", "pin": "1234", "branch_id": branch_id}))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 200);
 
@@ -700,7 +764,7 @@ async fn test_login_pin_teller_with_no_branch_list_works_anywhere(pool: PgPool) 
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "name": "Teller Free",
             "pin": "1234",
             "branch_id": branch_b
@@ -763,7 +827,7 @@ async fn test_pin_login_derives_offline_pin_hash(pool: PgPool) {
         &app,
         test::TestRequest::post()
             .uri("/auth/login")
-            .set_json(&json!({ "name": "Teller One", "pin": "1234", "branch_id": branch }))
+            .set_json(json!({ "name": "Teller One", "pin": "1234", "branch_id": branch }))
             .to_request(),
     )
     .await;
@@ -846,7 +910,7 @@ async fn test_login_pin_cross_org_isolation(pool: PgPool) {
     // (403) message — that would leak that the credentials are valid somewhere.
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "name": "Teller One",
             "pin": "1234",
             "branch_id": branch_b
@@ -1119,7 +1183,7 @@ async fn test_resolve_branch_success(pool: PgPool) {
     // Request from effectively the same point (< 1 m away)
     let req = test::TestRequest::post()
         .uri("/auth/resolve-branch")
-        .set_json(&json!({
+        .set_json(json!({
             "org_id": org_id,
             "latitude": 30.0444,
             "longitude": 31.2357
@@ -1152,7 +1216,7 @@ async fn test_resolve_branch_picks_nearest(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/resolve-branch")
-        .set_json(&json!({
+        .set_json(json!({
             "org_id": org_id,
             "latitude": 30.0444,
             "longitude": 31.2357
@@ -1183,7 +1247,7 @@ async fn test_resolve_branch_outside_radius_returns_404(pool: PgPool) {
     // Device is ~22 km away (Alexandria direction) — outside 200 m radius
     let req = test::TestRequest::post()
         .uri("/auth/resolve-branch")
-        .set_json(&json!({
+        .set_json(json!({
             "org_id": org_id,
             "latitude": 30.2444,
             "longitude": 31.2357
@@ -1214,7 +1278,7 @@ async fn test_resolve_branch_no_geo_branches_returns_404(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/resolve-branch")
-        .set_json(&json!({
+        .set_json(json!({
             "org_id": org_id,
             "latitude": 30.0444,
             "longitude": 31.2357
@@ -1245,7 +1309,7 @@ async fn test_resolve_branch_wrong_org_returns_404(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/resolve-branch")
-        .set_json(&json!({
+        .set_json(json!({
             "org_id": Uuid::new_v4(),
             "latitude": 30.0444,
             "longitude": 31.2357
@@ -1288,7 +1352,7 @@ async fn test_pin_login_same_branch_allowed_different_branch_blocked(pool: PgPoo
     let login = |branch: Uuid| {
         test::TestRequest::post()
             .uri("/auth/login")
-            .set_json(&json!({"name":"Teller One","pin":"1234","branch_id": branch}))
+            .set_json(json!({"name":"Teller One","pin":"1234","branch_id": branch}))
             .to_request()
     };
 
@@ -1398,7 +1462,7 @@ async fn test_pin_login_allowed_when_branch_has_other_tellers_open_shift(pool: P
     let login = |b: Uuid| {
         test::TestRequest::post()
             .uri("/auth/login")
-            .set_json(&json!({"name":"Bob","pin":"2222","branch_id": b}))
+            .set_json(json!({"name":"Bob","pin":"2222","branch_id": b}))
             .to_request()
     };
 
@@ -1452,7 +1516,7 @@ async fn test_login_suspended_org_rejected(pool: PgPool) {
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({ "email": "sus@test.com", "password": "password123" }))
+        .set_json(json!({ "email": "sus@test.com", "password": "password123" }))
         .to_request();
 
     let resp = test::call_service(&app, req).await;
@@ -1504,7 +1568,7 @@ async fn test_login_soft_deleted_org_rejected(pool: PgPool) {
         &app,
         test::TestRequest::post()
             .uri("/auth/login")
-            .set_json(&json!({ "email": "del@test.com", "password": "password123" }))
+            .set_json(json!({ "email": "del@test.com", "password": "password123" }))
             .to_request(),
     )
     .await;
@@ -1784,7 +1848,7 @@ async fn an_owner_pin_on_a_pre_0_8_tablet_is_refused(pool: PgPool) {
     let login = |name: &str, pin: &str, device: Option<&str>| {
         let mut r = test::TestRequest::post()
             .uri("/auth/login")
-            .set_json(&json!({"name": name, "pin": pin, "branch_id": branch_id}));
+            .set_json(json!({"name": name, "pin": pin, "branch_id": branch_id}));
         if let Some(d) = device {
             r = r.insert_header((madar_rust::tickets::DEVICE_ID_HEADER, d.to_string()));
         }
@@ -1888,7 +1952,7 @@ async fn an_open_till_does_not_block_an_email_sign_in_to_the_dashboard(pool: PgP
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "email": "owner-openshift@test.com",
             "password": "password123"
         }))
@@ -1917,7 +1981,7 @@ async fn an_open_till_still_blocks_a_pin_sign_in_at_another_branch(pool: PgPool)
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "pin": "4321",
             "branch_id": other_branch
         }))
@@ -1947,7 +2011,7 @@ async fn a_pin_sign_in_at_the_branch_of_the_open_till_still_resumes(pool: PgPool
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "pin": "4321",
             "branch_id": till_branch
         }))
@@ -2001,7 +2065,7 @@ async fn a_teller_with_an_open_till_is_still_blocked_on_a_legacy_email_till_logi
 
     let req = test::TestRequest::post()
         .uri("/auth/login")
-        .set_json(&json!({
+        .set_json(json!({
             "email": "legacy-teller@test.com",
             "password": "password123",
             "branch_id": other_branch

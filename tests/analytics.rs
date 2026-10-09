@@ -7,7 +7,7 @@
 //! only when someone asks for it — [`every_preset_runs_against_the_real_schema`]
 //! is what turns that into a build failure.
 
-use actix_web::{App, test, web};
+use actix_web::test;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -17,7 +17,6 @@ use common::analytics::*;
 
 use madar_rust::auth::jwt::create_token;
 use madar_rust::models::UserRole;
-
 
 async fn post_query(
     app: &impl actix_web::dev::Service<
@@ -191,7 +190,12 @@ async fn the_week_dimension_starts_saturday_in_the_merchant_zone(pool: PgPool) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| (r["week"].as_str().unwrap().to_string(), r["order_count"].as_i64().unwrap()))
+        .map(|r| {
+            (
+                r["week"].as_str().unwrap().to_string(),
+                r["order_count"].as_i64().unwrap(),
+            )
+        })
         .collect();
     assert_eq!(
         weeks,
@@ -386,7 +390,8 @@ async fn every_preset_runs_against_the_real_schema(pool: PgPool) {
     let app = metrics_app(&pool).await;
     let token = org_admin_token(s.org);
 
-    for chunk in madar_rust::analytics::presets::PRESETS.chunks(madar_rust::analytics::handlers::MAX_WIDGETS)
+    for chunk in
+        madar_rust::analytics::presets::PRESETS.chunks(madar_rust::analytics::handlers::MAX_WIDGETS)
     {
         let widgets: Vec<Value> = chunk
             .iter()

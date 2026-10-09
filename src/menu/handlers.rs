@@ -911,12 +911,12 @@ pub async fn list_menu_items(
         query.full.unwrap_or(false),
         sells_combos,
     );
-    if let Some(c) = &cache {
-        if let Some(body) = c.get(query.org_id, &variant).await {
-            return Ok(HttpResponse::Ok()
-                .content_type("application/json")
-                .body(body));
-        }
+    if let Some(c) = &cache
+        && let Some(body) = c.get(query.org_id, &variant).await
+    {
+        return Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body));
     }
 
     // When branch_id is supplied, prices are branch-effective (override replaces

@@ -170,7 +170,7 @@ pub struct PublicSocialLink {
     /// What a human calls it. The page falls back to this where it has no
     /// glyph for `key`, so a platform added on the server still renders.
     pub label: String,
-    /// `https://…` and nothing else — checked on write and again on read, see
+    /// An https address and nothing else — checked on write and again on read, see
     /// `orgs::social::links_of`.
     pub url: String,
 }
@@ -376,13 +376,6 @@ fn png_ok(bytes: Bytes) -> HttpResponse {
         .body(bytes)
 }
 
-fn png_response(img: image::DynamicImage) -> Result<HttpResponse, AppError> {
-    let mut buf = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png)
-        .map_err(|_| AppError::Internal)?;
-    Ok(png_ok(Bytes::from(buf.into_inner())))
-}
-
 /// A reward as the signup page lists it: what it is, and what it costs.
 #[derive(Serialize, ToSchema)]
 pub struct PublicReward {
@@ -391,6 +384,9 @@ pub struct PublicReward {
     pub cost_amount: i32,
 }
 
+/// What a rewards programme's join page shows: its brand, rewards and what joining asks for.
+///
+/// Name the shop with `org_id`, or a branch with `branch_id` from its counter code.
 #[utoipa::path(get, path = "/public/loyalty/join-info", tag = "loyalty-public", operation_id = "loyalty_join_info", params(BranchQuery),
     responses((status = 200, body = JoinInfo), AppErrorResponse))]
 pub async fn join_info(
@@ -499,6 +495,9 @@ pub struct JoinResult {
     pub card_link_sent: bool,
 }
 
+/// Join a shop's rewards programme.
+///
+/// Where `require_otp` is on, send the `device_token` from `/public/otp/verify`; until the phone is proven the answer carries no card.
 #[utoipa::path(post, path = "/public/loyalty/join", tag = "loyalty-public", operation_id = "loyalty_join", request_body = JoinInput,
     responses((status = 200, body = JoinResult), AppErrorResponse))]
 pub async fn join(
@@ -859,6 +858,9 @@ pub struct CardPreferences {
     pub locale: Option<String>,
 }
 
+/// Save a card holder's choices: no marketing messages, and the language to write in.
+///
+/// The card's own token is the key. Answers 204.
 #[utoipa::path(post, path = "/public/loyalty/card/{token}/preferences", tag = "loyalty-public",
     operation_id = "set_loyalty_card_preferences",
     params(("token" = String, Path, description = "Member token from the pass barcode")),
@@ -894,6 +896,9 @@ pub async fn set_preferences(
     Ok(HttpResponse::NoContent().finish())
 }
 
+/// A rewards card: the member's balance, progress to the next reward, rewards and wallet links.
+///
+/// The token is the one on the card's barcode.
 #[utoipa::path(get, path = "/public/loyalty/card/{token}", tag = "loyalty-public", operation_id = "loyalty_card",
     params(("token" = String, Path, description = "Member token from the pass barcode")),
     responses((status = 200, body = CardView), AppErrorResponse))]

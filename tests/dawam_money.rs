@@ -2456,7 +2456,7 @@ async fn a_first_salary_counts_from_hire_and_a_raise_from_today(pool: PgPool) {
     assert_eq!(rows[1].1, 500_000);
     let slip = slip_of(&app, &f, dina).await;
     let base = slip["base_piastres"].as_i64().unwrap();
-    assert!(base >= 400_000 && base <= 500_000, "{slip}");
+    assert!((400_000..=500_000).contains(&base), "{slip}");
 }
 
 // ── AT-9: one day, one price, every path (orchestrator decision #3) ─────────

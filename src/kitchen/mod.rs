@@ -18,7 +18,6 @@ pub mod kds;
 pub mod routes;
 pub mod stations;
 
-
 use serde::{Deserialize, Serialize};
 use sqlx::{PgConnection, PgExecutor, Postgres, Transaction};
 use utoipa::ToSchema;
@@ -247,8 +246,9 @@ pub async fn resolve_station(
 /// when nothing should hit the kitchen:
 ///   - `off`  → no kitchen ticket at all (retail / no-kitchen branch);
 ///   - `kds`  → lines that route to NO station are dropped (a bottled water
-///              doesn't clutter the grill screen); if none remain, no ticket;
+///     doesn't clutter the grill screen); if none remain, no ticket;
 ///   - `till`/`both` → every line is kept (unrouted lines show on the till queue).
+///
 /// The caller publishes `kitchen.fired` AFTER commit (so subscribers never read
 /// uncommitted rows) and only when this returns `Some`.
 pub(crate) async fn emit_kitchen_ticket(
@@ -256,7 +256,7 @@ pub(crate) async fn emit_kitchen_ticket(
     ctx: &EmitKitchen<'_>,
     lines: &[KitchenLine],
 ) -> Result<Option<Uuid>, AppError> {
-    let mode = routing_mode_on(&mut **tx, ctx.branch_id).await?;
+    let mode = routing_mode_on(tx, ctx.branch_id).await?;
     if mode == "off" {
         return Ok(None);
     }
@@ -436,7 +436,7 @@ pub(crate) async fn retire_unbumped_at_till_close(
     branch_id: Uuid,
     closed_by: Option<Uuid>,
 ) -> Result<u64, AppError> {
-    if routing_mode_on(&mut **tx, branch_id).await? != "till" {
+    if routing_mode_on(tx, branch_id).await? != "till" {
         return Ok(0);
     }
     let another_open: bool = sqlx::query_scalar(

@@ -643,13 +643,12 @@ pub async fn register_asset_files(
 /// Only the last two segments of the URL are used — the subdirectory and the
 /// file — and neither may climb out of the uploads directory.
 pub fn read_upload(url: &str) -> Option<image::DynamicImage> {
-    if let Some(path) = asset_file_for(url) {
-        if let Some(img) = std::fs::read(&path)
+    if let Some(path) = asset_file_for(url)
+        && let Some(img) = std::fs::read(&path)
             .ok()
             .and_then(|b| image::load_from_memory(&b).ok())
-        {
-            return Some(img);
-        }
+    {
+        return Some(img);
     }
     let (rest, file) = url.rsplit_once('/')?;
     let sub = rest.rsplit_once('/').map(|(_, s)| s).unwrap_or(rest);
@@ -675,8 +674,11 @@ mod tests {
         DynamicImage::ImageRgba8(img)
     }
 
+    /// An `(x range, y range, colour)` rectangle for [`on_transparency`].
+    type Shape = ((u32, u32), (u32, u32), [u8; 4]);
+
     /// Draw `shapes` (x range, y range, colour) onto a transparent field.
-    fn on_transparency(size: u32, shapes: &[((u32, u32), (u32, u32), [u8; 4])]) -> DynamicImage {
+    fn on_transparency(size: u32, shapes: &[Shape]) -> DynamicImage {
         let mut img = RgbaImage::new(size, size);
         for p in img.pixels_mut() {
             *p = Rgba([0, 0, 0, 0]);
@@ -796,8 +798,8 @@ mod tests {
     fn a_wide_wordmark_keeps_both_of_its_ends() {
         // A 400×100 mark: red at the left end, blue at the right.
         let logo = on_transparency(400, &[]);
-        let mut img = logo.to_rgba8();
-        let wide = image::imageops::crop_imm(&mut img, 0, 0, 400, 100).to_image();
+        let img = logo.to_rgba8();
+        let wide = image::imageops::crop_imm(&img, 0, 0, 400, 100).to_image();
         let mut wide = wide;
         for y in 20..80 {
             for x in 10..60 {

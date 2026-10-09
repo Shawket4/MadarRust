@@ -46,7 +46,13 @@ pub struct StaffPoolSettings {
 impl StaffPoolSettings {
     /// What a scope runs on before anyone has saved anything: off.
     pub fn defaults(org_id: Uuid, branch_id: Option<Uuid>) -> Self {
-        Self { org_id, branch_id, enabled: false, daily_allowance: 0, eligible_item_ids: Vec::new() }
+        Self {
+            org_id,
+            branch_id,
+            enabled: false,
+            daily_allowance: 0,
+            eligible_item_ids: Vec::new(),
+        }
     }
 
     /// The same settings as the shared engine takes them. This is the only
@@ -118,7 +124,10 @@ pub async fn load_effective(
     if let Some(s) = load_scope(pool, org_id, None).await? {
         // Reported under the branch that asked, so a caller never has to know
         // which scope answered.
-        return Ok(StaffPoolSettings { branch_id: Some(branch_id), ..s });
+        return Ok(StaffPoolSettings {
+            branch_id: Some(branch_id),
+            ..s
+        });
     }
     Ok(StaffPoolSettings::defaults(org_id, Some(branch_id)))
 }
@@ -158,7 +167,13 @@ pub async fn get_settings(
     // Reading the rule is part of holding the act: a manager who may record a
     // staff drink must be able to see what the allowance is. Editing it is the
     // owner's settings capability, checked on PUT.
-    require(pool.get_ref(), &claims, Cap::OrdersStaffDrinkRecord, query.branch_id).await?;
+    require(
+        pool.get_ref(),
+        &claims,
+        Cap::OrdersStaffDrinkRecord,
+        query.branch_id,
+    )
+    .await?;
     if let Some(b) = query.branch_id {
         require_branch_access(pool.get_ref(), &claims, b).await?;
     }
@@ -187,7 +202,13 @@ pub async fn put_settings(
     // Setting a branch's allowance is changing the shop's rules, not working
     // the till: it is the org settings capability, as every other settings
     // screen is.
-    require(pool.get_ref(), &claims, Cap::OrgSettingsEdit, incoming.branch_id).await?;
+    require(
+        pool.get_ref(),
+        &claims,
+        Cap::OrgSettingsEdit,
+        incoming.branch_id,
+    )
+    .await?;
     if let Some(b) = incoming.branch_id {
         require_branch_access(pool.get_ref(), &claims, b).await?;
     }
@@ -254,7 +275,13 @@ pub async fn delete_settings(
     // judged: someone who may not edit settings must be told that, not handed
     // a hint about which argument was missing.
     let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
-    require(pool.get_ref(), &claims, Cap::OrgSettingsEdit, query.branch_id).await?;
+    require(
+        pool.get_ref(),
+        &claims,
+        Cap::OrgSettingsEdit,
+        query.branch_id,
+    )
+    .await?;
     let branch_id = query.branch_id.ok_or_else(|| {
         AppError::BadRequest("Name the branch whose override you want to remove".into())
     })?;

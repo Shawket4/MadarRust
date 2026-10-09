@@ -148,6 +148,9 @@ const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
     (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
     EXISTS(SELECT 1 FROM tills sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift"#;
 
+/// A shop's branches that take online orders, with each channel's hours and settings.
+///
+/// `org_id` names the shop. With `browse=true` every active branch is listed, for a read-only menu.
 #[utoipa::path(
     get, path = "/public/branches", tag = "delivery-public", params(PublicBranchesQuery),
     responses((status = 200, body = [PublicBranch]), AppErrorResponse)
@@ -401,6 +404,9 @@ pub struct ChannelParam {
     pub preview: Option<bool>,
 }
 
+/// A branch's menu for one ordering channel, with prices in piastres.
+///
+/// `channel` is `in_mall`, `outside`, `umbrella` or `pickup`. `preview=true` shows a channel's menu while it is closed, and `channel=dine_in&preview=true` gives the read-only dine-in menu. Nothing can be ordered from a preview.
 #[utoipa::path(
     get, path = "/public/branches/{id}/menu", tag = "delivery-public", params(ChannelParam),
     responses((status = 200, body = DeliveryMenu), AppErrorResponse)
@@ -1332,6 +1338,9 @@ pub(crate) async fn compute_outside_fee(
     Ok(select_zone_fee(distance_i, source, max_dist, &zones))
 }
 
+/// The delivery fee and zone for a point, before ordering.
+///
+/// Needs `lat`, `lng` and `channel`. `status` says whether the branch delivers there; the fee is in piastres.
 #[utoipa::path(
     get, path = "/public/branches/{id}/delivery-quote", tag = "delivery-public", params(QuoteQuery),
     responses((status = 200, body = QuoteResponse), AppErrorResponse)
@@ -1476,6 +1485,9 @@ fn generate_otp_code() -> String {
     format!("{n:04}")
 }
 
+/// Send a 4-digit code by WhatsApp to verify a phone number.
+///
+/// One live code per phone per minute (409 otherwise). Check it with `/public/otp/verify`.
 #[utoipa::path(
     post, path = "/public/otp/request", tag = "delivery-public", request_body = OtpRequestInput,
     responses((status = 200, body = OtpRequestResponse), AppErrorResponse)
@@ -1532,6 +1544,9 @@ pub struct OtpVerifyResponse {
     pub device_token: String,
 }
 
+/// Check a WhatsApp code and get a `device_token` that proves the phone.
+///
+/// Ordering, booking, the rewards card and order history take this token where a shop asks for a verified phone. A code allows five tries.
 #[utoipa::path(
     post, path = "/public/otp/verify", tag = "delivery-public", request_body = OtpVerifyInput,
     responses((status = 200, body = OtpVerifyResponse), AppErrorResponse)
@@ -1682,6 +1697,9 @@ pub struct DeliveryOrderInput {
     pub contact_device_token: Option<String>,
 }
 
+/// Place an online order (delivery or pickup) at a branch.
+///
+/// Answers 201 with the order; follow it at `/public/delivery-orders/{id}/track`. The server prices the cart in piastres. Where the branch requires a verified phone (the default), send the `device_token` from `/public/otp/verify`.
 #[utoipa::path(
     post, path = "/public/delivery-orders", tag = "delivery-public", request_body = DeliveryOrderInput,
     responses((status = 201, body = DeliveryOrder), AppErrorResponse)
@@ -2345,6 +2363,9 @@ struct OrderHistoryRow {
     cart: serde_json::Value,
 }
 
+/// A customer's past orders at a shop, by their verified phone.
+///
+/// Needs `phone` and the `device_token` from `/public/otp/verify`; a phone number alone unlocks nothing.
 #[utoipa::path(
     get, path = "/public/delivery-orders/history", tag = "delivery-public",
     params(GuestHistoryQuery),
@@ -2458,6 +2479,9 @@ pub struct GuestSavedLocation {
     pub last_used_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A customer's saved delivery addresses at a shop, by their verified phone.
+///
+/// Needs `phone` and the `device_token` from `/public/otp/verify`.
 #[utoipa::path(
     get, path = "/public/delivery-orders/past-locations", tag = "delivery-public",
     params(GuestLocationsQuery),
@@ -2540,6 +2564,9 @@ pub struct DeliveryTracking {
     pub address_line: Option<String>,
 }
 
+/// An online order's status, timeline and totals, from the id in its tracking link.
+///
+/// Amounts are in piastres.
 #[utoipa::path(
     get, path = "/public/delivery-orders/{id}/track", tag = "delivery-public",
     responses((status = 200, body = DeliveryTracking), AppErrorResponse)

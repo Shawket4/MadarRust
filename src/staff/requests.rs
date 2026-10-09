@@ -744,7 +744,7 @@ pub(crate) async fn day_adjustments(
     let mut adj = DayAdjustments::default();
     // Where the pings put the person that day (D2): approved time off counts
     // only the minutes actually away.
-    let pings: Vec<(Uuid, DateTime<Utc>, bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+    let pings: Vec<Ping> = sqlx::query_as(
         "SELECT p.attendance_record_id, p.at, p.inside, a.check_out_at \
            FROM attendance_pings p JOIN attendance_records a ON a.id = p.attendance_record_id \
           WHERE a.employee_id = $1 AND a.business_date = $2 AND a.covered_employee_id IS NULL \
@@ -814,14 +814,16 @@ pub(crate) async fn day_adjustments(
     Ok(adj)
 }
 
+/// One attendance ping as the day's pass reads it: `(record, at, inside,
+/// the record's check-out)`.
+type Ping = (Uuid, DateTime<Utc>, bool, Option<DateTime<Utc>>);
+
 /// The runs a record's pings put the person outside the fence: from the
 /// first outside ping to the next inside one, an open run to the record's
 /// check-out (or for good while it is open; readers clip to the punches).
 /// `pings` are `(record, at, inside, check_out)`, grouped by record, oldest
 /// first.
-fn away_runs(
-    pings: &[(Uuid, DateTime<Utc>, bool, Option<DateTime<Utc>>)],
-) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+fn away_runs(pings: &[Ping]) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
     let mut runs = Vec::new();
     let mut open: Option<(Uuid, DateTime<Utc>, Option<DateTime<Utc>>)> = None;
     for &(record, at, inside, out) in pings {

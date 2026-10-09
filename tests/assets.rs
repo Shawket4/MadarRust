@@ -256,7 +256,9 @@ async fn stage_never_uses_client_filename_in_path(pool: PgPool) {
         !label.contains('/') && !label.contains('\u{0007}'),
         "{label}"
     );
-    madar_rust::assets::worker::run_one(&pool, &store).await.unwrap();
+    madar_rust::assets::worker::run_one(&pool, &store)
+        .await
+        .unwrap();
     let keys: Vec<String> = sqlx::query_scalar("SELECT hash || '.' || ext FROM assets")
         .fetch_all(&pool)
         .await
@@ -429,7 +431,9 @@ async fn ingest_rejects_animated_gif(pool: PgPool) {
         &raw.into_inner(),
     )
     .await;
-    assert!(matches!(r, Err(madar_rust::errors::AppError::BadRequest(ref m)) if m.contains("Animated")));
+    assert!(
+        matches!(r, Err(madar_rust::errors::AppError::BadRequest(ref m)) if m.contains("Animated"))
+    );
 }
 
 #[sqlx::test]
@@ -797,7 +801,9 @@ async fn upload_route_to_worker_attaches_group(pool: PgPool) {
         matches!(refs.get(&item), Some(madar_rust::assets::refs::AssetGroupRef::Processing(p)) if p.job_id == job)
     );
     assert_eq!(
-        madar_rust::assets::worker::run_one(&pool, &store).await.unwrap(),
+        madar_rust::assets::worker::run_one(&pool, &store)
+            .await
+            .unwrap(),
         Some(madar_rust::assets::worker::JobResult::Done(job))
     );
     let g: Option<Uuid> = sqlx::query_scalar("SELECT image_group_id FROM menu_items WHERE id=$1")
@@ -889,7 +895,9 @@ async fn worker_retries_then_fails_job(pool: PgPool) {
             .await
             .unwrap();
         // staged file lives in the good store; point the job at it explicitly
-        let r = madar_rust::assets::worker::run_one(&pool, &broken).await.unwrap();
+        let r = madar_rust::assets::worker::run_one(&pool, &broken)
+            .await
+            .unwrap();
         let (status, attempts): (String, i32) =
             sqlx::query_as("SELECT status, attempts FROM asset_jobs WHERE id=$1")
                 .bind(job)
@@ -1349,7 +1357,10 @@ async fn bundle_route_range_resume_and_topup(pool: PgPool) {
         .collect();
     assert_eq!(rest.len(), 2);
     for (name, data) in rest {
-        assert_eq!(name.split('.').next().unwrap(), madar_rust::assets::sha256_hex(&data));
+        assert_eq!(
+            name.split('.').next().unwrap(),
+            madar_rust::assets::sha256_hex(&data)
+        );
     }
     let too_many = serde_json::json!({"branch_id": branch, "hashes": vec!["a".repeat(64); 2001]});
     let resp = test::call_service(
@@ -1412,7 +1423,10 @@ async fn legacy_upload_path_redirects_after_prune(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::FOUND);
     assert_eq!(
         hits.iter().map(|h| (h.kind, h.org_id)).collect::<Vec<_>>(),
-        vec![(madar_rust::client_seen::KIND_UPLOADS_LEGACY_REDIRECT, Some(org))]
+        vec![(
+            madar_rust::client_seen::KIND_UPLOADS_LEGACY_REDIRECT,
+            Some(org)
+        )]
     );
     let loc = resp
         .headers()

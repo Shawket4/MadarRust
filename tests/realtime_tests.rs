@@ -10,10 +10,10 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::realtime::event::{BranchEvent, Topic};
-use madar_rust::realtime::hub::BranchEventHub;
 use madar_rust::auth::jwt::{JwtSecret, create_token};
 use madar_rust::models::UserRole;
+use madar_rust::realtime::event::{BranchEvent, Topic};
+use madar_rust::realtime::hub::BranchEventHub;
 
 fn secret() -> JwtSecret {
     JwtSecret("secret".into())

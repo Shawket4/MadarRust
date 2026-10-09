@@ -30,6 +30,7 @@ pub struct ShortLinkRow {
 /// `short_url` if found, otherwise create a new one via Shlink + insert.
 /// `findIfExists: true` on the Shlink side means the call is idempotent even
 /// when our DB row is missing (e.g. after a data wipe).
+#[allow(clippy::too_many_arguments)] // the link's key, its target and the provider
 pub async fn get_or_create_short_link(
     pool: &PgPool,
     provider: &dyn ShortLinkProvider,

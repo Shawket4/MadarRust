@@ -495,7 +495,7 @@ mod tests {
         "definitions",
     ];
 
-    fn walk<'a>(v: &'a Value, path: &str, found: &mut Vec<(String, String)>) {
+    fn walk(v: &Value, path: &str, found: &mut Vec<(String, String)>) {
         match v {
             Value::Object(map) => {
                 for (k, child) in map {

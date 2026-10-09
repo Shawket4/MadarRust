@@ -24,6 +24,40 @@
     }
   ],
   "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "What this host is, for a person or an agent that opens it.",
+        "operationId": "api_root",
+        "responses": {
+          "200": {
+            "description": "The API's name and where its documentation is",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
+    "/.well-known/mcp/server-card.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "The MCP server card: how to reach this server and what it offers, built from\nthe same tool list `tools/list` answers with, so the two cannot disagree. The\nmarketing site's /.well-known/mcp/server-card.json redirects here.",
+        "operationId": "mcp_server_card",
+        "responses": {
+          "200": {
+            "description": "The MCP server card",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
     "/addon-items": {
       "get": {
         "tags": [
@@ -22330,6 +22364,37 @@
         ]
       }
     },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "One JSON-RPC message in, one answer out (a notification gets 202 and no body).",
+        "operationId": "mcp",
+        "requestBody": {
+          "description": "One JSON-RPC 2.0 message (MCP Streamable HTTP)",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The JSON-RPC answer",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "202": {
+            "description": "A notification, accepted"
+          }
+        }
+      }
+    },
     "/menu-item-sizes/{size_id}/base": {
       "put": {
         "tags": [
@@ -27869,6 +27934,23 @@
         ]
       }
     },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "The public part of this API as OpenAPI 3.1.",
+        "operationId": "public_openapi",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document of the `/public/` endpoints",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
     "/orders": {
       "get": {
         "tags": [
@@ -32855,6 +32937,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "A shop's branches that take table bookings online.",
+        "description": "`org_id` names the shop. Only active branches with booking switched on are listed.",
         "operationId": "booking_branches",
         "parameters": [
           {
@@ -32949,6 +33033,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "Book a table at a branch.",
+        "description": "Answers 201 with the booking. The time must be a free slot after the branch's lead time. Where the branch's `require_otp` is on, send the `device_token` from `/public/otp/verify`.",
         "operationId": "create_public_booking",
         "requestBody": {
           "content": {
@@ -33039,6 +33125,7 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "A booking, by the manage token from its confirmation link.",
         "operationId": "get_public_booking",
         "parameters": [
           {
@@ -33128,6 +33215,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "Change a booking's time, party size or notes, by its manage token.",
+        "description": "Only a confirmed booking, and only until the branch's lead time before it starts; after that, 409.",
         "operationId": "update_public_booking",
         "parameters": [
           {
@@ -33229,6 +33318,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "Cancel a booking, by its manage token.",
+        "description": "Cancelling a booking that is already cancelled returns it unchanged. A party already seated is the venue's to cancel.",
         "operationId": "cancel_public_booking",
         "parameters": [
           {
@@ -33320,6 +33411,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A shop's branches that take online orders, with each channel's hours and settings.",
+        "description": "`org_id` names the shop. With `browse=true` every active branch is listed, for a read-only menu.",
         "operationId": "public_branches",
         "parameters": [
           {
@@ -33426,6 +33519,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "A branch's booking rules: party sizes, slot length, lead time and how far ahead.",
+        "description": "`require_otp` says whether a booking needs a phone verified through `/public/otp/verify`.",
         "operationId": "booking_info",
         "parameters": [
           {
@@ -33518,6 +33613,8 @@
         "tags": [
           "bookings-public"
         ],
+        "summary": "The free booking times at a branch for one date and party size.",
+        "description": "Refused when the branch takes no online bookings, or the date or party size is outside its rules.",
         "operationId": "booking_slots",
         "parameters": [
           {
@@ -33730,6 +33827,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "The delivery fee and zone for a point, before ordering.",
+        "description": "Needs `lat`, `lng` and `channel`. `status` says whether the branch delivers there; the fee is in piastres.",
         "operationId": "delivery_quote",
         "parameters": [
           {
@@ -33847,6 +33946,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A branch's menu for one ordering channel, with prices in piastres.",
+        "description": "`channel` is `in_mall`, `outside`, `umbrella` or `pickup`. `preview=true` shows a channel's menu while it is closed, and `channel=dine_in&preview=true` gives the read-only dine-in menu. Nothing can be ordered from a preview.",
         "operationId": "public_menu",
         "parameters": [
           {
@@ -33959,6 +34060,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "Place an online order (delivery or pickup) at a branch.",
+        "description": "Answers 201 with the order; follow it at `/public/delivery-orders/{id}/track`. The server prices the cart in piastres. Where the branch requires a verified phone (the default), send the `device_token` from `/public/otp/verify`.",
         "operationId": "create_delivery_order",
         "requestBody": {
           "content": {
@@ -34049,6 +34152,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A customer's past orders at a shop, by their verified phone.",
+        "description": "Needs `phone` and the `device_token` from `/public/otp/verify`; a phone number alone unlocks nothing.",
         "operationId": "guest_order_history",
         "parameters": [
           {
@@ -34162,6 +34267,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "A customer's saved delivery addresses at a shop, by their verified phone.",
+        "description": "Needs `phone` and the `device_token` from `/public/otp/verify`.",
         "operationId": "guest_past_locations",
         "parameters": [
           {
@@ -34287,6 +34394,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "An online order's status, timeline and totals, from the id in its tracking link.",
+        "description": "Amounts are in piastres.",
         "operationId": "track_delivery_order",
         "parameters": [
           {
@@ -34378,6 +34487,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "A rewards card: the member's balance, progress to the next reward, rewards and wallet links.",
+        "description": "The token is the one on the card's barcode.",
         "operationId": "loyalty_card",
         "parameters": [
           {
@@ -34562,6 +34673,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "Save a card holder's choices: no marketing messages, and the language to write in.",
+        "description": "The card's own token is the key. Answers 204.",
         "operationId": "set_loyalty_card_preferences",
         "parameters": [
           {
@@ -34742,6 +34855,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "Join a shop's rewards programme.",
+        "description": "Where `require_otp` is on, send the `device_token` from `/public/otp/verify`; until the phone is proven the answer carries no card.",
         "operationId": "loyalty_join",
         "requestBody": {
           "content": {
@@ -34832,6 +34947,8 @@
         "tags": [
           "loyalty-public"
         ],
+        "summary": "What a rewards programme's join page shows: its brand, rewards and what joining asks for.",
+        "description": "Name the shop with `org_id`, or a branch with `branch_id` from its counter code.",
         "operationId": "loyalty_join_info",
         "parameters": [
           {
@@ -35020,6 +35137,8 @@
         "tags": [
           "order-now"
         ],
+        "summary": "\"Order now\" from a wallet card: the member's last branch and channel, to prefill an order.",
+        "description": "The card's token alone shows only a first name and a masked phone. With a `device_token` for the member's current phone it gives the full prefill and saved addresses.",
         "operationId": "order_now_context",
         "parameters": [
           {
@@ -35120,6 +35239,8 @@
         "tags": [
           "order-now"
         ],
+        "summary": "Merge the profile that already holds the new phone into this card's profile.",
+        "description": "The answer to a `PHONE_BELONGS_TO_ANOTHER` refusal from replace-identity, with the same proofs. This card's customer is the one kept.",
         "operationId": "order_now_combine",
         "parameters": [
           {
@@ -35221,6 +35342,8 @@
         "tags": [
           "order-now"
         ],
+        "summary": "Change the phone number on a card's customer profile.",
+        "description": "Needs proof of both phones: `device_token` for the current one and `new_phone_device_token` for the new one. At most two changes in 30 days.",
         "operationId": "order_now_replace_identity",
         "parameters": [
           {
@@ -35639,6 +35762,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "Send a 4-digit code by WhatsApp to verify a phone number.",
+        "description": "One live code per phone per minute (409 otherwise). Check it with `/public/otp/verify`.",
         "operationId": "otp_request",
         "requestBody": {
           "content": {
@@ -35729,6 +35854,8 @@
         "tags": [
           "delivery-public"
         ],
+        "summary": "Check a WhatsApp code and get a `device_token` that proves the phone.",
+        "description": "Ordering, booking, the rewards card and order history take this token where a shop asks for a verified phone. A code allows five tries.",
         "operationId": "otp_verify",
         "requestBody": {
           "content": {
@@ -35911,6 +36038,7 @@
         "tags": [
           "open_tickets"
         ],
+        "summary": "The table behind a QR code: its label, its branch, and whether the branch is taking orders now.",
         "operationId": "public_table",
         "parameters": [
           {
@@ -36190,6 +36318,56 @@
                   "$ref": "#/components/schemas/ErrorBody"
                 }
               }
+            }
+          }
+        }
+      }
+    },
+    "/public/tenant-shell": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "A shop page's HTML: the app entry with the shop's head and noscript.",
+        "description": "Called by nginx for page requests on a shop's own host. Public by nature:\nit returns what the shop's public pages and the public JSON endpoints\nalready show.",
+        "operationId": "public_tenant_shell",
+        "parameters": [
+          {
+            "name": "host",
+            "in": "query",
+            "description": "The shop's host, e.g. `rue.madar-pos.cloud`. nginx sends it as the\n`X-Shell-Host` header; the query parameter is for tests and probes.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "description": "The page's path and query, e.g. `/order/menu?branch=…`. nginx sends it\nas the `X-Shell-Path` header.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The page's HTML",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "404": {
+            "description": "No such shop, or a path its apps don't route",
+            "content": {
+              "text/html": {}
+            }
+          },
+          "503": {
+            "description": "The app entry isn't deployed here (nginx serves the static file)",
+            "content": {
+              "text/html": {}
             }
           }
         }
@@ -77952,6 +78130,14 @@
           "ingredient_name": {
             "type": "string"
           },
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres this delivery cost (negative for a return); null when unknown."
+          },
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
@@ -77974,7 +78160,15 @@
               "null"
             ],
             "format": "int64",
-            "description": "Piastres per base stock unit (actual)."
+            "description": "Piastres per base stock unit (actual), rounded to whole piastres."
+          },
+          "unit_cost_exact": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Piastres per base stock unit at full precision."
           }
         }
       },
@@ -85325,10 +85519,17 @@
         "required": [
           "org_ingredient_id",
           "purchase_unit",
-          "quantity_ordered",
-          "unit_cost"
+          "quantity_ordered"
         ],
         "properties": {
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres for the whole line, as invoiced. Preferred: the unit cost is\nderived from it exactly (12 000 g for 548.16 EGP is 4.568 piastres/g,\nwhere a whole-piastre unit cost made it 5 and the order 600.00)."
+          },
           "org_ingredient_id": {
             "type": "string",
             "format": "uuid"
@@ -85341,9 +85542,12 @@
             "format": "double"
           },
           "unit_cost": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "Piastres per purchase unit."
+            "description": "Piastres per purchase unit, for clients that predate `line_cost`.\nIgnored when `line_cost` is sent; one of the two is required."
           },
           "units_per_purchase_unit": {
             "type": [
@@ -85746,7 +85950,7 @@
               "string",
               "null"
             ],
-            "description": "`https://pay.google.com/gp/v/save/<jwt>`."
+            "description": "The Google Wallet save link: the signed JWT on pay.google.com's save path."
           }
         }
       },
@@ -88921,7 +89125,7 @@
           },
           "url": {
             "type": "string",
-            "description": "`https://…` and nothing else — checked on write and again on read, see\n`orgs::social::links_of`."
+            "description": "An https address and nothing else — checked on write and again on read, see\n`orgs::social::links_of`."
           }
         }
       },
@@ -89418,7 +89622,9 @@
           "units_per_purchase_unit",
           "quantity_ordered",
           "quantity_received",
-          "unit_cost"
+          "unit_cost",
+          "unit_cost_exact",
+          "line_cost"
         ],
         "properties": {
           "id": {
@@ -89427,6 +89633,11 @@
           },
           "ingredient_name": {
             "type": "string"
+          },
+          "line_cost": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Piastres for the whole line, as on the supplier's invoice. The unit\ncost is derived from it, never the other way round."
           },
           "org_ingredient_id": {
             "type": "string",
@@ -89454,7 +89665,12 @@
           "unit_cost": {
             "type": "integer",
             "format": "int64",
-            "description": "Piastres per PURCHASE unit."
+            "description": "Piastres per PURCHASE unit, rounded to whole piastres (older readers;\nthe truth is `line_cost`, the precise figure `unit_cost_exact`)."
+          },
+          "unit_cost_exact": {
+            "type": "number",
+            "format": "double",
+            "description": "Piastres per PURCHASE unit, exact: `line_cost / quantity_ordered`."
           },
           "units_per_purchase_unit": {
             "type": "number",
@@ -90549,6 +90765,14 @@
           "quantity_received"
         ],
         "properties": {
+          "line_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional ACTUAL invoice total (piastres) for what this delivery brought,\nwhen it differs from the ordered price. Preferred over `unit_cost`.\nDrives weighted-average cost + the ledger; omitted (with `unit_cost`)\n⟹ the ordered line total, pro rata to the quantity received."
+          },
           "line_id": {
             "type": "string",
             "format": "uuid"
@@ -90563,7 +90787,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Optional ACTUAL invoice cost (piastres per purchase unit) for this\ndelivery, when it differs from the ordered price. Drives weighted-average\ncost + the ledger; omitted ⟹ the PO line's ordered cost is used."
+            "description": "Optional ACTUAL invoice cost in piastres per purchase unit (older\nclients). Ignored when `line_cost` is sent."
           }
         }
       },
@@ -101701,6 +101925,10 @@
     {
       "name": "orgs",
       "description": "Organization CRUD. Super-admin only."
+    },
+    {
+      "name": "public",
+      "description": "What the API host says about itself: its root and the public subset of this spec."
     },
     {
       "name": "branches",

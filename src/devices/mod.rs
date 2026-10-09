@@ -12,7 +12,6 @@ pub mod activation;
 pub mod handlers;
 pub mod routes;
 
-
 use std::future::{Ready, ready};
 
 use actix_web::{FromRequest, HttpRequest, dev::Payload, web};

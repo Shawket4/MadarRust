@@ -87,7 +87,7 @@ pub async fn ensure_translations(translations: &mut HashMap<String, String>) -> 
     let client = Client::new();
 
     for target_lang in missing_langs {
-        if target_lang == &source_lang {
+        if target_lang == source_lang {
             continue;
         }
 
@@ -226,10 +226,10 @@ pub fn merge_translations_json(dst: &mut serde_json::Value, src: &serde_json::Va
     }
     let dst_obj = dst.as_object_mut().expect("dst is an object");
     for (key, val) in src_obj {
-        if let Some(text) = val.as_str() {
-            if !text.trim().is_empty() {
-                dst_obj.insert(key.clone(), serde_json::Value::String(text.to_string()));
-            }
+        if let Some(text) = val.as_str()
+            && !text.trim().is_empty()
+        {
+            dst_obj.insert(key.clone(), serde_json::Value::String(text.to_string()));
         }
     }
 }

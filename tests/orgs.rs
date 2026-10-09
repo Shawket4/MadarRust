@@ -356,20 +356,26 @@ async fn test_offline_auth_bundle_includes_an_all_branches_owner(pool: PgPool) {
     // A registered, unretired device of that branch — the bundle is branch-scoped
     // by this header.
     let device_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO devices (id, org_id, branch_id, code, kind) VALUES ($1,$2,$3,'D01','pos')")
-        .bind(device_id)
-        .bind(org_id)
-        .bind(branch_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO devices (id, org_id, branch_id, code, kind) VALUES ($1,$2,$3,'D01','pos')",
+    )
+    .bind(device_id)
+    .bind(org_id)
+    .bind(branch_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // The teller: branch-assigned the legacy way (the control — always worked).
     let teller = Uuid::new_v4();
     sqlx::query("INSERT INTO users (id, org_id, name, role, pin_hash) VALUES ($1,$2,'Sayed','teller'::user_role,'h')")
         .bind(teller).bind(org_id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1,$2)")
-        .bind(teller).bind(branch_id).execute(&pool).await.unwrap();
+        .bind(teller)
+        .bind(branch_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // The owner: a PIN, NO legacy branch row, an all-branches role assignment.
     let owner = Uuid::new_v4();
@@ -469,7 +475,7 @@ async fn test_update_org(pool: PgPool) {
     let req = test::TestRequest::patch()
         .uri(&format!("/orgs/{}", org_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "name": "Updated Name",
             "slug": "updated-slug"
         }))
@@ -514,7 +520,7 @@ async fn test_update_org_conflict(pool: PgPool) {
     let req = test::TestRequest::patch()
         .uri(&format!("/orgs/{}", org1_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "slug": "slug-2"
         }))
         .to_request();
@@ -843,7 +849,7 @@ async fn a_rate_comes_back_as_a_json_number(pool: PgPool) {
         test::TestRequest::patch()
             .uri(&format!("/orgs/{}", org_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "tax_rate": 0.14,
                 "service_charge_rate": 0.12,
             }))
@@ -891,7 +897,7 @@ async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
             test::TestRequest::patch()
                 .uri(&format!("/orgs/{}", org_id))
                 .insert_header(("Authorization", format!("Bearer {}", token)))
-                .set_json(&serde_json::json!({"tax_rate": bad}))
+                .set_json(serde_json::json!({"tax_rate": bad}))
                 .to_request(),
         )
         .await;
@@ -913,7 +919,7 @@ async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
         test::TestRequest::patch()
             .uri(&format!("/orgs/{}", org_id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({"tax_rate": 0.2}))
+            .set_json(serde_json::json!({"tax_rate": 0.2}))
             .to_request(),
     )
     .await;

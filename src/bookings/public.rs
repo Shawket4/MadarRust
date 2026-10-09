@@ -38,6 +38,9 @@ pub struct PublicBookingBranch {
     pub code: String,
 }
 
+/// A shop's branches that take table bookings online.
+///
+/// `org_id` names the shop. Only active branches with booking switched on are listed.
 #[utoipa::path(get, path = "/public/booking-branches", tag = "bookings-public", params(OrgQuery),
     responses((status = 200, body = Vec<PublicBookingBranch>), AppErrorResponse))]
 pub async fn booking_branches(
@@ -90,6 +93,9 @@ async fn branch_names(pool: &PgPool, branch_id: Uuid) -> Result<(String, String)
     row.ok_or_else(|| AppError::NotFound("Branch not found".into()))
 }
 
+/// A branch's booking rules: party sizes, slot length, lead time and how far ahead.
+///
+/// `require_otp` says whether a booking needs a phone verified through `/public/otp/verify`.
 #[utoipa::path(get, path = "/public/branches/{id}/booking-info", tag = "bookings-public",
     params(("id" = Uuid, Path, description = "Branch ID")),
     responses((status = 200, body = PublicBookingInfo), AppErrorResponse))]
@@ -171,6 +177,9 @@ async fn public_gate(
     Ok((s, tz))
 }
 
+/// The free booking times at a branch for one date and party size.
+///
+/// Refused when the branch takes no online bookings, or the date or party size is outside its rules.
 #[utoipa::path(get, path = "/public/branches/{id}/booking-slots", tag = "bookings-public",
     params(("id" = Uuid, Path, description = "Branch ID"), SlotsQuery),
     responses((status = 200, body = PublicSlots), AppErrorResponse))]
@@ -291,6 +300,9 @@ fn check_slot(
     Ok(())
 }
 
+/// Book a table at a branch.
+///
+/// Answers 201 with the booking. The time must be a free slot after the branch's lead time. Where the branch's `require_otp` is on, send the `device_token` from `/public/otp/verify`.
 #[utoipa::path(post, path = "/public/bookings", tag = "bookings-public", request_body = PublicBookingInput,
     responses((status = 201, body = PublicBookingView), AppErrorResponse))]
 pub async fn create_public_booking(
@@ -348,6 +360,7 @@ async fn by_token(pool: &PgPool, token: &str) -> Result<BookingView, AppError> {
         .ok_or_else(|| AppError::NotFound("Booking not found".into()))
 }
 
+/// A booking, by the manage token from its confirmation link.
 #[utoipa::path(get, path = "/public/bookings/{token}", tag = "bookings-public",
     params(("token" = String, Path, description = "Manage token from the confirmation link")),
     responses((status = 200, body = PublicBookingView), AppErrorResponse))]
@@ -369,6 +382,9 @@ pub struct PublicBookingChange {
     pub notes: Option<String>,
 }
 
+/// Change a booking's time, party size or notes, by its manage token.
+///
+/// Only a confirmed booking, and only until the branch's lead time before it starts; after that, 409.
 #[utoipa::path(patch, path = "/public/bookings/{token}", tag = "bookings-public", request_body = PublicBookingChange,
     params(("token" = String, Path, description = "Manage token")),
     responses((status = 200, body = PublicBookingView), AppErrorResponse))]
@@ -416,6 +432,9 @@ pub async fn update_public_booking(
     Ok(HttpResponse::Ok().json(public_view(pool.get_ref(), view).await?))
 }
 
+/// Cancel a booking, by its manage token.
+///
+/// Cancelling a booking that is already cancelled returns it unchanged. A party already seated is the venue's to cancel.
 #[utoipa::path(post, path = "/public/bookings/{token}/cancel", tag = "bookings-public",
     params(("token" = String, Path, description = "Manage token")),
     responses((status = 200, body = PublicBookingView), AppErrorResponse))]

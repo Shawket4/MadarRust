@@ -447,10 +447,10 @@ pub async fn finish_turn(
             Ok(seq) => {
                 // Fold older turns into the running summary once the window has
                 // slid past them. Spawned, so this message does not pay for it.
-                if seq > compaction::VERBATIM_TURNS {
-                    if let Some(p) = state.provider.clone() {
-                        compaction::spawn(db.clone(), p, id);
-                    }
+                if seq > compaction::VERBATIM_TURNS
+                    && let Some(p) = state.provider.clone()
+                {
+                    compaction::spawn(db.clone(), p, id);
                 }
             }
             Err(e) => report::report(Failure::new("ai", "append_turn"), &e),

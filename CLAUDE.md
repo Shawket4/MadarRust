@@ -185,9 +185,10 @@ Each feature module owns its routes, handlers and tests together.
 
 - **Identity & access** — `auth`, `users`, `orgs`, `branches`, `permissions`
   (role × resource × action, seeded by `permissions::seeder`).
-- **Selling** — `orders`, `tickets` (waiter open tickets), `held_orders` (POS parked
-  carts + table occupancy + transfer waitlist), `tills`, `shifts`, `payment_methods`,
-  `discounts`. (Combos/bundles were removed 2026-09-25; `src/bundles` is only
+- **Selling** — `orders`, `tickets` (waiter open tickets), `floor_ops` (table
+  occupancy + transfer waitlist), `tills`, `shifts`, `payment_methods`, `discounts`.
+  There is no held-orders module: a POS parked cart is device-local (see "Held
+  orders" below). (Combos/bundles were removed 2026-09-25; `src/bundles` is only
   the old-till `GET /bundles` empty-page stub.)
 - **Catalog & cost** — `menu`, `menu_unification`, `recipes`, `costing`, `units`,
   `inventory`, `purchasing`, `stocktakes`.
@@ -203,7 +204,7 @@ Each feature module owns its routes, handlers and tests together.
 The POS is offline-first. Every mutating POS operation is split **live route** /
 `*_inner` core so `/sync/replay` can flush a till's queued backlog through exactly the
 same code path (see `src/sync/handlers.rs` and the `*_inner` fns in `tickets`,
-`held_orders`). If you add a POS-facing mutation, split it the same way or offline
+`floor_ops`). If you add a POS-facing mutation, split it the same way or offline
 tills silently lose the write.
 
 ### The POS changefeed (`/sync/pull`, offline plan B)
@@ -247,14 +248,22 @@ Publish **after** `tx.commit()`, never inside the transaction.
 ### The floor / tables feature (spans all three repos)
 - `branch_tables` is one entity shared by three features: QR targets, floor geometry,
   and live occupancy. It is also the **per-table mutex** — every occupancy mutation
-  locks its row (`SELECT … FOR UPDATE`) and then checks both held orders and open
-  tickets in the same transaction. Invariant: at most one live occupant per table.
+  locks its row (`SELECT … FOR UPDATE`) and then checks the live occupancy (a ticket,
+  a till's `party` hold, a booking) in the same transaction. Invariant: at most one
+  live occupant per table (`table_occupancies`, partial unique index).
 - Permissions are split on purpose: `floor_plan` = geometry authoring (managers,
   dashboard), `reservations` = live table status (host/teller, POS).
-- **Bussing:** a checkout does NOT free its table. `complete` (held order) and settle
-  (open ticket) call `bus_table` → status `dirty`; the table stays there until a human
-  clears it on the POS. Moves/voids/discards call `free_table` → `free`, because no
-  party vacated. Both live in `src/held_orders/mod.rs`.
+- **Bussing:** a checkout does NOT free its table. Settling a ticket, or a till
+  releasing its party hold with `bus: true` (it checked a parked order out), ends the
+  occupancy with `needs_bussing` → status `dirty`; the table stays there until a human
+  clears it on the POS. Moves/voids/discards end it without → `free`, because no
+  party vacated. All in `src/floor_ops/mod.rs` (`end_occupancy_row` and friends).
+- **Held orders are not a server entity.** A POS parked cart lives only on the
+  terminal that parked it (removed server-side 2026-09-05). Only its claim on a
+  table crosses the wire: `hold_table` / `release_table` (a `party` occupancy owned
+  by that till). A till close records what it left parked
+  (`tills.held_orders_left_open` / `_total`, sent by the till). Visibility is the
+  POS's business: whoever is signed in on that device sees all of them.
 - The booking flow (`/reservations`, `/public/reservations`) is **deprecated** and only
   mounts behind `MADAR_ENABLE_RESERVATIONS`; `/floor/*` is always mounted.
 

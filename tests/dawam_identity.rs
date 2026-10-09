@@ -842,9 +842,7 @@ where
             Error = actix_web::Error,
         >,
 {
-    call!(app, "GET", "/staff/me/context", me.to_string())
-        .status()
-        .as_u16()
+    call!(app, "GET", "/staff/me/context", me).status().as_u16()
 }
 
 /// RO-4, RO-10: a new phone, a new number, the app switched off, the

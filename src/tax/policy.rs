@@ -18,7 +18,7 @@ pub async fn for_branch<'e, E>(pool: E, branch_id: Uuid) -> Result<TaxPolicy, Ap
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let row: Option<(
+    type Row = Option<(
         Decimal,
         bool,
         Decimal,
@@ -27,7 +27,8 @@ where
         Option<bool>,
         Option<Decimal>,
         Option<bool>,
-    )> = sqlx::query_as(
+    )>;
+    let row: Row = sqlx::query_as(
         "SELECT o.tax_rate, o.tax_inclusive, o.service_charge_rate, o.service_charge_taxable, \
                 b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable \
          FROM branches b JOIN organizations o ON o.id = b.org_id \

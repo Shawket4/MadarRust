@@ -69,10 +69,9 @@ fn claims(req: &HttpRequest) -> Result<Claims, AppError> {
 pub fn parse_file_name(file: &str) -> Option<(String, &'static str)> {
     let (hash, ext) = if let Some(h) = file.strip_suffix(".lottie.zst") {
         (h, "lottie.zst")
-    } else if let Some(h) = file.strip_suffix(".webp") {
-        (h, "webp")
     } else {
-        return None;
+        let h = file.strip_suffix(".webp")?;
+        (h, "webp")
     };
     super::is_hash(hash).then(|| (hash.to_string(), ext))
 }
