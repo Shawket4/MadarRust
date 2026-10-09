@@ -194,7 +194,7 @@ fn combo_guard(e: &sqlx::Error) -> Option<(u16, &'static str, &'static str)> {
             "That item can't be chosen here.",
         ),
         ("DEAL_INVALID", 400, "Check the deal."),
-        // migrations/20261008100000_warehouses.sql: a selling row at a warehouse.
+        // migrations/20261009120000_warehouses.sql: a selling row at a warehouse.
         (
             "WAREHOUSE_CANNOT_SELL",
             409,
