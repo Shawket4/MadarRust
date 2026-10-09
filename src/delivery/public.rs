@@ -819,6 +819,14 @@ async fn public_combos_and_deals(
                         _ => vec![],
                     };
                     for item in items {
+                        // The item's own choice wins over its category's,
+                        // wherever each is listed (madar_catalog::combo::choice_for):
+                        // that is the surcharge and size the order is charged.
+                        let c = s
+                            .choices
+                            .iter()
+                            .find(|x| x.menu_item_id == Some(item))
+                            .unwrap_or(c);
                         if !on_menu.contains(&item) {
                             // Greyed: its name, no sizes, never the default.
                             if let Some((name, tr, image, price)) = off_menu.get(&item)
