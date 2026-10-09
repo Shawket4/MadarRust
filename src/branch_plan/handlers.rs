@@ -249,7 +249,7 @@ async fn load_plan(pool: &PgPool, branch_id: Uuid, b: &BranchRow) -> Result<Bran
         .fetch_all(pool)
         .await?;
 
-        let sections = stations
+        let mut sections: Vec<PlanSection> = stations
             .iter()
             .enumerate()
             .map(|(i, s)| PlanSection {
@@ -271,35 +271,45 @@ async fn load_plan(pool: &PgPool, branch_id: Uuid, b: &BranchRow) -> Result<Bran
                 y: s.canvas_y.unwrap_or(i as f64 * ROW * 1.5),
             })
             .collect();
+        let mut devices: Vec<PlanDevice> = devices
+            .into_iter()
+            .map(|d| PlanDevice {
+                id: d.0,
+                kind: d.1,
+                name: d.2,
+                receipt_printer_id: d.3,
+                device_id: d.4,
+                x: d.5,
+                y: d.6,
+            })
+            .collect();
+        let mut printers: Vec<PlanPrinter> = printers
+            .into_iter()
+            .map(|p| PlanPrinter {
+                id: p.0,
+                role: p.1,
+                name: p.2,
+                connection: p.3,
+                brand: p.4,
+                ip: p.5,
+                port: p.6,
+                paper_mm: p.7,
+                host_device_id: p.8,
+                x: p.9,
+                y: p.10,
+            })
+            .collect();
+        keep_live_printers(
+            branch_id,
+            b,
+            &stations,
+            &mut devices,
+            &mut printers,
+            &mut sections,
+        );
         return Ok(BranchPlan {
-            devices: devices
-                .into_iter()
-                .map(|d| PlanDevice {
-                    id: d.0,
-                    kind: d.1,
-                    name: d.2,
-                    receipt_printer_id: d.3,
-                    device_id: d.4,
-                    x: d.5,
-                    y: d.6,
-                })
-                .collect(),
-            printers: printers
-                .into_iter()
-                .map(|p| PlanPrinter {
-                    id: p.0,
-                    role: p.1,
-                    name: p.2,
-                    connection: p.3,
-                    brand: p.4,
-                    ip: p.5,
-                    port: p.6,
-                    paper_mm: p.7,
-                    host_device_id: p.8,
-                    x: p.9,
-                    y: p.10,
-                })
-                .collect(),
+            devices,
+            printers,
             sections,
             till_prints_kitchen: b.till_prints_kitchen,
         });
@@ -402,6 +412,119 @@ async fn load_plan(pool: &PgPool, branch_id: Uuid, b: &BranchRow) -> Result<Bran
             Some("till") | Some("both") | None
         ),
     })
+}
+
+fn same_printer(p: &PlanPrinter, ip: &str, port: Option<i32>) -> bool {
+    p.connection == "network"
+        && p.ip.as_deref().map(str::trim) == Some(ip.trim())
+        && p.port.unwrap_or(9100) == port.unwrap_or(9100)
+}
+
+/// The kitchen-stations page and the branch dialog still edit the printer
+/// columns the POS reads, and a save writes those columns from the plan. So a
+/// printer changed there after the last save is put back into the plan here,
+/// as the section's (or the till's) first printer, and the next save keeps it
+/// instead of silently writing the plan's older printer back.
+fn keep_live_printers(
+    branch_id: Uuid,
+    b: &BranchRow,
+    stations: &[StationRow],
+    devices: &mut [PlanDevice],
+    printers: &mut Vec<PlanPrinter>,
+    sections: &mut [PlanSection],
+) {
+    for (s, row) in sections.iter_mut().zip(stations) {
+        let Some(ip) = row.printer_ip.as_deref().filter(|ip| !ip.trim().is_empty()) else {
+            continue;
+        };
+        let first = s
+            .printer_ids
+            .iter()
+            .filter_map(|id| printers.iter().find(|p| p.id == *id))
+            .find(|p| p.connection == "network");
+        if first
+            .is_some_and(|p| same_printer(p, ip, row.printer_port) && p.brand == row.printer_brand)
+        {
+            continue;
+        }
+        let existing = printers
+            .iter()
+            .find(|p| {
+                p.role == "kitchen"
+                    && same_printer(p, ip, row.printer_port)
+                    && p.brand == row.printer_brand
+            })
+            .map(|p| p.id);
+        let id = existing.unwrap_or_else(|| {
+            let port = row.printer_port.unwrap_or(9100);
+            let id = stable_id(
+                branch_id,
+                &format!("station-printer:{}:{ip}:{port}", row.id),
+            );
+            printers.push(PlanPrinter {
+                id,
+                role: "kitchen".into(),
+                name: format!("{} printer", s.name),
+                connection: "network".into(),
+                brand: row.printer_brand.clone(),
+                ip: Some(ip.trim().into()),
+                port: Some(port),
+                paper_mm: 80,
+                host_device_id: None,
+                x: COL_OUTPUTS,
+                y: s.y,
+            });
+            id
+        });
+        s.printer_ids.retain(|p| *p != id);
+        s.printer_ids.insert(0, id);
+    }
+
+    // The branch columns are written from the first POS printing receipts on a
+    // network printer; with none, a save leaves them alone.
+    let Some(ip) = b.printer_ip.as_deref() else {
+        return;
+    };
+    let Some(pos) = devices.iter_mut().find(|d| {
+        d.kind == "pos"
+            && d.receipt_printer_id
+                .and_then(|id| printers.iter().find(|p| p.id == id))
+                .is_some_and(|p| p.connection == "network")
+    }) else {
+        return;
+    };
+    let current = printers
+        .iter()
+        .find(|p| Some(p.id) == pos.receipt_printer_id);
+    let matches = |p: &PlanPrinter| {
+        same_printer(p, ip, b.printer_port) && (p.brand.is_none() || p.brand == b.printer_brand)
+    };
+    if current.is_some_and(matches) {
+        return;
+    }
+    let existing = printers
+        .iter()
+        .find(|p| p.role == "receipt" && matches(p))
+        .map(|p| p.id);
+    let id = existing.unwrap_or_else(|| {
+        let port = b.printer_port.unwrap_or(9100);
+        let id = stable_id(branch_id, &format!("receipt-printer:{ip}:{port}"));
+        printers.push(PlanPrinter {
+            id,
+            role: "receipt".into(),
+            name: "Receipt printer".into(),
+            connection: "network".into(),
+            brand: b.printer_brand.clone(),
+            ip: Some(ip.trim().into()),
+            port: Some(port),
+            paper_mm: 80,
+            host_device_id: None,
+            x: COL_FRONT,
+            y: pos.y + ROW * 0.5,
+        });
+        id
+    });
+    pos.receipt_printer_id = Some(id);
 }
 
 async fn plan_view(pool: &PgPool, branch_id: Uuid) -> Result<BranchPlanView, AppError> {
@@ -507,6 +630,28 @@ pub async fn save_plan(
     let problems = check_plan(&plan);
     if !problems.is_empty() {
         return Err(AppError::BadRequest(problems.join("; ")));
+    }
+
+    // A section is a station: adding or removing one asks for the same grants
+    // the kitchen-stations page does, not just the edit one.
+    let stations: Vec<(Uuid, bool)> = sqlx::query_as(
+        "SELECT id, is_active FROM kitchen_stations WHERE branch_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(branch_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+    if plan
+        .sections
+        .iter()
+        .any(|s| !stations.iter().any(|(id, _)| *id == s.id))
+    {
+        check_permission(pool.get_ref(), &claims, "kitchen_stations", "create").await?;
+    }
+    if stations
+        .iter()
+        .any(|(id, active)| *active && !plan.sections.iter().any(|s| s.id == *id))
+    {
+        check_permission(pool.get_ref(), &claims, "kitchen_stations", "delete").await?;
     }
 
     let mut tx = pool.get_ref().begin().await?;

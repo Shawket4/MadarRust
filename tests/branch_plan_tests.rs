@@ -435,6 +435,81 @@ async fn saving_writes_the_whole_plan_and_the_columns_the_pos_reads(pool: PgPool
     assert_eq!(versions[0]["version"], 2);
 }
 
+/// The kitchen-stations page and the branch dialog still write the printer
+/// columns the POS reads. A change made there shows in the plan, and the next
+/// save keeps it rather than writing the plan's older printer back.
+#[sqlx::test]
+async fn a_printer_changed_on_the_old_pages_survives_the_next_save(pool: PgPool) {
+    let (_, branch, owner) = setup(&pool).await;
+    let app = app!(pool);
+    let mut plan = till_and_screen(vec![]);
+    let rp = printer("receipt", "network");
+    plan.devices[0].receipt_printer_id = Some(rp.id);
+    let kp = printer("kitchen", "network");
+    plan.sections[0].printer_ids = vec![kp.id];
+    plan.printers = vec![rp, kp];
+    let put = |plan: &BranchPlan, v: i32| {
+        test::TestRequest::put()
+            .uri("/branch-plan")
+            .set_json(json!({ "branch_id": branch, "expected_version": v, "plan": plan }))
+    };
+    let get = || test::TestRequest::get().uri(&format!("/branch-plan?branch_id={branch}"));
+    let (st, body) = call(&app, put(&plan, 0), Some(&owner)).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+
+    sqlx::query("UPDATE kitchen_stations SET printer_ip = '192.168.1.77' WHERE id = $1")
+        .bind(plan.sections[0].id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE branches SET printer_ip = '192.168.1.88' WHERE id = $1")
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (st, view) = call(&app, get(), Some(&owner)).await;
+    assert_eq!(st, StatusCode::OK, "{view}");
+    let loaded: BranchPlan = serde_json::from_value(view["plan"].clone()).unwrap();
+    let ip_of = |id: Uuid| {
+        loaded
+            .printers
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.ip.clone())
+    };
+    assert_eq!(
+        ip_of(loaded.sections[0].printer_ids[0]).as_deref(),
+        Some("192.168.1.77")
+    );
+    assert_eq!(
+        ip_of(loaded.devices[0].receipt_printer_id.unwrap()).as_deref(),
+        Some("192.168.1.88")
+    );
+
+    let (st, body) = call(&app, put(&loaded, 1), Some(&owner)).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let station_ip: Option<String> =
+        sqlx::query_scalar("SELECT printer_ip FROM kitchen_stations WHERE id = $1")
+            .bind(plan.sections[0].id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(station_ip.as_deref(), Some("192.168.1.77"));
+    let branch_ip: Option<String> =
+        sqlx::query_scalar("SELECT host(printer_ip) FROM branches WHERE id = $1")
+            .bind(branch)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(branch_ip.as_deref(), Some("192.168.1.88"));
+
+    // Now the plan matches the columns, so loading it adds nothing more.
+    let (_, view) = call(&app, get(), Some(&owner)).await;
+    let again: BranchPlan = serde_json::from_value(view["plan"].clone()).unwrap();
+    assert_eq!(again.printers.len(), loaded.printers.len());
+}
+
 #[sqlx::test]
 async fn a_save_over_someone_elses_is_refused(pool: PgPool) {
     let (_, branch, owner) = setup(&pool).await;
@@ -596,6 +671,63 @@ async fn only_someone_who_sets_up_the_kitchen_may_read_or_save(pool: PgPool) {
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
+}
+
+#[sqlx::test]
+async fn adding_or_removing_a_section_needs_the_station_create_and_delete_grants(pool: PgPool) {
+    let (org, branch, owner) = setup(&pool).await;
+    let app = app!(pool);
+    let grill = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO kitchen_stations (id, org_id, branch_id, name, is_default) VALUES ($1, $2, $3, 'Grill', true)",
+    )
+    .bind(grill)
+    .bind(org)
+    .bind(branch)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // This person may edit stations but neither add (101) nor remove (104) one.
+    madar_rust::authz::sync_catalogue(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason)
+         SELECT $1, id, cap, 'deny', 'test' FROM users, unnest(ARRAY[101, 104]) cap WHERE org_id = $1",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let put = |plan: &BranchPlan, v: i32| {
+        test::TestRequest::put()
+            .uri("/branch-plan")
+            .set_json(json!({ "branch_id": branch, "expected_version": v, "plan": plan }))
+    };
+
+    let mut plan = till_and_screen(vec![]);
+    plan.sections[0].id = grill;
+    plan.sections[0].name = "Grill".into();
+    let (st, body) = call(&app, put(&plan, 0), Some(&owner)).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "editing the stations there is allowed: {body}"
+    );
+
+    let mut more = plan.clone();
+    let mut bar = section("Bar", false);
+    bar.screen_ids = plan.sections[0].screen_ids.clone();
+    more.sections.push(bar);
+    let (st, _) = call(&app, put(&more, 1), Some(&owner)).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "a new section is a new station");
+
+    let mut fewer = plan.clone();
+    fewer.sections.clear();
+    let (st, _) = call(&app, put(&fewer, 1), Some(&owner)).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "removing a section deletes its station"
+    );
 }
 
 // ── Slots and activation codes (BB-8) ───────────────────────
