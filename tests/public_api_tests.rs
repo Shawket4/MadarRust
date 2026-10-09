@@ -13,8 +13,15 @@ macro_rules! app {
     () => {
         test::init_service(
             App::new()
+                .wrap(actix_web::middleware::from_fn(public_api::versioned))
                 .configure(public_api::configure)
                 .route("/public/ping", web::get().to(HttpResponse::Ok))
+                .route(
+                    "/public/echo",
+                    web::get().to(|req: actix_web::HttpRequest| async move {
+                        HttpResponse::Ok().body(req.query_string().to_string())
+                    }),
+                )
                 .default_service(web::to(public_api::not_found)),
         )
         .await
@@ -112,7 +119,7 @@ async fn the_spec_is_the_public_part_and_complete() {
     let paths = spec["paths"].as_object().unwrap();
     assert!(paths.len() > 10, "{}", paths.len());
     for (p, ops) in paths {
-        assert!(p.starts_with("/public/"), "{p} is not public");
+        assert!(p.starts_with("/v1/public/"), "{p} is not public, at v1");
         // Self-describing for agents: a doc comment on the handler is its summary.
         for (method, op) in ops.as_object().unwrap() {
             assert!(
@@ -125,9 +132,9 @@ async fn the_spec_is_the_public_part_and_complete() {
             );
         }
     }
-    assert!(!paths.contains_key("/public/tenant-shell"));
-    assert!(paths.contains_key("/public/orgs/links"));
-    assert!(paths.contains_key("/public/branches/{id}/menu"));
+    assert!(!paths.contains_key("/v1/public/tenant-shell"));
+    assert!(paths.contains_key("/v1/public/orgs/links"));
+    assert!(paths.contains_key("/v1/public/branches/{id}/menu"));
 
     let mut wanted = BTreeSet::new();
     refs(&spec, &mut wanted);
@@ -216,4 +223,39 @@ async fn a_route_limiter_answers_429_in_json() {
             .unwrap()
             .starts_with("Too many requests")
     );
+}
+
+/// `/v1/…` is version 1's versioned address: the same routes, query intact.
+/// Only the public API, the root and the spec are under it.
+#[actix_web::test]
+async fn v1_reaches_the_same_routes() {
+    let app = app!();
+    let call = |method: actix_web::http::Method, uri: &str| {
+        test::TestRequest::default()
+            .method(method)
+            .uri(uri)
+            .to_request()
+    };
+    use actix_web::http::Method;
+    for uri in ["/v1/public/ping", "/v1", "/v1/", "/v1/openapi.json"] {
+        let resp = test::call_service(&app, call(Method::GET, uri)).await;
+        assert_eq!(resp.status().as_u16(), 200, "GET {uri}");
+    }
+    let resp = test::call_service(&app, call(Method::HEAD, "/v1")).await;
+    assert_eq!(resp.status().as_u16(), 200, "HEAD /v1");
+    let (_, _, root) = get_json(&app, "/v1").await;
+    assert_eq!(root["name"], "Madar POS API");
+
+    let resp = test::call_service(&app, call(Method::GET, "/v1/public/echo?a=1&b=two")).await;
+    assert_eq!(test::read_body(resp).await, "a=1&b=two");
+
+    for uri in [
+        "/v1/ping",
+        "/v1public/ping",
+        "/v2/public/ping",
+        "/v1/v1/public/ping",
+    ] {
+        let resp = test::call_service(&app, call(Method::GET, uri)).await;
+        assert_eq!(resp.status().as_u16(), 404, "GET {uri} is not version 1's");
+    }
 }

@@ -7,6 +7,11 @@
 //!    endpoints the shop pages use without an account. The full spec stays
 //!    behind `MADAR_ENABLE_SWAGGER_UI`: it describes every staff and owner
 //!    route, which is nobody else's business.
+//!
+//! Version 1 of the public API also answers at `/v1/…` (`/v1/public/…`, `/v1`,
+//! `/v1/openapi.json`), its versioned address, which the spec lists. The path is
+//! rewritten before routing, so it reaches the same handlers, guards and rate
+//! limits as the unprefixed one; Madar's own pages keep using `/public/…`.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -47,7 +52,7 @@ pub fn public_subset(full: &Value) -> Value {
         .map(|m| {
             m.iter()
                 .filter(|(p, _)| p.starts_with("/public/") && !INTERNAL.contains(&p.as_str()))
-                .map(|(p, v)| (p.clone(), v.clone()))
+                .map(|(p, v)| (format!("{VERSION_PREFIX}{p}"), v.clone()))
                 .collect()
         })
         .unwrap_or_default();
@@ -118,9 +123,10 @@ pub fn public_subset(full: &Value) -> Value {
                             Every call names the shop (`slug` or an id); there is no \
                             cross-shop listing. Madar POS is a point of sale for cafés \
                             and restaurants in Egypt: https://get.madar-pos.cloud/\n\n\
-                            **Versioning.** This is version 1. Changes within it only add \
-                            (new endpoints, new optional fields). A breaking change comes \
-                            at a new path; the old endpoint keeps working for at least six \
+                            **Versioning.** This is version 1, at `/v1/` (the same routes \
+                            also answer without the prefix, for Madar's own pages). Changes \
+                            within it only add (new endpoints, new optional fields). A \
+                            breaking change comes as `/v2/`; the old endpoint keeps working for at least six \
                             months after it is marked `deprecated` here, and meanwhile \
                             answers with `Deprecation` (RFC 9745) and `Sunset` (RFC 8594) \
                             headers and a `Link` to its replacement.\n\n\
@@ -180,6 +186,37 @@ pub async fn root() -> HttpResponse {
 /// here, instead of an empty body. Mounted as the app's default service.
 pub async fn not_found() -> HttpResponse {
     HttpResponse::NotFound().json(json!({ "error": "Not found" }))
+}
+
+/// The versioned address of version 1 of the public API.
+const VERSION_PREFIX: &str = "/v1";
+
+/// `/v1/public/…`, `/v1/openapi.json` and `/v1` (see the module docs) rewritten
+/// to their unprefixed routes. Mounted innermost on the App, so it runs just
+/// before routing; anything else under `/v1/` is left alone, and 404s.
+pub async fn versioned(
+    mut req: actix_web::dev::ServiceRequest,
+    next: actix_web::middleware::Next<impl actix_web::body::MessageBody + 'static>,
+) -> Result<actix_web::dev::ServiceResponse, actix_web::Error> {
+    let path = req.path();
+    let rest = match path.strip_prefix(VERSION_PREFIX) {
+        Some("" | "/") => Some("/"),
+        Some(r) if r.starts_with("/public/") || r == "/openapi.json" => Some(r),
+        _ => None,
+    };
+    if let Some(rest) = rest {
+        let target = match req.uri().query() {
+            Some(q) => format!("{rest}?{q}"),
+            None => rest.to_string(),
+        };
+        let mut parts = req.uri().clone().into_parts();
+        parts.path_and_query = target.parse().ok();
+        if let Ok(uri) = actix_web::http::Uri::from_parts(parts) {
+            req.match_info_mut().get_mut().update(&uri);
+            req.head_mut().uri = uri;
+        }
+    }
+    next.call(req).await.map(|r| r.map_into_boxed_body())
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {

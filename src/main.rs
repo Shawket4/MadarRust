@@ -254,6 +254,10 @@ async fn run() -> std::io::Result<()> {
         // Build the App. All `.wrap()` calls happen first so the App's
         // generic type is stable when we conditionally add Swagger UI.
         let mut app = App::new()
+            // `/v1/…` → the public API's routes, just before routing (innermost).
+            .wrap(actix_web::middleware::from_fn(
+                madar_rust::public_api::versioned,
+            ))
             // The general limiter (and whole-dataset exports) — see
             // `rate_limit::throttle_exports`. INSIDE CORS, so its 429 carries
             // the CORS headers: outside it, the browser hid the 429 and the

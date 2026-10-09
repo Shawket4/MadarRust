@@ -293,7 +293,7 @@ async fn the_resources_read_cleanly(pool: PgPool) {
             .as_object()
             .unwrap()
             .keys()
-            .all(|p| p.starts_with("/public/")),
+            .all(|p| p.starts_with("/v1/public/")),
         "only the public part"
     );
 
