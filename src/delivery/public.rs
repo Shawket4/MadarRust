@@ -339,6 +339,23 @@ pub struct DeliveryMenuItem {
     /// (categories expanded to their available items). The server still
     /// prices the order.
     pub combo: Option<crate::combos::types::PublicCombo>,
+    /// A kind=item row: madar-catalog's view of it at this branch (sizes, the
+    /// recipe's swap categories and bases, groups), so the storefront prices a
+    /// swap over the recipe's own choice exactly as the order is charged.
+    /// No quantities or costs. Additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub pricing: Option<madar_catalog::ItemView>,
+}
+
+/// One option as madar-catalog prices it at this branch, plus this channel's
+/// own price for it: online intake charges a channel price instead of the
+/// rule's (see `delivery::snapshot`).
+#[derive(Serialize, ToSchema)]
+pub struct DeliveryOptionPricing {
+    #[schema(value_type = Object)]
+    pub view: madar_catalog::OptionView,
+    pub channel_price: Option<i32>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -365,6 +382,10 @@ pub struct DeliveryMenu {
     /// The deals on offer on this channel now (§11.2): checkout applies the
     /// best ones automatically (`POST …/cart-quote` shows them). Additive.
     pub deals: Vec<crate::deals::types::DealRule>,
+    /// Every option the menu offers (the add-on catalog and each item's
+    /// groups), as the pricing rule reads it; see `DeliveryMenuItem.pricing`.
+    /// Additive.
+    pub option_pricing: Vec<DeliveryOptionPricing>,
 }
 
 /// Customer-facing summary of a channel's active discount, so the public UI can
@@ -614,6 +635,66 @@ pub(crate) async fn load_public_menu(
     let mut modifier_groups_by_item =
         load_modifier_groups(pool, &item_ids, branch_id, channel).await?;
 
+    // The pricing rule's views (the order path's own loader), so the
+    // storefront's estimate is the charge.
+    let option_ids: Vec<Uuid> = addons
+        .iter()
+        .map(|a| a.addon_item_id)
+        .chain(
+            modifier_groups_by_item
+                .values()
+                .flatten()
+                .flat_map(|g| g.options.iter().map(|o| o.option_id)),
+        )
+        .collect();
+    let mut catalog = crate::orders::catalog_view::Catalog::new(Some(branch_id));
+    catalog.ensure_on(pool, &item_ids, &option_ids).await?;
+    let channel_prices: std::collections::HashMap<Uuid, i32> = match channel {
+        None => std::collections::HashMap::new(),
+        Some(ch) => sqlx::query_as::<_, (Uuid, i32)>(
+            "SELECT addon_item_id, price_override FROM branch_channel_addon_overrides \
+              WHERE branch_id = $1 AND channel = $2::delivery_channel \
+                AND price_override IS NOT NULL AND addon_item_id = ANY($3)",
+        )
+        .bind(branch_id)
+        .bind(ch)
+        .bind(&option_ids)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect(),
+    };
+    let mut seen_options = std::collections::HashSet::new();
+    let option_pricing: Vec<DeliveryOptionPricing> = option_ids
+        .iter()
+        .filter(|id| seen_options.insert(**id))
+        .filter_map(|id| {
+            catalog.option(*id).map(|o| DeliveryOptionPricing {
+                view: o.view.clone(),
+                channel_price: channel_prices.get(id).copied(),
+            })
+        })
+        .collect();
+    // A swap is priced over the recipe lines in a category some option swaps,
+    // and their bases: only those go on the public menu. The rest of each
+    // recipe stays off it (and off the wire).
+    let swap_slugs: std::collections::HashSet<String> = option_pricing
+        .iter()
+        .filter_map(|p| madar_catalog::target_of(&p.view).map(|t| t.slug))
+        .collect();
+    let public_pricing = |v: &madar_catalog::ItemView| {
+        let mut v = v.clone();
+        v.recipe
+            .retain(|r| r.category.as_ref().is_some_and(|c| swap_slugs.contains(c)));
+        let kept: std::collections::HashSet<String> = v
+            .recipe
+            .iter()
+            .filter_map(|r| r.ingredient_id.clone())
+            .collect();
+        v.bases.retain(|b| kept.contains(&b.ingredient_id));
+        v
+    };
+
     // Combos (§2.5) and deals (§11.2) on this channel: `None` is the QR
     // table menu, a delivery channel is the online storefront.
     let sale_channel = if channel.is_some() {
@@ -638,6 +719,9 @@ pub(crate) async fn load_public_menu(
         .map(
             |(id, category_id, name, name_translations, description, image_url, price, kind)| {
                 DeliveryMenuItem {
+                    pricing: (kind == "item")
+                        .then(|| catalog.item(id).map(|i| public_pricing(&i.view)))
+                        .flatten(),
                     combo: combos.remove(&id),
                     meal: meals.get(&id).copied(),
                     kind,
@@ -664,6 +748,7 @@ pub(crate) async fn load_public_menu(
         addons,
         discount,
         deals,
+        option_pricing,
     })
 }
 

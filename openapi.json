@@ -76018,7 +76018,8 @@
           "categories",
           "items",
           "addons",
-          "deals"
+          "deals",
+          "option_pricing"
         ],
         "properties": {
           "addons": {
@@ -76057,6 +76058,13 @@
             "items": {
               "$ref": "#/components/schemas/DeliveryMenuItem"
             }
+          },
+          "option_pricing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeliveryOptionPricing"
+            },
+            "description": "Every option the menu offers (the add-on catalog and each item's\ngroups), as the pricing rule reads it; see `DeliveryMenuItem.pricing`.\nAdditive."
           }
         }
       },
@@ -76226,6 +76234,13 @@
             "type": "integer",
             "format": "int32"
           },
+          "pricing": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "A kind=item row: madar-catalog's view of it at this branch (sizes, the\nrecipe's swap categories and bases, groups), so the storefront prices a\nswap over the recipe's own choice exactly as the order is charged.\nNo quantities or costs. Additive."
+          },
           "sizes": {
             "type": "array",
             "items": {
@@ -76330,6 +76345,25 @@
             "type": "integer",
             "format": "int32",
             "description": "Channel-effective surcharge (piastres): branch_channel → branch →\nchannel → catalog default. Unavailable options are excluded entirely."
+          }
+        }
+      },
+      "DeliveryOptionPricing": {
+        "type": "object",
+        "description": "One option as madar-catalog prices it at this branch, plus this channel's\nown price for it: online intake charges a channel price instead of the\nrule's (see `delivery::snapshot`).",
+        "required": [
+          "view"
+        ],
+        "properties": {
+          "channel_price": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "view": {
+            "type": "object"
           }
         }
       },

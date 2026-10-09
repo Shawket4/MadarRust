@@ -3318,6 +3318,137 @@ mod it {
         );
     }
 
+    /// The storefront prices a swap with the menu's own pricing views and gets
+    /// what the order is charged: over the recipe's coffee, not the full price,
+    /// and a channel's own price replaces the rule's (as online intake does).
+    #[sqlx::test]
+    async fn public_menu_pricing_views_give_the_swap_the_order_is_charged(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, branch, teller).await;
+
+        // A V60 brewed with Ethiopian beans; Ethiopian and Decaf are coffee options.
+        let v60 = seed_item(&pool, org, 6000).await;
+        let bean = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                let ing = Uuid::new_v4();
+                sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, 'g'::inventory_unit, 50, ingredient_category_id($2, 'coffee_bean'))")
+                    .bind(ing).bind(org).bind(name).execute(&pool).await.unwrap();
+                ing
+            }
+        };
+        let ethiopian_beans = bean("Ethiopian beans").await;
+        let decaf_beans = bean("Decaf beans").await;
+        sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1,$2,18,'one_size','Ethiopian beans','g')")
+            .bind(v60).bind(ethiopian_beans).execute(&pool).await.unwrap();
+        let option = |name: &'static str, price: i32, ing: Uuid| {
+            let pool = pool.clone();
+            async move {
+                let addon = seed_addon_typed(&pool, org, name, "coffee_type", price).await;
+                sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,18,$3,'g')")
+                    .bind(addon).bind(ing).bind(name).execute(&pool).await.unwrap();
+                addon
+            }
+        };
+        let ethiopian = option("Ethiopian", 2500, ethiopian_beans).await;
+        let decaf = option("Decaf", 3500, decaf_beans).await;
+        // Sugar is in the recipe too, but nothing swaps it.
+        let sugar = Uuid::new_v4();
+        sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Sugar', 'g'::inventory_unit, 5, ingredient_category_id($2, 'general'))")
+            .bind(sugar).bind(org).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1,$2,10,'one_size','Sugar','g')")
+            .bind(v60).bind(sugar).execute(&pool).await.unwrap();
+
+        let app = app!(&pool);
+        let menu = |ch: &'static str| {
+            test::TestRequest::get().uri(&format!("/public/branches/{branch}/menu?channel={ch}"))
+        };
+        let (st, m) = send(&app, menu("in_mall")).await;
+        assert_eq!(st, StatusCode::OK, "{m}");
+        let item = m["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == v60.to_string())
+            .unwrap();
+        let view_of = |m: &Value| madar_catalog::CatalogView {
+            item: serde_json::from_value(item["pricing"].clone())
+                .expect("the item carries its pricing view"),
+            options: m["option_pricing"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| serde_json::from_value(o["view"].clone()).unwrap())
+                .collect(),
+        };
+        let charge = |view: &madar_catalog::CatalogView, opt: Uuid| {
+            let sel = madar_catalog::Selection {
+                size_label: None,
+                options: vec![madar_catalog::Pick {
+                    id: opt.to_string(),
+                    quantity: 1,
+                }],
+                ..Default::default()
+            };
+            madar_catalog::price_options(view, &sel).unwrap().options[0].unit_price
+        };
+        let view = view_of(&m);
+        assert_eq!(
+            charge(&view, ethiopian),
+            0,
+            "the recipe's own beans are included"
+        );
+        assert_eq!(
+            charge(&view, decaf),
+            1000,
+            "Decaf costs its difference over Ethiopian"
+        );
+        // The menu sends no recipe quantities, and only the lines a swap is priced over.
+        assert!(
+            !item["pricing"].to_string().contains("quantity"),
+            "{}",
+            item["pricing"]
+        );
+        assert!(
+            !item["pricing"].to_string().contains(&sugar.to_string()),
+            "{}",
+            item["pricing"]
+        );
+        assert_eq!(
+            item["pricing"]["recipe"].as_array().unwrap().len(),
+            1,
+            "{}",
+            item["pricing"]
+        );
+
+        // The server charges the same for the cart.
+        let quote = |opt: Uuid| {
+            test::TestRequest::post()
+            .uri(&format!("/public/branches/{branch}/cart-quote"))
+            .set_json(json!({"channel": "in_mall", "items": [{"menu_item_id": v60, "quantity": 1, "addons": [{"addon_item_id": opt, "quantity": 1}]}]}))
+        };
+        let (st, q) = send(&app, quote(decaf)).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(q["items_total"], 6000 + 1000, "{q}");
+
+        // A channel price replaces the rule's charge, as intake does.
+        sqlx::query("INSERT INTO branch_channel_addon_overrides (branch_id, addon_item_id, channel, price_override) VALUES ($1, $2, 'in_mall', 4000)")
+            .bind(branch).bind(decaf).execute(&pool).await.unwrap();
+        let (_, m) = send(&app, menu("in_mall")).await;
+        let decaf_pricing = m["option_pricing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["view"]["id"] == decaf.to_string())
+            .unwrap();
+        assert_eq!(decaf_pricing["channel_price"], 4000);
+        let (_, q) = send(&app, quote(decaf)).await;
+        assert_eq!(q["items_total"], 6000 + 4000, "{q}");
+    }
+
     #[sqlx::test]
     async fn channel_addon_override_applied_at_intake(pool: PgPool) {
         let org = seed_org(&pool).await;
