@@ -40,7 +40,9 @@ BEGIN
     FOREACH t IN ARRAY ARRAY[
         'orders', 'open_tickets', 'tills', 'devices', 'device_activation_codes',
         'delivery_orders', 'bookings', 'branch_tables', 'kitchen_tickets',
-        'qr_short_links', 'staff_drinks'
+        'qr_short_links', 'staff_drinks',
+        -- The branch builder's pieces: a warehouse has no devices, printers or kitchen.
+        'branch_device_slots', 'branch_printers', 'kitchen_stations'
     ] LOOP
         EXECUTE format(
             'CREATE TRIGGER trg_%1$s_selling_branch BEFORE INSERT OR UPDATE OF branch_id ON %1$I
