@@ -117,6 +117,10 @@ pub struct ScheduleAssignment {
     pub effective_from: NaiveDate,
     pub effective_to: Option<NaiveDate>,
     pub created_at: DateTime<Utc>,
+    /// Where a business-wide block is worked (hunt H2-B8b); null = the
+    /// block's own branch, else the person's first.
+    #[sqlx(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow, ToSchema)]
@@ -203,8 +207,12 @@ impl ResolvedShift {
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
 pub struct UpsertWorkShiftRequest {
-    #[serde(default)]
-    pub branch_id: Option<Uuid>,
+    /// The block's branch; null = the whole business. On an update, omitted
+    /// keeps the block's branch (E2E B-ROTA-8); on a create, omitted = the
+    /// whole business.
+    #[serde(default, deserialize_with = "double_option")]
+    #[schema(value_type = Option<Uuid>, nullable)]
+    pub branch_id: Option<Option<Uuid>>,
     pub name: String,
     pub start_time: NaiveTime,
     pub end_time: NaiveTime,
@@ -254,6 +262,11 @@ pub struct CreateAssignmentRequest {
     pub effective_from: Option<NaiveDate>,
     #[serde(default)]
     pub effective_to: Option<NaiveDate>,
+    /// The branch whose board sets the pattern: a business-wide block is
+    /// worked there every week (one of the person's branches, else 400
+    /// `EMPLOYEE_NOT_AT_BRANCH`). Omitted = the person's first branch.
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -292,6 +305,12 @@ pub struct PutDayRequest {
     pub shifts: Vec<DayBlock>,
     #[serde(default)]
     pub reason: Option<String>,
+    /// The branch whose board sets the day: a business-wide block is worked
+    /// there (one of the person's branches, else 400
+    /// `EMPLOYEE_NOT_AT_BRANCH`). Omitted = each block stays where the date
+    /// had it (a new one at the person's first branch).
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -299,6 +318,13 @@ pub struct PutDayRequest {
 pub struct DayKey {
     pub employee_id: Uuid,
     pub on_date: NaiveDate,
+    /// The board it is reset from (BUG-4): only the blocks worked at that
+    /// branch go back to the pattern; the other branches' stay (one of the
+    /// person's branches, else 400 `EMPLOYEE_NOT_AT_BRANCH`). Omitted (an
+    /// old client) = the branches the caller may edit the roster at: an
+    /// owner resets the whole date, as before.
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, ToSchema)]
@@ -513,16 +539,9 @@ pub async fn my_schedule(
     let employee_id = me.employee_id;
     let org_id = me.org_id;
 
-    if query.to < query.from {
-        return Err(AppError::BadRequest("`to` is before `from`".into()));
-    }
     // A phone shows a week or a month; anything larger is a scrape, not a screen.
+    crate::staff::validate_range(query.from, query.to, 62)?;
     let span = (query.to - query.from).num_days();
-    if span > 62 {
-        return Err(AppError::BadRequest(
-            "Range too wide — request 62 days or fewer".into(),
-        ));
-    }
 
     let tz = employee_timezone(pool.get_ref(), org_id, employee_id).await?;
     // Named only when the employee has exactly ONE live branch — the same rule
@@ -598,14 +617,30 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
+/// 400 `SHIFT_SETTING_INVALID` {field}: one of a block's numbers is out of range.
+fn setting_invalid(field: &str, reason: String) -> AppError {
+    crate::staff::coded_vars(
+        400,
+        "SHIFT_SETTING_INVALID",
+        reason,
+        serde_json::json!({ "field": field }),
+    )
+}
+
 fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError> {
     let name = body.name.trim();
     if name.is_empty() {
-        return Err(AppError::BadRequest("Shift name is required".into()));
+        return Err(crate::staff::coded(
+            400,
+            "SHIFT_NAME_REQUIRED",
+            "Shift name is required",
+        ));
     }
     if body.start_time == body.end_time {
-        return Err(AppError::BadRequest(
-            "A shift cannot start and end at the same time".into(),
+        return Err(crate::staff::coded(
+            400,
+            "SHIFT_EMPTY",
+            "A shift cannot start and end at the same time",
         ));
     }
     for (label, value) in [
@@ -617,23 +652,29 @@ fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError
         ),
     ] {
         if value.is_some_and(|v| v < 0) {
-            return Err(AppError::BadRequest(format!("{label} cannot be negative")));
+            return Err(setting_invalid(
+                label,
+                format!("{label} cannot be negative"),
+            ));
         }
     }
-    if body.checkin_window_minutes.is_some_and(|v| v <= 0) {
-        return Err(AppError::BadRequest(
-            "checkin_window_minutes must be positive".into(),
-        ));
-    }
-    if body.half_day_threshold_minutes.is_some_and(|v| v <= 0) {
-        return Err(AppError::BadRequest(
-            "half_day_threshold_minutes must be positive".into(),
-        ));
-    }
-    if body.overtime_multiplier.is_some_and(|v| v <= Decimal::ZERO) {
-        return Err(AppError::BadRequest(
-            "overtime_multiplier must be positive".into(),
-        ));
+    for (label, bad) in [
+        (
+            "checkin_window_minutes",
+            body.checkin_window_minutes.is_some_and(|v| v <= 0),
+        ),
+        (
+            "half_day_threshold_minutes",
+            body.half_day_threshold_minutes.is_some_and(|v| v <= 0),
+        ),
+        (
+            "overtime_multiplier",
+            body.overtime_multiplier.is_some_and(|v| v <= Decimal::ZERO),
+        ),
+    ] {
+        if bad {
+            return Err(setting_invalid(label, format!("{label} must be positive")));
+        }
     }
     for (label, value) in [
         ("ot_day_multiplier", body.ot_day_multiplier.flatten()),
@@ -641,29 +682,36 @@ fn validate_work_shift(body: &UpsertWorkShiftRequest) -> Result<String, AppError
     ] {
         // numeric(4,2): above zero, below 100.
         if value.is_some_and(|v| v <= Decimal::ZERO || v >= Decimal::from(100)) {
-            return Err(AppError::BadRequest(format!(
-                "{label} must be above 0 and below 100"
-            )));
+            return Err(setting_invalid(
+                label,
+                format!("{label} must be above 0 and below 100"),
+            ));
         }
     }
     if let Some(days) = &body.valid_days
         && (days.is_empty() || days.iter().any(|d| !(0..=6).contains(d)))
     {
-        return Err(AppError::BadRequest(
-            "valid_days needs at least one day, 0 (Sunday) through 6 (Saturday)".into(),
+        return Err(crate::staff::coded(
+            400,
+            "SHIFT_DAYS_REQUIRED",
+            "valid_days needs at least one day, 0 (Sunday) through 6 (Saturday)",
         ));
     }
     if let Some(times) = &body.day_times {
         let mut seen = BTreeSet::new();
         for t in times {
             if !(0..=6).contains(&t.day_of_week) || !seen.insert(t.day_of_week) {
-                return Err(AppError::BadRequest(
-                    "day_times: one entry per day, 0 (Sunday) through 6 (Saturday)".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "SHIFT_DAY_TIMES_INVALID",
+                    "day_times: one entry per day, 0 (Sunday) through 6 (Saturday)",
                 ));
             }
             if t.start_time == t.end_time {
-                return Err(AppError::BadRequest(
-                    "A shift cannot start and end at the same time".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "SHIFT_EMPTY",
+                    "A shift cannot start and end at the same time",
                 ));
             }
         }
@@ -720,7 +768,7 @@ async fn load_work_shift(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<WorkSh
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Work shift not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "SHIFT_NOT_FOUND", "Work shift not found"))?;
     complete_shifts(pool, org_id, std::slice::from_mut(&mut row)).await?;
     Ok(row)
 }
@@ -797,7 +845,7 @@ pub async fn create_work_shift(
         &claims,
         org_id,
         Cap::HrScheduleCreate,
-        body.branch_id,
+        body.branch_id.flatten(),
     )
     .await?;
     let name = validate_work_shift(&body)?;
@@ -821,7 +869,7 @@ pub async fn create_work_shift(
         "#,
     )
     .bind(org_id)
-    .bind(body.branch_id)
+    .bind(body.branch_id.flatten())
     .bind(&name)
     .bind(body.start_time)
     .bind(body.end_time)
@@ -846,10 +894,15 @@ pub async fn create_work_shift(
 
 fn refuse_times_off_days(valid_days: &[i16], times: &[DayTime]) -> Result<(), AppError> {
     if let Some(t) = times.iter().find(|t| !valid_days.contains(&t.day_of_week)) {
-        return Err(AppError::BadRequest(format!(
-            "day {} has its own times but isn't one of the block's days",
-            t.day_of_week
-        )));
+        return Err(crate::staff::coded_vars(
+            400,
+            "SHIFT_DAY_TIMES_OFF_DAY",
+            format!(
+                "day {} has its own times but isn't one of the block's days",
+                t.day_of_week
+            ),
+            serde_json::json!({ "day_of_week": t.day_of_week }),
+        ));
     }
     Ok(())
 }
@@ -890,15 +943,11 @@ pub async fn update_work_shift(
         current,
     )
     .await?;
-    if body.branch_id != current {
-        require_shift_scope(
-            pool.get_ref(),
-            &claims,
-            org_id,
-            Cap::HrScheduleEdit,
-            body.branch_id,
-        )
-        .await?;
+    // Omitted keeps the branch; only an explicit null moves the block to the
+    // whole business (E2E B-ROTA-8).
+    let branch = body.branch_id.unwrap_or(current);
+    if branch != current {
+        require_shift_scope(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit, branch).await?;
     }
     let name = validate_work_shift(&body)?;
     let before = load_work_shift(pool.get_ref(), org_id, *id).await?;
@@ -931,13 +980,16 @@ pub async fn update_work_shift(
         .fetch_one(&mut *tx)
         .await?;
         if stuck > 0 {
-            return Err(AppError::Refused {
+            // With its figures (AT-13, E2E B-ROTA-3).
+            return Err(AppError::CodedVars {
+                status: 409,
                 code: "SHIFT_DAYS_IN_USE",
                 reason: format!(
                     "{stuck} roster entr{} still put {} on the days you took away — move them first.",
                     if stuck == 1 { "y" } else { "ies" },
                     before.name
                 ),
+                vars: serde_json::json!({ "n": stuck, "name": before.name, "days": dropped }),
             });
         }
     }
@@ -974,7 +1026,7 @@ pub async fn update_work_shift(
     )
     .bind(*id)
     .bind(org_id)
-    .bind(body.branch_id)
+    .bind(branch)
     .bind(&name)
     .bind(body.start_time)
     .bind(body.end_time)
@@ -1047,10 +1099,21 @@ pub async fn delete_work_shift(
     .fetch_one(pool.get_ref())
     .await?;
     if assigned > 0 {
-        return Err(AppError::BadRequest(format!(
-            "{assigned} roster assignment(s) still use this shift — remove them first, \
-             or deactivate the shift instead"
-        )));
+        // Coded with its figures, for the client's own wording (AT-13, E2E
+        // B-ROTA-2); a conflict with the roster, like SHIFT_DAYS_IN_USE.
+        let name: String = sqlx::query_scalar("SELECT name FROM work_shifts WHERE id = $1")
+            .bind(*id)
+            .fetch_one(pool.get_ref())
+            .await?;
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "SHIFT_IN_USE",
+            reason: format!(
+                "{assigned} roster assignment(s) still use {name} — remove them first, \
+                 or switch the shift off instead"
+            ),
+            vars: serde_json::json!({ "n": assigned, "name": name }),
+        });
     }
 
     let deleted = sqlx::query("DELETE FROM work_shifts WHERE id = $1 AND org_id = $2")
@@ -1060,7 +1123,11 @@ pub async fn delete_work_shift(
         .await?
         .rows_affected();
     if deleted == 0 {
-        return Err(AppError::NotFound("Work shift not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "SHIFT_NOT_FOUND",
+            "Work shift not found",
+        ));
     }
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1084,7 +1151,7 @@ pub async fn list_assignments(
 
     let rows = sqlx::query_as::<_, ScheduleAssignment>(&format!(
         "SELECT s.id, s.org_id, s.employee_id, s.work_shift_id, ws.name AS work_shift_name, \
-                s.day_of_week, s.effective_from, s.effective_to, s.created_at \
+                s.day_of_week, s.effective_from, s.effective_to, s.created_at, s.branch_id \
            FROM staff_schedules s \
            JOIN work_shifts ws ON ws.id = s.work_shift_id \
           WHERE ($1::uuid IS NULL OR s.employee_id = $1) AND s.org_id = $2 AND {} \
@@ -1129,17 +1196,25 @@ pub async fn create_assignment(
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
     let subject = access::subject(pool.get_ref(), org_id, body.employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
+    // The board it is set from (hunt H2-B8b): the person's, and the caller's.
+    if let Some(at) = body.branch_id {
+        board_branch(pool.get_ref(), &claims, org_id, &subject, at).await?;
+    }
 
     if body.day_of_week.is_some_and(|d| !(0..=6).contains(&d)) {
-        return Err(AppError::BadRequest(
-            "day_of_week must be 0 (Sunday) through 6 (Saturday)".into(),
+        return Err(crate::staff::coded(
+            400,
+            "DAY_OF_WEEK_INVALID",
+            "day_of_week must be 0 (Sunday) through 6 (Saturday)",
         ));
     }
     if let (Some(from), Some(to)) = (body.effective_from, body.effective_to)
         && to < from
     {
-        return Err(AppError::BadRequest(
-            "effective_to is before effective_from".into(),
+        return Err(crate::staff::coded(
+            400,
+            "RANGE_BACKWARDS",
+            "effective_to is before effective_from",
         ));
     }
     let info = days::block_info(
@@ -1176,12 +1251,19 @@ pub async fn create_assignment(
     let row = sqlx::query_as::<_, ScheduleAssignment>(
         "WITH ins AS (
              INSERT INTO staff_schedules
-                 (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to)
-             VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6)
+                 (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to,
+                  branch_id)
+             VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6,
+                     (SELECT $7::uuid
+                       WHERE EXISTS (SELECT 1 FROM work_shifts w
+                                      WHERE w.id = $3 AND w.branch_id IS NULL)
+                         AND EXISTS (SELECT 1 FROM employee_branches eb
+                                      WHERE eb.employee_id = $2 AND eb.branch_id = $7)))
              RETURNING *
          )
          SELECT ins.id, ins.org_id, ins.employee_id, ins.work_shift_id, ws.name AS work_shift_name,
-                ins.day_of_week, ins.effective_from, ins.effective_to, ins.created_at
+                ins.day_of_week, ins.effective_from, ins.effective_to, ins.created_at,
+                ins.branch_id
            FROM ins JOIN work_shifts ws ON ws.id = ins.work_shift_id",
     )
     .bind(org_id)
@@ -1190,6 +1272,7 @@ pub async fn create_assignment(
     .bind(body.day_of_week)
     .bind(body.effective_from)
     .bind(body.effective_to)
+    .bind(body.branch_id)
     .fetch_one(&mut *tx)
     .await?;
     // Two weeks from when it starts covers every weekday twice, the night
@@ -1228,7 +1311,9 @@ pub async fn delete_assignment(
             .bind(org_id)
             .fetch_optional(pool.get_ref())
             .await?
-            .ok_or_else(|| AppError::NotFound("Assignment not found".into()))?;
+            .ok_or_else(|| {
+                crate::staff::coded(404, "ASSIGNMENT_NOT_FOUND", "Assignment not found")
+            })?;
     let subject = access::subject(pool.get_ref(), org_id, owner).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
@@ -1245,7 +1330,11 @@ pub async fn delete_assignment(
         .await?
         .rows_affected();
     if deleted == 0 {
-        return Err(AppError::NotFound("Assignment not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "ASSIGNMENT_NOT_FOUND",
+            "Assignment not found",
+        ));
     }
     let changes = match horizon {
         Some((a, b)) => days::diff(&before, &days::snapshot(&mut tx, &[owner], a, b).await?),
@@ -1270,8 +1359,10 @@ fn times_of(
             code: "SHIFT_EMPTY",
             reason: "A shift can't start and end at the same time.".into(),
         }),
-        _ => Err(AppError::BadRequest(
-            "Send both start_time and end_time, or neither".into(),
+        _ => Err(crate::staff::coded(
+            400,
+            "TIMES_BOTH_OR_NEITHER",
+            "Send both start_time and end_time, or neither",
         )),
     }
 }
@@ -1389,11 +1480,16 @@ pub async fn put_override(
         .map(|work_shift_id| Block {
             work_shift_id,
             times,
+            branch_id: None,
         })
         .into_iter()
         .collect();
     if body.work_shift_id.is_none() && times.is_some() {
-        return Err(AppError::BadRequest("A day off has no times".into()));
+        return Err(crate::staff::coded(
+            400,
+            "DAY_OFF_NO_TIMES",
+            "A day off has no times",
+        ));
     }
     let by = claims.user_id_safe().ok();
     authorize_blocks(pool, &claims, org_id, &blocks).await?;
@@ -1460,23 +1556,48 @@ pub async fn put_day(
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     let subject = editable_subject(pool, &claims, org_id, body.employee_id).await?;
+    // The board it is set from (hunt H2-B8): the person's, and the caller's.
+    if let Some(at) = body.branch_id {
+        board_branch(pool, &claims, org_id, &subject, at).await?;
+    }
     let mut blocks = Vec::with_capacity(body.shifts.len());
     for s in &body.shifts {
         blocks.push(Block {
             work_shift_id: s.work_shift_id,
             times: times_of(s.start_time, s.end_time)?,
+            branch_id: body.branch_id,
         });
     }
     let by = claims.user_id_safe().ok();
     authorize_blocks(pool, &claims, org_id, &blocks).await?;
     let mut tx = pool.begin().await?;
     check_blocks(&mut tx, &subject, body.on_date, &blocks).await?;
+    // A board sends only its own branch's blocks (hunt H2-D15, SC-5): from a
+    // branch, the date's blocks worked at ANOTHER branch stay as they are
+    // (own times and branch) unless the request names them. With no branch
+    // (an old client) the whole date is replaced, as before.
+    let mut day = blocks.clone();
+    if let Some(at) = body.branch_id {
+        for s in resolve_range(&mut *tx, &[subject.id], body.on_date, body.on_date, None).await? {
+            if s.on_date != body.on_date
+                || s.branch_id == Some(at)
+                || day.iter().any(|b| b.work_shift_id == s.work_shift_id)
+            {
+                continue;
+            }
+            day.push(Block {
+                work_shift_id: s.work_shift_id,
+                times: s.times_edited.then_some((s.start_time, s.end_time)),
+                branch_id: s.branch_id,
+            });
+        }
+    }
     days::replace_day(
         &mut tx,
         org_id,
         subject.id,
         body.on_date,
-        &blocks,
+        &day,
         clean_reason(&body.reason),
         by,
     )
@@ -1498,6 +1619,26 @@ pub async fn put_day(
     Ok(HttpResponse::Ok().json(day_view(pool, org_id, subject.id, body.on_date).await?))
 }
 
+/// The branch whose board sets a day or a pattern (hunt H2-B8, B8b): one of
+/// the person's (400 `EMPLOYEE_NOT_AT_BRANCH`), where the caller may edit
+/// the roster (403).
+async fn board_branch(
+    pool: &PgPool,
+    claims: &crate::auth::jwt::Claims,
+    org_id: Uuid,
+    subject: &access::Subject,
+    at: Uuid,
+) -> Result<(), AppError> {
+    if !subject.branches.contains(&at) {
+        return Err(AppError::Coded {
+            status: 400,
+            code: "EMPLOYEE_NOT_AT_BRANCH",
+            reason: format!("{} doesn't work at that branch.", subject.name),
+        });
+    }
+    access::require_at(pool, claims, org_id, Cap::HrScheduleEdit, at).await
+}
+
 /// Put a date back on the standing pattern.
 #[utoipa::path(
     delete, path = "/staff/schedules/days", tag = "staff",
@@ -1515,11 +1656,27 @@ pub async fn reset_day(
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     let subject = editable_subject(pool, &claims, org_id, query.employee_id).await?;
+    let scope = match query.branch_id {
+        Some(at) => {
+            board_branch(pool, &claims, org_id, &subject, at).await?;
+            Some(vec![at])
+        }
+        None => access::scope(pool, &claims, org_id, Cap::HrScheduleEdit).await?,
+    };
+    let by = claims.user_id_safe().ok();
     let mut tx = pool.begin().await?;
-    let removed = days::reset_day(&mut tx, subject.id, query.on_date).await?;
+    let changed = days::reset_day(
+        &mut tx,
+        org_id,
+        subject.id,
+        query.on_date,
+        scope.as_deref(),
+        by,
+    )
+    .await?;
     days::check_overlaps(&mut tx, subject.id, query.on_date, query.on_date).await?;
     tx.commit().await?;
-    if removed > 0 {
+    if changed {
         after_day_change(pool, org_id, subject.id, query.on_date).await?;
     }
     Ok(HttpResponse::Ok().json(day_view(pool, org_id, subject.id, query.on_date).await?))
@@ -1587,17 +1744,26 @@ pub async fn move_shift(
     let pool = pool.get_ref();
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     if body.employee_id == body.to_employee_id {
-        return Err(AppError::BadRequest("Pick someone else.".into()));
+        return Err(crate::staff::coded(
+            400,
+            "PICK_SOMEONE_ELSE",
+            "Pick someone else.",
+        ));
     }
     let from = editable_subject(pool, &claims, org_id, body.employee_id).await?;
     let to = editable_subject(pool, &claims, org_id, body.to_employee_id).await?;
     if to.employment_status != "active" {
-        return Err(AppError::NotFound("Employee not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "EMPLOYEE_NOT_FOUND",
+            "Employee not found",
+        ));
     }
     let by = claims.user_id_safe().ok();
     let block_only = Block {
         work_shift_id: body.work_shift_id,
         times: None,
+        branch_id: None,
     };
     authorize_blocks(pool, &claims, org_id, &[block_only]).await?;
     let mut tx = pool.begin().await?;
@@ -1611,15 +1777,32 @@ pub async fn move_shift(
         by,
     )
     .await?;
-    let Some(times) = removed else {
+    let Some(removed) = removed else {
         return Err(AppError::Refused {
             code: "NOT_ROSTERED",
             reason: format!("{} isn't on that shift that day.", from.name),
         });
     };
+    // Already on that block that day? Adding it would be a no-op on the
+    // date's set and the block would simply vanish from `from` (E2E
+    // B-ROTA-1). Refused; the transaction rolls back and `from` keeps it.
+    if let Some(on) = resolve_range(&mut *tx, &[to.id], body.on_date, body.on_date, None)
+        .await?
+        .into_iter()
+        .find(|s| s.work_shift_id == body.work_shift_id)
+    {
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "ALREADY_ROSTERED",
+            reason: format!("{} is already on {} that day.", to.name, on.name),
+            vars: serde_json::json!({ "name": to.name, "shift": on.name, "date": body.on_date }),
+        });
+    }
+    // Its times, and where it was worked (hunt H2-B8).
     let block = Block {
         work_shift_id: body.work_shift_id,
-        times,
+        times: removed.times,
+        branch_id: removed.branch_id,
     };
     check_blocks(&mut tx, &to, body.on_date, &[block]).await?;
     days::add_block(
@@ -1677,7 +1860,7 @@ pub async fn delete_override(
     .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?
-    .ok_or_else(|| AppError::NotFound("Override not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "OVERRIDE_NOT_FOUND", "Override not found"))?;
     let (owner, on_date) = row;
     let subject = access::subject(pool.get_ref(), org_id, owner).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
@@ -1690,7 +1873,11 @@ pub async fn delete_override(
         .await?
         .rows_affected();
     if deleted == 0 {
-        return Err(AppError::NotFound("Override not found".into()));
+        return Err(crate::staff::coded(
+            404,
+            "OVERRIDE_NOT_FOUND",
+            "Override not found",
+        ));
     }
     days::check_overlaps(&mut tx, owner, on_date, on_date).await?;
     tx.commit().await?;
@@ -1784,7 +1971,7 @@ async fn shift_branch(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<Option<Uu
             .bind(org_id)
             .fetch_optional(pool)
             .await?;
-    row.ok_or_else(|| AppError::NotFound("Work shift not found".into()))
+    row.ok_or_else(|| crate::staff::coded(404, "SHIFT_NOT_FOUND", "Work shift not found"))
 }
 
 /// A branch's shift is its manager's; an org-wide template needs the

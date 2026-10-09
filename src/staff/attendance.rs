@@ -93,9 +93,14 @@ pub struct AttendanceRecord {
     pub overtime_status: Option<String>,
     #[sqlx(default)]
     pub tracking_off: bool,
-    /// Why someone else punched for this person.
+    /// Why someone else punched this person IN (or the only punch they made).
     #[sqlx(default)]
     pub punch_reason: Option<String>,
+    /// Why someone else punched this person OUT; the in-reason stays in
+    /// `punch_reason` (AT-10, Mac E2E BC-1).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub check_out_reason: Option<String>,
     /// A manager set this day's status by hand; automation keeps it (AT-7).
     #[sqlx(default)]
     #[serde(default)]
@@ -122,6 +127,7 @@ const RECORD_COLS: &str = r#"
     a.is_manual, a.notes, a.edit_reason, a.created_by, a.edited_by,
     a.created_at, a.updated_at, a.covered_employee_id, a.cover_status,
     a.overtime_status, a.tracking_off, a.punch_reason, a.status_overridden,
+    a.check_out_reason,
     EXISTS (SELECT 1 FROM payroll_periods pp
              WHERE pp.org_id = a.org_id AND pp.status IN ('generated', 'paid', 'closed')
                AND pp.start_date <= a.business_date AND pp.end_date >= a.business_date)
@@ -174,6 +180,11 @@ pub struct AttendanceSettings {
     pub limit_overtime_day_hours: Decimal,
     /// POS-derived coverage: one person per this many orders an hour.
     pub orders_per_staff: i32,
+    /// How a confirmed cover is paid (owner decision D5): `minute_rate` (the
+    /// coverer's day rate ÷ 8 h × the minutes covered, CV-4; the default) or
+    /// `full_block` (the covered block as a full day). A branch may override
+    /// it (listed in `overridden`).
+    pub cover_pay_mode: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// For a branch: the rules it sets itself (every other field is the
@@ -381,6 +392,10 @@ pub struct PutAttendanceSettingsRequest {
     pub limit_overtime_day_hours: Option<Decimal>,
     #[serde(default)]
     pub orders_per_staff: Option<i32>,
+    /// `minute_rate` · `full_block` (D5). On a branch: its own override;
+    /// `inherit: ["cover_pay_mode"]` goes back to the business's.
+    #[serde(default)]
+    pub cover_pay_mode: Option<String>,
     /// Branch only: rules to take from the business again (field names, as
     /// in `overridden`).
     #[serde(default)]
@@ -398,6 +413,31 @@ pub struct AttendanceQuery {
     pub employee_id: Option<Uuid>,
     #[serde(default)]
     pub status: Option<String>,
+}
+
+/// `GET /staff/attendance`: a date range, or — for Approvals — every
+/// pending cover or overtime however old (hunt H2-B5).
+#[derive(Deserialize, IntoParams, Debug)]
+#[into_params(parameter_in = Query)]
+pub struct AttendanceListQuery {
+    /// Required unless `cover_status` or `overtime_status` is `pending`.
+    #[serde(default)]
+    pub from: Option<NaiveDate>,
+    /// Required unless `cover_status` or `overtime_status` is `pending`.
+    #[serde(default)]
+    pub to: Option<NaiveDate>,
+    #[serde(default)]
+    pub branch_id: Option<Uuid>,
+    #[serde(default)]
+    pub employee_id: Option<Uuid>,
+    #[serde(default)]
+    pub status: Option<String>,
+    /// `pending` · `confirmed` · `rejected`: covers in that state.
+    #[serde(default)]
+    pub cover_status: Option<String>,
+    /// `pending` · `approved` · `rejected`: overtime in that state.
+    #[serde(default)]
+    pub overtime_status: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams, Debug)]
@@ -484,6 +524,11 @@ pub struct DayAdjustments {
     pub leave_paid: bool,
     /// A half-day leave: the half of the day's rostered time that is off (RQ-8).
     pub half_off: Option<ExcusedWindow>,
+    /// When the phone's pings put the person outside the fence on this day's
+    /// own records: each run from its first outside ping to the ping that
+    /// found them back (an open run to the check-out). Only ever read inside
+    /// an approved excuse or early departure (owner decision D2).
+    pub away: Vec<(DateTime<Utc>, DateTime<Utc>)>,
 }
 
 /// [`DayAdjustments`] resolved for one shift.
@@ -504,6 +549,72 @@ pub struct ShiftAdjustments {
     /// they are paid.
     pub leave_minutes: i64,
     pub leave_paid: bool,
+    /// The rostered window, when there is one: approved time off counts only
+    /// inside it.
+    pub shift: Option<(DateTime<Utc>, DateTime<Utc>)>,
+    /// The day's pinged-away runs ([`DayAdjustments::away`]).
+    pub away: Vec<(DateTime<Utc>, DateTime<Utc>)>,
+}
+
+/// A span of time, `[from, to)`.
+type Span = (DateTime<Utc>, DateTime<Utc>);
+
+/// Sorted, merged, non-empty spans.
+fn merge_spans(mut spans: Vec<Span>) -> Vec<Span> {
+    spans.retain(|(a, b)| b > a);
+    spans.sort();
+    let mut out: Vec<Span> = Vec::new();
+    for (a, b) in spans {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// Every part of `a` that is also in `b`, merged.
+fn intersect_spans(a: &[Span], b: &[Span]) -> Vec<Span> {
+    let mut out = Vec::new();
+    for &(a0, a1) in a {
+        for &(b0, b1) in b {
+            let (lo, hi) = (a0.max(b0), a1.min(b1));
+            if hi > lo {
+                out.push((lo, hi));
+            }
+        }
+    }
+    merge_spans(out)
+}
+
+/// `a` with every part of `holes` taken out (both merged).
+fn subtract_spans(a: &[Span], holes: &[Span]) -> Vec<Span> {
+    let mut out = Vec::new();
+    for &(a0, a1) in a {
+        let mut cur = a0;
+        for &(h0, h1) in holes {
+            if h1 <= cur || h0 >= a1 {
+                continue;
+            }
+            if h0 > cur {
+                out.push((cur, h0));
+            }
+            cur = cur.max(h1);
+        }
+        if cur < a1 {
+            out.push((cur, a1));
+        }
+    }
+    out
+}
+
+/// Whole minutes in `spans` (merged).
+fn span_minutes(spans: &[Span]) -> i64 {
+    spans
+        .iter()
+        .map(|(a, b)| (*b - *a).num_seconds())
+        .sum::<i64>()
+        / 60
 }
 
 impl DayAdjustments {
@@ -525,6 +636,8 @@ impl DayAdjustments {
             on_leave: self.on_leave,
             leave_paid: self.leave_paid,
             leave_minutes: if self.on_leave { window_minutes } else { 0 },
+            shift: start.zip(end).filter(|(s, e)| e > s),
+            away: self.away.clone(),
             ..Default::default()
         };
         if let (Some(s), Some(e)) = (start, end) {
@@ -556,6 +669,16 @@ impl DayAdjustments {
                         to: *to,
                         paid: r.paid,
                     });
+                    // An excuse over the shift's start lets them arrive when
+                    // it ends, and one over its end lets them leave when it
+                    // starts: the time is priced as time away (paid or
+                    // unpaid, D2), never again as lateness or leaving early.
+                    if *from <= s && out.excused_until.is_none_or(|cur| *to > cur) {
+                        out.excused_until = Some((*to).min(e));
+                    }
+                    if *from > s && *to >= e && out.excused_from.is_none_or(|cur| *from < cur) {
+                        out.excused_from = Some(*from);
+                    }
                 }
             }
             if let Some(off) = self.half_off.filter(|_| !self.on_leave) {
@@ -595,44 +718,80 @@ impl DayAdjustments {
 }
 
 impl ShiftAdjustments {
-    /// Minutes inside `[in, out]` that an approved excuse forgives, paid or
-    /// unpaid as asked.
-    ///
-    /// Clipped to the attendance window because an excuse that runs past
-    /// check-out did not consume time the employee was being paid for anyway;
-    /// crediting it would pay them for being absent twice over.
-    fn excused_minutes(
-        &self,
-        check_in: DateTime<Utc>,
-        check_out: DateTime<Utc>,
-        paid: bool,
-    ) -> i64 {
-        self.excuses
+    /// The approved windows of one pay kind, clipped to the shift: each
+    /// excuse, and an early departure from its time to the shift's end.
+    fn windows(&self, paid: bool) -> Vec<Span> {
+        let mut spans: Vec<Span> = self
+            .excuses
             .iter()
             .filter(|w| w.paid == paid)
-            .map(|w| w.minutes_within(check_in, check_out))
-            .sum()
+            .map(|w| (w.from, w.to))
+            .collect();
+        if let (Some((from, p)), Some((_, end))) = (self.early_departure, self.shift)
+            && p == paid
+        {
+            spans.push((from, end));
+        }
+        let spans = merge_spans(spans);
+        match self.shift {
+            Some(shift) => intersect_spans(&spans, &[shift]),
+            None => spans,
+        }
     }
 
-    /// Minutes of approved but UNPAID time off inside a closed shift (RQ-7):
-    /// an unpaid excuse while clocked in, and the tail of the shift an unpaid
-    /// early departure covers. Priced as an `excused_unpaid` deduction.
+    /// The minutes actually away inside `windows` (owner decision D2, 24 Sep
+    /// 2026): the part the person wasn't clocked in for (only inside a
+    /// rostered shift: an unrostered day owes nothing), plus the part the
+    /// phone's pings put them outside the fence while clocked in. Being
+    /// there all along is zero, whatever the request said.
+    fn away_within(
+        &self,
+        windows: &[Span],
+        check_in: DateTime<Utc>,
+        check_out: DateTime<Utc>,
+    ) -> Vec<Span> {
+        let clocked = [(check_in, check_out)];
+        let unclocked = match self.shift {
+            Some(_) => subtract_spans(windows, &clocked),
+            None => Vec::new(),
+        };
+        let pinged = intersect_spans(
+            &intersect_spans(windows, &clocked),
+            &merge_spans(self.away.clone()),
+        );
+        merge_spans(unclocked.into_iter().chain(pinged).collect())
+    }
+
+    /// Minutes of approved but UNPAID time off actually taken inside a closed
+    /// shift (RQ-7, D2): an unpaid excuse or early departure charges only the
+    /// minutes away inside its window. A paid window wins where the two
+    /// overlap. Priced as an `excused_unpaid` deduction.
     pub fn unpaid_excused_minutes(
         &self,
         check_in: Option<DateTime<Utc>>,
         check_out: Option<DateTime<Utc>>,
-        scheduled_end: Option<DateTime<Utc>>,
     ) -> i64 {
         let (Some(in_at), Some(out_at)) = (check_in, check_out) else {
             return 0;
         };
-        let mut minutes = self.excused_minutes(in_at, out_at, false);
-        if let (Some((from, false)), Some(end)) = (self.early_departure, scheduled_end)
-            && out_at < end
-        {
-            minutes += (end - out_at.max(from)).num_minutes().max(0);
-        }
-        minutes
+        let unpaid = subtract_spans(&self.windows(false), &self.windows(true));
+        span_minutes(&self.away_within(&unpaid, in_at, out_at))
+    }
+
+    /// Minutes the pings put the person away while clocked in, inside any
+    /// approved window: not worked, so never counted as worked (D2).
+    fn away_while_clocked(&self, check_in: DateTime<Utc>, check_out: DateTime<Utc>) -> i64 {
+        let all = merge_spans(
+            self.windows(true)
+                .into_iter()
+                .chain(self.windows(false))
+                .collect(),
+        );
+        let clocked = [(check_in, check_out)];
+        span_minutes(&intersect_spans(
+            &intersect_spans(&all, &clocked),
+            &merge_spans(self.away.clone()),
+        ))
     }
 }
 
@@ -671,12 +830,16 @@ pub fn derive(
         _ => 0,
     };
 
-    // A PAID excuse credits the time back: the employee was permitted to be away,
-    // so those minutes count toward the day. An UNPAID one leaves `worked` alone —
-    // the gap is missing from the clocked span, and the `excused_unpaid`
-    // deduction prices it.
+    // Worked time never goes above real presence (owner decision D2): an
+    // approved excuse credits nothing (a paid one used to add its window on
+    // top of the time the person was there anyway, 8h00 became 9h05), and
+    // the minutes the pings put them away inside an approved window are not
+    // worked. A paid window forgives them; an unpaid one is priced as an
+    // `excused_unpaid` deduction.
+    let mut away_mid = 0;
     if let (Some(in_at), Some(out_at)) = (check_in_at, check_out_at) {
-        worked += adjustments.excused_minutes(in_at, out_at, true);
+        away_mid = adjustments.away_while_clocked(in_at, out_at);
+        worked = (worked - away_mid).max(0);
     }
 
     let (overtime, early) = match (scheduled_end_at, check_out_at) {
@@ -715,23 +878,23 @@ pub fn derive(
             AttendanceStatus::Present
         }
     } else {
-        // An approved early departure (or half a day on leave) shortens the
-        // time the employee OWED, so the half-day threshold shrinks with it —
-        // otherwise permission to leave at noon would still be recorded as
-        // half a day.
+        // An approved early departure or late arrival (or half a day on
+        // leave) shortens the time the employee OWED, so the half-day
+        // threshold shrinks with it — otherwise permission to leave at noon,
+        // or to come in at four, would still be recorded as half a day.
         let span = shift.map(|s| s.span_minutes()).unwrap_or(0);
         let excused_tail = match (adjustments.excused_from, scheduled_end_at) {
             (Some(from), Some(end)) => (end - from).num_minutes().max(0),
             _ => 0,
         };
+        // The head is excused by a first-half leave or by an approved late
+        // arrival alike (the agreed arrival time; Mac E2E): `excused_until`
+        // carries whichever is later.
         let excused_head = match (adjustments.excused_until, scheduled_start_at) {
-            (Some(until), Some(start)) if adjustments.leave_minutes > 0 => (until - start)
-                .num_minutes()
-                .max(0)
-                .min(adjustments.leave_minutes),
+            (Some(until), Some(start)) => (until - start).num_minutes().max(0),
             _ => 0,
         };
-        let owed = (span - excused_tail - excused_head).max(0);
+        let owed = (span - excused_tail - excused_head - away_mid).max(0);
         rules::classify(
             check_in_at.is_some(),
             worked,
@@ -876,6 +1039,11 @@ const RULE_FIELDS: &[RuleField] = &[
     RuleField {
         name: "orders_per_staff",
         default: "12",
+        branch: true,
+    },
+    RuleField {
+        name: "cover_pay_mode",
+        default: "'minute_rate'",
         branch: true,
     },
 ];
@@ -1103,6 +1271,7 @@ fn bind_rule<'q>(
         "limit_rest_hours" => q.bind(body.limit_rest_hours),
         "limit_overtime_day_hours" => q.bind(body.limit_overtime_day_hours),
         "orders_per_staff" => q.bind(body.orders_per_staff),
+        "cover_pay_mode" => q.bind(body.cover_pay_mode.as_deref()),
         other => unreachable!("rule field {other} has no binding"),
     }
 }
@@ -1133,6 +1302,7 @@ fn rule_sent(name: &str, body: &PutAttendanceSettingsRequest) -> bool {
         "limit_rest_hours" => body.limit_rest_hours.is_some(),
         "limit_overtime_day_hours" => body.limit_overtime_day_hours.is_some(),
         "orders_per_staff" => body.orders_per_staff.is_some(),
+        "cover_pay_mode" => body.cover_pay_mode.is_some(),
         _ => false,
     }
 }
@@ -1163,35 +1333,10 @@ pub async fn put_attendance_settings(
     if let Some(tiers) = body.late_deduction_tiers.as_deref() {
         rules::validate_tiers(tiers)?;
     }
-    if let Some(mode) = body.gender_mode.as_deref() {
-        if !matches!(mode, "off" | "soft" | "hard") {
-            return Err(AppError::BadRequest(
-                "gender_mode is off, soft or hard".into(),
-            ));
-        }
+    check_setting_ranges(&body)?;
+    if body.gender_mode.is_some() {
         // Roster settings are the owner's (hr.roster.settings).
         access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrRosterSettings).await?;
-    }
-    if body
-        .working_days_per_month
-        .is_some_and(|d| d <= Decimal::ZERO)
-    {
-        return Err(AppError::BadRequest(
-            "working_days_per_month must be positive".into(),
-        ));
-    }
-    if body
-        .default_overtime_multiplier
-        .is_some_and(|m| m <= Decimal::ZERO)
-    {
-        return Err(AppError::BadRequest(
-            "default_overtime_multiplier must be positive".into(),
-        ));
-    }
-    if body.auto_checkout_buffer_minutes.is_some_and(|m| m < 0) {
-        return Err(AppError::BadRequest(
-            "auto_checkout_buffer_minutes cannot be negative".into(),
-        ));
     }
     let inherit: Vec<String> = body.inherit.clone().unwrap_or_default();
     let branch_fields = branch_rule_fields();
@@ -1288,6 +1433,202 @@ pub async fn put_attendance_settings(
     Ok(HttpResponse::Ok().json(row))
 }
 
+/// Every number and choice of the rules within what makes sense — checked
+/// here, so an impossible value is never stored and never surfaces as a raw
+/// "Database error" (E2E B-SETUP-1, RU-8, AV-5, RU-13, AT-11). The refusal is
+/// 400 `SETTING_OUT_OF_RANGE` with `{field, min, max}` (or `{field, allowed}`)
+/// for the client's own wording (AT-13).
+fn check_setting_ranges(body: &PutAttendanceSettingsRequest) -> Result<(), AppError> {
+    fn out(field: &str, why: String, vars: serde_json::Value) -> AppError {
+        let mut vars = vars;
+        vars["field"] = serde_json::json!(field);
+        AppError::CodedVars {
+            status: 400,
+            code: "SETTING_OUT_OF_RANGE",
+            reason: why,
+            vars,
+        }
+    }
+    // (field, value, min, min inclusive, max, max inclusive)
+    let d = |v: i64| Decimal::from(v);
+    type Ranges = [(&'static str, Option<Decimal>, Decimal, bool, Decimal, bool); 13];
+    let ranges: Ranges = [
+        (
+            "overtime_day_multiplier",
+            body.overtime_day_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "overtime_night_multiplier",
+            body.overtime_night_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "holiday_multiplier",
+            body.holiday_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "default_overtime_multiplier",
+            body.default_overtime_multiplier,
+            d(1),
+            true,
+            d(100),
+            false,
+        ),
+        (
+            "advance_cap_percent",
+            body.advance_cap_percent,
+            d(0),
+            true,
+            d(100),
+            true,
+        ),
+        (
+            "absence_deduction_days",
+            body.absence_deduction_days,
+            d(0),
+            true,
+            d(31),
+            true,
+        ),
+        (
+            "working_days_per_month",
+            body.working_days_per_month,
+            d(0),
+            false,
+            d(31),
+            true,
+        ),
+        (
+            "limit_day_hours",
+            body.limit_day_hours,
+            d(0),
+            false,
+            d(168),
+            true,
+        ),
+        (
+            "limit_week_hours",
+            body.limit_week_hours,
+            d(0),
+            false,
+            d(168),
+            true,
+        ),
+        (
+            "limit_presence_hours",
+            body.limit_presence_hours,
+            d(0),
+            false,
+            d(168),
+            true,
+        ),
+        (
+            "limit_rest_hours",
+            body.limit_rest_hours,
+            d(0),
+            true,
+            d(168),
+            true,
+        ),
+        (
+            "limit_overtime_day_hours",
+            body.limit_overtime_day_hours,
+            d(0),
+            true,
+            d(168),
+            true,
+        ),
+        (
+            "auto_checkout_buffer_minutes",
+            body.auto_checkout_buffer_minutes.map(Decimal::from),
+            d(0),
+            true,
+            d(24 * 60),
+            true,
+        ),
+    ];
+    for (field, value, min, min_in, max, max_in) in ranges {
+        let Some(v) = value else { continue };
+        let low = if min_in { v < min } else { v <= min };
+        let high = if max_in { v > max } else { v >= max };
+        if low || high {
+            let (lo, hi) = (
+                if min_in { "from" } else { "above" },
+                if max_in { "up to" } else { "below" },
+            );
+            return Err(out(
+                field,
+                format!("{field} must be {lo} {min} and {hi} {max}"),
+                serde_json::json!({ "min": min, "max": max,
+                                    "min_inclusive": min_in, "max_inclusive": max_in }),
+            ));
+        }
+    }
+    if let Some(n) = body.orders_per_staff
+        && !(1..=1000).contains(&n)
+    {
+        return Err(out(
+            "orders_per_staff",
+            "orders_per_staff must be from 1 and up to 1000".into(),
+            serde_json::json!({ "min": 1, "max": 1000 }),
+        ));
+    }
+    if let Some(n) = body.period_start_day
+        && !(1..=28).contains(&n)
+    {
+        return Err(out(
+            "period_start_day",
+            "period_start_day must be from 1 and up to 28".into(),
+            serde_json::json!({ "min": 1, "max": 28 }),
+        ));
+    }
+    let choices: [(&str, Option<&str>, &[&str]); 4] = [
+        (
+            "cover_pay_mode",
+            body.cover_pay_mode.as_deref(),
+            &["minute_rate", "full_block"],
+        ),
+        (
+            "overtime_mode",
+            body.overtime_mode.as_deref(),
+            &["off", "automatic", "approval"],
+        ),
+        (
+            "half_day_leave_counts",
+            body.half_day_leave_counts.as_deref(),
+            &["half_shift", "whole_day"],
+        ),
+        (
+            "gender_mode",
+            body.gender_mode.as_deref(),
+            &["off", "soft", "hard"],
+        ),
+    ];
+    for (field, value, allowed) in choices {
+        if let Some(v) = value
+            && !allowed.contains(&v)
+        {
+            return Err(out(
+                field,
+                format!("{field} is one of {}", allowed.join(", ")),
+                serde_json::json!({ "allowed": allowed }),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── Geofence ──────────────────────────────────────────────────
 
 #[derive(sqlx::FromRow)]
@@ -1342,7 +1683,11 @@ pub(crate) async fn check_geofence(
         return Ok(None);
     };
     if !madar_dawam::geofence::in_range(lat, lng) {
-        return Err(AppError::BadRequest("Coordinates are out of range".into()));
+        return Err(AppError::Coded {
+            status: 400,
+            code: "COORDINATES_OUT_OF_RANGE",
+            reason: "Coordinates are out of range".into(),
+        });
     }
 
     let distance = haversine_meters(
@@ -1548,6 +1893,18 @@ pub async fn check_in(
         resolve_punch_shift(pool.get_ref(), employee_id, today, &tz, now).await?;
 
     check_window(shift.as_ref(), now)?;
+    // No payroll check: clocking in and out always works, whatever state the
+    // month's payroll is in (owner, 30 Sep 2026). An approved month's payslip
+    // is a frozen snapshot, so a punch recorded in it moves no money; edits
+    // (manual records, corrections, deletes) are still refused there.
+    // A colleague is covering it: never paid twice (D1).
+    refuse_if_covered(
+        pool.get_ref(),
+        employee_id,
+        business_date,
+        shift.as_ref().map(|s| s.work_shift_id),
+    )
+    .await?;
 
     let adjustments =
         adjustments_for(pool.get_ref(), &settings, employee_id, business_date, &tz).await?;
@@ -1637,6 +1994,45 @@ pub async fn check_in(
     .await?;
     let record = load_record(pool.get_ref(), org_id, id).await?;
     Ok(HttpResponse::Created().json(record))
+}
+
+/// A shift a colleague is covering can't be punched for its owner (owner
+/// decision D1, 24 Sep 2026): otherwise the shift is paid twice. A pending or
+/// confirmed cover blocks every way of punching in — the app, the till, a
+/// manager's punch, a manual record, a correction; a rejected one doesn't.
+/// If the owner turns up mid-cover, the manager ends or rejects the cover
+/// first. 409 `SHIFT_COVERED` `{coverer_name}`.
+pub(crate) async fn refuse_if_covered(
+    pool: &PgPool,
+    employee_id: Uuid,
+    business_date: NaiveDate,
+    work_shift_id: Option<Uuid>,
+) -> Result<(), AppError> {
+    let Some(shift) = work_shift_id else {
+        return Ok(());
+    };
+    let coverer: Option<String> = sqlx::query_scalar(
+        "SELECT e.name FROM attendance_records a JOIN employees e ON e.id = a.employee_id \
+          WHERE a.covered_employee_id = $1 AND a.business_date = $2 AND a.work_shift_id = $3 \
+            AND a.employee_id <> $1 AND a.cover_status IN ('pending', 'confirmed') \
+          ORDER BY a.created_at LIMIT 1",
+    )
+    .bind(employee_id)
+    .bind(business_date)
+    .bind(shift)
+    .fetch_optional(pool)
+    .await?;
+    match coverer {
+        None => Ok(()),
+        Some(name) => Err(AppError::CodedVars {
+            status: 409,
+            code: "SHIFT_COVERED",
+            reason: format!(
+                "{name} is covering this shift. A manager ends or rejects the cover first."
+            ),
+            vars: serde_json::json!({ "coverer_name": name }),
+        }),
+    }
 }
 
 /// A check-in before the shift's window opens, or after it ended, is refused
@@ -1742,7 +2138,12 @@ pub async fn check_out(
         .fetch_optional(pool.get_ref())
         .await?;
     }
-    let open = open.ok_or_else(|| AppError::NotFound("You are not checked in".into()))?;
+    let open = open.ok_or_else(|| AppError::Coded {
+        status: 404,
+        code: "NOT_CLOCKED_IN",
+        reason: "You are not checked in".into(),
+    })?;
+    // No payroll check: a check-out always closes the shift (see check_in).
 
     let settings = load_settings(pool.get_ref(), org_id, Some(open.branch_id)).await?;
     let distance = check_geofence(
@@ -2080,9 +2481,15 @@ pub async fn my_attendance(
 ) -> Result<HttpResponse, AppError> {
     validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
 
-    let rows = sqlx::query_as::<_, AttendanceRecord>(&format!(
+    // My own days, and a colleague's cover OF my shift (B-CV-1): the app
+    // must know the block is covered (D1 refuses my punch on it), so it
+    // stops offering "Clock in". The row stays the coverer's
+    // (`employee_id`), with `covered_employee_id` = me and its
+    // `cover_status`; their location is never shown to me.
+    let mut rows = sqlx::query_as::<_, AttendanceRecord>(&format!(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
-          WHERE a.employee_id = $1 AND a.business_date BETWEEN $2 AND $3 \
+          WHERE (a.employee_id = $1 OR a.covered_employee_id = $1) \
+            AND a.business_date BETWEEN $2 AND $3 \
           ORDER BY a.business_date DESC, a.check_in_at DESC NULLS LAST"
     ))
     .bind(me.employee_id)
@@ -2090,6 +2497,12 @@ pub async fn my_attendance(
     .bind(query.to)
     .fetch_all(pool.get_ref())
     .await?;
+    for r in rows.iter_mut().filter(|r| r.employee_id != me.employee_id) {
+        r.check_in_latitude = None;
+        r.check_in_longitude = None;
+        r.check_out_latitude = None;
+        r.check_out_longitude = None;
+    }
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -2112,14 +2525,14 @@ pub(crate) async fn load_record(
 
 #[utoipa::path(
     get, path = "/staff/attendance", tag = "staff",
-    params(AttendanceQuery),
+    params(AttendanceListQuery),
     responses((status = 200, description = "Attendance records", body = Vec<AttendanceRecord>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_attendance(
     req: HttpRequest,
     pool: crate::db::Db,
-    query: web::Query<AttendanceQuery>,
+    query: web::Query<AttendanceListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = caller(&req)?;
     let org_id = scope_org(&req, &claims)?;
@@ -2132,26 +2545,64 @@ pub async fn list_attendance(
         query.branch_id,
     )
     .await?;
-    validate_range(query.from, query.to, MAX_RANGE_DAYS)?;
     if let Some(status) = query.status.as_deref() {
         AttendanceStatus::parse(status)?;
     }
+    let check = |value: Option<&str>, allowed: &[&str], field: &str| match value {
+        Some(v) if !allowed.contains(&v) => Err(AppError::BadRequest(format!(
+            "{field} is one of {}",
+            allowed.join(", ")
+        ))),
+        _ => Ok(()),
+    };
+    check(
+        query.cover_status.as_deref(),
+        &["pending", "confirmed", "rejected"],
+        "cover_status",
+    )?;
+    check(
+        query.overtime_status.as_deref(),
+        &["pending", "approved", "rejected"],
+        "overtime_status",
+    )?;
+    // Pending items are few and must all reach Approvals, however old; any
+    // other listing is a window.
+    let pending = query.cover_status.as_deref() == Some("pending")
+        || query.overtime_status.as_deref() == Some("pending");
+    let (from, to) = match (query.from, query.to) {
+        (Some(from), Some(to)) => {
+            validate_range(from, to, MAX_RANGE_DAYS)?;
+            (Some(from), Some(to))
+        }
+        (None, None) if pending => (None, None),
+        _ => {
+            return Err(AppError::Coded {
+                status: 400,
+                code: "RANGE_REQUIRED",
+                reason: "Pick a date range (from and to).".into(),
+            });
+        }
+    };
 
     let rows = sqlx::query_as::<_, AttendanceRecord>(&format!(
         "SELECT {RECORD_COLS} {RECORD_JOINS} \
           WHERE a.org_id = $1 \
-            AND a.business_date BETWEEN $2 AND $3 \
+            AND ($2::date IS NULL OR a.business_date BETWEEN $2 AND $3) \
             AND ($4::uuid[] IS NULL OR a.branch_id = ANY($4)) \
             AND ($5::uuid IS NULL OR a.employee_id = $5) \
             AND ($6::text IS NULL OR a.status = $6) \
+            AND ($7::text IS NULL OR a.cover_status = $7) \
+            AND ($8::text IS NULL OR a.overtime_status = $8) \
           ORDER BY a.business_date DESC, lower(emp.name)"
     ))
     .bind(org_id)
-    .bind(query.from)
-    .bind(query.to)
+    .bind(from)
+    .bind(to)
     .bind(scope.as_deref())
     .bind(query.employee_id)
     .bind(query.status.as_deref())
+    .bind(query.cover_status.as_deref())
+    .bind(query.overtime_status.as_deref())
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -2227,6 +2678,12 @@ pub struct PresenceRow {
     /// Minutes this person is rostered for today — the denominator of the
     /// labour-vs-plan bar.
     pub scheduled_minutes: i64,
+    /// When a punch for them opens: the next shift of their today (not yet
+    /// ended; else the first) less its check-in window (CL-3). Null when not
+    /// rostered. The dashboard offers Punch from then, as the app does
+    /// (minor default M15).
+    #[sqlx(default)]
+    pub punch_opens_at: Option<DateTime<Utc>>,
 }
 
 /// The whole team's state right now, plus the day's labour against plan.
@@ -2331,6 +2788,7 @@ pub async fn team_presence(
                    l.d,
                    COALESCE(sh.minutes, 0)                        AS scheduled_minutes,
                    sh.due_at                                      AS due_at,
+                   sh.opens_at                                    AS punch_opens_at,
                    -- An approved leave or mission covers their today: the
                    -- sweep excuses the day on the same test (E2E B-TEAM-7).
                    EXISTS (
@@ -2345,8 +2803,14 @@ pub async fn team_presence(
               -- split days, day-scoped blocks and their effective times.
               LEFT JOIN LATERAL (
                   SELECT SUM(EXTRACT(EPOCH FROM (r.end_at - r.start_at)) / 60)::bigint AS minutes,
-                         MIN(r.start_at) AS due_at
+                         MIN(r.start_at) AS due_at,
+                         COALESCE(
+                             MIN(r.start_at - make_interval(mins => GREATEST(ws.checkin_window_minutes, 0)))
+                                 FILTER (WHERE r.end_at > now()),
+                             MIN(r.start_at - make_interval(mins => GREATEST(ws.checkin_window_minutes, 0)))
+                         ) AS opens_at
                     FROM dawam_roster(ARRAY[l.id], l.d, l.d) r
+                    JOIN work_shifts ws ON ws.id = r.work_shift_id
               ) sh ON true
         ),
         today AS (
@@ -2367,7 +2831,7 @@ pub async fn team_presence(
                COALESCE(t.check_out_at, NULL) AS check_out_at,
                COALESCE(t.late_minutes, 0)    AS late_minutes,
                COALESCE(t.worked_minutes, 0)  AS worked_minutes,
-               r.scheduled_minutes,
+               r.scheduled_minutes, r.punch_opens_at,
                CASE
                    WHEN t.status = 'on_leave'                       THEN 'on_leave'
                    WHEN t.check_in_at IS NOT NULL
@@ -2473,6 +2937,16 @@ pub async fn create_manual_record(
             "That branch belongs to a different organization".into(),
         ));
     }
+    // A worked day on a shift a colleague is covering is paid twice (D1).
+    if body.check_in_at.is_some() {
+        refuse_if_covered(
+            pool.get_ref(),
+            body.employee_id,
+            body.business_date,
+            body.work_shift_id,
+        )
+        .await?;
+    }
 
     let tz = branch_timezone(pool.get_ref(), body.branch_id).await?;
     let shift = load_shift_snapshot(
@@ -2556,8 +3030,10 @@ pub async fn create_manual_record(
     .await?;
 
     let Some(id) = inserted else {
-        return Err(AppError::Conflict(
-            "This employee already has a record for that day and shift — correct it instead".into(),
+        return Err(crate::staff::coded(
+            409,
+            "RECORD_EXISTS",
+            "This employee already has a record for that day and shift — correct it instead",
         ));
     };
 
@@ -2717,6 +3193,21 @@ async fn rederive(
     method: Option<&str>,
 ) -> Result<(), AppError> {
     let existing = load_record(pool, org_id, record_id).await?;
+    // A check-in written by hand or by an approved correction onto the
+    // owner's day of a shift a colleague is covering (D1).
+    if human.is_some()
+        && check_in_at.is_some()
+        && existing.check_in_at.is_none()
+        && existing.covered_employee_id.is_none()
+    {
+        refuse_if_covered(
+            pool,
+            existing.employee_id,
+            existing.business_date,
+            existing.work_shift_id,
+        )
+        .await?;
+    }
     let check_in_at = check_in_at.or(existing.check_in_at);
     let check_out_at = check_out_at.or(existing.check_out_at);
     if let (Some(in_at), Some(out_at)) = (check_in_at, check_out_at)

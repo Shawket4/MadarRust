@@ -695,7 +695,7 @@ pub async fn finalize_delivery_order(
         delivery_order_id: Some(id),
     };
     let (created, warnings) =
-        snapshot::apply_snapshot(&mut tx, &ctx, &cart.lines, &deductions).await?;
+        snapshot::apply_snapshot(&mut tx, &ctx, &cart.lines, &cart.deals, &deductions).await?;
 
     // What was paid goes in its own column. This used to overwrite the
     // customer's hint with the real method, which is how rows came to say

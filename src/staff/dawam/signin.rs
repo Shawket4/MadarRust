@@ -114,6 +114,61 @@ async fn accounts_for(pool: &PgPool, phone: &str) -> Result<Vec<Account>, AppErr
     .await?)
 }
 
+/// App Review's sign-in: Apple's reviewers can't receive a WhatsApp code.
+///
+/// On only when BOTH `MADAR_REVIEW_PHONE` and `MADAR_REVIEW_OTP` (six
+/// digits) are set; `main.rs` mounts it then, and warns at boot. A code asked
+/// for exactly that phone IS that code, and no WhatsApp is sent. Everything
+/// else is the ordinary sign-in: the phone must be an active employee with
+/// the app in a Dawam business, the login governor and the one-code-a-minute
+/// rule apply, the code lives 300 s with five tries and is deleted on use,
+/// the phone is bound like any phone and the location notice is still asked.
+#[derive(Clone)]
+pub struct ReviewLogin {
+    /// Canonical (`crate::phone`).
+    phone: String,
+    code: String,
+}
+
+impl ReviewLogin {
+    pub fn from_env() -> Option<Self> {
+        let phone = std::env::var("MADAR_REVIEW_PHONE").ok();
+        let code = std::env::var("MADAR_REVIEW_OTP").ok();
+        Self::new(phone.as_deref(), code.as_deref())
+    }
+
+    /// Off (`None`) unless both are given, the phone reads as a phone and the
+    /// code is six digits.
+    pub fn new(phone: Option<&str>, code: Option<&str>) -> Option<Self> {
+        let phone = crate::phone::normalize_phone(phone?.trim()).ok()?;
+        let code = code?.trim();
+        (code.len() == 6 && code.bytes().all(|c| c.is_ascii_digit())).then(|| Self {
+            phone,
+            code: code.to_string(),
+        })
+    }
+
+    /// The review phone (the boot warning names it; never the code).
+    pub fn phone(&self) -> &str {
+        &self.phone
+    }
+
+    /// The code for a request from `phone` (canonical): the review code for
+    /// the review phone, nothing for anyone else.
+    fn code_for(&self, phone: &str) -> Option<&str> {
+        (self.phone == phone).then_some(self.code.as_str())
+    }
+}
+
+/// Never prints the code.
+impl std::fmt::Debug for ReviewLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReviewLogin")
+            .field("phone", &self.phone)
+            .finish_non_exhaustive()
+    }
+}
+
 fn six_digits() -> String {
     let b = *Uuid::new_v4().as_bytes();
     let n = u32::from_le_bytes([b[0], b[1], b[2], b[3]]) % 1_000_000;
@@ -127,14 +182,48 @@ fn six_digits() -> String {
 )]
 pub async fn otp_request(
     pool: web::Data<PgPool>,
+    review: Option<web::Data<ReviewLogin>>,
     body: web::Json<StaffOtpRequest>,
 ) -> Result<HttpResponse, AppError> {
     let phone = crate::phone::normalize_phone(&body.phone)?;
-    if accounts_for(pool.get_ref(), &phone).await?.is_empty() {
+    let accounts = accounts_for(pool.get_ref(), &phone).await?;
+    if accounts.is_empty() {
+        // Known but not active (suspended or terminated): say so, and send
+        // nothing (minor default M13).
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT e.employment_status FROM employees e \
+               JOIN organizations o ON o.id = e.org_id \
+              WHERE e.phone_key = $1 AND e.app_access AND 'dawam' = ANY(o.modules) \
+              ORDER BY e.updated_at DESC LIMIT 1",
+        )
+        .bind(&phone)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        if let Some(status) = status {
+            return Err(AppError::CodedVars {
+                status: 403,
+                code: "ACCOUNT_NOT_ACTIVE",
+                reason: "Your account isn't active. Ask your manager.".into(),
+                vars: serde_json::json!({ "status": status }),
+            });
+        }
         // RO-1: no self-registration.
-        return Err(AppError::NotFound(
-            "This number isn't registered with any business. Ask your manager to add you.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 404,
+            code: "PHONE_NOT_REGISTERED",
+            reason: "This number isn't registered with any business. Ask your manager to add you."
+                .into(),
+        });
+    }
+    // Every business the number works at is paused: no WhatsApp is sent
+    // for a code the check would refuse anyway (SA-3, minor default M13).
+    if accounts.iter().all(|a| !a.org_active) {
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "ORG_SUSPENDED",
+            reason: "This business is paused.".into(),
+            vars: serde_json::json!({ "org_name": accounts[0].org_name }),
+        });
     }
     let recent: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM staff_otp WHERE phone = $1 \
@@ -144,11 +233,21 @@ pub async fn otp_request(
     .fetch_one(pool.get_ref())
     .await?;
     if recent {
-        return Err(AppError::Conflict(
-            "A code was just sent. Please wait a minute.".into(),
-        ));
+        return Err(AppError::CodedVars {
+            status: 409,
+            code: "OTP_RECENTLY_SENT",
+            reason: "A code was just sent. Please wait a minute.".into(),
+            vars: serde_json::json!({ "wait_seconds": 60 }),
+        });
     }
-    let code = six_digits();
+    // App Review's phone (both env vars set): its code is the review code and
+    // no WhatsApp goes out. Every check above has applied, and the tries,
+    // the expiry and the one use below apply as to any code.
+    let review_code = review
+        .as_deref()
+        .and_then(|r| r.code_for(&phone))
+        .map(str::to_owned);
+    let code = review_code.clone().unwrap_or_else(six_digits);
     sqlx::query("DELETE FROM staff_otp WHERE phone = $1")
         .bind(&phone)
         .execute(pool.get_ref())
@@ -162,6 +261,12 @@ pub async fn otp_request(
     .bind(OTP_TTL_SECONDS.to_string())
     .execute(pool.get_ref())
     .await?;
+    if review_code.is_some() {
+        return Ok(HttpResponse::Ok().json(StaffOtpSent {
+            sent: true,
+            dev_code: None,
+        }));
+    }
     crate::delivery::whatsapp::send_message(
         pool.get_ref().clone(),
         phone,
@@ -204,17 +309,28 @@ pub async fn otp_verify(
     .fetch_optional(pool)
     .await?;
     let Some((otp_id, expected, used)) = claimed else {
-        return Err(AppError::BadRequest(
-            "No active code — request a new one.".into(),
-        ));
+        return Err(AppError::Coded {
+            status: 400,
+            code: "OTP_NONE_ACTIVE",
+            reason: "No active code — request a new one.".into(),
+        });
     };
     if !crate::secrets::constant_time_eq(body.code.as_bytes(), expected.as_bytes()) {
         let left = OTP_MAX_ATTEMPTS - used;
-        return Err(AppError::BadRequest(if left > 0 {
-            format!("Incorrect code. {left} tries left.")
+        return Err(if left > 0 {
+            AppError::CodedVars {
+                status: 400,
+                code: "OTP_WRONG",
+                reason: format!("Incorrect code. {left} tries left."),
+                vars: serde_json::json!({ "attempts_left": left }),
+            }
         } else {
-            "Too many tries — request a new code.".into()
-        }));
+            AppError::Coded {
+                status: 400,
+                code: "OTP_TOO_MANY_TRIES",
+                reason: "Too many tries — request a new code.".into(),
+            }
+        });
     }
 
     let accounts = accounts_for(pool, &phone).await?;
@@ -249,10 +365,12 @@ pub async fn otp_verify(
     }
     .ok_or_else(|| AppError::NotFound("You don't work at that business.".into()))?;
     if !account.org_active {
-        return Err(AppError::Forbidden(format!(
-            "{} is suspended. Sign-in is stopped until it's reactivated.",
-            account.org_name
-        )));
+        return Err(AppError::CodedVars {
+            status: 403,
+            code: "ORG_SUSPENDED",
+            reason: "This business is paused.".into(),
+            vars: serde_json::json!({ "org_name": account.org_name }),
+        });
     }
 
     // Deleted on use (RO-2).

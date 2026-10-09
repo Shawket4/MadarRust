@@ -1,13 +1,103 @@
 //! Shared rate-limiting helpers.
 //!
-//! `PeerIpOrLocalhost` keys the `actix-governor` limiter by the client's peer
-//! IP, falling back to 127.0.0.1 when no socket address is available (actix
-//! test utilities don't supply a real peer addr). Shared so the auth and
-//! public-menu endpoints limit on the same key type.
+//! Every limit kept per address asks [`client_ip`] who is calling: the
+//! socket's peer, or the `X-Real-IP` that a trusted proxy (nginx, through the
+//! Docker bridge) forwards. `PeerIpOrLocalhost` keys the `actix-governor`
+//! limiters by it, falling back to 127.0.0.1 when no socket address is
+//! available (actix test utilities don't supply a real peer addr).
 
+use actix_governor::governor::NotUntil;
+use actix_governor::governor::clock::{Clock, DefaultClock, QuantaInstant};
 use actix_governor::{KeyExtractor, SimpleKeyExtractionError};
 use actix_web::dev::ServiceRequest;
+use actix_web::{HttpResponse, HttpResponseBuilder};
 use std::net::{IpAddr, Ipv4Addr};
+
+/// A route governor's 429 in the API's own shape (`ErrorBody` plus the wait),
+/// instead of actix-governor's plain-text sentence. The governor has already
+/// set `Retry-After`.
+fn governor_refusal(
+    negative: &NotUntil<QuantaInstant>,
+    mut response: HttpResponseBuilder,
+) -> HttpResponse {
+    let wait = negative
+        .wait_time_from(DefaultClock::default().now())
+        .as_secs();
+    response.json(serde_json::json!({
+        "error": "Too many requests just now. This will clear in a moment.",
+        "code": "RATE_LIMITED",
+        "retry_after_seconds": wait,
+    }))
+}
+
+// ── Who is calling ───────────────────────────────────────────────────────────
+
+/// The proxies whose `X-Real-IP` is believed: loopback (nginx on the same host
+/// as a bare backend) and the container's default gateway, which is the Docker
+/// bridge that nginx's connections arrive through via Docker's port proxy
+/// (`172.21.0.1` on the box). `MADAR_TRUSTED_PROXIES` (comma-separated
+/// addresses) replaces the set when it is not that. Nothing else is trusted:
+/// another container on the network, or anything that reaches the port some
+/// other way, is keyed by its own address whatever header it sends.
+static TRUSTED_PROXIES: std::sync::LazyLock<Vec<IpAddr>> = std::sync::LazyLock::new(|| {
+    if let Ok(list) = std::env::var("MADAR_TRUSTED_PROXIES")
+        && !list.trim().is_empty()
+    {
+        return list
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+    }
+    let mut trusted = vec![
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+    ];
+    if let Some(gw) = std::fs::read_to_string("/proc/net/route")
+        .ok()
+        .and_then(|t| default_gateway(&t))
+    {
+        trusted.push(gw);
+    }
+    trusted
+});
+
+/// The IPv4 default gateway in a `/proc/net/route` table: the row whose
+/// destination is `00000000`, its gateway in the kernel's little-endian hex.
+#[doc(hidden)]
+pub fn default_gateway(route_table: &str) -> Option<IpAddr> {
+    route_table.lines().skip(1).find_map(|line| {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.get(1) != Some(&"00000000") {
+            return None;
+        }
+        let gw = u32::from_str_radix(cols.get(2)?, 16).ok()?;
+        (gw != 0).then(|| IpAddr::V4(Ipv4Addr::from(gw.to_le_bytes())))
+    })
+}
+
+/// The caller's address, for every limit that is kept per address.
+///
+/// The socket's peer, unless the peer is a trusted proxy ([`TRUSTED_PROXIES`])
+/// that says who it is forwarding in `X-Real-IP`. On the box every request
+/// reaches the container through Docker's port proxy, so the peer alone is the
+/// same address for every visitor, and each "per IP" allowance (the OTP ones
+/// included) was one allowance shared by the whole platform. nginx SETS the
+/// header on every vhost (`proxy_set_header X-Real-IP $remote_addr`), so a
+/// value a client sends never gets through it; behind Cloudflare `$remote_addr`
+/// is already the visitor (`cloudflare-real-ip.conf`), and `api.` is DNS-only.
+pub fn client_ip(req: &ServiceRequest) -> Option<IpAddr> {
+    let peer = req.peer_addr()?.ip();
+    if TRUSTED_PROXIES.contains(&peer)
+        && let Some(forwarded) = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<IpAddr>().ok())
+    {
+        return Some(forwarded);
+    }
+    Some(peer)
+}
 
 /// Rate limiting is ON by default. Set `MADAR_DISABLE_RATE_LIMIT=1` (or `=true`)
 /// to turn it off — used by the local API-fuzz harness (scripts/api-fuzz.sh) so
@@ -27,10 +117,15 @@ impl KeyExtractor for PeerIpOrLocalhost {
     type KeyExtractionError = SimpleKeyExtractionError<&'static str>;
 
     fn extract(&self, req: &ServiceRequest) -> Result<Self::Key, Self::KeyExtractionError> {
-        Ok(req
-            .peer_addr()
-            .map(|s| s.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+        Ok(client_ip(req).unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+    }
+
+    fn exceed_rate_limit_response(
+        &self,
+        negative: &NotUntil<QuantaInstant>,
+        response: HttpResponseBuilder,
+    ) -> HttpResponse {
+        governor_refusal(negative, response)
     }
 }
 
@@ -55,6 +150,225 @@ impl KeyExtractor for PathToken {
         let end = token.char_indices().nth(96).map_or(token.len(), |(i, _)| i);
         Ok(token[..end].to_string())
     }
+
+    fn exceed_rate_limit_response(
+        &self,
+        negative: &NotUntil<QuantaInstant>,
+        response: HttpResponseBuilder,
+    ) -> HttpResponse {
+        governor_refusal(negative, response)
+    }
+}
+
+// ── Per-route limiters ───────────────────────────────────────────────────────
+
+/// One per-route governor's defaults: `burst` requests at once, then one more
+/// every `ms_per_request`. Each is overridable with
+/// `MADAR_RL_<AREA>_<LIMITER>_BURST` and `MADAR_RL_<AREA>_<LIMITER>_MS_PER_REQUEST`.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteLimitDef {
+    pub area: &'static str,
+    pub limiter: &'static str,
+    pub burst: u32,
+    pub ms_per_request: u64,
+    /// What it guards (the `.env.example` line).
+    pub guards: &'static str,
+}
+
+/// Every per-route governor in the backend, in one place, so the routes, the
+/// tests and the docs read the same numbers. The owner doubled every
+/// allowance on 2026-09-25 (burst ×2, refill twice as fast) and wanted each
+/// one set from the environment.
+pub const ROUTE_LIMITS: &[RouteLimitDef] = &[
+    RouteLimitDef {
+        area: "AUTH",
+        limiter: "LOGIN",
+        burst: 120,
+        ms_per_request: 500,
+        guards: "per IP: password/PIN login, staff OTP request + verify, staff session refresh",
+    },
+    RouteLimitDef {
+        area: "AUTH",
+        limiter: "ACTIVATION",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: device activation codes and branch resolution",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: opening the order-now page from a card",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "IDENTITY",
+        burst: 10,
+        ms_per_request: 3_000,
+        guards: "per IP: changing who an order-now profile belongs to",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "BROWSE_TOKEN",
+        burst: 40,
+        ms_per_request: 1_000,
+        guards: "per card token: opening the order-now page",
+    },
+    RouteLimitDef {
+        area: "CUSTOMERS",
+        limiter: "IDENTITY_TOKEN",
+        burst: 6,
+        ms_per_request: 60_000,
+        guards: "per card token: replace/combine identity",
+    },
+    RouteLimitDef {
+        area: "LOYALTY",
+        limiter: "BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: loyalty join pages and cards",
+    },
+    RouteLimitDef {
+        area: "LOYALTY",
+        limiter: "JOIN",
+        burst: 10,
+        ms_per_request: 3_000,
+        guards: "per IP: loyalty sign-up",
+    },
+    RouteLimitDef {
+        area: "DEMO",
+        limiter: "REQUEST",
+        burst: 10,
+        ms_per_request: 15_000,
+        guards: "per IP: the public demo request form",
+    },
+    RouteLimitDef {
+        area: "TICKETS",
+        limiter: "TABLE_BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: a table's QR menu",
+    },
+    RouteLimitDef {
+        area: "TICKETS",
+        limiter: "TABLE_INTAKE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: orders placed from a table's QR",
+    },
+    RouteLimitDef {
+        area: "INTEGRATIONS",
+        limiter: "PARTNER",
+        burst: 60,
+        ms_per_request: 1_000,
+        guards: "per IP: the password-authenticated partner analytics API",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: the public delivery menu",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "QUOTE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: delivery quotes",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "OTP",
+        burst: 6,
+        ms_per_request: 15_000,
+        guards: "per IP: delivery OTP send and verify",
+    },
+    RouteLimitDef {
+        area: "DELIVERY",
+        limiter: "INTAKE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: delivery order intake",
+    },
+    RouteLimitDef {
+        area: "BOOKINGS",
+        limiter: "BROWSE",
+        burst: 120,
+        ms_per_request: 500,
+        guards: "per IP: public booking pages and availability",
+    },
+    RouteLimitDef {
+        area: "BOOKINGS",
+        limiter: "WRITE",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: creating or changing a public booking",
+    },
+];
+
+/// A route governor's numbers after the environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteLimit {
+    pub burst: u32,
+    pub ms_per_request: u64,
+}
+
+/// `MADAR_RL_<AREA>_<LIMITER>_BURST` / `_MS_PER_REQUEST`, else the defaults.
+/// A missing, unparsable or out-of-range value falls back, as the global
+/// helpers do.
+pub fn route_limit(area: &str, limiter: &str, default_burst: u32, default_ms: u64) -> RouteLimit {
+    let var = |what: &str| std::env::var(format!("MADAR_RL_{area}_{limiter}_{what}")).ok();
+    RouteLimit {
+        burst: var("BURST")
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|n| (1..=1_000_000).contains(n))
+            .unwrap_or(default_burst),
+        ms_per_request: var("MS_PER_REQUEST")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| (1..=86_400_000).contains(n))
+            .unwrap_or(default_ms),
+    }
+}
+
+/// The numbers of a limiter in [`ROUTE_LIMITS`], after the environment.
+pub fn limit_of(area: &str, limiter: &str) -> RouteLimit {
+    let d = ROUTE_LIMITS
+        .iter()
+        .find(|d| d.area == area && d.limiter == limiter)
+        .unwrap_or_else(|| panic!("rate limiter {area}/{limiter} is not in ROUTE_LIMITS"));
+    route_limit(area, limiter, d.burst, d.ms_per_request)
+}
+
+/// One governor config from `(area, limiter, default_burst, default_ms)`.
+pub fn governor<K: KeyExtractor>(
+    key: K,
+    area: &str,
+    limiter: &str,
+    default_burst: u32,
+    default_ms: u64,
+) -> actix_governor::GovernorConfig<K, actix_governor::governor::middleware::NoOpMiddleware> {
+    let l = route_limit(area, limiter, default_burst, default_ms);
+    actix_governor::GovernorConfigBuilder::default()
+        .key_extractor(key)
+        .milliseconds_per_request(l.ms_per_request)
+        .burst_size(l.burst)
+        .finish()
+        .unwrap_or_else(|| panic!("invalid rate limiter {area}/{limiter}: {l:?}"))
+}
+
+/// The governor for a limiter listed in [`ROUTE_LIMITS`]: what every route uses.
+pub fn route_governor<K: KeyExtractor>(
+    key: K,
+    area: &str,
+    limiter: &str,
+) -> actix_governor::GovernorConfig<K, actix_governor::governor::middleware::NoOpMiddleware> {
+    let d = ROUTE_LIMITS
+        .iter()
+        .find(|d| d.area == area && d.limiter == limiter)
+        .unwrap_or_else(|| panic!("rate limiter {area}/{limiter} is not in ROUTE_LIMITS"));
+    governor(key, area, limiter, d.burst, d.ms_per_request)
 }
 
 // ── Exports ──────────────────────────────────────────────────────────────────
@@ -73,8 +387,9 @@ impl KeyExtractor for PathToken {
 /// other control instead.
 pub const EXPORT_HEADER: &str = "X-Madar-Export";
 
-/// Exports per user per window.
-const EXPORT_MAX: usize = 5;
+/// Exports per user per window (`MADAR_EXPORT_MAX_PER_MINUTE`; doubled from
+/// 5 on the owner's request, 2026-09-25).
+const EXPORT_MAX: usize = 10;
 const EXPORT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn export_max() -> usize {
@@ -122,7 +437,10 @@ fn allow_export(key: &str) -> bool {
 /// this is here to stop a runaway client from taking the box down, not to pace
 /// anyone's honest use of the dashboard. A page that fires forty queries on
 /// load is a page we wrote, and it should not be punished for it.
-const GLOBAL_PER_MINUTE: f64 = 200.0;
+///
+/// `MADAR_RATE_LIMIT_PER_MINUTE`; doubled from 200 on the owner's request
+/// (2026-09-25).
+const GLOBAL_PER_MINUTE: f64 = 400.0;
 
 fn global_per_minute() -> f64 {
     std::env::var("MADAR_RATE_LIMIT_PER_MINUTE")
@@ -132,10 +450,12 @@ fn global_per_minute() -> f64 {
         .unwrap_or(GLOBAL_PER_MINUTE)
 }
 
+/// Per client key: `(tokens, last refill, capacity)` (see [`BUCKETS`]).
+type Buckets = std::collections::HashMap<String, (f64, std::time::Instant, f64)>;
+
 /// `(tokens, last refill)` per client.
-static BUCKETS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (f64, std::time::Instant, f64)>>,
-> = std::sync::LazyLock::new(Default::default);
+static BUCKETS: std::sync::LazyLock<std::sync::Mutex<Buckets>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// The ceiling for one ADDRESS across every account behind it. The person
 /// bucket is what an honest till spends; this one stops a single address from
@@ -153,7 +473,10 @@ static BUCKETS: std::sync::LazyLock<
 /// actually catches a runaway client, and it is per account, so raising the
 /// address ceiling does not loosen it: fifty honest tills each stay inside
 /// their own 200, and one broken tablet is still stopped on its own.
-const PER_ADDRESS_PER_MINUTE: f64 = 10_000.0;
+///
+/// `MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE`; doubled from 10,000 on the
+/// owner's request (2026-09-25).
+const PER_ADDRESS_PER_MINUTE: f64 = 20_000.0;
 
 fn per_address_per_minute() -> f64 {
     std::env::var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE")
@@ -163,13 +486,9 @@ fn per_address_per_minute() -> f64 {
         .unwrap_or(PER_ADDRESS_PER_MINUTE)
 }
 
-/// Spend a token for `key` from the general bucket. False when it is empty.
-fn take_token(key: &str) -> bool {
-    take_token_at(key, global_per_minute())
-}
-
-/// Spend a token for `key` from a bucket of `per_minute`, refilling first.
-fn take_token_at(key: &str, per_minute: f64) -> bool {
+/// Spend a token for `key` from a bucket of `per_minute`, refilling first: the
+/// tokens left, or `Err` with the tokens there are (fewer than one).
+fn take_token_at(key: &str, per_minute: f64) -> Result<f64, f64> {
     let per_second = per_minute / 60.0;
     let now = std::time::Instant::now();
     let mut map = BUCKETS.lock().unwrap_or_else(|e| e.into_inner());
@@ -190,16 +509,47 @@ fn take_token_at(key: &str, per_minute: f64) -> bool {
     entry.1 = now;
     if refilled < 1.0 {
         entry.0 = refilled;
-        return false;
+        return Err(refilled);
     }
     entry.0 = refilled - 1.0;
-    true
+    Ok(entry.0)
 }
 
-/// The caller's address (`unknown` without a socket).
+/// Whole seconds until a bucket of `per_minute` holding `tokens` has one again.
+fn seconds_to_a_token(tokens: f64, per_minute: f64) -> u64 {
+    ((1.0 - tokens) / (per_minute / 60.0)).ceil().max(1.0) as u64
+}
+
+/// The caller's bucket in the IETF RateLimit header fields
+/// (draft-ietf-httpapi-ratelimit-headers): its quota over a 60-second window,
+/// the requests left, and the seconds until it is full again.
+fn set_rate_limit_headers(
+    headers: &mut actix_web::http::header::HeaderMap,
+    per_minute: f64,
+    left: f64,
+) {
+    use actix_web::http::header::{HeaderName, HeaderValue};
+    let full_in = ((per_minute - left) / (per_minute / 60.0)).ceil().max(0.0) as u64;
+    for (name, value) in [
+        (
+            "ratelimit-policy",
+            format!("\"caller\";q={};w=60", per_minute as u64),
+        ),
+        (
+            "ratelimit",
+            format!("\"caller\";r={};t={full_in}", left.floor() as u64),
+        ),
+    ] {
+        if let Ok(v) = HeaderValue::from_str(&value) {
+            headers.insert(HeaderName::from_static(name), v);
+        }
+    }
+}
+
+/// The caller's address (`unknown` without a socket). See [`client_ip`].
 fn address_of(req: &actix_web::dev::ServiceRequest) -> String {
-    req.peer_addr()
-        .map(|s| s.ip().to_string())
+    client_ip(req)
+        .map(|ip| ip.to_string())
         .unwrap_or_else(|| "unknown".into())
 }
 
@@ -214,24 +564,31 @@ fn address_of(req: &actix_web::dev::ServiceRequest) -> String {
 /// sign-ins). The bearer is verified here instead — verified, not just decoded,
 /// so a forged token cannot choose whose allowance it spends.
 fn limiter_key(req: &actix_web::dev::ServiceRequest) -> String {
+    let bearer = || {
+        req.headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+    };
+    let secret = || req.app_data::<actix_web::web::Data<crate::auth::jwt::JwtSecret>>();
+    // A staff-app phone is its own device (a verified staff token), as a
+    // signed-in till is its person: keyed by address, every phone on one
+    // shop's Wi-Fi shared one allowance.
+    if let Some(c) = bearer()
+        .zip(secret())
+        .and_then(|(t, s)| crate::staff::principal::verify(s, t).ok())
+    {
+        return format!("staff:{}", c.dev);
+    }
     crate::orgs::handlers::extract_claims(req.request())
         .ok()
         .or_else(|| {
-            let token = req
-                .headers()
-                .get("Authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))?;
-            let secret = req.app_data::<actix_web::web::Data<crate::auth::jwt::JwtSecret>>()?;
-            crate::auth::jwt::verify_token(secret, token).ok()
+            let token = bearer()?;
+            crate::auth::jwt::verify_token(secret()?, token).ok()
         })
         .and_then(|c| c.user_id_safe().ok())
         .map(|id| id.to_string())
-        .unwrap_or_else(|| {
-            req.peer_addr()
-                .map(|s| s.ip().to_string())
-                .unwrap_or_else(|| "unknown".into())
-        })
+        .unwrap_or_else(|| address_of(req))
 }
 
 /// One gate for every request: a general token bucket, and a much tighter
@@ -250,6 +607,8 @@ pub async fn throttle_exports(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| matches!(v, "1" | "true"));
 
+    // The general bucket after this request, for the RateLimit headers.
+    let mut left = None;
     if rate_limiting_enabled() {
         // Per PERSON, not per address: a shop behind one office router is one
         // address and several people, and throttling them as one would make the
@@ -264,6 +623,7 @@ pub async fn throttle_exports(
             if !allow_export(&key) {
                 return Ok(too_many(
                     req,
+                    "EXPORT_RATE_LIMITED",
                     format!(
                         "That is {} exports in a minute. Give it a moment and try again — \
                          each one reads the whole filtered dataset.",
@@ -271,32 +631,56 @@ pub async fn throttle_exports(
                     ),
                 ));
             }
-        } else if !take_token(&key)
-            || (key != address_of(&req)
-                && !take_token_at(
-                    &format!("addr:{}", address_of(&req)),
-                    per_address_per_minute(),
-                ))
-        {
-            return Ok(too_many(
-                req,
-                "Too many requests just now. This will clear in a moment.".into(),
-            ));
+        } else {
+            let per_minute = global_per_minute();
+            let address = address_of(&req);
+            // The address bucket is spent only when the person's allowed it.
+            let refused = match take_token_at(&key, per_minute) {
+                Err(tokens) => Some(seconds_to_a_token(tokens, per_minute)),
+                Ok(l) => {
+                    left = Some((per_minute, l));
+                    let per_address = per_address_per_minute();
+                    (key != address)
+                        .then(|| take_token_at(&format!("addr:{address}"), per_address).err())
+                        .flatten()
+                        .map(|tokens| seconds_to_a_token(tokens, per_address))
+                }
+            };
+            if let Some(wait) = refused {
+                let mut res = too_many(
+                    req,
+                    "RATE_LIMITED",
+                    "Too many requests just now. This will clear in a moment.".into(),
+                );
+                set_rate_limit_headers(res.headers_mut(), per_minute, 0.0);
+                res.headers_mut().insert(
+                    actix_web::http::header::RETRY_AFTER,
+                    actix_web::http::header::HeaderValue::from(wait),
+                );
+                return Ok(res);
+            }
         }
     }
-    next.call(req).await.map(|r| r.map_into_left_body())
+    let mut res = next.call(req).await?.map_into_left_body();
+    if let Some((per_minute, l)) = left {
+        set_rate_limit_headers(res.headers_mut(), per_minute, l);
+    }
+    Ok(res)
 }
 
 /// The 429, as a RESPONSE rather than an error: an `Err` from a middleware
 /// passes actix-cors without its headers, so the browser hid it and the
-/// dashboard said "Network error" (E2E B-TEAM-8). Same body and code as
-/// `AppError::TooManyRequests` everywhere else.
+/// dashboard said "Network error" (E2E B-TEAM-8). Same body as
+/// `AppError::TooManyRequests` everywhere else; `code` names the limiter that
+/// refused (`RATE_LIMITED`, `EXPORT_RATE_LIMITED`).
 fn too_many<B>(
     req: actix_web::dev::ServiceRequest,
-    why: String,
+    code: &'static str,
+    reason: String,
 ) -> actix_web::dev::ServiceResponse<actix_web::body::EitherBody<B>> {
     use actix_web::ResponseError;
-    req.into_response(crate::errors::AppError::TooManyRequests(why).error_response())
+    let refusal = crate::errors::AppError::TooManyRequests { code, reason };
+    req.into_response(refusal.error_response())
         .map_into_right_body()
 }
 
@@ -352,6 +736,15 @@ mod tests {
         use crate::auth::jwt::{JwtSecret, create_token};
         use crate::models::UserRole;
         use actix_web::{App, HttpResponse, test, web};
+        // Small allowances, so the ceiling is reached in a few hundred calls
+        // however slow the box: at the defaults (20,000 a minute, 333 a
+        // second back) a loaded run could serve no faster than the refill
+        // and never reach it.
+        // SAFETY: nextest runs each test in its own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "20");
+            std::env::set_var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE", "200");
+        }
         let secret = JwtSecret("address-ceiling-test-secret".into());
         let app = test::init_service(
             App::new()
@@ -366,15 +759,16 @@ mod tests {
         .await;
         let per_person = global_per_minute() as usize;
         let ceiling = per_address_per_minute() as usize;
-        // Enough extra accounts that the bucket's refill during a slow run
-        // (~167 a second at 10,000 a minute) cannot cover them: with only +2
-        // (400 requests) a run slower than ~2.4 s — a loaded CI box — let
-        // every request through and failed "did not multiply".
-        let accounts = ceiling / per_person + 10;
         let mut ok = 0usize;
-        let mut paced = 0usize;
         let started = std::time::Instant::now();
-        for _ in 0..accounts {
+        // New accounts at one address until a FRESH account's very first
+        // request is refused: its own bucket is full, so only the address
+        // ceiling can refuse it. Stopping on that event rather than after a
+        // fixed number of accounts keeps the test independent of how fast the
+        // box runs (a fixed count failed under the full parallel run, when
+        // the address bucket's refill covered the margin).
+        let mut refused_fresh = false;
+        for _ in 0..(ceiling / per_person) * 4 + 10 {
             let token = create_token(
                 &secret,
                 uuid::Uuid::new_v4(),
@@ -384,29 +778,35 @@ mod tests {
                 1,
             )
             .unwrap();
-            for _ in 0..per_person {
+            for n in 0..per_person {
                 let req = test::TestRequest::get()
                     .uri("/api/ping")
                     .insert_header(("Authorization", format!("Bearer {token}")))
                     .peer_addr("10.9.9.9:5000".parse().unwrap())
                     .to_request();
-                match test::try_call_service(&app, req).await {
-                    Ok(r) if r.status().is_success() => ok += 1,
+                let status = match test::try_call_service(&app, req).await {
+                    Ok(r) => r.status(),
                     // The 429 is a response (B-TEAM-8), so it can carry CORS.
-                    Ok(r) => {
-                        assert_eq!(r.status(), actix_web::http::StatusCode::TOO_MANY_REQUESTS);
-                        paced += 1;
-                    }
-                    Err(e) => {
-                        assert_eq!(
-                            e.error_response().status(),
-                            actix_web::http::StatusCode::TOO_MANY_REQUESTS
-                        );
-                        paced += 1;
-                    }
+                    Err(e) => e.error_response().status(),
+                };
+                if status.is_success() {
+                    ok += 1;
+                    continue;
                 }
+                assert_eq!(status, actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+                if n == 0 {
+                    refused_fresh = true;
+                }
+                break;
+            }
+            if refused_fresh {
+                break;
             }
         }
+        assert!(
+            refused_fresh,
+            "a fresh account at a full address is refused: the accounts did not multiply the allowance"
+        );
         // The address bucket refills continuously while the loop runs.
         let refilled =
             (started.elapsed().as_secs_f64() * per_address_per_minute() / 60.0).ceil() as usize;
@@ -415,14 +815,9 @@ mod tests {
             "{ok} requests passed one address, ceiling {ceiling} (+{refilled} refilled)"
         );
         assert!(
-            ok < accounts * per_person,
-            "the accounts did not multiply the allowance"
-        );
-        assert!(
             ok >= ceiling - 1,
             "the ceiling is reached, not undercut ({ok})"
         );
-        assert!(paced > 0);
     }
 
     /// Two people at one address each get their own allowance, through the
@@ -459,16 +854,21 @@ mod tests {
             let r = test::call_service(&app, call(alice.clone())).await;
             assert!(r.status().is_success());
         }
-        let paced = test::try_call_service(&app, call(alice.clone())).await;
-        let status = match paced {
-            Ok(r) => r.status(),
-            Err(e) => e.error_response().status(),
-        };
-        assert_eq!(
-            status,
-            actix_web::http::StatusCode::TOO_MANY_REQUESTS,
-            "alice spent hers"
-        );
+        // Her bucket refills while the loop runs (a token every 150 ms at
+        // 400 a minute), so on a loaded box the next call or two may still
+        // pass; far faster than the refill, she is refused.
+        let mut refused = false;
+        for _ in 0..per_minute {
+            let status = match test::try_call_service(&app, call(alice.clone())).await {
+                Ok(r) => r.status(),
+                Err(e) => e.error_response().status(),
+            };
+            if status == actix_web::http::StatusCode::TOO_MANY_REQUESTS {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "alice spent hers");
         let r = test::call_service(&app, call(bob.clone())).await;
         assert!(
             r.status().is_success(),
@@ -494,6 +894,245 @@ mod tests {
         assert_eq!(limiter_key(&req), "10.0.0.7");
     }
 
+    /// A staff-app phone is keyed by its own device, like a signed-in till,
+    /// never by the address: every phone on a shop's Wi-Fi (or one mobile
+    /// carrier's NAT) shared ONE allowance, and a few pull-to-refreshes got
+    /// 429 — worded "can't reach the server" (owner, Android, 2026-09-25).
+    #[test]
+    fn a_staff_phone_is_keyed_by_its_device_not_the_address() {
+        use crate::auth::jwt::JwtSecret;
+        use actix_web::{test, web};
+        let secret = JwtSecret("limiter-key-test-secret".into());
+        let device = uuid::Uuid::new_v4();
+        let (token, _) = crate::staff::principal::mint(
+            &secret,
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            None,
+            device,
+        )
+        .unwrap();
+        let req = test::TestRequest::get()
+            .uri("/staff/me/context")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .peer_addr("10.0.0.7:5000".parse().unwrap())
+            .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+            .to_srv_request();
+        assert_eq!(limiter_key(&req), format!("staff:{device}"));
+        // A staff token signed with another secret is nobody: the address.
+        let (fake, _) = crate::staff::principal::mint(
+            &JwtSecret("not-the-secret".into()),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            None,
+            device,
+        )
+        .unwrap();
+        let req = test::TestRequest::get()
+            .uri("/staff/me/context")
+            .insert_header(("Authorization", format!("Bearer {fake}")))
+            .peer_addr("10.0.0.7:5000".parse().unwrap())
+            .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+            .to_srv_request();
+        assert_eq!(limiter_key(&req), "10.0.0.7");
+    }
+
+    /// The owner's request (2026-09-25): every allowance doubled.
+    #[test]
+    fn the_defaults_are_the_doubled_allowances() {
+        assert_eq!(GLOBAL_PER_MINUTE, 400.0);
+        assert_eq!(PER_ADDRESS_PER_MINUTE, 20_000.0);
+        assert_eq!(EXPORT_MAX, 10);
+        // (area, limiter, burst before, seconds per request before)
+        let before: &[(&str, &str, u32, u64)] = &[
+            ("AUTH", "LOGIN", 60, 1),
+            ("AUTH", "ACTIVATION", 10, 6),
+            ("CUSTOMERS", "BROWSE", 30, 1),
+            ("CUSTOMERS", "IDENTITY", 5, 6),
+            ("CUSTOMERS", "BROWSE_TOKEN", 20, 2),
+            ("CUSTOMERS", "IDENTITY_TOKEN", 3, 120),
+            ("LOYALTY", "BROWSE", 30, 1),
+            ("LOYALTY", "JOIN", 5, 6),
+            ("DEMO", "REQUEST", 5, 30),
+            ("TICKETS", "TABLE_BROWSE", 30, 1),
+            ("TICKETS", "TABLE_INTAKE", 10, 6),
+            ("INTEGRATIONS", "PARTNER", 30, 2),
+            ("DELIVERY", "BROWSE", 30, 1),
+            ("DELIVERY", "QUOTE", 10, 6),
+            ("DELIVERY", "OTP", 3, 30),
+            ("DELIVERY", "INTAKE", 10, 6),
+            ("BOOKINGS", "BROWSE", 60, 1),
+            ("BOOKINGS", "WRITE", 10, 6),
+        ];
+        assert_eq!(before.len(), ROUTE_LIMITS.len(), "every limiter is listed");
+        for (area, limiter, burst, secs) in before {
+            let d = ROUTE_LIMITS
+                .iter()
+                .find(|d| d.area == *area && d.limiter == *limiter)
+                .unwrap_or_else(|| panic!("{area}/{limiter}"));
+            assert_eq!(d.burst, burst * 2, "{area}/{limiter} burst");
+            assert_eq!(d.ms_per_request, secs * 1000 / 2, "{area}/{limiter} refill");
+        }
+    }
+
+    /// Every variable is documented in `.env.example` with its default.
+    #[test]
+    fn every_limit_is_documented_with_its_default() {
+        let doc = include_str!("../.env.example");
+        let mut want = vec![
+            format!("MADAR_RATE_LIMIT_PER_MINUTE={GLOBAL_PER_MINUTE}"),
+            format!("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE={PER_ADDRESS_PER_MINUTE}"),
+            format!("MADAR_EXPORT_MAX_PER_MINUTE={EXPORT_MAX}"),
+        ];
+        for d in ROUTE_LIMITS {
+            want.push(format!(
+                "MADAR_RL_{}_{}_BURST={}",
+                d.area, d.limiter, d.burst
+            ));
+            want.push(format!(
+                "MADAR_RL_{}_{}_MS_PER_REQUEST={}",
+                d.area, d.limiter, d.ms_per_request
+            ));
+        }
+        for w in want {
+            assert!(doc.contains(&w), ".env.example lacks {w}");
+        }
+    }
+
+    /// Each limiter is set from the environment; a garbage value falls back.
+    /// (nextest runs each test in its own process, so these variables reach
+    /// no other test.)
+    #[test]
+    fn every_limit_is_read_from_the_environment() {
+        // SAFETY: this test's own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "33");
+            std::env::set_var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE", "4444");
+            std::env::set_var("MADAR_EXPORT_MAX_PER_MINUTE", "3");
+            std::env::set_var("MADAR_RL_DELIVERY_OTP_BURST", "2");
+            std::env::set_var("MADAR_RL_DELIVERY_OTP_MS_PER_REQUEST", "90000");
+            std::env::set_var("MADAR_RL_BOOKINGS_WRITE_BURST", "lots");
+            std::env::set_var("MADAR_RL_BOOKINGS_WRITE_MS_PER_REQUEST", "0");
+        }
+        assert_eq!(global_per_minute(), 33.0);
+        assert_eq!(per_address_per_minute(), 4444.0);
+        assert_eq!(export_max(), 3);
+        assert_eq!(
+            limit_of("DELIVERY", "OTP"),
+            RouteLimit {
+                burst: 2,
+                ms_per_request: 90_000
+            }
+        );
+        assert_eq!(
+            limit_of("BOOKINGS", "WRITE"),
+            RouteLimit {
+                burst: 20,
+                ms_per_request: 3_000
+            },
+            "garbage falls back to the default"
+        );
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "not a number");
+            std::env::set_var("MADAR_EXPORT_MAX_PER_MINUTE", "-1");
+        }
+        assert_eq!(global_per_minute(), GLOBAL_PER_MINUTE);
+        assert_eq!(export_max(), EXPORT_MAX);
+    }
+
+    /// An override reaches a real route governor: a burst of 2 on the delivery
+    /// OTP limiter refuses the third call from one address.
+    #[actix_web::test]
+    async fn a_route_governor_takes_its_numbers_from_the_environment() {
+        use actix_web::{App, HttpResponse, test, web};
+        // SAFETY: this test's own process; nothing else reads it.
+        unsafe {
+            std::env::set_var("MADAR_RL_DELIVERY_OTP_BURST", "2");
+        }
+        let gov = route_governor(PeerIpOrLocalhost, "DELIVERY", "OTP");
+        let app = test::init_service(
+            App::new().service(
+                web::resource("/otp")
+                    .wrap(actix_governor::Governor::new(&gov))
+                    .route(web::post().to(HttpResponse::Ok)),
+            ),
+        )
+        .await;
+        let call = || {
+            test::TestRequest::post()
+                .uri("/otp")
+                .peer_addr("10.1.2.3:5000".parse().unwrap())
+                .to_request()
+        };
+        for _ in 0..2 {
+            assert!(test::call_service(&app, call()).await.status().is_success());
+        }
+        let third = match test::try_call_service(&app, call()).await {
+            Ok(r) => r.status(),
+            Err(e) => e.error_response().status(),
+        };
+        assert_eq!(third, actix_web::http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// Every answer says what is left of the caller's bucket (the IETF
+    /// RateLimit fields), and the refusal says when to come back.
+    #[actix_web::test]
+    async fn answers_carry_the_rate_limit_headers() {
+        use actix_web::{App, HttpResponse, test, web};
+        let app = test::init_service(
+            App::new()
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .route("/public/ping", web::get().to(HttpResponse::Ok)),
+        )
+        .await;
+        let per_minute = global_per_minute() as u64;
+        let call = || {
+            test::TestRequest::get()
+                .uri("/public/ping")
+                .peer_addr("10.9.3.1:4000".parse().unwrap())
+                .to_request()
+        };
+        let header = |h: &actix_web::http::header::HeaderMap, name: &str| {
+            h.get(name).map(|v| v.to_str().unwrap().to_string())
+        };
+
+        let first = test::call_service(&app, call()).await;
+        assert_eq!(
+            header(first.headers(), "ratelimit-policy").as_deref(),
+            Some(format!("\"caller\";q={per_minute};w=60").as_str())
+        );
+        assert_eq!(
+            header(first.headers(), "ratelimit").as_deref(),
+            Some(format!("\"caller\";r={};t=1", per_minute - 1).as_str()),
+            "one spent, back within a second"
+        );
+        let second = test::call_service(&app, call()).await;
+        assert!(
+            header(second.headers(), "ratelimit")
+                .unwrap()
+                .starts_with(&format!("\"caller\";r={};", per_minute - 2))
+        );
+
+        for _ in 2..per_minute {
+            test::call_service(&app, call()).await;
+        }
+        let refused = match test::try_call_service(&app, call()).await {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert_eq!(refused.status().as_u16(), 429);
+        assert!(
+            header(refused.headers(), "ratelimit")
+                .unwrap()
+                .starts_with("\"caller\";r=0;")
+        );
+        let wait: u64 = header(refused.headers(), "retry-after")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&wait), "{wait}");
+    }
+
     #[test]
     fn the_bucket_refills_rather_than_opening_on_the_minute() {
         // A fixed window has a cliff — the same request that worked a second
@@ -502,14 +1141,23 @@ mod tests {
         let key = "bucket-test";
         let per_minute = global_per_minute();
         for _ in 0..per_minute as usize {
-            assert!(take_token(key));
+            assert!(take_token_at(key, per_minute).is_ok());
         }
-        assert!(!take_token(key), "the bucket is empty");
+        assert!(
+            take_token_at(key, per_minute).is_err(),
+            "the bucket is empty"
+        );
 
-        // A third of a second later there is one token, not a whole window's.
-        BUCKETS.lock().unwrap().get_mut(key).unwrap().1 -= std::time::Duration::from_millis(400);
-        assert!(take_token(key), "one token has come back");
-        assert!(!take_token(key), "and only one");
+        // One and a half tokens' time later there is one token, not a whole
+        // window's.
+        let token_ms = 60_000.0 / per_minute;
+        BUCKETS.lock().unwrap().get_mut(key).unwrap().1 -=
+            std::time::Duration::from_millis((token_ms * 1.5) as u64);
+        assert!(
+            take_token_at(key, per_minute).is_ok(),
+            "one token has come back"
+        );
+        assert!(take_token_at(key, per_minute).is_err(), "and only one");
     }
 
     #[test]
@@ -625,5 +1273,117 @@ mod tests {
         .await;
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(allow(&r).as_deref(), Some(origin), "a route governor's 429");
+    }
+
+    /// Each limiter's 429 names the limiter in its code: the general and
+    /// per-address buckets answer `RATE_LIMITED`, only the export gate
+    /// `EXPORT_RATE_LIMITED`. Every 429 said "export" before, so the staff
+    /// app's ordinary reads (`/staff/me/payslips`, …) came back as a
+    /// throttled export (iOS device checks, 2026-09-25).
+    #[actix_web::test]
+    async fn each_limiter_names_itself_in_the_code() {
+        use crate::auth::jwt::{JwtSecret, create_token};
+        use crate::models::UserRole;
+        use actix_web::{App, HttpResponse, http::StatusCode, test, web};
+        // Small allowances, so each bucket runs dry in a handful of calls and
+        // none refills (a token every 12 s or more) while the test runs.
+        // SAFETY: nextest runs each test in its own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "3");
+            std::env::set_var("MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE", "5");
+            std::env::set_var("MADAR_EXPORT_MAX_PER_MINUTE", "2");
+        }
+        let secret = JwtSecret("limiter-code-test-secret".into());
+        let person = || {
+            create_token(
+                &secret,
+                uuid::Uuid::new_v4(),
+                None,
+                UserRole::Teller,
+                None,
+                1,
+            )
+            .unwrap()
+        };
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(JwtSecret(secret.0.clone())))
+                .wrap(actix_web::middleware::from_fn(throttle_exports))
+                .route("/public/ping", web::get().to(HttpResponse::Ok))
+                .service(
+                    web::scope("/api")
+                        .wrap(crate::auth::middleware::JwtMiddleware)
+                        .route("/ping", web::get().to(HttpResponse::Ok)),
+                ),
+        )
+        .await;
+        let call = |addr: &str, bearer: Option<&str>, export: bool| {
+            let mut req = test::TestRequest::get()
+                .uri("/public/ping")
+                .peer_addr(addr.parse().unwrap());
+            if let Some(b) = bearer {
+                req = req
+                    .uri("/api/ping")
+                    .insert_header(("Authorization", format!("Bearer {b}")));
+            }
+            if export {
+                req = req.insert_header((EXPORT_HEADER, "1"));
+            }
+            req.to_request()
+        };
+        const SLOW_DOWN: &str = "Too many requests just now. This will clear in a moment.";
+
+        // The general bucket: an anonymous caller is keyed by its address, and
+        // only its own bucket is asked.
+        for _ in 0..3 {
+            let r = test::call_service(&app, call("10.7.0.1:4000", None, false)).await;
+            assert!(r.status().is_success());
+        }
+        let r = test::call_service(&app, call("10.7.0.1:4000", None, false)).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value = test::read_body_json(r).await;
+        assert_eq!(body["code"], "RATE_LIMITED", "the general bucket: {body}");
+        assert_eq!(body["error"], SLOW_DOWN);
+
+        // The per-address bucket: alice spends 3 of the address's 5, bob 2
+        // more, and bob's next call is refused although his own bucket still
+        // holds a token. Only the address ceiling can refuse it.
+        let (alice, bob) = (person(), person());
+        for _ in 0..3 {
+            let r = test::call_service(&app, call("10.7.0.2:4000", Some(&alice), false)).await;
+            assert!(r.status().is_success());
+        }
+        for _ in 0..2 {
+            let r = test::call_service(&app, call("10.7.0.2:4000", Some(&bob), false)).await;
+            assert!(r.status().is_success());
+        }
+        let r = test::call_service(&app, call("10.7.0.2:4000", Some(&bob), false)).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value = test::read_body_json(r).await;
+        assert_eq!(
+            body["code"], "RATE_LIMITED",
+            "the per-address bucket: {body}"
+        );
+        assert_eq!(body["error"], SLOW_DOWN);
+
+        // The export gate keeps its own code and sentence.
+        let carol = person();
+        for _ in 0..2 {
+            let r = test::call_service(&app, call("10.7.0.3:4000", Some(&carol), true)).await;
+            assert!(r.status().is_success());
+        }
+        let r = test::call_service(&app, call("10.7.0.3:4000", Some(&carol), true)).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body: serde_json::Value = test::read_body_json(r).await;
+        assert_eq!(
+            body["code"], "EXPORT_RATE_LIMITED",
+            "the export gate: {body}"
+        );
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("That is 2 exports in a minute.")),
+            "{body}"
+        );
     }
 }

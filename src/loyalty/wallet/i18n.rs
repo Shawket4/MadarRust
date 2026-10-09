@@ -293,12 +293,20 @@ mod tests {
 
         s.stamp_per_line_item = Some(false);
         let per_order = how_it_works(&s);
-        assert!(per_order.en.contains("Every order earns a stamp"), "{}", per_order.en);
+        assert!(
+            per_order.en.contains("Every order earns a stamp"),
+            "{}",
+            per_order.en
+        );
         assert!(per_order.ar.contains("كل طلب"), "{}", per_order.ar);
 
         s.stamp_per_line_item = Some(true);
         let per_item = how_it_works(&s);
-        assert!(per_item.en.contains("Every item you buy earns a stamp"), "{}", per_item.en);
+        assert!(
+            per_item.en.contains("Every item you buy earns a stamp"),
+            "{}",
+            per_item.en
+        );
         assert!(per_item.ar.contains("كل صنف"), "{}", per_item.ar);
         // The threshold is still in both, whichever sentence was chosen.
         assert!(per_item.en.contains("costs 5 of them"));

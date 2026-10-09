@@ -54,6 +54,11 @@ pub struct PublicBranch {
 #[derive(Deserialize, IntoParams)]
 pub struct PublicBranchesQuery {
     pub org_id: Uuid,
+    /// The read-only menu (`/menu`): every active branch, not only the ones
+    /// taking online orders — a shop with ordering switched off still has a
+    /// menu to show. Each branch's channel flags stay as they are, so a client
+    /// never offers an order where none is taken.
+    pub browse: Option<bool>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -143,6 +148,9 @@ const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
     (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
     EXISTS(SELECT 1 FROM tills sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift"#;
 
+/// A shop's branches that take online orders, with each channel's hours and settings.
+///
+/// `org_id` names the shop. With `browse=true` every active branch is listed, for a read-only menu.
 #[utoipa::path(
     get, path = "/public/branches", tag = "delivery-public", params(PublicBranchesQuery),
     responses((status = 200, body = [PublicBranch]), AppErrorResponse)
@@ -157,11 +165,12 @@ pub async fn public_branches(
            JOIN organizations o ON o.id = b.org_id
            LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
            WHERE b.org_id = $1 AND b.is_active = true AND b.deleted_at IS NULL
-             AND (COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false)
+             AND ($2 OR COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false)
                   OR COALESCE(s.umbrella_enabled, false) OR COALESCE(s.pickup_enabled, false))
            ORDER BY b.name"#,
     ))
     .bind(query.org_id)
+    .bind(query.browse.unwrap_or(false))
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -314,9 +323,22 @@ pub struct DeliveryMenuItem {
     /// When non-empty the customizer filters the global catalog to these IDs by
     /// default, with a "show all" escape hatch. Empty = no restriction.
     pub allowed_addon_ids: Vec<Uuid>,
-    /// The item's modifier groups (unified model), channel-effective. Empty ⇒
-    /// the customizer falls back to `addons` + `allowed_addon_ids`.
+    /// The item's modifier groups (unified model), channel-effective: every
+    /// active attached group, a group with no option here included (options
+    /// `[]`). Non-empty ⇒ the item's add-ons are SET: the page offers only
+    /// what these groups hold, and no "show all" (none at all when every
+    /// group is empty). Empty ⇒ not set up in the unified model: the page
+    /// falls back to `addons` + `allowed_addon_ids`.
     pub modifier_groups: Vec<DeliveryModifierGroup>,
+    /// `item` | `combo` (combos module). Additive.
+    pub kind: String,
+    /// A kind=item row: its "make it a meal" upsell (C14), when that combo is
+    /// on this menu.
+    pub meal: Option<crate::combos::types::MealLink>,
+    /// A kind=combo row: its slots with every choice priced for this channel
+    /// (categories expanded to their available items). The server still
+    /// prices the order.
+    pub combo: Option<crate::combos::types::PublicCombo>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -340,6 +362,9 @@ pub struct DeliveryMenu {
     /// to the item subtotal only — the delivery fee is always charged in full.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discount: Option<DeliveryMenuDiscount>,
+    /// The deals on offer on this channel now (§11.2): checkout applies the
+    /// best ones automatically (`POST …/cart-quote` shows them). Additive.
+    pub deals: Vec<crate::deals::types::DealRule>,
 }
 
 /// Customer-facing summary of a channel's active discount, so the public UI can
@@ -361,8 +386,15 @@ pub struct DeliveryMenuDiscount {
     pub value_rate: rust_decimal::Decimal,
 }
 
+/// The `channel` of the read-only dine-in menu (see [`ChannelParam`]).
+const DINE_IN_PREVIEW: &str = "dine_in";
+
 #[derive(Deserialize, IntoParams)]
 pub struct ChannelParam {
+    /// A delivery channel, or `dine_in` — the dine-in menu (branch prices, no
+    /// channel discount), accepted ONLY with `preview=true`: the read-only
+    /// menu of a shop that takes no online orders. Nothing can be ordered
+    /// against it; quote and intake know no such channel.
     pub channel: String,
     /// Read-only browse preview. When `true`, the menu is returned even if the
     /// channel is closed right now, so customers can browse while a branch is
@@ -372,6 +404,9 @@ pub struct ChannelParam {
     pub preview: Option<bool>,
 }
 
+/// A branch's menu for one ordering channel, with prices in piastres.
+///
+/// `channel` is `in_mall`, `outside`, `umbrella` or `pickup`. `preview=true` shows a channel's menu while it is closed, and `channel=dine_in&preview=true` gives the read-only dine-in menu. Nothing can be ordered from a preview.
 #[utoipa::path(
     get, path = "/public/branches/{id}/menu", tag = "delivery-public", params(ChannelParam),
     responses((status = 200, body = DeliveryMenu), AppErrorResponse)
@@ -382,6 +417,22 @@ pub async fn public_menu(
     query: web::Query<ChannelParam>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
+    if query.channel == DINE_IN_PREVIEW {
+        if !query.preview.unwrap_or(false) {
+            return Err(AppError::BadRequest(
+                "the dine-in menu is read-only: pass preview=true".into(),
+            ));
+        }
+        let org_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT org_id FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+        )
+        .bind(branch_id)
+        .fetch_optional(pool.get_ref())
+        .await?;
+        let org_id = org_id.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+        let menu = load_public_menu(pool.get_ref(), org_id, branch_id, None).await?;
+        return Ok(HttpResponse::Ok().json(menu));
+    }
     validate_channel(&query.channel)?;
 
     let branch: Option<(Uuid, bool)> = sqlx::query_as(&format!(
@@ -491,11 +542,12 @@ pub(crate) async fn load_public_menu(
         .collect();
 
     #[allow(clippy::type_complexity)]
-    let item_rows: Vec<(Uuid, Option<Uuid>, String, serde_json::Value, Option<String>, Option<String>, i32)> =
+    let item_rows: Vec<(Uuid, Option<Uuid>, String, serde_json::Value, Option<String>, Option<String>, i32, String)> =
         sqlx::query_as(
             r#"SELECT mi.id, mi.category_id, mi.name, mi.name_translations, mi.description,
                       COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = mi.image_group_id AND a.variant = 'full' LIMIT 1), mi.image_url) AS image_url,
-                      COALESCE(bcmo.price_override, bmo.price_override, mi.base_price) AS price
+                      COALESCE(bcmo.price_override, bmo.price_override, mi.base_price) AS price,
+                      mi.kind
                FROM menu_items mi
                LEFT JOIN branch_menu_overrides bmo
                       ON bmo.menu_item_id = mi.id AND bmo.branch_id = $1
@@ -562,11 +614,33 @@ pub(crate) async fn load_public_menu(
     let mut modifier_groups_by_item =
         load_modifier_groups(pool, &item_ids, branch_id, channel).await?;
 
+    // Combos (§2.5) and deals (§11.2) on this channel: `None` is the QR
+    // table menu, a delivery channel is the online storefront.
+    let sale_channel = if channel.is_some() {
+        madar_catalog::combo::Channel::Online
+    } else {
+        madar_catalog::combo::Channel::Qr
+    };
+    let (mut combos, meals, deals) = public_combos_and_deals(
+        pool,
+        org_id,
+        branch_id,
+        sale_channel,
+        &item_rows,
+        &sizes_by_item,
+    )
+    .await?;
+
+    let shown: std::collections::HashSet<Uuid> = combos.keys().copied().collect();
     let items: Vec<DeliveryMenuItem> = item_rows
         .into_iter()
+        .filter(|r| r.7 != "combo" || shown.contains(&r.0))
         .map(
-            |(id, category_id, name, name_translations, description, image_url, price)| {
+            |(id, category_id, name, name_translations, description, image_url, price, kind)| {
                 DeliveryMenuItem {
+                    combo: combos.remove(&id),
+                    meal: meals.get(&id).copied(),
+                    kind,
                     sizes: sizes_by_item.remove(&id).unwrap_or_default(),
                     optionals: optionals_by_item.remove(&id).unwrap_or_default(),
                     default_milk_addon_id: default_milk_by_item.remove(&id),
@@ -589,13 +663,276 @@ pub(crate) async fn load_public_menu(
         items,
         addons,
         discount,
+        deals,
     })
+}
+
+#[allow(clippy::type_complexity)]
+type PublicItemRow = (
+    Uuid,
+    Option<Uuid>,
+    String,
+    serde_json::Value,
+    Option<String>,
+    Option<String>,
+    i32,
+    String,
+);
+
+/// The combos a public menu shows (only those on sale on `channel` at the
+/// branch now, their category choices expanded to the items this menu
+/// offers), the "make it a meal" links into them, and the deals on offer.
+#[allow(clippy::type_complexity)]
+async fn public_combos_and_deals(
+    pool: &PgPool,
+    org_id: Uuid,
+    branch_id: Uuid,
+    channel: madar_catalog::combo::Channel,
+    rows: &[PublicItemRow],
+    sizes: &std::collections::HashMap<Uuid, Vec<DeliveryMenuSize>>,
+) -> Result<
+    (
+        std::collections::HashMap<Uuid, crate::combos::types::PublicCombo>,
+        std::collections::HashMap<Uuid, crate::combos::types::MealLink>,
+        Vec<crate::deals::types::DealRule>,
+    ),
+    AppError,
+> {
+    use crate::combos::types::{PublicCombo, PublicComboChoice, PublicComboSize, PublicComboSlot};
+    use std::collections::{HashMap, HashSet};
+
+    let mut conn = pool.acquire().await?;
+    let sell = crate::deals::load::channels_at(&mut conn, org_id, Some(branch_id)).await?;
+    let sell_c = crate::combos::economics::sell_of(sell);
+    if !sell_c.get(channel) {
+        return Ok((HashMap::new(), HashMap::new(), Vec::new()));
+    }
+    let now = crate::combos::load::local_now(&mut conn, org_id, Some(branch_id)).await?;
+    let b = branch_id.to_string();
+
+    // Deals on offer now at this branch.
+    let deals: Vec<crate::deals::types::DealRule> =
+        crate::deals::load::load_rules(&mut conn, org_id, None)
+            .await?
+            .into_iter()
+            .map(|r| crate::deals::load::for_branch(r, branch_id, sell))
+            .filter(|r| {
+                r.is_active
+                    && madar_catalog::sale_window::open(
+                        &r.windows
+                            .iter()
+                            .map(crate::combos::load::window_view)
+                            .collect::<Vec<_>>(),
+                        Some(&b),
+                        &now,
+                    )
+            })
+            .collect();
+
+    let combo_ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|r| r.7 == "combo")
+        .map(|r| r.0)
+        .collect();
+    if combo_ids.is_empty() {
+        return Ok((HashMap::new(), HashMap::new(), deals));
+    }
+    let row_of: HashMap<Uuid, &PublicItemRow> = rows.iter().map(|r| (r.0, r)).collect();
+    // What this menu sells: its kind=item rows.
+    let on_menu: HashSet<Uuid> = rows.iter().filter(|r| r.7 == "item").map(|r| r.0).collect();
+    let defs = crate::combos::load::load_combos(&mut conn, org_id, Some(&combo_ids)).await?;
+    let cats: Vec<Uuid> = defs
+        .iter()
+        .flat_map(|d| {
+            d.slots
+                .iter()
+                .flat_map(|s| s.choices.iter().filter_map(|c| c.category_id))
+        })
+        .collect();
+    let members = crate::combos::load::category_members(&mut conn, org_id, &cats).await?;
+    // Choices this menu does not sell right now (switched off at the branch or
+    // on the channel, or an item choice whose item is inactive): shown greyed,
+    // never pickable (owner, 2026-09-27), so their names come from here.
+    let off_menu_ids: Vec<Uuid> = defs
+        .iter()
+        .flat_map(|d| d.slots.iter().flat_map(|s| s.choices.iter()))
+        .flat_map(|c| match (c.menu_item_id, c.category_id) {
+            (Some(i), _) => vec![i],
+            (None, Some(cat)) => members.get(&cat).cloned().unwrap_or_default(),
+            _ => vec![],
+        })
+        .filter(|i| !on_menu.contains(i))
+        .collect::<HashSet<Uuid>>()
+        .into_iter()
+        .collect();
+    let off_menu: HashMap<Uuid, (String, serde_json::Value, Option<String>, i32)> =
+        sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>, i32)>(
+            "SELECT mi.id, mi.name, mi.name_translations, \
+                    COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = mi.image_group_id AND a.variant = 'full' LIMIT 1), mi.image_url), \
+                    mi.base_price \
+               FROM menu_items mi \
+              WHERE mi.org_id = $1 AND mi.id = ANY($2) AND mi.kind = 'item' AND mi.deleted_at IS NULL",
+        )
+        .bind(org_id)
+        .bind(&off_menu_ids)
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|(id, name, tr, image, price)| (id, (name, tr, image, price)))
+        .collect();
+
+    let mut out = HashMap::new();
+    for def in &defs {
+        let Some(row) = row_of.get(&def.id) else {
+            continue;
+        };
+        let view = def.view(i64::from(row.6), Some(branch_id));
+        let at = madar_catalog::combo::Availability {
+            channel,
+            sell: &sell_c,
+            branch_enabled: true,
+            branch_id: Some(&b),
+            now: &now,
+        };
+        let admits = |c: &madar_catalog::combo::ChoiceView| {
+            let parse = |s: &Option<String>| s.as_deref().and_then(|v| v.parse::<Uuid>().ok());
+            if let Some(i) = parse(&c.menu_item_id) {
+                return on_menu.contains(&i);
+            }
+            parse(&c.category_id)
+                .and_then(|cat| members.get(&cat))
+                .is_some_and(|ms| ms.iter().any(|m| on_menu.contains(m)))
+        };
+        if madar_catalog::combo::available(&view, &at, admits).is_err() {
+            continue;
+        }
+        let slots = def
+            .slots
+            .iter()
+            .map(|s| {
+                let mut seen = HashSet::new();
+                let mut choices = Vec::new();
+                for c in &s.choices {
+                    let items: Vec<Uuid> = match (c.menu_item_id, c.category_id) {
+                        (Some(i), _) => vec![i],
+                        (None, Some(cat)) => members.get(&cat).cloned().unwrap_or_default(),
+                        _ => vec![],
+                    };
+                    for item in items {
+                        if !on_menu.contains(&item) {
+                            // Greyed: its name, no sizes, never the default.
+                            if let Some((name, tr, image, price)) = off_menu.get(&item)
+                                && seen.insert(item)
+                            {
+                                choices.push(PublicComboChoice {
+                                    menu_item_id: item,
+                                    name: name.clone(),
+                                    name_translations: tr.clone(),
+                                    image_url: public_image_url(org_id, image.clone()),
+                                    base_price: *price,
+                                    included_size_label: c
+                                        .included_size_label
+                                        .clone()
+                                        .unwrap_or_else(|| "one_size".into()),
+                                    sizes: Vec::new(),
+                                    surcharge: c.surcharge,
+                                    available: false,
+                                });
+                            }
+                            continue;
+                        }
+                        if !seen.insert(item) {
+                            continue;
+                        }
+                        let r = row_of[&item];
+                        let own: Vec<(String, i32)> = match sizes.get(&item) {
+                            Some(zs) if !zs.is_empty() => {
+                                zs.iter().map(|z| (z.label.clone(), z.price)).collect()
+                            }
+                            _ => vec![("one_size".to_string(), r.6)],
+                        };
+                        let included = c.included_size_label.clone().unwrap_or_else(|| {
+                            own.iter()
+                                .min_by_key(|(_, p)| *p)
+                                .map(|(l, _)| l.clone())
+                                .unwrap_or_else(|| "one_size".into())
+                        });
+                        let base = own
+                            .iter()
+                            .find(|(l, _)| *l == included)
+                            .map(|(_, p)| *p)
+                            .unwrap_or(r.6);
+                        let sizes = own
+                            .iter()
+                            .map(|(label, price)| PublicComboSize {
+                                extra: if *label == included {
+                                    0
+                                } else if let Some(z) =
+                                    c.size_surcharges.iter().find(|z| z.size_label == *label)
+                                {
+                                    z.surcharge
+                                } else {
+                                    (price - base).max(0)
+                                },
+                                label: label.clone(),
+                                price: *price,
+                            })
+                            .collect();
+                        choices.push(PublicComboChoice {
+                            menu_item_id: item,
+                            name: r.2.clone(),
+                            name_translations: r.3.clone(),
+                            image_url: public_image_url(org_id, r.5.clone()),
+                            base_price: base,
+                            included_size_label: included,
+                            sizes,
+                            surcharge: c.surcharge,
+                            available: true,
+                        });
+                    }
+                }
+                // An unavailable item is never the default.
+                let default_on = s.default_item_id.filter(|d| {
+                    choices
+                        .iter()
+                        .any(|c: &PublicComboChoice| c.menu_item_id == *d && c.available)
+                });
+                PublicComboSlot {
+                    id: s.id,
+                    name: s.name.clone(),
+                    name_translations: s.name_translations.clone(),
+                    sort: s.sort,
+                    min: s.min,
+                    max: s.max,
+                    default_item_id: default_on,
+                    default_size_label: default_on.and(s.default_size_label.clone()),
+                    choices,
+                }
+            })
+            .collect();
+        out.insert(
+            def.id,
+            PublicCombo {
+                is_fixed: def.is_fixed(),
+                slots,
+            },
+        );
+    }
+
+    let meals = crate::combos::load::meal_links(&mut conn, org_id)
+        .await?
+        .into_iter()
+        .filter(|(item, m)| on_menu.contains(item) && out.contains_key(&m.combo_id))
+        .collect();
+    Ok((out, meals, deals))
 }
 
 /// Load the org-wide global addon catalog (the POS model: one catalog for every
 /// item), priced/availability-resolved per channel (branch_channel → branch →
 /// catalog default). Channel-unavailable options are excluded. Ordered by `type`
-/// then `name`. Loaded once per request, not per item.
+/// then `name`. Loaded once per request, not per item. A custom group's options
+/// (no legacy type) are not in it: they reach the menu through the item's
+/// `modifier_groups` (see `menu::handlers::AddonItem`).
 async fn load_addon_catalog(
     pool: &PgPool,
     org_id: Uuid,
@@ -616,7 +953,7 @@ async fn load_addon_catalog(
          LEFT JOIN branch_channel_addon_overrides bcao \
                 ON bcao.addon_item_id = a.id AND bcao.branch_id = $1 \
                AND bcao.channel = $2::delivery_channel \
-         WHERE a.org_id = $3 AND a.is_active = true \
+         WHERE a.org_id = $3 AND a.is_active = true AND a.type IS NOT NULL \
          ORDER BY a.type, a.name",
     )
     .bind(branch_id)
@@ -725,8 +1062,13 @@ async fn load_default_milk(
 /// channel-effective (branch_channel → branch → channel → catalog default, per
 /// CONTRACT §3). Addon-sourced options only; `included_option_ids` honoured;
 /// effectively-unavailable options excluded (same convention as the flat addon
-/// catalog); groups left with no options are dropped. Returns an empty map for
-/// orgs not yet backfilled — callers treat that as "no unified groups".
+/// catalog). Every ACTIVE attached group is listed, even one left with no
+/// options (the item's own empty Options group after its groups were all
+/// detached): an item that lists a group has its add-ons SET, and the page
+/// offers only what its groups hold — never the org's whole add-on catalog,
+/// as the till reads it (`/catalog/sync` lists the same attachments). An item
+/// with no attachment at all is absent from the map — not set up in the
+/// unified model — and callers fall back to the legacy allowlist.
 async fn load_modifier_groups(
     pool: &PgPool,
     item_ids: &[Uuid],
@@ -746,13 +1088,13 @@ async fn load_modifier_groups(
         String,            // selection_type
         i32,               // effective min
         Option<i32>,       // effective max
-        bool,              // effective required
-        Option<String>,    // legacy_addon_type
-        Uuid,              // option id
-        String,            // option name
-        serde_json::Value, // option name_translations
-        i32,               // effective price
-        bool,              // effective availability
+        bool,                      // effective required
+        Option<String>,            // legacy_addon_type
+        Option<Uuid>,              // option id (none: a group with no option here)
+        Option<String>,            // option name
+        Option<serde_json::Value>, // option name_translations
+        Option<i32>,               // effective price
+        Option<bool>,              // effective availability
     )> = sqlx::query_as(
         "SELECT mimg.menu_item_id, mimg.group_id, g.name, g.name_translations, \
                 g.selection_type, \
@@ -765,8 +1107,9 @@ async fn load_modifier_groups(
                 COALESCE(bc.is_available, b.is_available, c.is_available, true)  AS is_available \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups g  ON g.id = mimg.group_id AND g.is_active = true \
-         JOIN modifier_options o ON o.group_id = g.id AND o.is_active = true \
+         LEFT JOIN modifier_options o ON o.group_id = g.id AND o.is_active = true \
                                 AND o.legacy_source = 'addon' \
+                                AND (mimg.included_option_ids IS NULL OR o.id = ANY(mimg.included_option_ids)) \
          LEFT JOIN menu_price_overrides bc \
                 ON bc.target_type = 'modifier_option' AND bc.target_id = o.id \
                AND bc.scope = 'branch_channel' AND bc.branch_id = $2 \
@@ -778,7 +1121,6 @@ async fn load_modifier_groups(
                 ON c.target_type = 'modifier_option' AND c.target_id = o.id \
                AND c.scope = 'channel' AND c.channel = $3::delivery_channel \
          WHERE mimg.menu_item_id = ANY($1) \
-           AND (mimg.included_option_ids IS NULL OR o.id = ANY(mimg.included_option_ids)) \
          ORDER BY mimg.menu_item_id, mimg.sort, g.name, o.sort, o.name",
     )
     .bind(item_ids)
@@ -806,9 +1148,6 @@ async fn load_modifier_groups(
         avail,
     ) in rows
     {
-        if !avail {
-            continue; // customer-facing: unavailable options are excluded entirely
-        }
         let groups = by_item.entry(item_id).or_default();
         let group = match groups.last_mut() {
             Some(g) if g.group_id == group_id => g,
@@ -827,16 +1166,16 @@ async fn load_modifier_groups(
                 groups.last_mut().expect("just pushed")
             }
         };
-        group.options.push(DeliveryModifierOption {
-            option_id: oid,
-            name: oname,
-            name_translations: otrans,
-            price,
-        });
-    }
-    // Drop groups whose options all resolved unavailable.
-    for groups in by_item.values_mut() {
-        groups.retain(|g| !g.options.is_empty());
+        // The group stays listed; an option only when there is one and it
+        // is available (customer-facing: unavailable options are excluded).
+        if let (Some(option_id), Some(name), Some(price), Some(true)) = (oid, oname, price, avail) {
+            group.options.push(DeliveryModifierOption {
+                option_id,
+                name,
+                name_translations: otrans.unwrap_or_else(|| serde_json::json!({})),
+                price,
+            });
+        }
     }
     Ok(by_item)
 }
@@ -999,6 +1338,9 @@ pub(crate) async fn compute_outside_fee(
     Ok(select_zone_fee(distance_i, source, max_dist, &zones))
 }
 
+/// The delivery fee and zone for a point, before ordering.
+///
+/// Needs `lat`, `lng` and `channel`. `status` says whether the branch delivers there; the fee is in piastres.
 #[utoipa::path(
     get, path = "/public/branches/{id}/delivery-quote", tag = "delivery-public", params(QuoteQuery),
     responses((status = 200, body = QuoteResponse), AppErrorResponse)
@@ -1143,6 +1485,9 @@ fn generate_otp_code() -> String {
     format!("{n:04}")
 }
 
+/// Send a 4-digit code by WhatsApp to verify a phone number.
+///
+/// One live code per phone per minute (409 otherwise). Check it with `/public/otp/verify`.
 #[utoipa::path(
     post, path = "/public/otp/request", tag = "delivery-public", request_body = OtpRequestInput,
     responses((status = 200, body = OtpRequestResponse), AppErrorResponse)
@@ -1199,6 +1544,9 @@ pub struct OtpVerifyResponse {
     pub device_token: String,
 }
 
+/// Check a WhatsApp code and get a `device_token` that proves the phone.
+///
+/// Ordering, booking, the rewards card and order history take this token where a shop asks for a verified phone. A code allows five tries.
 #[utoipa::path(
     post, path = "/public/otp/verify", tag = "delivery-public", request_body = OtpVerifyInput,
     responses((status = 200, body = OtpVerifyResponse), AppErrorResponse)
@@ -1349,6 +1697,9 @@ pub struct DeliveryOrderInput {
     pub contact_device_token: Option<String>,
 }
 
+/// Place an online order (delivery or pickup) at a branch.
+///
+/// Answers 201 with the order; follow it at `/public/delivery-orders/{id}/track`. The server prices the cart in piastres. Where the branch requires a verified phone (the default), send the `device_token` from `/public/otp/verify`.
 #[utoipa::path(
     post, path = "/public/delivery-orders", tag = "delivery-public", request_body = DeliveryOrderInput,
     responses((status = 201, body = DeliveryOrder), AppErrorResponse)
@@ -1712,7 +2063,11 @@ pub async fn create_delivery_order(
     // the tax is inside the base and the total does not grow; the identity
     // the row CHECKs is exactly this sum.
     let policy = online_tax_policy(pool.get_ref(), body.branch_id).await?;
-    let breakdown = crate::tax::compute(subtotal as i64, discount_amount as i64, &policy);
+    let breakdown = madar_money::bill::price_subtotal(
+        i64::from(subtotal),
+        madar_money::bill::BillDiscount::Stated(i64::from(discount_amount)),
+        &policy,
+    );
     let tax_amount = breakdown.tax as i32;
     let total = breakdown.total as i32 + delivery_fee;
 
@@ -1735,7 +2090,12 @@ pub async fn create_delivery_order(
     .bind(biz_date)
     .fetch_one(&mut *tx)
     .await?;
-    let delivery_ref = format!("D-{}-{}-{:04}", branch_code, madar_time::yymmdd(biz_date), seq);
+    let delivery_ref = format!(
+        "D-{}-{}-{:04}",
+        branch_code,
+        madar_time::yymmdd(biz_date),
+        seq
+    );
 
     // WHO (design §2.4). A card's customer as is; otherwise the live customer
     // holding this phone, created on first contact. A matched customer's
@@ -2003,6 +2363,9 @@ struct OrderHistoryRow {
     cart: serde_json::Value,
 }
 
+/// A customer's past orders at a shop, by their verified phone.
+///
+/// Needs `phone` and the `device_token` from `/public/otp/verify`; a phone number alone unlocks nothing.
 #[utoipa::path(
     get, path = "/public/delivery-orders/history", tag = "delivery-public",
     params(GuestHistoryQuery),
@@ -2116,6 +2479,9 @@ pub struct GuestSavedLocation {
     pub last_used_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A customer's saved delivery addresses at a shop, by their verified phone.
+///
+/// Needs `phone` and the `device_token` from `/public/otp/verify`.
 #[utoipa::path(
     get, path = "/public/delivery-orders/past-locations", tag = "delivery-public",
     params(GuestLocationsQuery),
@@ -2198,6 +2564,9 @@ pub struct DeliveryTracking {
     pub address_line: Option<String>,
 }
 
+/// An online order's status, timeline and totals, from the id in its tracking link.
+///
+/// Amounts are in piastres.
 #[utoipa::path(
     get, path = "/public/delivery-orders/{id}/track", tag = "delivery-public",
     responses((status = 200, body = DeliveryTracking), AppErrorResponse)

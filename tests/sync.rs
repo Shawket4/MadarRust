@@ -769,7 +769,7 @@ async fn a_live_till_on_the_old_build_can_still_sell(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "shift_id": shift,
                 "payment_method": "cash",
@@ -835,7 +835,7 @@ async fn a_converted_discount_still_has_to_add_up(pool: PgPool) {
         test::TestRequest::post()
             .uri("/orders")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&serde_json::json!({
+            .set_json(serde_json::json!({
                 "branch_id": branch,
                 "shift_id": shift,
                 "payment_method": "cash",
@@ -1065,7 +1065,11 @@ async fn a_resumed_held_order_records_who_started_it_and_who_settled_it(pool: Pg
     msale["request"]["till_id"] = serde_json::json!(mshift);
     let r = replay(&app, &mbearer, &msale).await;
     assert!(r.status().is_success(), "{}", r.status());
-    assert_eq!(flags_of(&pool, manager).await, 0, "never flagged either way");
+    assert_eq!(
+        flags_of(&pool, manager).await,
+        0,
+        "never flagged either way"
+    );
 }
 
 async fn flags_of(pool: &PgPool, author: Uuid) -> i64 {
@@ -1256,17 +1260,27 @@ async fn a_tellers_over_cap_discount_is_flagged_without_approval_and_clean_with_
     let bearer = token(teller, org, UserRole::Teller);
 
     // No approval: accepted, recorded, flagged against the sale.
-    let r = replay(&app, &bearer, &discounted_sale(teller, branch, shift, item, None)).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &discounted_sale(teller, branch, shift, item, None),
+    )
+    .await;
     assert!(r.status().is_success(), "{:?}", r.status());
-    let (order_id, kind, by, approval_id, amount): (Uuid, Option<String>, Option<Uuid>, Option<Uuid>, i32) =
-        sqlx::query_as(
-            "SELECT id, discount_kind, discount_applied_by, discount_approval_id, discount_amount
+    let (order_id, kind, by, approval_id, amount): (
+        Uuid,
+        Option<String>,
+        Option<Uuid>,
+        Option<Uuid>,
+        i32,
+    ) = sqlx::query_as(
+        "SELECT id, discount_kind, discount_applied_by, discount_approval_id, discount_amount
                FROM orders WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(branch)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    )
+    .bind(branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(kind.as_deref(), Some("manual_amount"));
     assert_eq!(by, Some(teller));
     assert_eq!(approval_id, None);
@@ -1292,7 +1306,12 @@ async fn a_tellers_over_cap_discount_is_flagged_without_approval_and_clean_with_
         "id": Uuid::new_v4(), "capability": "orders.discount.manual_amount",
         "approver_id": teller, "amount_minor": 1500
     });
-    let r = replay(&app, &bearer, &discounted_sale(teller, branch, shift, item, Some(own))).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &discounted_sale(teller, branch, shift, item, Some(own)),
+    )
+    .await;
     assert!(r.status().is_success());
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM authz_replay_flags WHERE author_id = $1")
         .bind(teller)
@@ -1307,7 +1326,12 @@ async fn a_tellers_over_cap_discount_is_flagged_without_approval_and_clean_with_
         "id": approval_id, "capability": "orders.discount.manual_amount",
         "approver_id": manager, "amount_minor": 1500
     });
-    let r = replay(&app, &bearer, &discounted_sale(teller, branch, shift, item, Some(good))).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &discounted_sale(teller, branch, shift, item, Some(good)),
+    )
+    .await;
     assert!(r.status().is_success(), "{:?}", r.status());
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM authz_replay_flags WHERE author_id = $1")
         .bind(teller)
@@ -1336,7 +1360,13 @@ async fn a_tellers_over_cap_discount_is_flagged_without_approval_and_clean_with_
 async fn a_discount_within_the_cap_is_clean_and_a_percent_cap_counts_basis_points(pool: PgPool) {
     let app = app!(pool);
     let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
-    cap_role_grant(&pool, teller, 206, serde_json::json!({ "max_percent": 1000 })).await;
+    cap_role_grant(
+        &pool,
+        teller,
+        206,
+        serde_json::json!({ "max_percent": 1000 }),
+    )
+    .await;
     let bearer = token(teller, org, UserRole::Teller);
 
     // 10.00 off by hand: at the cap.
@@ -1494,12 +1524,11 @@ async fn a_live_discount_over_the_cap_with_a_managers_pin_is_allowed_and_recorde
     let v: serde_json::Value = test::read_body_json(r).await;
     assert_eq!(v["discount_applied_by"], serde_json::json!(teller));
     assert_eq!(v["discount_approval_id"], approval_id);
-    let approver: Uuid =
-        sqlx::query_scalar("SELECT approver_user_id FROM approvals WHERE id = $1")
-            .bind(uuid::Uuid::parse_str(approval_id.as_str().unwrap()).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let approver: Uuid = sqlx::query_scalar("SELECT approver_user_id FROM approvals WHERE id = $1")
+        .bind(uuid::Uuid::parse_str(approval_id.as_str().unwrap()).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(approver, manager);
 }
 
@@ -1519,9 +1548,12 @@ async fn an_allow_override_caps_a_discount_for_one_person(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let eff = madar_rust::authz::require::effective(&pool, teller, Some(branch)).await.unwrap();
+    let eff = madar_rust::authz::require::effective(&pool, teller, Some(branch))
+        .await
+        .unwrap();
     assert_eq!(
-        eff.limits_of(madar_rust::authz::Cap::OrdersDiscountManualAmount).max_amount,
+        eff.limits_of(madar_rust::authz::Cap::OrdersDiscountManualAmount)
+            .max_amount,
         Some(500)
     );
 }
@@ -1609,8 +1641,17 @@ async fn a_table_bills_over_cap_discount_is_flagged_without_approval_and_clean_w
     });
 
     let ticket = fired_ticket(&app, &bearer, teller, branch, item).await;
-    let r = replay(&app, &bearer, &settle_op(teller, ticket, shift, over.clone(), None)).await;
-    assert!(r.status().is_success(), "the bill lands anyway: {}", r.status());
+    let r = replay(
+        &app,
+        &bearer,
+        &settle_op(teller, ticket, shift, over.clone(), None),
+    )
+    .await;
+    assert!(
+        r.status().is_success(),
+        "the bill lands anyway: {}",
+        r.status()
+    );
     assert_eq!(
         bill_flags(&pool, teller).await,
         vec![(
@@ -1628,7 +1669,11 @@ async fn a_table_bills_over_cap_discount_is_flagged_without_approval_and_clean_w
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(kind.as_deref(), Some("manual_amount"), "attributed like a counter sale");
+    assert_eq!(
+        kind.as_deref(),
+        Some("manual_amount"),
+        "attributed like a counter sale"
+    );
     assert_eq!(by, Some(teller));
     assert_eq!(appr, None);
     assert_eq!(amount, 2000, "the money as the drawer took it");
@@ -1640,7 +1685,12 @@ async fn a_table_bills_over_cap_discount_is_flagged_without_approval_and_clean_w
         "approver_id": manager, "amount_minor": 2000
     });
     let ticket2 = fired_ticket(&app, &bearer, teller, branch, item).await;
-    let r = replay(&app, &bearer, &settle_op(teller, ticket2, shift, over, Some(good))).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &settle_op(teller, ticket2, shift, over, Some(good)),
+    )
+    .await;
     assert!(r.status().is_success(), "{}", r.status());
     assert_eq!(
         bill_flags(&pool, teller).await.len(),
@@ -1653,7 +1703,11 @@ async fn a_table_bills_over_cap_discount_is_flagged_without_approval_and_clean_w
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(stored, Some(approval_id), "the approval rides onto the order");
+    assert_eq!(
+        stored,
+        Some(approval_id),
+        "the approval rides onto the order"
+    );
     let verified: bool = sqlx::query_scalar("SELECT verified FROM approvals WHERE id = $1")
         .bind(approval_id)
         .fetch_one(&pool)
@@ -1683,7 +1737,12 @@ async fn a_bill_within_the_cap_is_clean_and_an_inherited_waiter_discount_is_stil
         "discount_amount": 500
     });
     let ticket = fired_ticket(&app, &bearer, teller, branch, item).await;
-    let r = replay(&app, &bearer, &settle_op(teller, ticket, shift, under, None)).await;
+    let r = replay(
+        &app,
+        &bearer,
+        &settle_op(teller, ticket, shift, under, None),
+    )
+    .await;
     assert!(r.status().is_success());
     assert!(bill_flags(&pool, teller).await.is_empty(), "within the cap");
 
@@ -1820,9 +1879,7 @@ async fn a_live_settle_takes_a_managers_pin_over_the_cashiers_cap(pool: PgPool) 
 /// it lands with the amount AS RUNG (never recomputed from the dead rule) and is
 /// flagged for the owner. Live, the same preset is still a clean error.
 #[sqlx::test]
-async fn a_replayed_sale_whose_preset_was_switched_off_lands_with_the_amount_as_rung(
-    pool: PgPool,
-) {
+async fn a_replayed_sale_whose_preset_was_switched_off_lands_with_the_amount_as_rung(pool: PgPool) {
     let app = app_with_orders!(pool);
     let (org, branch, item, teller, _manager, shift) = discount_sale_fixture(&pool).await;
     sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
@@ -1887,14 +1944,16 @@ async fn a_replayed_sale_whose_preset_was_switched_off_lands_with_the_amount_as_
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(amount, 500, "as rung — NOT 25% of whatever the basket is now");
-    let flags: Vec<(String, String)> = sqlx::query_as(
-        "SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1",
-    )
-    .bind(teller)
-    .fetch_all(&pool)
-    .await
-    .unwrap();
+    assert_eq!(
+        amount, 500,
+        "as rung — NOT 25% of whatever the basket is now"
+    );
+    let flags: Vec<(String, String)> =
+        sqlx::query_as("SELECT capability, reason FROM authz_replay_flags WHERE author_id = $1")
+            .bind(teller)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     assert!(
         flags.contains(&(
             "orders.discount.preset:inactive".to_string(),
@@ -2095,7 +2154,11 @@ async fn a_replayed_order_with_a_negative_subtotal_is_refused_not_booked(pool: P
         }
     });
     let r = replay(&app, &bearer, &op).await;
-    assert_eq!(r.status(), 400, "a negative sale is corrupt input, not a sale");
+    assert_eq!(
+        r.status(),
+        400,
+        "a negative sale is corrupt input, not a sale"
+    );
 
     let booked: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE branch_id = $1")
         .bind(branch)
@@ -2230,5 +2293,8 @@ async fn a_replayed_modifier_priced_below_nothing_is_refused_even_inside_a_posit
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(rows, 0, "no negative add-on row may reach the revenue reports");
+    assert_eq!(
+        rows, 0,
+        "no negative add-on row may reach the revenue reports"
+    );
 }

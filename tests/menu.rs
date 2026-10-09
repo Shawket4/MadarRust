@@ -959,7 +959,7 @@ async fn test_update_optional_field_swap_ingredient_requires_quantity(pool: PgPo
         test::TestRequest::patch()
             .uri(&format!("/menu-items/{}/optionals/{}", item_id, field.id))
             .insert_header(("Authorization", format!("Bearer {}", token)))
-            .set_json(&serde_json::json!({"org_ingredient_id": sugar}))
+            .set_json(serde_json::json!({"org_ingredient_id": sugar}))
             .to_request(),
     )
     .await;
@@ -973,7 +973,7 @@ async fn test_update_optional_field_swap_ingredient_requires_quantity(pool: PgPo
     let resp = test::call_service(&app, test::TestRequest::patch()
         .uri(&format!("/menu-items/{}/optionals/{}", item_id, field.id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&serde_json::json!({"org_ingredient_id": sugar, "ingredient_unit": "g", "quantity_used": 50.0})).to_request()).await;
+        .set_json(serde_json::json!({"org_ingredient_id": sugar, "ingredient_unit": "g", "quantity_used": 50.0})).to_request()).await;
     assert!(
         resp.status().is_success(),
         "swap with a fresh quantity must succeed"
@@ -1234,11 +1234,8 @@ async fn test_branch_override_null_price_inherits_but_can_disable(pool: PgPool) 
         is_available: true,
         sizes: None,
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert!(resp.status().is_success());
     let ov: BranchMenuOverride = test::read_body_json(resp).await;
     assert_eq!(ov.price_override, None);
@@ -1266,11 +1263,7 @@ async fn test_branch_override_null_price_inherits_but_can_disable(pool: PgPool) 
         is_available: false,
         sizes: None,
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     let resp = test::call_service(
         &app,
         auth_req!(
@@ -1305,11 +1298,8 @@ async fn test_branch_override_upsert_update_path(pool: PgPool) {
             is_available: true,
             sizes: None,
         };
-        let resp = test::call_service(
-            &app,
-            auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-        )
-        .await;
+        let resp =
+            test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
         assert!(resp.status().is_success());
     }
     let resp = test::call_service(
@@ -1347,11 +1337,7 @@ async fn test_branch_override_isolated_per_branch(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
 
     let resp = test::call_service(
         &app,
@@ -1400,11 +1386,8 @@ async fn test_branch_override_zero_allowed_negative_rejected(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert!(resp.status().is_success(), "zero price (free) is allowed");
 
     let body = BranchMenuOverrideInput {
@@ -1414,11 +1397,8 @@ async fn test_branch_override_zero_allowed_negative_rejected(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert_eq!(resp.status(), 400, "negative price is rejected");
 }
 
@@ -1445,7 +1425,7 @@ async fn test_branch_override_item_from_other_org_rejected(pool: PgPool) {
     };
     let resp = test::call_service(
         &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token_a, body),
+        auth_req!(put, "/branch-menu-overrides", token_a, body),
     )
     .await;
     assert_eq!(
@@ -1493,11 +1473,8 @@ async fn test_branch_override_permissions_enforced(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert_eq!(resp.status(), 403, "upsert needs menu_items/update");
     let resp = test::call_service(
         &app,
@@ -1593,11 +1570,8 @@ async fn test_branch_override_unknown_branch_404(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert_eq!(resp.status(), 404, "unknown branch is not found");
 }
 
@@ -1622,11 +1596,7 @@ async fn test_list_menu_items_full_with_branch_override(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
 
     let resp = test::call_service(
         &app,
@@ -1672,11 +1642,7 @@ async fn test_branch_override_with_category_filter(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
 
     let resp = test::call_service(
         &app,
@@ -1757,11 +1723,8 @@ async fn test_branch_size_override_crud_and_menu_injection(pool: PgPool) {
             price_override: 9000,
         }]),
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert!(resp.status().is_success());
     let ov: BranchMenuOverride = test::read_body_json(resp).await;
     assert_eq!(
@@ -1794,11 +1757,7 @@ async fn test_branch_size_override_crud_and_menu_injection(pool: PgPool) {
         is_available: true,
         sizes: None,
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     let resp = test::call_service(
         &app,
         auth_req!(
@@ -1824,11 +1783,7 @@ async fn test_branch_size_override_crud_and_menu_injection(pool: PgPool) {
         is_available: true,
         sizes: Some(vec![]),
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     let resp = test::call_service(&app, menu_full(&token)).await;
     let full: Vec<MenuItemFull> = test::read_body_json(resp).await;
     assert_eq!(
@@ -1862,11 +1817,8 @@ async fn test_branch_size_override_validation(pool: PgPool) {
             price_override: 100,
         }]),
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert_eq!(
         resp.status(),
         400,
@@ -1884,11 +1836,8 @@ async fn test_branch_size_override_validation(pool: PgPool) {
             price_override: -1,
         }]),
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
     assert_eq!(resp.status(), 400, "negative size price is rejected");
 }
 
@@ -1916,11 +1865,7 @@ async fn test_branch_size_overrides_cleared_on_delete(pool: PgPool) {
             price_override: 9000,
         }]),
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-menu-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-menu-overrides", token, body)).await;
 
     let resp = test::call_service(
         &app,
@@ -2000,11 +1945,8 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
         price_override: Some(1500),
         is_available: true,
     };
-    let resp = test::call_service(
-        &app,
-        auth_req!(put, "/branch-addon-overrides".to_string(), token, body),
-    )
-    .await;
+    let resp =
+        test::call_service(&app, auth_req!(put, "/branch-addon-overrides", token, body)).await;
     assert!(resp.status().is_success());
     let ov: BranchAddonOverride = test::read_body_json(resp).await;
     assert_eq!(ov.price_override, Some(1500));
@@ -2035,11 +1977,7 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
         price_override: Some(1500),
         is_available: false,
     };
-    test::call_service(
-        &app,
-        auth_req!(put, "/branch-addon-overrides".to_string(), token, body),
-    )
-    .await;
+    test::call_service(&app, auth_req!(put, "/branch-addon-overrides", token, body)).await;
     let resp = test::call_service(&app, branch_addons(&token)).await;
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
     assert_eq!(addons.len(), 0, "branch-disabled addon is excluded");
@@ -2228,7 +2166,7 @@ async fn test_menu_catalog_overridden_filter_and_sort(pool: PgPool) {
     assert_eq!(page.data[0].item.id, latte, "overridden item sorts first");
 }
 
-// ── `image` asset refs on every menu/category/bundle read ────────────────────
+// ── `image` asset refs on every menu/category read ───────────────────────────
 
 async fn attach_photo(
     pool: &PgPool,
@@ -2283,7 +2221,7 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
             .app_data(web::Data::new(get_secret()))
             .configure(routes::configure)
             .configure(madar_rust::costing::routes::configure)
-            .configure(madar_rust::bundles::routes::configure),
+            .configure(madar_rust::bundles::configure),
     )
     .await;
     let org = seed_org(&pool).await;
@@ -2294,13 +2232,6 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
     }
     let cat = seed_category(&pool, org, "Mains").await;
     let item = seed_menu_item(&pool, org, cat, "Burger", 1000).await;
-    let bundle = Uuid::new_v4();
-    sqlx::query("INSERT INTO bundles (id, org_id, name, price) VALUES ($1, $2, 'Combo', 900)")
-        .bind(bundle)
-        .bind(org)
-        .execute(&pool)
-        .await
-        .unwrap();
     let gi = attach_photo(
         &pool,
         &store,
@@ -2319,16 +2250,6 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
         AssetPurpose::CategoryPhoto,
         cat,
         2,
-    )
-    .await;
-    let gb = attach_photo(
-        &pool,
-        &store,
-        org,
-        AssetTable::Bundles,
-        AssetPurpose::BundlePhoto,
-        bundle,
-        3,
     )
     .await;
     // A third-party absolute URL is served verbatim (no uploads prefix).
@@ -2397,14 +2318,23 @@ async fn image_refs_on_all_menu_reads(pool: PgPool) {
     assert!(resp.status().is_success(), "{}", resp.status());
     assert_image(&json(resp).await, gc, "PATCH categories");
 
-    // Bundles: get + list.
-    let resp = test::call_service(&app, get(format!("/bundles/{bundle}"))).await;
+    // Combos are gone. Every till in the field still fetches this page as a
+    // REQUIRED part of its catalog refresh: it must answer, empty, in the
+    // `PaginatedBundles` shape those builds decode.
+    let resp = test::call_service(
+        &app,
+        get(format!(
+            "/bundles?org_id={org}&status=active&page=1&per_page=500"
+        )),
+    )
+    .await;
     assert!(resp.status().is_success(), "{}", resp.status());
-    assert_image(&json(resp).await, gb, "bundles/{id}");
-    let resp = test::call_service(&app, get(format!("/bundles?org_id={org}"))).await;
-    assert!(resp.status().is_success(), "{}", resp.status());
-    let v = json(resp).await;
-    assert_image(&v["data"][0], gb, "bundles list");
+    assert_eq!(
+        json(resp).await,
+        serde_json::json!({"data": [], "total": 0, "page": 1, "per_page": 500, "total_pages": 0})
+    );
+    let resp = test::call_service(&app, get(format!("/bundles/{item}"))).await;
+    assert_eq!(resp.status().as_u16(), 404, "only the list stub is left");
 }
 
 #[sqlx::test]
@@ -2561,13 +2491,21 @@ async fn the_has_recipe_filter_needs_recipes_read(pool: PgPool) {
     let filtered = format!("/costing/catalog?org_id={org_id}&has_recipe=false");
 
     let t = generate_teller_token(teller, org_id);
-    assert_eq!(test::call_service(&app, get(t.clone(), plain)).await.status(), 200);
     assert_eq!(
-        test::call_service(&app, get(t, filtered.clone())).await.status(),
+        test::call_service(&app, get(t.clone(), plain))
+            .await
+            .status(),
+        200
+    );
+    assert_eq!(
+        test::call_service(&app, get(t, filtered.clone()))
+            .await
+            .status(),
         403,
         "a teller holds no recipes.read"
     );
-    let resp = test::call_service(&app, get(generate_org_admin_token(owner, org_id), filtered)).await;
+    let resp =
+        test::call_service(&app, get(generate_org_admin_token(owner, org_id), filtered)).await;
     assert_eq!(resp.status(), 200);
     let page: PaginatedMenuItems = test::read_body_json(resp).await;
     assert_eq!(page.total, 1, "the burger has no recipe yet");

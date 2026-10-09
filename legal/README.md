@@ -77,3 +77,11 @@ Static site behind nginx on the VPS, same pattern as the other vhosts; certbot i
 cert and `/etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh` reloads nginx on renewal.
 No backend dependency — these URLs are cited in app store listings and must stay up even
 when the API is down.
+
+`python3 legal/build.py` renders `dist/` (committed; the deploy workflow rebuilds it). Besides
+the pages it writes `404.html`, each source verbatim as `<name>.md` plus `index.md`,
+`llms.txt`, `sitemap.xml`, `robots.txt`, and a `.gz` of each for `gzip_static`. Meta
+descriptions live in `build.py`, not front matter: editing a source moves the git date that
+the sitemap and `dateModified` report. `legal.vhost` needs two files already on the server:
+`snippets/madar-security-headers.conf` and the `$md_suffix` map in
+`conf.d/madar-markdown.conf` (Markdown for `Accept: text/markdown`).

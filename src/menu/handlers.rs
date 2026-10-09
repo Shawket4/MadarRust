@@ -28,7 +28,6 @@ pub(crate) async fn image_url_side_effects(
     let tbl = match table {
         crate::assets::ingest::AssetTable::Categories => "categories",
         crate::assets::ingest::AssetTable::MenuItems => "menu_items",
-        crate::assets::ingest::AssetTable::Bundles => "bundles",
         _ => return Ok(()),
     };
     match new {
@@ -150,6 +149,11 @@ pub struct MenuItem {
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub default_milk_addon_id: Option<String>,
+    /// `item` | `combo` (combos module). A combo's price is its `one_size`
+    /// row like any item; its slots are on `GET /combos/{id}`. Additive.
+    #[sqlx(default)]
+    #[serde(default = "crate::combos::types::item_kind")]
+    pub kind: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
@@ -161,6 +165,15 @@ pub struct ItemSize {
     pub is_active: bool,
 }
 
+// An add-on as the old wire knows it: an option of a group that has a legacy
+// type (`milk_type`, `coffee_type`, `extra`, …), which old tills require.
+//
+// Every reader of this shape filters `type IS NOT NULL`. Once the contract
+// shim has run, `addon_items` is a view over `modifier_options` that also
+// lists the options of a CUSTOM group (`legacy_addon_type` NULL, new clients
+// only) with `type` NULL — the order path prices every option through it, so
+// the view keeps them — and a NULL type decoded here was a 500 on every
+// `/sync/pull` of the org's branches.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
 pub struct AddonItem {
     pub id: Uuid,
@@ -288,6 +301,14 @@ pub struct MenuItemFull {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Object>)]
     pub pricing: Option<madar_catalog::ItemView>,
+    /// A kind=item row: its "make it a meal" upsell (C14), or `null`.
+    #[serde(default)]
+    pub meal: Option<crate::combos::types::MealLink>,
+    /// A kind=combo row: its slots, windows and channel toggles for the
+    /// requested branch; `null` for an item. Combo rows are served only to a
+    /// client that can sell them (a browser, POS ≥ 0.9.0, the KDS).
+    #[serde(default)]
+    pub combo: Option<crate::combos::types::ComboFeed>,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -879,18 +900,23 @@ pub async fn list_menu_items(
     // Serve from the per-org menu cache when enabled (MENU_CACHE_TTL_SECS>0). The
     // variant folds in every param that changes the body so views never alias.
     // Disabled / unregistered (every test) → `cache` is None and we hit the DB.
+    // Combos (COMBOS_CONTRACT.md §2.4): a till older than POS 0.9.0 builds its
+    // menu from this endpoint and cannot sell a combo, so `kind=combo` rows are
+    // left out for it. Part of the cache key: two clients, two bodies.
+    let sells_combos = crate::client_seen::sells_combos(req.headers());
     let variant = format!(
-        "menu|{}|{}|{}",
+        "menu|{}|{}|{}|{}",
         query.category_id.map(|c| c.to_string()).unwrap_or_default(),
         query.branch_id.map(|b| b.to_string()).unwrap_or_default(),
         query.full.unwrap_or(false),
+        sells_combos,
     );
-    if let Some(c) = &cache {
-        if let Some(body) = c.get(query.org_id, &variant).await {
-            return Ok(HttpResponse::Ok()
-                .content_type("application/json")
-                .body(body));
-        }
+    if let Some(c) = &cache
+        && let Some(body) = c.get(query.org_id, &variant).await
+    {
+        return Ok(HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body));
     }
 
     // When branch_id is supplied, prices are branch-effective (override replaces
@@ -902,7 +928,7 @@ pub async fn list_menu_items(
                 mi.description, mi.description_translations, mi.image_url,
                 COALESCE(bmo.price_override, mi.base_price) AS base_price,
                 mi.is_active,
-                mi.created_at, mi.updated_at, mi.deleted_at,
+                mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
                 (
                     SELECT a.id::text
                     FROM menu_item_recipes r
@@ -920,11 +946,13 @@ pub async fn list_menu_items(
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
            AND ($3::uuid IS NULL OR COALESCE(bmo.is_available, true) = true)
+           AND ($4 OR mi.kind <> 'combo')
          ORDER BY mi.name ASC",
     )
     .bind(query.org_id)
     .bind(query.category_id)
     .bind(query.branch_id)
+    .bind(sells_combos)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -941,6 +969,29 @@ pub async fn list_menu_items(
         let mut pricing = crate::orders::catalog_view::Catalog::new(query.branch_id);
         let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
         pricing.ensure_on(pool.get_ref(), &ids, &[]).await?;
+        // Combos: the `combo` object of every combo row and the "make it a
+        // meal" link of every item row (additive; old tills ignore both).
+        let (mut combo_feeds, meals) = {
+            let mut conn = pool.get_ref().acquire().await?;
+            let combo_ids: Vec<Uuid> = items
+                .iter()
+                .filter(|i| i.kind == "combo")
+                .map(|i| i.id)
+                .collect();
+            let feeds = crate::combos::load::feeds_for(
+                &mut conn,
+                query.org_id,
+                query.branch_id,
+                &combo_ids,
+            )
+            .await?;
+            let meals = if sells_combos {
+                crate::combos::load::meal_links(&mut conn, query.org_id).await?
+            } else {
+                Default::default()
+            };
+            (feeds, meals)
+        };
         for item in items {
             let mut sizes = fetch_sizes(pool.get_ref(), item.id).await?;
             let mut all_sizes = fetch_all_sizes(pool.get_ref(), item.id).await?;
@@ -957,6 +1008,8 @@ pub async fn list_menu_items(
             let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
             let recipe_steps = steps_by_item.remove(&item.id).unwrap_or_default();
             let item_pricing = pricing.item(item.id).map(|i| i.view.clone());
+            let meal = meals.get(&item.id).copied();
+            let combo = combo_feeds.remove(&item.id);
             result.push(MenuItemFull {
                 item,
                 sizes,
@@ -967,6 +1020,8 @@ pub async fn list_menu_items(
                 recipe_steps,
                 allowed_addon_ids,
                 pricing: item_pricing,
+                meal,
+                combo,
             });
         }
         let body = web::Bytes::from(serde_json::to_vec(&result).map_err(|_| AppError::Internal)?);
@@ -1059,7 +1114,7 @@ pub async fn list_menu_catalog(
         "SELECT mi.id, mi.org_id, mi.category_id, mi.name, mi.name_translations,
                 mi.description, mi.description_translations, mi.image_url,
                 mi.base_price, mi.is_active,
-                mi.created_at, mi.updated_at, mi.deleted_at,
+                mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
                 (
                     SELECT a.id::text
                     FROM menu_item_recipes r
@@ -1159,6 +1214,17 @@ pub async fn get_menu_item(
     let recipes = fetch_item_recipes(pool.get_ref(), *id).await?;
     let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), *id).await?;
     let recipe_steps = crate::recipes::steps::fetch_item_steps(pool.get_ref(), *id).await?;
+    // Its "make it a meal" link (C14), as the list and the feed carry it, so
+    // the studio shows what is saved; only while the combo is still live.
+    let meal = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT mi.meal_combo_id, mi.meal_slot_id FROM menu_items mi \
+           JOIN menu_items c ON c.id = mi.meal_combo_id AND c.kind = 'combo' AND c.deleted_at IS NULL \
+          WHERE mi.id = $1 AND mi.meal_slot_id IS NOT NULL",
+    )
+    .bind(*id)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .map(|(combo_id, slot_id)| crate::combos::types::MealLink { combo_id, slot_id });
 
     Ok(HttpResponse::Ok().json(MenuItemFull {
         item,
@@ -1170,6 +1236,8 @@ pub async fn get_menu_item(
         recipe_steps,
         allowed_addon_ids,
         pricing: None,
+        meal,
+        combo: None,
     }))
 }
 
@@ -1217,7 +1285,7 @@ pub async fn create_menu_item(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING id, org_id, category_id, name, name_translations, description, description_translations, image_url,
                    base_price, is_active,
-                   created_at, updated_at, deleted_at,
+                   created_at, updated_at, deleted_at, kind,
                    NULL::text AS default_milk_addon_id",
     )
     .bind(mut_body.org_id)
@@ -1274,6 +1342,8 @@ pub async fn create_menu_item(
         recipe_steps: vec![],
         allowed_addon_ids: vec![],
         pricing: None,
+        meal: None,
+        combo: None,
     }))
 }
 
@@ -1344,7 +1414,7 @@ pub async fn update_menu_item(
          WHERE id = $1 AND deleted_at IS NULL
          RETURNING id, org_id, category_id, name, name_translations, description, description_translations, image_url,
                    base_price, is_active,
-                   created_at, updated_at, deleted_at,
+                   created_at, updated_at, deleted_at, kind,
                    (
                        SELECT a.id::text
                        FROM menu_item_recipes r
@@ -1653,11 +1723,12 @@ pub async fn list_addon_items(
 
     // With a branch_id, default_price is branch-effective (override replaces it) and
     // branch-disabled addons are excluded. Without it ($3 NULL), the LEFT JOIN matches
-    // nothing → the plain org list (legacy contract).
+    // nothing → the plain org list (legacy contract). A custom group's options
+    // (type NULL) are not addons: see `AddonItem`.
     const FILTER: &str = "FROM addon_items a
          LEFT JOIN branch_addon_overrides bao
                 ON bao.addon_item_id = a.id AND bao.branch_id = $3
-         WHERE a.org_id = $1
+         WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::uuid IS NULL OR COALESCE(bao.is_available, true) = true)
            AND ($4::text IS NULL OR a.name ILIKE '%' || $4 || '%')";
@@ -1787,7 +1858,7 @@ pub async fn list_addon_catalog(
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
-         WHERE a.org_id = $1
+         WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
            AND ($5::bool IS NULL OR (bao.branch_id IS NOT NULL) = $5)",
@@ -1810,7 +1881,7 @@ pub async fn list_addon_catalog(
                 (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
-         WHERE a.org_id = $1
+         WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
            AND ($5::bool IS NULL OR (bao.branch_id IS NOT NULL) = $5)
@@ -3229,7 +3300,7 @@ async fn fetch_menu_item(pool: &PgPool, id: Uuid) -> Result<MenuItem, AppError> 
     sqlx::query_as::<_, MenuItem>(
         "SELECT id, org_id, category_id, name, name_translations, description, description_translations, image_url,
                 base_price, is_active,
-                created_at, updated_at, deleted_at,
+                created_at, updated_at, deleted_at, kind,
                 (
                     SELECT a.id::text
                     FROM menu_item_recipes r
@@ -3260,7 +3331,7 @@ async fn fetch_addon_item(pool: &PgPool, id: Uuid) -> Result<AddonItem, AppError
                   ORDER BY ingredient_name, org_ingredient_id
                   LIMIT 1) AS primary_ingredient_id
          FROM addon_items
-         WHERE id = $1",
+         WHERE id = $1 AND type IS NOT NULL",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -3370,7 +3441,7 @@ pub(crate) async fn addon_items_by_ids(
                 (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          FROM addon_items a
          LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
-         WHERE a.org_id = $1 AND a.id = ANY($3)",
+         WHERE a.org_id = $1 AND a.id = ANY($3) AND a.type IS NOT NULL",
     )
     .bind(org_id)
     .bind(branch_id)

@@ -7,8 +7,8 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::menu::lint::{LintIssue, LintSeverity, lint_org};
 use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::menu::lint::{LintIssue, LintSeverity, lint_org};
 use madar_rust::models::UserRole;
 
 async fn org(pool: &PgPool) -> Uuid {
@@ -330,7 +330,8 @@ async fn lint_endpoint_shape_and_auth(pool: PgPool) {
 }
 
 /// Operator run against a restored prod copy:
-/// `DATABASE_URL_DROPS=postgres://…/drops LINT_ORG=<uuid> cargo nextest run -E 'test(lint_restored_db)' --run-ignored only`
+/// `DATABASE_URL_DROPS=postgres://…/drops LINT_ORG=<uuid> cargo nextest run --features operator-tests -E 'test(lint_restored_db)' --run-ignored only`
+#[cfg(feature = "operator-tests")]
 #[tokio::test]
 #[ignore]
 async fn lint_restored_db() {
@@ -374,8 +375,15 @@ async fn staff_token(
         .await
         .unwrap();
     }
-    madar_rust::auth::jwt::create_token(&JwtSecret("secret".into()), user, Some(org), kind, None, 24)
-        .unwrap()
+    madar_rust::auth::jwt::create_token(
+        &JwtSecret("secret".into()),
+        user,
+        Some(org),
+        kind,
+        None,
+        24,
+    )
+    .unwrap()
 }
 
 /// `GET /menu/lint` is `menu.items.read`: refused to a person denied it, served to

@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::sync::pull::{ALL_TYPES, PullRequest, checksum::checksum_of, pull_core};
 use madar_rust::auth::jwt::{JwtSecret, create_token};
 use madar_rust::models::UserRole;
+use madar_rust::sync::pull::{ALL_TYPES, PullRequest, checksum::checksum_of, pull_core};
 
 struct Shop {
     org: Uuid,
@@ -460,7 +460,9 @@ async fn sweeper_emits_time_based_deletes_and_raises_watermark(pool: PgPool) {
     .await
     .unwrap();
 
-    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool)
+        .await
+        .unwrap();
     assert!(report.deletes_emitted >= 1, "{report:?}");
     assert!(report.tombstones_purged >= 1, "{report:?}");
     assert_eq!(op(pool.clone()).await, "delete");
@@ -539,21 +541,22 @@ DECLARE
     org uuid := '{org}';
     br uuid := '{branch}';
     adm uuid := '{admin}';
-    cat uuid; item uuid; item2 uuid; bun uuid; icat uuid; pm uuid; dev uuid; sec uuid; tbl uuid; tbl2 uuid;
+    cat uuid; item uuid; item2 uuid; icat uuid; pm uuid; dev uuid; sec uuid; tbl uuid; tbl2 uuid;
     ot uuid; ot2 uuid; til uuid; ord uuid; ord2 uuid;
 BEGIN
     INSERT INTO categories (org_id, name) VALUES (org, 'Hot') RETURNING id INTO cat;
     INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Latte', cat) RETURNING id INTO item;
     INSERT INTO menu_items (org_id, name, category_id) VALUES (org, 'Mocha', cat) RETURNING id INTO item2;
     INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES (item, 'M', 1000), (item2, 'M', 1200);
-    INSERT INTO bundles (org_id, name, price, status) VALUES (org, 'Duo', 2000, 'active') RETURNING id INTO bun;
-    INSERT INTO bundle_components (bundle_id, item_id) VALUES (bun, item), (bun, item2);
     INSERT INTO ingredient_categories (org_id, slug, name) VALUES (org, 'dairy', 'Dairy') RETURNING id INTO icat;
     INSERT INTO org_ingredients (org_id, name, unit, category_id) VALUES (org, 'Milk', 'ml', icat);
     INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash) VALUES (org, 'Cash', '#000', 'cash', true) RETURNING id INTO pm;
     INSERT INTO branch_payment_methods (branch_id, payment_method_id, org_id) VALUES (br, pm, org);
     INSERT INTO user_payment_methods (user_id, payment_method_id, org_id) VALUES (adm, pm, org);
     INSERT INTO discounts (org_id, name, type, value) VALUES (org, 'Staff', 'percentage', 0.1);
+    -- Combos module: one live deal rule (and a deleted one that must not project).
+    INSERT INTO deal_rules (org_id, name, kind, qty, price) VALUES (org, 'Any 2 for 90', 'n_for_price', 2, 9000);
+    INSERT INTO deal_rules (org_id, name, kind, qty, price, deleted_at) VALUES (org, 'Gone', 'n_for_price', 2, 9000, now());
     INSERT INTO addon_items (org_id, name, type, default_price) VALUES (org, 'Oat milk', 'milk', 1500);
     INSERT INTO customers (org_id, name, phone, phone_key) VALUES (org, 'Mona', '0100 123 4567', '01001234567');
     INSERT INTO staff_drinks (id, org_id, branch_id, menu_item_id, item_name, note, business_date, recorded_at)
@@ -704,6 +707,13 @@ async fn pull_checksums_equal_projected_sets_for_every_type(pool: PgPool) {
 
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     for ty in ALL_TYPES {
+        // Combos were removed: `bundle` stays a wire type (tills v0.8 count a
+        // full snapshot complete only when it is answered), always empty.
+        if *ty == "bundle" {
+            assert!(full.types.iter().any(|t| t == "bundle"), "{:?}", full.types);
+            assert!(full.data.get("bundle").is_none_or(|v| v.is_empty()));
+            continue;
+        }
         assert!(
             !full.data.get(*ty).is_none_or(|v| v.is_empty()),
             "fixture seeds a live `{ty}`"
@@ -957,7 +967,9 @@ async fn the_sweep_re_emits_live_rows_the_feed_never_heard_of(pool: PgPool) {
         "the hole is real: the snapshot shows no methods"
     );
 
-    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool)
+        .await
+        .unwrap();
     assert!(
         report.upserts_emitted >= 1,
         "the sweep noticed the missing row: {report:?}"
@@ -1010,7 +1022,7 @@ async fn a_device_that_already_synced_the_empty_snapshot_heals_on_its_next_pull(
             .unwrap_or(true),
         "the device starts out short, as the field does"
     );
-    let cursor = first.next.unwrap_or_else(|| 0);
+    let cursor = first.next.unwrap_or(0);
 
     // The fix lands (the migration runs this for every branch).
     let healed: i32 = sqlx::query_scalar("SELECT sync_backfill_branch($1)")
@@ -1065,7 +1077,6 @@ async fn a_late_branch_has_its_staff_and_addons_too(pool: PgPool) {
         "category",
         "discount",
         "ingredient",
-        "bundle",
         "customer",
     ] {
         assert!(
@@ -1120,7 +1131,9 @@ async fn a_restored_branch_is_short_until_the_sweep_catches_it(pool: PgPool) {
     assert!(short >= 1, "the restored branch really is short");
 
     // The sweep closes it, with nobody touching the device.
-    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool).await.unwrap();
+    let report = madar_rust::sync::pull::sweeper::sweep_once(&pool)
+        .await
+        .unwrap();
     assert!(report.upserts_emitted >= short, "{report:?}");
     let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
@@ -1153,19 +1166,41 @@ async fn a_discount_on_the_feed_parses_on_a_shipped_till(pool: PgPool) {
     let resp = madar_rust::sync::pull::pull_core(&pool, s.org, &req(s.branch), None)
         .await
         .unwrap();
-    let rows = resp.data.get("discount").expect("discounts are in the feed");
+    let rows = resp
+        .data
+        .get("discount")
+        .expect("discounts are in the feed");
     let d = rows.first().expect("the seeded discount");
 
     // Stored as the fraction 0.1; a shipped till must read the integer 10.
-    assert_eq!(d["dtype"], "percentage", "the generated model reads `dtype`");
-    assert_eq!(d["type"], "percentage", "and `type` stays for anything that read it");
-    assert_eq!(d["value"], 10, "the legacy integer a shipped till deserialises");
+    assert_eq!(
+        d["dtype"], "percentage",
+        "the generated model reads `dtype`"
+    );
+    assert_eq!(
+        d["type"], "percentage",
+        "and `type` stays for anything that read it"
+    );
+    assert_eq!(
+        d["value"], 10,
+        "the legacy integer a shipped till deserialises"
+    );
     assert!(
         (d["value_rate"].as_f64().unwrap() - 0.1).abs() < 1e-9,
         "the fraction stays available for clients that know to ask"
     );
     // Required by the generated model; their absence is what failed the parse.
-    for k in ["id", "org_id", "name", "is_active", "created_at", "updated_at"] {
-        assert!(!d[k].is_null(), "`{k}` must be present for the strict model");
+    for k in [
+        "id",
+        "org_id",
+        "name",
+        "is_active",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(
+            !d[k].is_null(),
+            "`{k}` must be present for the strict model"
+        );
     }
 }

@@ -27,6 +27,10 @@ pub const PLATFORMS: &[(&str, &str)] = &[
     ("x", "X"),
     ("youtube", "YouTube"),
     ("whatsapp", "WhatsApp"),
+    // The delivery app most of these shops already sell through: a customer
+    // who follows a shop often orders it there, and the store page is a link
+    // like any other.
+    ("talabat", "Talabat"),
     ("website", "Website"),
 ];
 
@@ -67,7 +71,7 @@ pub fn links_of(value: &serde_json::Value) -> Vec<SocialLink> {
 /// `http` is excluded as well as the obvious dangers: these URLs are printed
 /// into a pass that lives on a phone for years, and a plaintext link we baked
 /// in cannot be upgraded later.
-fn is_safe(url: &str) -> bool {
+pub(crate) fn is_safe(url: &str) -> bool {
     url.starts_with("https://")
         && url.len() > "https://".len()
         && !url.contains(char::is_whitespace)
@@ -120,6 +124,7 @@ mod tests {
     #[test]
     fn only_platforms_we_know_and_only_https() {
         assert!(validate(&json!({"instagram": "https://instagram.com/rue"})).is_ok());
+        assert!(validate(&json!({"talabat": "https://www.talabat.com/egypt/rue"})).is_ok());
         assert!(
             validate(&json!({"myspace": "https://example.com"})).is_err(),
             "an unknown key would print unchecked on a pass"

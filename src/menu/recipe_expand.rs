@@ -124,8 +124,10 @@ pub async fn best_rule_for(
 
 async fn rebuild_one(conn: &mut PgConnection, item_id: Uuid) -> Result<ExpandStats, AppError> {
     let item: Option<(Uuid, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        // A combo has no recipe of its own (COMBO_NO_RECIPE): each part uses
+        // its own item's, so no rule ever expands onto it.
         "SELECT org_id, category_id, recipe_source_item_id FROM menu_items \
-         WHERE id = $1 AND deleted_at IS NULL",
+         WHERE id = $1 AND deleted_at IS NULL AND kind <> 'combo'",
     )
     .bind(item_id)
     .fetch_optional(&mut *conn)

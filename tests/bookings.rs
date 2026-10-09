@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::bookings::model::BookingView;
 use madar_rust::auth::jwt::{JwtSecret, create_token};
+use madar_rust::bookings::model::BookingView;
 use madar_rust::models::UserRole;
 use madar_rust::realtime::event::Topic;
 use madar_rust::realtime::hub::BranchEventHub;
@@ -562,8 +562,9 @@ async fn public_booking_requires_a_verified_phone_when_the_branch_says_so(pool: 
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
     // A token for ANOTHER phone is refused; one for this phone is accepted.
-    body["device_token"] =
-        json!(madar_rust::delivery::whatsapp::issue_device_token("secret", "201099999999").unwrap());
+    body["device_token"] = json!(
+        madar_rust::delivery::whatsapp::issue_device_token("secret", "201099999999").unwrap()
+    );
     let (st, _) = send(
         &app,
         test::TestRequest::post()
@@ -572,8 +573,9 @@ async fn public_booking_requires_a_verified_phone_when_the_branch_says_so(pool: 
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
-    body["device_token"] =
-        json!(madar_rust::delivery::whatsapp::issue_device_token("secret", "201011111111").unwrap());
+    body["device_token"] = json!(
+        madar_rust::delivery::whatsapp::issue_device_token("secret", "201011111111").unwrap()
+    );
     let (st, b) = send(
         &app,
         test::TestRequest::post()
@@ -843,7 +845,9 @@ async fn sweep_reminds_announces_arrivals_and_rolls_no_shows(pool: PgPool) {
 
     let hub = BranchEventHub::new();
     let mut rx = hub.subscribe(branch);
-    madar_rust::bookings::jobs::run_tick(&pool, &hub).await.unwrap();
+    madar_rust::bookings::jobs::run_tick(&pool, &hub)
+        .await
+        .unwrap();
 
     let state = |id: Uuid| {
         sqlx::query_as::<_, (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>(
@@ -878,7 +882,9 @@ async fn sweep_reminds_announces_arrivals_and_rolls_no_shows(pool: PgPool) {
     );
 
     // A second tick is a no-op (idempotent stamps).
-    madar_rust::bookings::jobs::run_tick(&pool, &hub).await.unwrap();
+    madar_rust::bookings::jobs::run_tick(&pool, &hub)
+        .await
+        .unwrap();
     assert!(rx.try_recv().is_err(), "nothing new to publish");
 }
 
@@ -1361,7 +1367,9 @@ async fn a_voided_ticket_cancels_its_booking(pool: PgPool) {
     .unwrap();
     assert_eq!(booking_status(&pool, b3).await.0, "seated");
     let hub2 = BranchEventHub::new();
-    madar_rust::bookings::jobs::run_tick(&pool, &hub2).await.unwrap();
+    madar_rust::bookings::jobs::run_tick(&pool, &hub2)
+        .await
+        .unwrap();
     assert_eq!(booking_status(&pool, b2).await.0, "seated");
     assert_eq!(booking_status(&pool, b3).await.0, "cancelled");
 }

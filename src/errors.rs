@@ -69,9 +69,12 @@ pub enum AppError {
     ServiceUnavailable(String),
 
     /// Asked for too much, too fast. Distinct from `Conflict` because a client
-    /// should retry this one and only this one.
-    #[error("{0}")]
-    TooManyRequests(String),
+    /// should retry this one and only this one. `code` names the limiter:
+    /// `RATE_LIMITED` for the general and per-address buckets,
+    /// `EXPORT_RATE_LIMITED` for the export gate. One code for all three made
+    /// every ordinary read's 429 look like a throttled export.
+    #[error("{reason}")]
+    TooManyRequests { code: &'static str, reason: String },
 
     /// Too many wrong PINs at this till. Carries the remaining wait in seconds
     /// so the POS can show a live countdown instead of guessing
@@ -125,20 +128,77 @@ impl From<sqlx::Error> for AppError {
     fn from(e: sqlx::Error) -> Self {
         match e {
             sqlx::Error::RowNotFound => AppError::NotFound("Resource not found".into()),
+            // The combos module's guard triggers raise their contract code
+            // first in the message (a check violation); the API checks first,
+            // so this is the backstop's wording for every other write path
+            // (the studio's sizes, a recipe line, a choice group on a combo).
+            other if combo_guard(&other).is_some() => {
+                let (status, code, reason) = combo_guard(&other).expect("checked");
+                AppError::Coded {
+                    status,
+                    code,
+                    reason: reason.into(),
+                }
+            }
             // The database refuses these on its own (Dawam RQ-9, RQ-11), so two
             // requests sent at once can't both land; say why in words.
             other => match other.as_database_error().and_then(|d| d.constraint()) {
-                Some("staff_requests_no_overlap") => {
-                    AppError::Conflict("You already have a request like this for that time.".into())
-                }
+                Some("staff_requests_no_overlap") => AppError::Refused {
+                    code: "OVERLAPPING_REQUEST",
+                    reason: "You already have a request like this for that time.".into(),
+                },
+                Some("staff_swaps_one_open") => AppError::Refused {
+                    code: "SWAP_EXISTS",
+                    reason: "You've already asked for this swap — it's waiting.".into(),
+                },
                 Some("staff_requests_live_correction_unique")
-                | Some("staff_requests_live_shift_correction_unique") => {
-                    AppError::Conflict("This shift already has a correction waiting.".into())
-                }
+                | Some("staff_requests_live_shift_correction_unique") => AppError::Refused {
+                    code: "CORRECTION_WAITING",
+                    reason: "This shift already has a correction waiting.".into(),
+                },
                 _ => AppError::Db(other),
             },
         }
     }
+}
+
+/// A combos guard trigger's refusal (`migrations/20261005100000_combos.sql`):
+/// its code, HTTP status and English sentence.
+fn combo_guard(e: &sqlx::Error) -> Option<(u16, &'static str, &'static str)> {
+    let d = e.as_database_error()?;
+    if d.code().as_deref() != Some("23514") {
+        return None;
+    }
+    let msg = d.message();
+    const GUARDS: &[(&str, u16, &str)] = &[
+        ("COMBO_NESTED", 400, "A combo can't contain another combo."),
+        (
+            "COMBO_NO_RECIPE",
+            409,
+            "A combo has no recipe of its own; each item uses its own.",
+        ),
+        (
+            "COMBO_KIND_LOCKED",
+            409,
+            "This item has sales; its type can't change.",
+        ),
+        (
+            "MEAL_TARGET_INVALID",
+            400,
+            "That combo has no slot for this item.",
+        ),
+        ("COMBO_SLOT_INVALID", 400, "Check the combo's slots."),
+        (
+            "COMBO_CHOICE_NOT_ALLOWED",
+            400,
+            "That item can't be chosen here.",
+        ),
+        ("DEAL_INVALID", 400, "Check the deal."),
+    ];
+    GUARDS.iter().find_map(|(code, status, reason)| {
+        msg.starts_with(&format!("{code}:"))
+            .then_some((*status, *code, *reason))
+    })
 }
 
 impl AppError {
@@ -158,14 +218,12 @@ impl AppError {
     fn code(&self) -> Option<String> {
         match self {
             AppError::OrgSuspended => Some("ORG_SUSPENDED".to_string()),
-            // The dashboard branches on this to say "wait a moment" rather
-            // than showing a raw error for something that is not a fault.
-            AppError::TooManyRequests(_) => Some("EXPORT_RATE_LIMITED".to_string()),
             AppError::PinThrottled { .. } => Some("PIN_THROTTLED".to_string()),
             AppError::Refused { code, .. }
             | AppError::RefusedWith { code, .. }
             | AppError::Coded { code, .. }
-            | AppError::CodedVars { code, .. } => Some((*code).to_string()),
+            | AppError::CodedVars { code, .. }
+            | AppError::TooManyRequests { code, .. } => Some((*code).to_string()),
             _ => None,
         }
     }
@@ -189,42 +247,6 @@ fn status_for_sqlstate(code: Option<&str>) -> actix_web::http::StatusCode {
         Some(c) if c.starts_with("22") => StatusCode::BAD_REQUEST, // data exception (overflow, bad enum/uuid/encoding, offset range)
         Some(c) if c.starts_with("23") => StatusCode::CONFLICT,    // other integrity violations
         _ => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AppError, status_for_sqlstate};
-    use actix_web::ResponseError;
-    use actix_web::http::StatusCode;
-
-    #[test]
-    fn row_not_found_maps_to_404() {
-        // `fetch_one` on a missing row must surface as 404, not 500.
-        let resp = AppError::from(sqlx::Error::RowNotFound).error_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn classifies_sqlstates() {
-        assert_eq!(status_for_sqlstate(Some("23505")), StatusCode::CONFLICT); // unique
-        assert_eq!(status_for_sqlstate(Some("23503")), StatusCode::CONFLICT); // foreign key
-        assert_eq!(status_for_sqlstate(Some("23P01")), StatusCode::CONFLICT); // exclusion
-        assert_eq!(status_for_sqlstate(Some("23514")), StatusCode::BAD_REQUEST); // check
-        assert_eq!(status_for_sqlstate(Some("23502")), StatusCode::BAD_REQUEST); // not null
-        assert_eq!(status_for_sqlstate(Some("22003")), StatusCode::BAD_REQUEST); // numeric overflow
-        assert_eq!(status_for_sqlstate(Some("22P02")), StatusCode::BAD_REQUEST); // invalid text/enum
-        assert_eq!(status_for_sqlstate(Some("22021")), StatusCode::BAD_REQUEST); // bad encoding / NUL
-        assert_eq!(status_for_sqlstate(Some("2201X")), StatusCode::BAD_REQUEST); // offset out of range
-        assert_eq!(
-            status_for_sqlstate(Some("40P01")),
-            StatusCode::INTERNAL_SERVER_ERROR
-        ); // deadlock
-        assert_eq!(
-            status_for_sqlstate(Some("08006")),
-            StatusCode::INTERNAL_SERVER_ERROR
-        ); // connection failure
-        assert_eq!(status_for_sqlstate(None), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
 
@@ -264,7 +286,7 @@ impl actix_web::ResponseError for AppError {
             }
             AppError::Db(e) => HttpResponse::build(Self::db_status(e)).json(body),
             AppError::ServiceUnavailable(_) => HttpResponse::ServiceUnavailable().json(body),
-            AppError::TooManyRequests(_) => HttpResponse::TooManyRequests().json(body),
+            AppError::TooManyRequests { .. } => HttpResponse::TooManyRequests().json(body),
             // Retry-After as well as the body field: the header is the standard
             // any HTTP client already understands.
             AppError::PinThrottled { seconds } => HttpResponse::TooManyRequests()
@@ -322,5 +344,41 @@ impl IntoResponses for AppErrorResponse {
             ),
             ("500".to_string(), err("Internal server error")),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppError, status_for_sqlstate};
+    use actix_web::ResponseError;
+    use actix_web::http::StatusCode;
+
+    #[test]
+    fn row_not_found_maps_to_404() {
+        // `fetch_one` on a missing row must surface as 404, not 500.
+        let resp = AppError::from(sqlx::Error::RowNotFound).error_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn classifies_sqlstates() {
+        assert_eq!(status_for_sqlstate(Some("23505")), StatusCode::CONFLICT); // unique
+        assert_eq!(status_for_sqlstate(Some("23503")), StatusCode::CONFLICT); // foreign key
+        assert_eq!(status_for_sqlstate(Some("23P01")), StatusCode::CONFLICT); // exclusion
+        assert_eq!(status_for_sqlstate(Some("23514")), StatusCode::BAD_REQUEST); // check
+        assert_eq!(status_for_sqlstate(Some("23502")), StatusCode::BAD_REQUEST); // not null
+        assert_eq!(status_for_sqlstate(Some("22003")), StatusCode::BAD_REQUEST); // numeric overflow
+        assert_eq!(status_for_sqlstate(Some("22P02")), StatusCode::BAD_REQUEST); // invalid text/enum
+        assert_eq!(status_for_sqlstate(Some("22021")), StatusCode::BAD_REQUEST); // bad encoding / NUL
+        assert_eq!(status_for_sqlstate(Some("2201X")), StatusCode::BAD_REQUEST); // offset out of range
+        assert_eq!(
+            status_for_sqlstate(Some("40P01")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        ); // deadlock
+        assert_eq!(
+            status_for_sqlstate(Some("08006")),
+            StatusCode::INTERNAL_SERVER_ERROR
+        ); // connection failure
+        assert_eq!(status_for_sqlstate(None), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

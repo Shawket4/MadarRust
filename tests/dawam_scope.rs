@@ -632,6 +632,7 @@ fn org_wide(f: &F) -> Vec<(&'static str, String, Value)> {
             "/staff/attendance/settings".into(),
             json!({ "advance_cap_percent": 80 }),
         ),
+        // A public holiday is the owner's (D3, supersedes R-B3).
         (
             "PUT",
             format!(

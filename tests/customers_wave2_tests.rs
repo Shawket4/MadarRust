@@ -1712,8 +1712,10 @@ async fn the_order_now_link_follows_the_env_and_the_shop(pool: PgPool) {
 
     // First on the back of the card; Google gets it as a button instead.
     let settings = madar_rust::loyalty::settings::LoyaltySettings::defaults(s.org, None);
-    let mut copy = madar_rust::loyalty::wallet::CardCopy::default();
-    copy.order_now_url = madar_rust::loyalty::wallet::order_now_for(&pool, &me).await;
+    let mut copy = madar_rust::loyalty::wallet::CardCopy {
+        order_now_url: madar_rust::loyalty::wallet::order_now_for(&pool, &me).await,
+        ..Default::default()
+    };
     let back = madar_rust::loyalty::wallet::back_of_card(&me, &settings, &copy);
     assert_eq!(back[0].key, "ordernow");
     assert_eq!(back[0].value, "https://order.example/now/tok-link-1");
@@ -2147,10 +2149,18 @@ async fn a_customers_bookings_are_listed_through_the_merge_chain(pool: PgPool) {
 /// Design §4.2: a card has its own budget whatever address asks, and the
 /// identity endpoints share a much tighter one. (The test client has no peer
 /// address, so every request is "127.0.0.1" to the per-IP limiter: the counts
-/// below stay under ITS bursts — 30 browse, 5 identity — so that what refuses
+/// below stay under ITS bursts (rate_limit::ROUTE_LIMITS) so that what refuses
 /// is provably the per-card bucket.)
 #[sqlx::test]
 async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
+    // The per-card buckets refill slowly here, so a loaded box can't hand a
+    // token back mid-loop (at the default one a second, the 41st view passed
+    // under the full parallel run). The bursts stay the defaults.
+    // SAFETY: nextest runs each test in its own process; nothing else reads these.
+    unsafe {
+        std::env::set_var("MADAR_RL_CUSTOMERS_BROWSE_TOKEN_MS_PER_REQUEST", "600000");
+        std::env::set_var("MADAR_RL_CUSTOMERS_IDENTITY_TOKEN_MS_PER_REQUEST", "600000");
+    }
     let s = shop(&pool, false).await;
     seed_loyalty_member(&pool, s.org, SARA, "Sara", "tok-lim-1").await;
     seed_loyalty_member(&pool, s.org, "01155566677", "Omar", "tok-lim-2").await;
@@ -2162,12 +2172,19 @@ async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
                               "new_phone_device_token": "x", "other_phone": "01222333444",
                               "other_device_token": "x" }))
     };
-    // Three tries on one card — spread over BOTH identity endpoints — and the
-    // fourth is refused before it reaches the handler.
-    for (i, which) in ["replace-identity", "combine", "replace-identity"]
-        .into_iter()
-        .enumerate()
-    {
+    // A card's tries — spread over BOTH identity endpoints — and the next is
+    // refused before it reaches the handler.
+    let card = madar_rust::rate_limit::limit_of("CUSTOMERS", "IDENTITY_TOKEN").burst;
+    assert!(
+        card < madar_rust::rate_limit::limit_of("CUSTOMERS", "IDENTITY").burst,
+        "the card's bucket is the tighter one"
+    );
+    for i in 0..card {
+        let which = if i % 2 == 0 {
+            "replace-identity"
+        } else {
+            "combine"
+        };
         let (st, _) = send(&app, identity("tok-lim-1", which)).await;
         assert_ne!(st, StatusCode::TOO_MANY_REQUESTS, "try {i}");
     }
@@ -2178,12 +2195,14 @@ async fn order_now_is_limited_per_card_as_well_as_per_address(pool: PgPool) {
         "the card's bucket is empty"
     );
     // The same address, ANOTHER card: not refused — so it was the card's
-    // bucket, not the address's (whose burst of five has one left).
+    // bucket, not the address's (whose burst is larger).
     let (st, _) = send(&app, identity("tok-lim-2", "replace-identity")).await;
     assert_ne!(st, StatusCode::TOO_MANY_REQUESTS);
 
-    // Browsing: twenty a burst per card, under the address's thirty.
-    for i in 0..20 {
+    // Browsing: the card's burst, under the address's.
+    let card = madar_rust::rate_limit::limit_of("CUSTOMERS", "BROWSE_TOKEN").burst;
+    assert!(card < madar_rust::rate_limit::limit_of("CUSTOMERS", "BROWSE").burst);
+    for i in 0..card {
         let (st, _) = send(
             &app,
             test::TestRequest::get().uri("/public/order-now/tok-lim-1"),
@@ -2436,7 +2455,15 @@ async fn the_references_backfill_links_seeded_rows(pool: PgPool) {
         .await
         .unwrap();
     // Delivery orders: (org, branch, name, phone, address, created days ago).
-    let deliveries: [(Uuid, Uuid, &str, &str, Option<&str>, i32); 6] = [
+    type Deliveries = [(
+        Uuid,
+        Uuid,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        i32,
+    ); 6];
+    let deliveries: Deliveries = [
         (
             org,
             branch,

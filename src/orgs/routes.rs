@@ -7,6 +7,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     // already on the shopfront.
     cfg.route("/public/orgs/brand", web::get().to(super::public::brand));
     cfg.route(
+        "/public/orgs/links",
+        web::get().to(super::links_page::public_links),
+    );
+    cfg.route(
         "/public/orgs/favicon",
         web::get().to(super::public::favicon),
     );
@@ -52,6 +56,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/{id}/loyalty-qr",
                 web::get().to(qr_handlers::org_loyalty_qr),
-            ),
+            )
+            .route(
+                "/{id}/links-page",
+                web::get().to(super::links_page::get_links_page),
+            )
+            .route(
+                "/{id}/links-page",
+                web::put().to(super::links_page::put_links_page),
+            )
+            .route("/{id}/links-qr", web::get().to(qr_handlers::org_links_qr)),
     );
 }

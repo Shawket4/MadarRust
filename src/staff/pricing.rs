@@ -41,6 +41,10 @@ pub struct ShiftRules {
     pub overtime_day_multiplier: Decimal,
     pub overtime_night_multiplier: Decimal,
     pub holiday_multiplier: Decimal,
+    /// A confirmed cover is paid as the covered block's full day (`full_block`)
+    /// rather than at the plain minute rate over an 8-hour day (`minute_rate`,
+    /// the default; owner decision D5).
+    pub cover_full_block: bool,
 }
 
 impl ShiftRules {
@@ -59,6 +63,7 @@ impl ShiftRules {
             overtime_day_multiplier: shift_day.unwrap_or(s.overtime_day_multiplier),
             overtime_night_multiplier: shift_night.unwrap_or(s.overtime_night_multiplier),
             holiday_multiplier: s.holiday_multiplier,
+            cover_full_block: s.cover_pay_mode == "full_block",
         }
     }
 }
@@ -208,7 +213,19 @@ pub fn price_shift(f: &ShiftFacts, r: &ShiftRules) -> ShiftPrice {
     let mut out = ShiftPrice::default();
 
     // A cover is someone else's shift: extra time, no discipline (CV-4, CV-5).
+    // Owner decision D5: by default the coverer's plain minute rate, the day
+    // rate over an 8-hour day, so 2.5 hours pay 2.5 hours; `full_block` pays
+    // the covered block as a full day (the block's length is the divisor).
     if f.is_confirmed_cover {
+        let rates = if r.cover_full_block {
+            rates
+        } else {
+            PayRates::from_base(
+                f.base_salary_piastres,
+                r.working_days_per_month,
+                DEFAULT_SHIFT_MINUTES,
+            )
+        };
         out.cover_piastres =
             round_piastres(rates.minutes_piastres(Decimal::from(f.worked_minutes.max(0)))).max(0);
         return out;
@@ -319,13 +336,12 @@ pub fn settle_net(
 }
 
 /// A percentage of a salary, in piastres: `salary × percent ÷ 100`, rounded
-/// half away from zero (AT-2 — never banker's rounding).
+/// half away from zero (AT-2 — never banker's rounding). The rule is
+/// madar-shared's (`madar_dawam::pay::percent_of_salary`, DW3), the staff
+/// app's too; the SQL twins (`dawam_advance_cap`, an adjustment's
+/// `value_piastres`) are pinned to it by `tests/dawam_shared_rules_tests.rs`.
 pub fn percent_of_salary(base_salary_piastres: i64, percent: Decimal) -> i64 {
-    round_piastres(
-        Decimal::from(base_salary_piastres.max(0)) * percent.max(Decimal::ZERO)
-            / Decimal::from(100),
-    )
-    .max(0)
+    madar_dawam::pay::percent_of_salary(base_salary_piastres, percent)
 }
 
 /// Minutes of pay at the plain rate, exact (a repeating decimal, usually):
@@ -443,6 +459,7 @@ mod tests {
             overtime_day_multiplier: dec!(1.35),
             overtime_night_multiplier: dec!(1.70),
             holiday_multiplier: dec!(2),
+            cover_full_block: false,
         }
     }
 
@@ -498,6 +515,7 @@ mod tests {
             limit_rest_hours: dec!(12),
             limit_overtime_day_hours: dec!(2),
             orders_per_staff: 12,
+            cover_pay_mode: "minute_rate".into(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

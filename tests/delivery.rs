@@ -252,7 +252,19 @@ mod kitchen_projection {
                 line_cost: None,
                 unit_cost: None,
                 cost_missing: false,
+                line_kind: "item".into(),
+                id: None,
+                combo_line_id: None,
+                combo_slot_id: None,
+                combo_slot_name: None,
+                combo_slot_name_translations: serde_json::json!({}),
+                combo_unit_price: None,
+                combo_share: 0,
+                combo_surcharge: 0,
+                deal_minor: 0,
+                combo: None,
             }],
+            deals: vec![],
         };
         let lines = kitchen_lines(&cart);
         assert_eq!(lines.len(), 1);
@@ -1329,7 +1341,7 @@ mod it {
             &app,
             test::TestRequest::post()
                 .uri("/public/delivery-orders")
-                .set_json(&intake_body(
+                .set_json(intake_body(
                     branch,
                     "in_mall",
                     json!([{ "menu_item_id": item, "quantity": 2 }]),
@@ -1502,7 +1514,7 @@ mod it {
             &app,
             test::TestRequest::post()
                 .uri("/public/delivery-orders")
-                .set_json(&intake_body(
+                .set_json(intake_body(
                     branch,
                     "pickup",
                     json!([{ "menu_item_id": item, "quantity": 1 }]),
@@ -1679,13 +1691,14 @@ mod it {
         // Forward jump received → out_for_delivery (skips confirmed/preparing/ready).
         let (st, b) = set("out_for_delivery").await;
         assert_eq!(st, StatusCode::OK, "forward jump: {b}");
-        let (status, c_at, p_at, r_at, o_at): (
+        type Row = (
             String,
             Option<chrono::DateTime<chrono::Utc>>,
             Option<chrono::DateTime<chrono::Utc>>,
             Option<chrono::DateTime<chrono::Utc>>,
             Option<chrono::DateTime<chrono::Utc>>,
-        ) = sqlx::query_as(
+        );
+        let (status, c_at, p_at, r_at, o_at): Row = sqlx::query_as(
             "SELECT status::text, confirmed_at, preparing_at, ready_at, out_for_delivery_at
              FROM delivery_orders WHERE id=$1",
         )
@@ -1839,7 +1852,7 @@ mod it {
         // The list row carries the lightweight channel flag (for badges + KPIs)…
         assert_eq!(row["delivery_channel"], "in_mall");
         // …but NOT the full address block (detail-only).
-        assert!(row.get("delivery").map_or(true, |v| v.is_null()));
+        assert!(row.get("delivery").is_none_or(|v| v.is_null()));
     }
 
     #[sqlx::test]
@@ -1896,7 +1909,7 @@ mod it {
             "dine-in must have no channel flag"
         );
         assert!(
-            o.get("delivery").map_or(true, |v| v.is_null()),
+            o.get("delivery").is_none_or(|v| v.is_null()),
             "dine-in must have no delivery block"
         );
     }
@@ -3058,6 +3071,92 @@ mod it {
         assert_eq!(options[0]["price"], 130, "branch_channel beats catalog 100");
     }
 
+    /// An item whose groups are SET lists them even when they hold nothing
+    /// (the till's reading, `/catalog/sync`): after "detach all", an item
+    /// keeps its own empty Options group, and one whose only option is off
+    /// here has an empty group too. The page reads a listed group as "these
+    /// are the item's add-ons" — none — and never falls back to the org's
+    /// whole add-on catalog. An item never set up in the unified model lists
+    /// none (the fallback signal), and an inactive group is not listed.
+    #[sqlx::test]
+    async fn public_menu_lists_an_items_empty_group_set_so_it_offers_no_addons(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        let teller = seed_user(&pool, org, "teller").await;
+        seed_shift(&pool, branch, teller).await;
+        let detached = seed_item(&pool, org, 500).await;
+        let all_off = seed_item(&pool, org, 600).await;
+        let never_set = seed_item(&pool, org, 700).await;
+        let group = |name: &'static str, active: bool| {
+            let pool = pool.clone();
+            async move {
+                let id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO modifier_groups (id, org_id, name, selection_type, min_selections, max_selections, is_required, is_active) \
+                     VALUES ($1,$2,$3,'multi',0,NULL,false,$4)",
+                )
+                .bind(id).bind(org).bind(name).bind(active)
+                .execute(&pool).await.unwrap();
+                id
+            }
+        };
+        let attach = |item: Uuid, g: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) VALUES ($1,$2,0)")
+                    .bind(item).bind(g).execute(&pool).await.unwrap();
+            }
+        };
+        // `detached`: its own Options group, no option in it; an old
+        // inactive group is still attached and must not show.
+        let options = group("Options", true).await;
+        attach(detached, options).await;
+        let old = group("Old extras", false).await;
+        attach(detached, old).await;
+        // `all_off`: an Extras group whose only option is off at this branch.
+        let extras = group("Extras", true).await;
+        let shot = Uuid::new_v4();
+        sqlx::query("INSERT INTO modifier_options (id, group_id, name, price, sort) VALUES ($1,$2,'Shot',100,0)")
+            .bind(shot).bind(extras).execute(&pool).await.unwrap();
+        attach(all_off, extras).await;
+        sqlx::query(
+            "INSERT INTO menu_price_overrides (scope, branch_id, target_type, target_id, is_available) \
+             VALUES ('branch',$1,'modifier_option',$2,false)",
+        )
+        .bind(branch).bind(shot).execute(&pool).await.unwrap();
+
+        let app = app!(&pool);
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=in_mall")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        let groups_of = |id: Uuid| -> Vec<(String, usize)> {
+            b["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["id"] == id.to_string())
+                .unwrap_or_else(|| panic!("item {id} on the menu: {b}"))["modifier_groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| {
+                    (
+                        g["name"].as_str().unwrap().to_string(),
+                        g["options"].as_array().unwrap().len(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(groups_of(detached), vec![("Options".to_string(), 0)]);
+        assert_eq!(groups_of(all_off), vec![("Extras".to_string(), 0)]);
+        assert_eq!(groups_of(never_set), vec![]);
+    }
+
     #[sqlx::test]
     async fn public_menu_preview_returns_menu_when_channel_closed(pool: PgPool) {
         let org = seed_org(&pool).await;
@@ -3113,6 +3212,55 @@ mod it {
             StatusCode::NOT_FOUND,
             "preview must not bypass the channel-enabled check"
         );
+    }
+
+    #[sqlx::test]
+    async fn the_dine_in_menu_is_a_read_only_preview_for_any_branch(pool: PgPool) {
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        // No ordering channel at all: a shop that only wants a menu online.
+        let item = seed_item(&pool, org, 500).await;
+        let app = app!(&pool);
+
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!(
+                "/public/branches/{branch}/menu?channel=dine_in&preview=true"
+            )),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        let items = b["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{b}");
+        assert_eq!(items[0]["id"], item.to_string());
+
+        // Never without preview: nothing is ordered against it.
+        let (st, _b) = send(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/branches/{branch}/menu?channel=dine_in")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+
+        // The branch list hides it for ordering, and shows it for browsing.
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(b.as_array().unwrap().len(), 0, "{b}");
+        let (st, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}&browse=true")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let list = b.as_array().unwrap();
+        assert_eq!(list.len(), 1, "{b}");
+        assert_eq!(list[0]["id"], branch.to_string());
+        assert_eq!(list[0]["in_mall_enabled"], false);
     }
 
     #[sqlx::test]

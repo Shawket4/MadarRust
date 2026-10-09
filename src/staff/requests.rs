@@ -122,6 +122,16 @@ pub struct StaffRequest {
     #[sqlx(default)]
     #[serde(default)]
     pub cancel_note: Option<String>,
+    /// Who decided it, by name — their employee's name when linked, else
+    /// their account's — so a phone that can't look up the owner's account
+    /// still names them (RQ-F6).
+    #[sqlx(default)]
+    #[serde(default)]
+    pub decided_by_name: Option<String>,
+    /// Who cancelled it, by name, the same way.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub cancelled_by_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     /// A manager's own request waiting for someone above them (RQ-5): the
@@ -157,6 +167,13 @@ pub struct StaffRequest {
     #[sqlx(default)]
     #[serde(default)]
     pub month_closed: bool,
+    /// For a leave or mission: the days it covers that the person already
+    /// clocked in on. Approving turns those worked days into leave (the
+    /// punches are kept), so the approver is warned first (minor default
+    /// M16). Empty for every other kind.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub worked_dates: Vec<NaiveDate>,
 }
 
 const REQUEST_SELECT: &str = r#"
@@ -166,10 +183,23 @@ const REQUEST_SELECT: &str = r#"
            r.title, r.location,
            r.attendance_record_id, r.reason, r.status, r.is_paid, r.decided_by, r.decided_at,
            r.decision_note, r.cancelled_by, r.cancelled_at, r.cancel_note,
+           COALESCE(de.name, du.name) AS decided_by_name,
+           COALESCE(ce.name, cu.name) AS cancelled_by_name,
            r.created_at, r.updated_at,
-           ar.check_in_at AS record_check_in_at, ar.check_out_at AS record_check_out_at
+           ar.check_in_at AS record_check_in_at, ar.check_out_at AS record_check_out_at,
+           CASE WHEN r.kind IN ('leave', 'mission') THEN
+               ARRAY(SELECT DISTINCT w.business_date FROM attendance_records w
+                      WHERE w.employee_id = r.employee_id AND w.covered_employee_id IS NULL
+                        AND w.check_in_at IS NOT NULL
+                        AND w.business_date BETWEEN r.on_date AND COALESCE(r.end_date, r.on_date)
+                      ORDER BY 1)
+           ELSE '{}'::date[] END AS worked_dates
       FROM staff_requests r
       JOIN employees e ON e.id = r.employee_id
+      LEFT JOIN users du ON du.id = r.decided_by
+      LEFT JOIN employees de ON de.user_id = r.decided_by
+      LEFT JOIN users cu ON cu.id = r.cancelled_by
+      LEFT JOIN employees ce ON ce.user_id = r.cancelled_by
       LEFT JOIN leave_types t ON t.id = r.leave_type_id
       LEFT JOIN attendance_records ar ON ar.id = r.attendance_record_id
 "#;
@@ -293,9 +323,14 @@ pub struct BalanceQuery {
 fn validate_status_filter(status: Option<&str>) -> Result<(), AppError> {
     match status {
         None | Some("pending") | Some("approved") | Some("rejected") | Some("cancelled") => Ok(()),
-        Some(other) => Err(AppError::BadRequest(format!(
-            "Unknown status '{other}' — expected pending, approved, rejected, or cancelled"
-        ))),
+        Some(other) => Err(crate::staff::coded_vars(
+            400,
+            "STATUS_UNKNOWN",
+            format!(
+                "Unknown status '{other}' — expected pending, approved, rejected, or cancelled"
+            ),
+            serde_json::json!({ "status": other }),
+        )),
     }
 }
 
@@ -303,10 +338,15 @@ fn validate_kind(kind: &str) -> Result<(), AppError> {
     if KINDS.contains(&kind) {
         Ok(())
     } else {
-        Err(AppError::BadRequest(format!(
-            "Unknown request kind '{kind}' — expected one of {}",
-            KINDS.join(", ")
-        )))
+        Err(crate::staff::coded_vars(
+            400,
+            "REQUEST_KIND_UNKNOWN",
+            format!(
+                "Unknown request kind '{kind}' — expected one of {}",
+                KINDS.join(", ")
+            ),
+            serde_json::json!({ "kind": kind }),
+        ))
     }
 }
 
@@ -375,7 +415,8 @@ struct Shape {
 /// this exists so the API answers "a late arrival needs a time" rather than
 /// surfacing a constraint name.
 fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
-    let bad = |m: &str| Err(AppError::BadRequest(m.to_string()));
+    // Each shape refusal has its own code (hunt H2-B9).
+    let bad = |code: &'static str, m: &str| Err(crate::staff::coded(400, code, m));
     let mut shape = Shape {
         end_date: None,
         leave_half: None,
@@ -387,40 +428,59 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
             "late_arrival" | "early_departure" | "excuse" | "correction"
         )
     {
-        return bad("Only a late arrival, early departure, excuse or correction names a shift");
+        return bad(
+            "SHIFT_NOT_FOR_KIND",
+            "Only a late arrival, early departure, excuse or correction names a shift",
+        );
     }
     match body.kind.as_str() {
         "leave" => {
             let end = body.end_date.unwrap_or(body.on_date);
             if end < body.on_date {
-                return bad("End date is before start date");
+                return bad("END_BEFORE_START", "End date is before start date");
             }
             let half = body.is_half_day.unwrap_or(false);
             if half && end != body.on_date {
-                return bad("A half day must start and end on the same date");
+                return bad(
+                    "HALF_DAY_ONE_DATE",
+                    "A half day must start and end on the same date",
+                );
             }
             shape.end_date = Some(end);
             shape.leave_half = match (half, body.leave_half.as_deref()) {
                 (false, None) => None,
-                (false, Some(_)) => return bad("Only a half day says which half"),
+                (false, Some(_)) => {
+                    return bad("HALF_ONLY_FOR_HALF_DAY", "Only a half day says which half");
+                }
                 (true, None | Some("first")) => Some("first"),
                 (true, Some("second")) => Some("second"),
-                (true, Some(_)) => return bad("A half day is the first or the second half"),
+                (true, Some(_)) => {
+                    return bad(
+                        "HALF_DAY_WHICH_HALF",
+                        "A half day is the first or the second half",
+                    );
+                }
             };
         }
         "late_arrival" => {
             if body.to_time.is_none() {
-                return bad("A late arrival needs the time you expect to arrive");
+                return bad(
+                    "LATE_ARRIVAL_TIME_REQUIRED",
+                    "A late arrival needs the time you expect to arrive",
+                );
             }
         }
         "early_departure" => {
             if body.from_time.is_none() {
-                return bad("An early departure needs the time you expect to leave");
+                return bad(
+                    "EARLY_DEPARTURE_TIME_REQUIRED",
+                    "An early departure needs the time you expect to leave",
+                );
             }
         }
         "excuse" => match (body.from_time, body.to_time) {
             (Some(from), Some(to)) if to == from => {
-                return bad("The window must end after it starts");
+                return bad("WINDOW_EMPTY", "The window must end after it starts");
             }
             // Ending at or before it starts on the clock = past midnight.
             (Some(from), Some(to)) => {
@@ -428,17 +488,25 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
                     shape.end_date = Some(body.on_date + Duration::days(1));
                 }
             }
-            _ => return bad("A permission needs a start and an end time"),
+            _ => {
+                return bad(
+                    "EXCUSE_TIMES_REQUIRED",
+                    "A permission needs a start and an end time",
+                );
+            }
         },
         "mission" => {
             // The app sends the note; a title-less mission takes it (§3).
             shape.title = clean(body.title.as_ref()).or_else(|| clean(body.reason.as_ref()));
             if shape.title.is_none() {
-                return bad("A mission needs a title or a note saying where you'll be");
+                return bad(
+                    "MISSION_TITLE_REQUIRED",
+                    "A mission needs a title or a note saying where you'll be",
+                );
             }
             let end = body.end_date.unwrap_or(body.on_date);
             if end < body.on_date {
-                return bad("End date is before start date");
+                return bad("END_BEFORE_START", "End date is before start date");
             }
             shape.end_date = Some(end);
         }
@@ -446,12 +514,23 @@ fn validate_shape(body: &CreateStaffRequest) -> Result<Shape, AppError> {
             // The record it fixes, or — a rostered shift nobody clocked yet —
             // the shift (RQ-9).
             if body.attendance_record_id.is_none() && body.work_shift_id.is_none() {
-                return bad("A correction needs the attendance record or the shift it fixes");
+                return bad(
+                    "CORRECTION_TARGET_REQUIRED",
+                    "A correction needs the attendance record or the shift it fixes",
+                );
             }
             match (body.from_time, body.to_time) {
-                (None, None) => return bad("A correction needs a proposed time"),
+                (None, None) => {
+                    return bad(
+                        "CORRECTION_TIME_REQUIRED",
+                        "A correction needs a proposed time",
+                    );
+                }
                 (Some(from), Some(to)) if to == from => {
-                    return bad("The check-out must be after the check-in");
+                    return bad(
+                        "CHECK_OUT_BEFORE_CHECK_IN",
+                        "The check-out must be after the check-in",
+                    );
                 }
                 _ => {}
             }
@@ -663,6 +742,19 @@ pub(crate) async fn day_adjustments(
 
     let default_paid = settings.excused_time_paid_default;
     let mut adj = DayAdjustments::default();
+    // Where the pings put the person that day (D2): approved time off counts
+    // only the minutes actually away.
+    let pings: Vec<Ping> = sqlx::query_as(
+        "SELECT p.attendance_record_id, p.at, p.inside, a.check_out_at \
+           FROM attendance_pings p JOIN attendance_records a ON a.id = p.attendance_record_id \
+          WHERE a.employee_id = $1 AND a.business_date = $2 AND a.covered_employee_id IS NULL \
+          ORDER BY p.attendance_record_id, p.at",
+    )
+    .bind(employee_id)
+    .bind(business_date)
+    .fetch_all(pool)
+    .await?;
+    adj.away = away_runs(&pings);
     for row in rows {
         let timed = |candidates: [Option<DateTime<Utc>>; 2], paid: bool| TimedRequest {
             candidates: candidates.into_iter().flatten().collect(),
@@ -720,6 +812,40 @@ pub(crate) async fn day_adjustments(
         }
     }
     Ok(adj)
+}
+
+/// One attendance ping as the day's pass reads it: `(record, at, inside,
+/// the record's check-out)`.
+type Ping = (Uuid, DateTime<Utc>, bool, Option<DateTime<Utc>>);
+
+/// The runs a record's pings put the person outside the fence: from the
+/// first outside ping to the next inside one, an open run to the record's
+/// check-out (or for good while it is open; readers clip to the punches).
+/// `pings` are `(record, at, inside, check_out)`, grouped by record, oldest
+/// first.
+fn away_runs(pings: &[Ping]) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+    let mut runs = Vec::new();
+    let mut open: Option<(Uuid, DateTime<Utc>, Option<DateTime<Utc>>)> = None;
+    for &(record, at, inside, out) in pings {
+        if let Some((r, from, end)) = open
+            && r != record
+        {
+            runs.push((from, end.unwrap_or(DateTime::<Utc>::MAX_UTC)));
+            open = None;
+        }
+        match (inside, open) {
+            (false, None) => open = Some((record, at, out)),
+            (true, Some((_, from, _))) => {
+                runs.push((from, at));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some((_, from, end)) = open {
+        runs.push((from, end.unwrap_or(DateTime::<Utc>::MAX_UTC)));
+    }
+    runs
 }
 
 // ── Month guard (RQ-4) ────────────────────────────────────────
@@ -926,7 +1052,11 @@ async fn insert_request(
         .fetch_one(pool)
         .await?;
         if !known {
-            return Err(AppError::NotFound("Shift not found".into()));
+            return Err(crate::staff::coded(
+                404,
+                "SHIFT_NOT_FOUND",
+                "Shift not found",
+            ));
         }
     }
 
@@ -946,10 +1076,18 @@ async fn insert_request(
         .fetch_optional(pool)
         .await?;
         match owned {
-            None => return Err(AppError::NotFound("Attendance record not found".into())),
+            None => {
+                return Err(crate::staff::coded(
+                    404,
+                    "RECORD_NOT_FOUND",
+                    "Attendance record not found",
+                ));
+            }
             Some(date) if date != body.on_date => {
-                return Err(AppError::BadRequest(
-                    "That record is not on the date you are correcting".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "RECORD_OTHER_DATE",
+                    "That record is not on the date you are correcting",
                 ));
             }
             Some(_) => {}
@@ -975,13 +1113,19 @@ async fn insert_request(
             shift_id = None;
         } else if let Some(shift) = shift_id {
             if !shifts.iter().any(|s| s.id == shift) {
-                return Err(AppError::BadRequest(
-                    "That shift isn't on your roster that day".into(),
+                return Err(crate::staff::coded(
+                    400,
+                    "NOT_ROSTERED",
+                    "That shift isn't on your roster that day",
                 ));
             }
             // Nobody corrects a shift that hasn't started yet.
             if shifts.iter().any(|s| s.id == shift && s.start > s.now) {
-                return Err(AppError::BadRequest("That shift hasn't started yet".into()));
+                return Err(crate::staff::coded(
+                    400,
+                    "SHIFT_NOT_STARTED",
+                    "That shift hasn't started yet",
+                ));
             }
             record_id = sqlx::query_scalar(
                 "SELECT id FROM attendance_records \
@@ -1046,7 +1190,7 @@ pub(crate) async fn load_request(pool: &PgPool, id: Uuid) -> Result<StaffRequest
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+        .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
     enrich(pool, std::slice::from_mut(&mut row)).await?;
     Ok(row)
 }
@@ -1126,26 +1270,30 @@ async fn after_filing(
 
     let name = crate::staff::dawam::employee_name(pool, subject.id).await;
     let args = serde_json::json!({ "name": name, "kind": row.kind, "date": row.on_date });
-    if row.to_owner {
+    // Nobody is told of a request they filed themselves (minor default
+    // M17): neither the person it is for nor a manager filing it for them.
+    let filer: Option<Uuid> = match claims.and_then(|c| c.user_id_safe().ok()) {
+        Some(user) => {
+            sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
+                .bind(user)
+                .bind(org_id)
+                .fetch_optional(pool)
+                .await?
+        }
+        None => None,
+    };
+    let told = |e: &Uuid| *e != subject.id && Some(*e) != filer;
+    let to: Vec<Uuid> = if row.to_owner {
         // A manager's own request waits for someone above them: the owner is
         // told (RQ-5), not the requester's peers.
-        for owner in crate::staff::dawam::owners(pool, org_id).await? {
-            if owner != subject.id {
-                crate::staff::dawam::notify(pool, org_id, owner, "staff.n_request", args.clone())
-                    .await;
-            }
-        }
+        crate::staff::dawam::owners(pool, org_id).await?
     } else {
-        crate::staff::dawam::notify_managers(
-            pool,
-            org_id,
-            subject.home(),
-            Cap::HrLeaveEdit,
-            Some(subject.id),
-            "staff.n_request",
-            args,
-        )
-        .await;
+        crate::staff::dawam::managers_of(pool, org_id, subject.home(), Cap::HrLeaveEdit)
+            .await
+            .unwrap_or_default()
+    };
+    for e in to.iter().filter(|e| told(e)) {
+        crate::staff::dawam::notify(pool, org_id, *e, "staff.n_request", args.clone()).await;
     }
     Ok(row)
 }
@@ -1216,7 +1364,7 @@ pub async fn create_request_admin(
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrLeaveCreate).await?;
     let employee_id = body
         .employee_id
-        .ok_or_else(|| AppError::BadRequest("employee_id is required".into()))?;
+        .ok_or_else(|| crate::staff::coded(400, "EMPLOYEE_REQUIRED", "employee_id is required"))?;
     let subject = access::subject(pool.get_ref(), org_id, employee_id).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrLeaveCreate, &subject).await?;
 
@@ -1301,18 +1449,24 @@ const EXISTING_COLS: &str = "employee_id, kind, on_date, end_date, status, from_
      attendance_record_id, work_shift_id";
 
 fn check_transition(existing: &str, decision: &str) -> Result<(), AppError> {
+    // 409 REQUEST_ALREADY_DECIDED with {status} (the request's own), for the
+    // client's wording (AT-13, Mac E2E S-235).
+    let decided = |reason: String| AppError::CodedVars {
+        status: 409,
+        code: "REQUEST_ALREADY_DECIDED",
+        reason,
+        vars: serde_json::json!({ "status": existing }),
+    };
     if existing == decision {
-        return Err(AppError::Conflict(format!(
-            "This request is already {decision}"
-        )));
+        return Err(decided(format!("This request is already {decision}")));
     }
     if existing == "rejected" || existing == "cancelled" {
-        return Err(AppError::Conflict(format!(
+        return Err(decided(format!(
             "This request was already {existing} and cannot be changed"
         )));
     }
     if existing == "approved" && decision == "rejected" {
-        return Err(AppError::Conflict(
+        return Err(decided(
             "An approved request cannot be rejected — cancel it instead".into(),
         ));
     }
@@ -1366,7 +1520,7 @@ pub async fn decide_request(
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
 
     let subject = access::subject(pool, org_id, existing.employee_id).await?;
     let is_own = me
@@ -1383,9 +1537,11 @@ pub async fn decide_request(
         // `hr.requests.self_approve` it was approved as it was filed; without
         // it, someone above them decides.
         if is_own {
-            return Err(AppError::Forbidden(
-                "Your own requests are decided by someone above you.".into(),
-            ));
+            return Err(AppError::Coded {
+                status: 403,
+                code: "OWN_REQUEST",
+                reason: "Your own requests are decided by someone above you.".into(),
+            });
         }
         // A manager's request goes ABOVE them: a peer manager of the same
         // branch can't decide it (RQ-5).
@@ -1394,11 +1550,12 @@ pub async fn decide_request(
         {
             crate::permissions::guard::require_dominance(pool, &claims, user, Cap::HrLeaveEdit)
                 .await
-                .map_err(|_| {
-                    AppError::Forbidden(
+                .map_err(|_| AppError::Coded {
+                    status: 403,
+                    code: "MANAGER_REQUEST_ABOVE",
+                    reason:
                         "A manager's own request is decided by someone above them, usually the owner."
                             .into(),
-                    )
                 })?;
         }
     }
@@ -1406,25 +1563,35 @@ pub async fn decide_request(
     if decision == "cancelled" {
         // AT-7: undoing a decision, or someone else's request, says why.
         if (!is_own || existing.status == "approved") && note.is_none() {
-            return Err(AppError::BadRequest(if existing.status == "approved" {
-                "Say why this approved request is cancelled".into()
-            } else {
-                "Say why you are cancelling someone else's request".into()
-            }));
+            // 400 CANCEL_REASON_REQUIRED {status}: the request's own.
+            return Err(crate::staff::coded_vars(
+                400,
+                "CANCEL_REASON_REQUIRED",
+                if existing.status == "approved" {
+                    "Say why this approved request is cancelled"
+                } else {
+                    "Say why you are cancelling someone else's request"
+                },
+                serde_json::json!({ "status": existing.status }),
+            ));
         }
         // An approved correction has rewritten the punch; cancelling the
         // request would free the shift for another correction while the punch
         // stays rewritten (RQ-9). The punch is corrected on the attendance
         // record instead.
         if existing.kind == "correction" && existing.status == "approved" {
-            return Err(AppError::Conflict(
-                "An approved correction has already rewritten the punch — correct the attendance record instead".into(),
+            return Err(crate::staff::coded(
+                409,
+                "CORRECTION_APPLIED",
+                "An approved correction has already rewritten the punch — correct the attendance record instead",
             ));
         }
     }
     if decision == "approved" && existing.kind == "leave" && body.is_paid.is_none() {
-        return Err(AppError::BadRequest(
-            "Say whether this leave is paid or unpaid".into(),
+        return Err(crate::staff::coded(
+            400,
+            "LEAVE_PAY_REQUIRED",
+            "Say whether this leave is paid or unpaid",
         ));
     }
     if decision != "rejected" {
@@ -1491,7 +1658,7 @@ async fn apply_decision(
     .bind(org_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
 
     // ── is_paid resolution ──────────────────────────────────────
     // Only the window kinds and leave carry a pay decision. The approver's
@@ -1516,7 +1683,7 @@ async fn apply_decision(
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?
-    .ok_or_else(|| AppError::NotFound("Request not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "REQUEST_NOT_FOUND", "Request not found"))?;
     check_transition(&locked.status, decision)?;
     let before = locked.status.clone();
 
@@ -1603,8 +1770,10 @@ async fn record_for_shift(
     actor: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
     let Some(branch) = request_branch(pool, request.employee_id, request.on_date).await? else {
-        return Err(AppError::Conflict(
-            "That shift is no longer on the roster".into(),
+        return Err(crate::staff::coded(
+            409,
+            "NOT_ROSTERED",
+            "That shift is no longer on the roster",
         ));
     };
     let tz = crate::staff::branch_timezone(pool, branch).await?;
@@ -1617,7 +1786,20 @@ async fn record_for_shift(
     .await?
     .into_iter()
     .find(|s| s.work_shift_id == shift_id)
-    .ok_or_else(|| AppError::Conflict("That shift is no longer on the roster".into()))?;
+    .ok_or_else(|| {
+        crate::staff::coded(409, "NOT_ROSTERED", "That shift is no longer on the roster")
+    })?;
+    // A correction that clocks the owner in on a shift a colleague is
+    // covering would pay it twice (D1).
+    if request.from_time.is_some() {
+        crate::staff::attendance::refuse_if_covered(
+            pool,
+            request.employee_id,
+            request.on_date,
+            Some(shift_id),
+        )
+        .await?;
+    }
     sqlx::query(
         "INSERT INTO attendance_records \
              (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
@@ -1686,7 +1868,7 @@ async fn apply_correction(
     .bind(record_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("Attendance record not found".into()))?;
+    .ok_or_else(|| crate::staff::coded(404, "RECORD_NOT_FOUND", "Attendance record not found"))?;
     let tz = crate::staff::branch_timezone(pool, rec.branch_id).await?;
     let proposed_in = match request.from_time {
         Some(t) => Some(

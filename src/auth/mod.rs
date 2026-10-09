@@ -1,3 +1,4 @@
+pub mod email;
 pub mod guards;
 pub mod handlers;
 pub mod jwt;
@@ -7,4 +8,3 @@ pub mod org_status;
 pub mod pin_fingerprint;
 pub mod pin_throttle;
 pub mod routes;
-

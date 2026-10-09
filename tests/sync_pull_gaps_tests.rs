@@ -64,14 +64,22 @@ fn req(branch: Uuid) -> PullRequest {
     }
 }
 
-fn row<'a>(resp: &'a madar_rust::sync::pull::PullResponse, ty: &str, id: Uuid) -> Option<&'a Value> {
+fn row<'a>(
+    resp: &'a madar_rust::sync::pull::PullResponse,
+    ty: &str,
+    id: Uuid,
+) -> Option<&'a Value> {
     resp.data
         .get(ty)?
         .iter()
         .find(|r| r["id"] == id.to_string())
 }
 
-fn change<'a>(resp: &'a madar_rust::sync::pull::PullResponse, ty: &str, id: Uuid) -> Option<&'a madar_rust::sync::pull::PullChange> {
+fn change<'a>(
+    resp: &'a madar_rust::sync::pull::PullResponse,
+    ty: &str,
+    id: Uuid,
+) -> Option<&'a madar_rust::sync::pull::PullChange> {
     resp.changes.iter().find(|c| c.ty == ty && c.id == id)
 }
 
@@ -771,7 +779,11 @@ async fn seed_orders(pool: &PgPool, s: &Shop, till: Uuid, n: usize) -> Vec<Uuid>
     out
 }
 
-fn paged(branch: Uuid, size: i64, cursor: Option<madar_rust::sync::pull::SnapshotCursor>) -> PullRequest {
+fn paged(
+    branch: Uuid,
+    size: i64,
+    cursor: Option<madar_rust::sync::pull::SnapshotCursor>,
+) -> PullRequest {
     PullRequest {
         branch_id: branch,
         device_id: None,
@@ -1038,7 +1050,9 @@ async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(test_secret()))
-            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .app_data(web::Data::new(
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            ))
             .configure(madar_rust::tills::routes::configure)
             .configure(madar_rust::sync::routes::configure),
     )
@@ -1120,4 +1134,459 @@ async fn the_report_and_replay_answers_carry_feed_horizons(pool: PgPool) {
         "the report includes the feed up to its horizon"
     );
     assert_eq!(report["cash_movements_net"].as_i64(), Some(500));
+}
+
+// ── Custom (untyped) modifier groups after the contract shim ─────────────────
+//
+// A group created with no `legacy_addon_type` is a custom group for new clients
+// only. The shim's `addon_items` view still lists its options (it is where the
+// order path prices every option), but with `type` NULL, which the old addon
+// wire (`addon_type: String`) cannot carry. Live (T1 rig, 2026-09-26) that NULL
+// reached `addon_items_by_ids` and every `/sync/pull` of the branch answered
+// 500 "decoding column addon_type: unexpected null".
+
+macro_rules! custom_group_app {
+    ($pool:expr) => {
+        actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(actix_web::web::Data::new($pool.clone()))
+                .app_data(actix_web::web::Data::new(test_secret()))
+                .app_data(actix_web::web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
+                .configure(madar_rust::menu::routes::configure)
+                .configure(madar_rust::sync::routes::configure)
+                .configure(madar_rust::costing::routes::configure)
+                .configure(madar_rust::orders::routes::configure)
+                .configure(madar_rust::delivery::routes::configure),
+        )
+        .await
+    };
+}
+
+async fn http<S>(
+    app: &S,
+    method: &str,
+    uri: &str,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    use actix_web::test::TestRequest;
+    let mut r = match method {
+        "GET" => TestRequest::get(),
+        "POST" => TestRequest::post(),
+        "PATCH" => TestRequest::patch(),
+        "PUT" => TestRequest::put(),
+        other => panic!("unsupported method {other}"),
+    }
+    .uri(uri);
+    if let Some(t) = token {
+        r = r.insert_header(("Authorization", format!("Bearer {t}")));
+    }
+    if let Some(b) = body {
+        r = r.set_json(b);
+    }
+    let resp = actix_web::test::call_service(app, r.to_request()).await;
+    let status = resp.status().as_u16();
+    let bytes = actix_web::test::read_body(resp).await;
+    let v = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+    (status, v)
+}
+
+/// The shop's owner (org admin, default role grants) on a database the contract
+/// shim has been applied to, as on the box. Returns the owner's token.
+async fn shimmed_owner(pool: &PgPool, s: &Shop) -> String {
+    let owner: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (org_id, name, email, password_hash, role) VALUES ($1, 'Owner', $2, 'x', 'org_admin') RETURNING id",
+    )
+    .bind(s.org)
+    .bind(format!("{}@gaps.test", Uuid::new_v4()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../deploy/menu_unification_shim.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
+    madar_rust::auth::jwt::create_token(
+        &test_secret(),
+        owner,
+        Some(s.org),
+        madar_rust::models::UserRole::OrgAdmin,
+        None,
+        1,
+    )
+    .unwrap()
+}
+
+/// `POST /modifier-groups` then `POST /modifier-groups/{gid}/options`, as the
+/// dashboard does. Returns (group, option).
+async fn group_with_option<S>(app: &S, token: &str, group: Value, option: Value) -> (Uuid, Uuid)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let (st, g) = http(app, "POST", "/modifier-groups", Some(token), Some(group)).await;
+    assert_eq!(st, 201, "{g}");
+    let gid: Uuid = g["id"].as_str().unwrap().parse().unwrap();
+    let (st, o) = http(
+        app,
+        "POST",
+        &format!("/modifier-groups/{gid}/options"),
+        Some(token),
+        Some(option),
+    )
+    .await;
+    assert_eq!(st, 201, "{o}");
+    (gid, o["id"].as_str().unwrap().parse().unwrap())
+}
+
+/// The `id`s of a JSON array of objects.
+fn ids_in(v: &Value) -> Vec<String> {
+    v.as_array()
+        .unwrap_or_else(|| panic!("not an array: {v}"))
+        .iter()
+        .filter_map(|r| r["id"].as_str().or(r["addon_item_id"].as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The pull's change for (`ty`, `id`), from an HTTP answer.
+fn change_in<'a>(pull: &'a Value, ty: &str, id: Uuid) -> Option<&'a Value> {
+    pull["changes"]
+        .as_array()?
+        .iter()
+        .find(|c| c["type"] == ty && c["id"] == id.to_string())
+}
+
+#[sqlx::test]
+async fn a_custom_group_with_no_legacy_type_keeps_the_pull_and_the_addon_lists_answering(
+    pool: PgPool,
+) {
+    let s = shop(&pool).await;
+    let token = shimmed_owner(&pool, &s).await;
+    sqlx::query(
+        "INSERT INTO branch_delivery_settings (branch_id, pickup_enabled) VALUES ($1, true)",
+    )
+    .bind(s.branch)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = custom_group_app!(pool);
+    let pull = json_pull(s.branch);
+
+    let (st, first) = http(&app, "POST", "/sync/pull", Some(&token), Some(pull.clone())).await;
+    assert_eq!(st, 200, "{first}");
+    let cursor = first["next"].as_i64().unwrap();
+
+    // The owner's custom group: effect omitted, no legacy type → NULL type.
+    let (gid, custom) = group_with_option(
+        &app,
+        &token,
+        serde_json::json!({"name": "Toppings", "selection_type": "multi"}),
+        serde_json::json!({"name": "Caramel drizzle", "price": 500}),
+    )
+    .await;
+    let legacy: Option<String> =
+        sqlx::query_scalar("SELECT legacy_addon_type FROM modifier_groups WHERE id = $1")
+            .bind(gid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(legacy, None, "a custom group has no legacy lineage");
+    // A typed group beside it: old tills see this one.
+    let (_, typed) = group_with_option(
+        &app,
+        &token,
+        serde_json::json!({"name": "Extras", "selection_type": "multi", "legacy_addon_type": "extra"}),
+        serde_json::json!({"name": "Extra shot", "price": 700}),
+    )
+    .await;
+
+    // The incremental pull answers; the custom option's feed row is not a
+    // broken upsert but the delete the pull sends for anything it does not
+    // project (a till never held it), and the typed one arrives whole.
+    let (st, inc) = http(
+        &app,
+        "POST",
+        &format!("/sync/pull?since={cursor}"),
+        Some(&token),
+        Some(pull.clone()),
+    )
+    .await;
+    assert_eq!(st, 200, "the branch keeps syncing: {inc}");
+    let c = change_in(&inc, "addon_item", custom).expect("the option's feed row is answered");
+    assert_eq!(c["op"], "delete", "{c}");
+    assert!(c.get("data").is_none_or(Value::is_null), "{c}");
+    let t = change_in(&inc, "addon_item", typed).expect("the typed option rides the feed");
+    assert_eq!(t["op"], "upsert");
+    assert_eq!(t["data"]["addon_type"], "extra");
+    assert_eq!(t["data"]["default_price"], 700);
+
+    // A full snapshot answers too, without the custom option, and its checksum
+    // counts exactly the rows it ships.
+    let (st, full) = http(&app, "POST", "/sync/pull", Some(&token), Some(pull.clone())).await;
+    assert_eq!(st, 200, "{full}");
+    let rows = full["data"]["addon_item"].as_array().unwrap();
+    let shipped = ids_in(&full["data"]["addon_item"]);
+    assert!(shipped.contains(&typed.to_string()));
+    assert!(
+        !shipped.contains(&custom.to_string()),
+        "invisible to old tills"
+    );
+    let pairs: Vec<(String, i64)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_str().unwrap().to_string(),
+                r["seq"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(full["checksums"]["addon_item"]["count"], pairs.len() as i64);
+    assert_eq!(
+        full["checksums"]["addon_item"]["checksum"],
+        madar_rust::sync::pull::checksum::checksum_of(&pairs)
+    );
+
+    // The legacy addon lists answer, without it.
+    for uri in [
+        format!("/addon-items?org_id={}", s.org),
+        format!("/addon-items?org_id={}&branch_id={}", s.org, s.branch),
+        format!("/costing/addon-items?org_id={}", s.org),
+    ] {
+        let (st, list) = http(&app, "GET", &uri, Some(&token), None).await;
+        assert_eq!(st, 200, "{uri}: {list}");
+        let ids = ids_in(&list);
+        assert!(ids.contains(&typed.to_string()), "{uri}: {list}");
+        assert!(!ids.contains(&custom.to_string()), "{uri}: {list}");
+    }
+    for uri in [
+        format!("/addon-items?org_id={}&page=1&per_page=10", s.org),
+        format!("/addon-items/catalog?org_id={}", s.org),
+    ] {
+        let (st, page) = http(&app, "GET", &uri, Some(&token), None).await;
+        assert_eq!(st, 200, "{uri}: {page}");
+        assert_eq!(ids_in(&page["data"]), vec![typed.to_string()], "{uri}");
+        assert_eq!(page["total"], 1, "{uri}: the count agrees with the rows");
+    }
+    // The storefront's org-wide add-on list (the legacy shape) too.
+    let (st, menu) = http(
+        &app,
+        "GET",
+        &format!(
+            "/public/branches/{}/menu?channel=pickup&preview=true",
+            s.branch
+        ),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(st, 200, "{menu}");
+    let addons = ids_in(&menu["addons"]);
+    assert!(addons.contains(&typed.to_string()), "{menu}");
+    assert!(!addons.contains(&custom.to_string()), "{menu}");
+
+    // Giving the group a legacy type later makes its option an ordinary addon
+    // (an upsert), and clearing it again retires it (a delete).
+    let at = full["next"].as_i64().unwrap();
+    let (st, g) = http(
+        &app,
+        "PATCH",
+        &format!("/modifier-groups/{gid}"),
+        Some(&token),
+        Some(serde_json::json!({"legacy_addon_type": "extra"})),
+    )
+    .await;
+    assert_eq!(st, 200, "{g}");
+    let (st, inc) = http(
+        &app,
+        "POST",
+        &format!("/sync/pull?since={at}"),
+        Some(&token),
+        Some(pull.clone()),
+    )
+    .await;
+    assert_eq!(st, 200, "{inc}");
+    let c = change_in(&inc, "addon_item", custom).expect("typed now: re-emitted");
+    assert_eq!(c["op"], "upsert", "{c}");
+    assert_eq!(c["data"]["addon_type"], "extra");
+    let at = inc["next"].as_i64().unwrap();
+    let (st, g) = http(
+        &app,
+        "PATCH",
+        &format!("/modifier-groups/{gid}"),
+        Some(&token),
+        Some(serde_json::json!({"legacy_addon_type": null})),
+    )
+    .await;
+    assert_eq!(st, 200, "{g}");
+    assert_eq!(g["legacy_addon_type"], Value::Null);
+    let (st, inc) = http(
+        &app,
+        "POST",
+        &format!("/sync/pull?since={at}"),
+        Some(&token),
+        Some(pull),
+    )
+    .await;
+    assert_eq!(st, 200, "{inc}");
+    let c = change_in(&inc, "addon_item", custom).expect("untyped again: retired");
+    assert_eq!(c["op"], "delete", "{c}");
+    let (st, list) = http(
+        &app,
+        "GET",
+        &format!("/addon-items?org_id={}", s.org),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(st, 200, "{list}");
+    assert!(!ids_in(&list).contains(&custom.to_string()));
+}
+
+/// The order path is where a custom option must stay VISIBLE: a new till
+/// sells it from the unified groups and sends its id as an addon. Its NULL
+/// type must neither 500 the line that chooses it nor any line of an item whose
+/// recipe shares an ingredient with it (the swap-candidate lookup reads every
+/// option carrying the recipe's ingredients).
+#[sqlx::test]
+async fn a_custom_option_with_no_legacy_type_still_prices_on_the_order_path(pool: PgPool) {
+    let s = shop(&pool).await;
+    let token = shimmed_owner(&pool, &s).await;
+    let app = custom_group_app!(pool);
+
+    let espresso: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_ingredients (org_id, name, unit, cost_per_unit) VALUES ($1, 'Espresso', 'g', 1) RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let cat: Uuid = sqlx::query_scalar(
+        "INSERT INTO categories (org_id, name) VALUES ($1, 'Coffee') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let latte: Uuid = sqlx::query_scalar(
+        "INSERT INTO menu_items (org_id, category_id, name, base_price) VALUES ($1, $2, 'Latte', 6000) RETURNING id",
+    )
+    .bind(s.org)
+    .bind(cat)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let size: Uuid = sqlx::query_scalar("SELECT id FROM menu_item_sizes WHERE menu_item_id = $1")
+        .bind(latte)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size', $1, $2, 18, 'g')")
+        .bind(size)
+        .bind(espresso)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // "Extra shot" in a custom group, deducting the latte's own ingredient.
+    let (gid, shot) = group_with_option(
+        &app,
+        &token,
+        serde_json::json!({"name": "Strength", "selection_type": "multi"}),
+        serde_json::json!({"name": "Extra shot", "price": 1500}),
+    )
+    .await;
+    let (st, r) = http(
+        &app,
+        "PUT",
+        &format!("/modifier-options/{shot}/recipe"),
+        Some(&token),
+        Some(serde_json::json!([{"ingredient_id": espresso, "quantity": 9, "unit": "g"}])),
+    )
+    .await;
+    assert_eq!(st, 200, "{r}");
+    let (st, r) = http(
+        &app,
+        "PUT",
+        &format!("/menu-items/{latte}/modifier-groups"),
+        Some(&token),
+        Some(serde_json::json!({"groups": [{"group_id": gid, "sort": 0}]})),
+    )
+    .await;
+    assert_eq!(st, 200, "{r}");
+
+    use madar_rust::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
+    // A plain latte: the custom option is a swap candidate of its espresso.
+    let plain = resolve_menu_item_configuration(&pool, latte, None, 1, &[], &[], s.branch)
+        .await
+        .expect("a latte still sells");
+    assert_eq!(plain.addon_line, 0);
+    // A latte with the extra shot: charged, and its 9 g deducted over the 18 g.
+    let with = resolve_menu_item_configuration(
+        &pool,
+        latte,
+        None,
+        1,
+        &[AddonInput {
+            addon_item_id: shot,
+            quantity: 1,
+            unit_price: None,
+        }],
+        &[],
+        s.branch,
+    )
+    .await
+    .expect("the custom option sells");
+    assert_eq!(with.addon_line, 1500);
+    let espresso_g: f64 = with
+        .deductions
+        .iter()
+        .filter(|d| d.org_ingredient_id == Some(espresso))
+        .map(|d| d.quantity)
+        .sum();
+    assert_eq!(espresso_g, 27.0);
+
+    // The recipe preview a till asks for answers too.
+    let (st, preview) = http(
+        &app,
+        "POST",
+        "/orders/preview-recipe",
+        Some(&token),
+        Some(serde_json::json!({
+            "menu_item_id": latte,
+            "size_label": null,
+            "addons": [{"addon_item_id": shot, "quantity": 1}],
+            "optional_field_ids": []
+        })),
+    )
+    .await;
+    assert_eq!(st, 200, "{preview}");
+    let from_addon: f64 = preview
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["source"] == "addon")
+        .map(|l| l["quantity"].as_f64().unwrap())
+        .sum();
+    assert_eq!(from_addon, 9.0, "{preview}");
+}
+
+fn json_pull(branch: Uuid) -> Value {
+    serde_json::json!({ "branch_id": branch })
 }

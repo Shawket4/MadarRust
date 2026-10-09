@@ -121,13 +121,14 @@ async fn load_uncached(
     .fetch_all(&mut *conn)
     .await?;
 
-    let overrides: Vec<(
+    type Overrides = Vec<(
         i16,
         String,
         Option<Uuid>,
         Option<serde_json::Value>,
         Option<i64>,
-    )> = sqlx::query_as(
+    )>;
+    let overrides: Overrides = sqlx::query_as(
         "SELECT capability_id, effect, branch_id, limits,
                     floor(extract(epoch FROM valid_to))::bigint
                FROM user_overrides WHERE user_id = $1 AND revoked_at IS NULL",

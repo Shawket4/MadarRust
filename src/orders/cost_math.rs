@@ -16,7 +16,7 @@ pub struct InventoryDeduction {
     pub ingredient_name: String,
     pub unit: String,
     pub quantity: f64,
-    pub source: String, // "drink_recipe" | "addon" | "addon_swap:<name>" | "optional" | "bundle_component:<name>"
+    pub source: String, // "drink_recipe" | "addon" | "addon_swap:<name>" | "optional"
     pub category: String,
     /// Additive-addon attribution (None for recipe/swap/optional entries).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -24,9 +24,6 @@ pub struct InventoryDeduction {
     /// Optional-field attribution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optional_field_id: Option<Uuid>,
-    /// Bundle-component attribution (which component this entry belongs to).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_item_id: Option<Uuid>,
     /// Piastre cost per ingredient unit at sale time. None ⟺ unknown.
     pub cost_per_unit: Option<f64>,
     /// quantity × cost_per_unit in piastres, rounded. None ⟺ unknown.
@@ -43,16 +40,15 @@ pub struct LineCostSummary {
 ///
 /// * `line_cost` — full COGS in piastres; `None` when anything is unknown.
 /// * `unit_cost` — recipe-scope (drink_recipe + addon_swap) cost ÷ quantity;
-///   `None` for bundle lines and whenever recipe cost is unknown.
+///   `None` whenever recipe cost is unknown.
 /// * `cost_missing` — any unresolved entry, a menu line with no recipe at
 ///   all, or an additive addon with no ingredient rows.
 pub fn summarize_line_costs(
     deductions: &[InventoryDeduction],
     quantity: i32,
-    is_bundle_line: bool,
     has_uncosted_addon: bool,
 ) -> LineCostSummary {
-    let mut cost_missing = deductions.iter().any(|d| d.line_cost.is_none())
+    let cost_missing = deductions.iter().any(|d| d.line_cost.is_none())
         || deductions.is_empty()
         || has_uncosted_addon;
 
@@ -69,24 +65,16 @@ pub fn summarize_line_costs(
 
     let recipe_scope =
         |d: &&InventoryDeduction| d.source == "drink_recipe" || d.source.starts_with("addon_swap:");
-    let unit_cost = if is_bundle_line {
+    let entries: Vec<&InventoryDeduction> = deductions.iter().filter(recipe_scope).collect();
+    let unit_cost = if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
         None
     } else {
-        let entries: Vec<&InventoryDeduction> = deductions.iter().filter(recipe_scope).collect();
-        if entries.is_empty() || entries.iter().any(|d| d.cost_per_unit.is_none()) {
-            None
-        } else {
-            let cost: f64 = entries
-                .iter()
-                .map(|d| d.cost_per_unit.unwrap() * d.quantity)
-                .sum();
-            Some((cost / quantity.max(1) as f64).round() as i64)
-        }
+        let cost: f64 = entries
+            .iter()
+            .map(|d| d.cost_per_unit.unwrap() * d.quantity)
+            .sum();
+        Some((cost / quantity.max(1) as f64).round() as i64)
     };
-
-    if is_bundle_line && deductions.is_empty() {
-        cost_missing = true;
-    }
 
     LineCostSummary {
         line_cost,
@@ -114,7 +102,6 @@ mod tests {
             category: String::new(),
             addon_item_id: None,
             optional_field_id: None,
-            component_item_id: None,
             cost_per_unit,
             line_cost,
         }
@@ -122,7 +109,7 @@ mod tests {
 
     #[test]
     fn empty_line_is_cost_missing() {
-        let s = summarize_line_costs(&[], 1, false, false);
+        let s = summarize_line_costs(&[], 1, false);
         assert!(s.cost_missing);
         assert_eq!(s.line_cost, None);
         assert_eq!(s.unit_cost, None);
@@ -131,7 +118,7 @@ mod tests {
     #[test]
     fn fully_costed_recipe_line_rolls_up() {
         let d = ded("drink_recipe", 2.0, Some(50.0), Some(100));
-        let s = summarize_line_costs(std::slice::from_ref(&d), 1, false, false);
+        let s = summarize_line_costs(std::slice::from_ref(&d), 1, false);
         assert!(!s.cost_missing);
         assert_eq!(s.line_cost, Some(100)); // 50 × 2
         assert_eq!(s.unit_cost, Some(100)); // recipe cost ÷ qty(1)
@@ -140,7 +127,7 @@ mod tests {
     #[test]
     fn unit_cost_divides_by_quantity() {
         let d = ded("drink_recipe", 4.0, Some(50.0), Some(200));
-        let s = summarize_line_costs(std::slice::from_ref(&d), 2, false, false);
+        let s = summarize_line_costs(std::slice::from_ref(&d), 2, false);
         assert_eq!(s.line_cost, Some(200)); // full COGS, not divided
         assert_eq!(s.unit_cost, Some(100)); // 200 ÷ 2
     }
@@ -148,7 +135,7 @@ mod tests {
     #[test]
     fn any_unknown_cost_marks_missing() {
         let d = ded("drink_recipe", 2.0, None, None);
-        let s = summarize_line_costs(std::slice::from_ref(&d), 1, false, false);
+        let s = summarize_line_costs(std::slice::from_ref(&d), 1, false);
         assert!(s.cost_missing);
         assert_eq!(s.line_cost, None);
     }
@@ -156,26 +143,9 @@ mod tests {
     #[test]
     fn uncosted_addon_flag_marks_missing() {
         let d = ded("drink_recipe", 2.0, Some(50.0), Some(100));
-        let s = summarize_line_costs(std::slice::from_ref(&d), 1, false, true);
+        let s = summarize_line_costs(std::slice::from_ref(&d), 1, true);
         assert!(s.cost_missing);
         assert_eq!(s.line_cost, None);
-    }
-
-    #[test]
-    fn bundle_line_has_no_unit_cost() {
-        let d = ded("drink_recipe", 2.0, Some(50.0), Some(100));
-        let s = summarize_line_costs(std::slice::from_ref(&d), 1, true, false);
-        assert_eq!(s.unit_cost, None);
-        assert_eq!(s.line_cost, Some(100));
-        // A non-empty, fully-costed bundle line is NOT cost_missing — the late
-        // `is_bundle_line && deductions.is_empty()` guard must require BOTH.
-        assert!(!s.cost_missing);
-    }
-
-    #[test]
-    fn empty_bundle_line_is_cost_missing() {
-        let s = summarize_line_costs(&[], 1, true, false);
-        assert!(s.cost_missing);
     }
 
     #[test]
@@ -184,7 +154,7 @@ mod tests {
         // additive addon contributes to line_cost but not unit_cost.
         let recipe = ded("drink_recipe", 1.0, Some(50.0), Some(50));
         let addon = ded("addon", 1.0, Some(30.0), Some(30));
-        let s = summarize_line_costs(&[recipe, addon], 1, false, false);
+        let s = summarize_line_costs(&[recipe, addon], 1, false);
         assert_eq!(s.line_cost, Some(80)); // 50 + 30
         assert_eq!(s.unit_cost, Some(50)); // recipe scope only
     }

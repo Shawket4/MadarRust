@@ -1,31 +1,19 @@
-use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_governor::Governor;
 use actix_web::{middleware::Condition, web};
 
 use crate::auth::{handlers, middleware::JwtMiddleware};
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
-/// Login attempts one address may make in a minute (and at once).
-pub const LOGIN_PER_MINUTE: u32 = 60;
-
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    // Password/PIN login: 60 req/min per IP, burst of 60 (owner decision
-    // 2026-09-16). Fifty tablets behind one router sign in at shift change;
+    // Password/PIN login: per IP, burst 120, one more every 500 ms (owner decisions
+    // 2026-09-16, doubled 2026-09-25). Fifty tablets behind one router sign in at shift change;
     // PIN guessing is held back by the per-device and per-branch growing delay
     // (`auth::pin_throttle`), not by this per-address ceiling.
-    let login_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(LOGIN_PER_MINUTE)
-        .finish()
-        .expect("Invalid rate limiter configuration");
-    // Activation codes and branch resolution stay at 10 req/min per IP, burst
-    // 10: an activation code is 8 digits and has no delay of its own.
-    let gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(10)
-        .finish()
-        .expect("Invalid rate limiter configuration");
+    let login_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "AUTH", "LOGIN");
+    // Activation codes and branch resolution: per IP, burst 20, one every 3 s
+    // (an activation code is 8 digits and has no delay of its own). The numbers
+    // are rate_limit::ROUTE_LIMITS', each set from the environment.
+    let gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "AUTH", "ACTIVATION");
     // Disabled wholesale by MADAR_DISABLE_RATE_LIMIT for local API fuzzing.
     let limited = rate_limiting_enabled();
 

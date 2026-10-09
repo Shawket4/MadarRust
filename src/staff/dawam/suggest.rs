@@ -199,33 +199,21 @@ struct Proposal {
 
 impl Problem {
     fn slot(&self, date: NaiveDate, shift: usize) -> Option<Slot> {
-        use chrono::TimeZone;
         let w = &self.shifts[shift];
         if !w.valid_on(date) {
             return None;
         }
         let (start, end) = w.times_on(date);
-        let end_date = if end <= start {
-            date + Duration::days(1)
-        } else {
-            date
-        };
+        // Placed as the roster resolver's SQL places a shift (madar-shared's
+        // `madar_dawam::shift::instants`, DW1): overnight on the next date, a
+        // time in the spring gap moved forward by it, a time that happens
+        // twice the later one. `.earliest()` dropped the slot in the gap and
+        // put it an hour early in the autumn.
+        let (start, end) = madar_dawam::shift::instants(self.tz, date, start, end)?;
         Some(Slot {
             date,
             shift,
-            span: engine::Span {
-                date,
-                start: self
-                    .tz
-                    .from_local_datetime(&date.and_time(start))
-                    .earliest()?
-                    .with_timezone(&Utc),
-                end: self
-                    .tz
-                    .from_local_datetime(&end_date.and_time(end))
-                    .earliest()?
-                    .with_timezone(&Utc),
-            },
+            span: engine::Span { date, start, end },
         })
     }
 
@@ -1288,17 +1276,27 @@ pub async fn precompute(
 /// Make `shift` (None = off) the standing pattern for `d`'s weekday from `d`
 /// on. Rows covering that weekday end the day before; an every-day row is
 /// split so the other weekdays keep it, except where they have their own.
+/// A business-wide block goes where `branch` (the suggesting board) is,
+/// the split rows keep their own (hunt H2-B8b).
 async fn set_pattern_day(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
     employee_id: Uuid,
     d: NaiveDate,
     shift: Option<Uuid>,
+    branch: Option<Uuid>,
 ) -> Result<(), AppError> {
     let dow = days::dow(d);
-    type Row = (Uuid, Uuid, Option<i16>, NaiveDate, Option<NaiveDate>);
+    type Row = (
+        Uuid,
+        Uuid,
+        Option<i16>,
+        NaiveDate,
+        Option<NaiveDate>,
+        Option<Uuid>,
+    );
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT id, work_shift_id, day_of_week, effective_from, effective_to \
+        "SELECT id, work_shift_id, day_of_week, effective_from, effective_to, branch_id \
            FROM staff_schedules WHERE employee_id = $1 AND org_id = $2 \
             AND (effective_to IS NULL OR effective_to >= $3) \
             AND (day_of_week IS NULL OR day_of_week = $4) FOR UPDATE",
@@ -1309,14 +1307,15 @@ async fn set_pattern_day(
     .bind(dow)
     .fetch_all(&mut *conn)
     .await?;
-    for (id, ws_id, day, from, until) in rows {
+    for (id, ws_id, day, from, until, at) in rows {
         if day.is_none() {
             let start = from.max(d);
             for other in (0..7i16).filter(|x| *x != dow) {
                 sqlx::query(
                     "INSERT INTO staff_schedules \
-                         (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to) \
-                     SELECT $1, $2, $3, $4, $5, $6 WHERE NOT EXISTS ( \
+                         (org_id, employee_id, work_shift_id, day_of_week, effective_from, \
+                          effective_to, branch_id) \
+                     SELECT $1, $2, $3, $4, $5, $6, $7 WHERE NOT EXISTS ( \
                          SELECT 1 FROM staff_schedules WHERE employee_id = $2 AND day_of_week = $4 \
                             AND (effective_to IS NULL OR effective_to >= $5) \
                             AND ($6::date IS NULL OR effective_from <= $6))",
@@ -1327,6 +1326,7 @@ async fn set_pattern_day(
                 .bind(other)
                 .bind(start)
                 .bind(until)
+                .bind(at)
                 .execute(&mut *conn)
                 .await?;
             }
@@ -1346,14 +1346,20 @@ async fn set_pattern_day(
     }
     if let Some(shift) = shift {
         sqlx::query(
-            "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, effective_from) \
-             SELECT $1, $2, id, $4, $5 FROM work_shifts WHERE id = $3 AND org_id = $1",
+            "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, \
+                 effective_from, branch_id) \
+             SELECT $1, $2, w.id, $4, $5, \
+                    CASE WHEN w.branch_id IS NULL AND EXISTS ( \
+                             SELECT 1 FROM employee_branches eb \
+                              WHERE eb.employee_id = $2 AND eb.branch_id = $6) THEN $6 END \
+               FROM work_shifts w WHERE w.id = $3 AND w.org_id = $1",
         )
         .bind(org_id)
         .bind(employee_id)
         .bind(shift)
         .bind(dow)
         .bind(d)
+        .bind(branch)
         .execute(&mut *conn)
         .await?;
     }
@@ -1413,9 +1419,22 @@ pub async fn decide_suggestion(
         }
         None => None,
     };
+    // The days of a published week a pattern change moves, for SC-4.
+    let mut pattern_changes = std::collections::BTreeSet::new();
     if body.accept {
         let mut tx = pool.begin().await?;
         if pattern {
+            // Every published day from the change on, before and after, so
+            // the ones it moves are marked and the person told (SC-4, E2E
+            // B-ROTA-5) — as a day edit is.
+            let window = days::published_horizon(&mut tx, &[to.id])
+                .await?
+                .map(|(from, until)| (from.max(s.date), until))
+                .filter(|(from, until)| from <= until);
+            let before = match window {
+                Some((a, b)) => days::snapshot(&mut tx, &[to.id], a, b).await?,
+                None => Default::default(),
+            };
             // The standing pattern itself: the one suggestion that changes it.
             set_pattern_day(
                 &mut tx,
@@ -1423,17 +1442,25 @@ pub async fn decide_suggestion(
                 to.id,
                 s.date,
                 (!s.work_shift_id.is_nil()).then_some(s.work_shift_id),
+                Some(body.branch_id),
             )
             .await?;
             days::check_overlaps(&mut tx, to.id, s.date, s.date + Duration::days(14)).await?;
+            if let Some((a, b)) = window {
+                let after = days::snapshot(&mut tx, &[to.id], a, b).await?;
+                pattern_changes = days::diff(&before, &after);
+            }
         } else {
+            // Worked where the suggesting branch's board put it, or where the
+            // shift it moves was worked (hunt H2-B8).
             let block = Block {
                 work_shift_id: s.work_shift_id,
                 times: None,
+                branch_id: Some(body.branch_id),
             };
-            let mut times = None;
+            let mut taken = None;
             if let Some(f) = &from {
-                times = days::remove_block(
+                taken = days::remove_block(
                     &mut tx,
                     org_id,
                     f.id,
@@ -1446,9 +1473,17 @@ pub async fn decide_suggestion(
                 .ok_or_else(|| AppError::Refused {
                     code: "SUGGESTION_STALE",
                     reason: "That shift moved since — refresh the suggestions.".into(),
-                })?;
+                })
+                .map(Some)?;
             }
-            let block = Block { times, ..block };
+            let block = match taken {
+                Some(t) => Block {
+                    times: t.times,
+                    branch_id: t.branch_id.or(block.branch_id),
+                    ..block
+                },
+                None => block,
+            };
             days::validate_block(&mut tx, &to, s.date, &block).await?;
             days::add_block(
                 &mut tx,
@@ -1463,7 +1498,9 @@ pub async fn decide_suggestion(
             days::check_overlaps(&mut tx, to.id, s.date, s.date).await?;
         }
         tx.commit().await?;
-        if !pattern {
+        if pattern {
+            days::mark_changed(pool, org_id, &pattern_changes).await?;
+        } else {
             if let Some(f) = &from {
                 after_day_change(pool, org_id, f.id, s.date).await?;
             }

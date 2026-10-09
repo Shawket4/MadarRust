@@ -525,4 +525,3 @@ pub async fn get_menu_lint(
     let issues = lint_org_group(pool.get_ref(), query.org_id, query.group_id).await?;
     Ok(HttpResponse::Ok().json(issues))
 }
-

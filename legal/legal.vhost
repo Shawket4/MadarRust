@@ -2,9 +2,12 @@
 #
 # Deliberately dependency-free and backend-free: these URLs are cited in the App
 # Store and Google Play listings and must stay up even when the API is down.
+#
+# Relies on two files outside this one, both already on the server:
+#   snippets/madar-security-headers.conf  nosniff, frame, referrer and HSTS headers
+#   conf.d/madar-markdown.conf            map: $md_suffix is ".md" when Accept names
+#                                         text/markdown, "" otherwise
 server {
-    listen 80;
-    listen [::]:80;
     server_name legal.madar-pos.cloud;
 
     # Served by nginx directly, NOT proxied anywhere — renewals depend on it.
@@ -13,17 +16,97 @@ server {
     root /var/www/madar-legal;
     index index.html;
 
+    # The Markdown, llms.txt, robots.txt and sitemap declare UTF-8 too, not only
+    # the pages. text/html is always included; listing it again makes nginx warn.
+    charset utf-8;
+    charset_types text/plain text/markdown text/xml application/xml;
+
     # Static documents: no scripts at all, so the policy can be strict. Inline
     # styles are allowed because the CSS is embedded to keep each page a single
-    # self-contained file.
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # self-contained file. The JSON-LD blocks are data, not script; CSP does not
+    # apply to them.
+    #
+    # add_header is NOT inherited by a location that has any add_header of its
+    # own: it then sends only its own. So every such location below repeats the
+    # include and the CSP. Keep the three copies of the CSP identical.
+    include snippets/madar-security-headers.conf;
     add_header Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'" always;
 
-    # /privacy-policy and /privacy-policy.html both resolve.
-    location / { try_files $uri $uri.html $uri/ =404; }
+    # Compression. This nginx has gzip_static compiled in but no brotli module,
+    # so: serve the .gz produced at build time when the client accepts it (best
+    # ratio, no per-request CPU), and fall back to compressing on the fly.
+    gzip on;
+    gzip_vary on;
+    gzip_comp_level 6;
+    gzip_min_length 256;
+    gzip_proxied any;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml;
+    gzip_static on;
+
+    error_page 404 /404.html;
+    location = /404.html { internal; }
+
+    # A document page, or its Markdown source when the request's Accept names
+    # text/markdown. For everyone else $md_suffix is "", the first candidate is
+    # /<doc> with no extension, which never exists, and the page itself is served.
+    location ~ ^/(?<doc>[a-z0-9-]+)\.html$ {
+        include snippets/madar-security-headers.conf;
+        add_header Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'" always;
+        add_header Vary Accept;
+        try_files /${doc}${md_suffix} $uri =404;
+    }
+
+    # The index, negotiated the same way.
+    location = / {
+        include snippets/madar-security-headers.conf;
+        add_header Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'" always;
+        add_header Vary Accept;
+        try_files /index${md_suffix} /index.html =404;
+    }
+
+    # One URL per document: /privacy-policy and /privacy-policy/ move to
+    # /privacy-policy.html, and only when that page exists. The target ends in
+    # .html, which this pattern cannot match, so the redirect cannot loop.
+    location ~ ^/(?<doc>[a-z0-9-]+)/?$ {
+        if (-f $document_root/${doc}.html) { return 301 https://legal.madar-pos.cloud/${doc}.html$is_args$args; }
+        return 404;
+    }
+
+    # The Markdown copies, llms.txt, robots.txt and sitemap.xml.
+    location / { try_files $uri =404; }
 
     access_log /var/log/nginx/legal-madar.access.log;
     error_log  /var/log/nginx/legal-madar.error.log;
+
+    listen 443 ssl; # managed by Certbot
+    listen [::]:443 ssl; # managed by Certbot
+    ssl_certificate /etc/nginx/ssl/cloudflare-origin/cert.pem; # Cloudflare Origin CA (proxied host, valid to 2041)
+    ssl_certificate_key /etc/nginx/ssl/cloudflare-origin/key.pem; # Cloudflare Origin CA
+
+    # Restore the real client IP. Rate limits are per IP; without this every
+    # customer arrives as a Cloudflare address and shares one budget.
+    include /etc/nginx/cloudflare-real-ip.conf;
+
+    # Origin lockdown: this hostname is proxied, so legitimate traffic can only
+    # arrive from Cloudflare. The origin IP is publicly known, so without this
+    # anyone can address the box directly and skip the edge's rate limiting and
+    # WAF. NEVER add this to a DNS-only vhost (api, demo-api, sentry) or another
+    # tenant's config -- they are reached directly by design.
+    include /etc/nginx/cloudflare-only.conf;
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name legal.madar-pos.cloud;
+
+    # ACME first, and as a LOCATION rather than certbot default server-level
+    # `if (...) return 301`. An `if` runs in the rewrite phase before location
+    # matching, so it swallows /.well-known/ too - which silently breaks any
+    # future webroot renewal. Location matching lets this win instead.
+    location /.well-known/acme-challenge/ { root /var/www/letsencrypt; try_files $uri =404; }
+
+    location / { return 301 https://$host$request_uri; }
 }

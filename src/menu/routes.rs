@@ -31,6 +31,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/{id}", web::get().to(get_menu_item))
                 .route("/{id}", web::patch().to(update_menu_item))
                 .route("/{id}", web::delete().to(delete_menu_item))
+                // "Make it a meal" (combos C14)
+                .route(
+                    "/{id}/meal",
+                    web::put().to(crate::combos::handlers::put_meal),
+                )
                 // Sizes
                 .route("/{id}/sizes", web::post().to(upsert_size))
                 .route("/{id}/sizes/{sid}", web::delete().to(delete_size))

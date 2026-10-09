@@ -10,8 +10,6 @@
 
 use actix_web::{App, test, web};
 use chrono::{Duration, NaiveTime, Timelike, Utc};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -356,7 +354,7 @@ async fn check_in(
     lng: f64,
 ) -> actix_web::dev::ServiceResponse {
     let req = authed(test::TestRequest::post().uri("/staff/me/check-in"), token)
-        .set_json(&json!({ "branch_id": branch, "latitude": lat, "longitude": lng }))
+        .set_json(json!({ "branch_id": branch, "latitude": lat, "longitude": lng }))
         .to_request();
     test::call_service(app, req).await
 }
@@ -632,7 +630,7 @@ async fn clocking_straight_back_out_is_a_half_day_not_an_absence(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
         .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     let body: serde_json::Value = test::read_body_json(resp).await;
@@ -654,7 +652,7 @@ async fn checking_out_without_checking_in_is_a_404(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
         .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 404);
 }
@@ -774,7 +772,7 @@ async fn check_out_closes_the_day_and_records_worked_minutes(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
         .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -987,7 +985,7 @@ async fn a_department_holding_employees_cannot_be_deleted(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/staff/departments")
         .auth(&token)
-        .set_json(&json!({ "name": "Kitchen" }))
+        .set_json(json!({ "name": "Kitchen" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 201);
@@ -1045,7 +1043,7 @@ async fn approving_leave_asks_paid_or_unpaid_and_writes_no_balance(pool: PgPool)
     let req = test::TestRequest::post()
         .uri("/staff/me/requests")
         .auth(&employee_token)
-        .set_json(&json!({
+        .set_json(json!({
             "kind": "leave",
             "leave_type_id": leave_type,
             "on_date": "2026-09-01",
@@ -1219,7 +1217,7 @@ async fn generate(
 ) -> actix_web::dev::ServiceResponse {
     let req = test::TestRequest::post()
         .uri(&format!("/staff/payroll/periods/{period}/generate"))
-        .auth(&token)
+        .auth(token)
         .to_request();
     test::call_service(app, req).await
 }
@@ -1600,7 +1598,7 @@ async fn a_paid_period_cannot_be_regenerated(pool: PgPool) {
     let req = test::TestRequest::patch()
         .uri(&format!("/staff/payroll/periods/{period}/status"))
         .auth(&token)
-        .set_json(&json!({ "status": "paid" }))
+        .set_json(json!({ "status": "paid" }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 409);
     let req = test::TestRequest::patch()
@@ -1609,7 +1607,7 @@ async fn a_paid_period_cannot_be_regenerated(pool: PgPool) {
             f.employee
         ))
         .auth(&token)
-        .set_json(&json!({ "method": "cash" }))
+        .set_json(json!({ "method": "cash" }))
         .to_request();
     assert_eq!(test::call_service(&app, req).await.status(), 200);
 
@@ -1820,8 +1818,8 @@ async fn check_out(
 ) -> actix_web::dev::ServiceResponse {
     let req = test::TestRequest::post()
         .uri("/staff/me/check-out")
-        .auth(&token)
-        .set_json(&json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
+        .auth(token)
+        .set_json(json!({ "latitude": BRANCH_LAT, "longitude": BRANCH_LNG }))
         .to_request();
     test::call_service(app, req).await
 }
@@ -1940,44 +1938,52 @@ async fn an_approved_early_departure_shortens_the_day_that_was_owed(pool: PgPool
 }
 
 #[sqlx::test]
-async fn a_paid_excuse_credits_the_time_and_an_unpaid_one_does_not(pool: PgPool) {
-    // The pure shape of the rule, without the clock: an excused window inside the
-    // attendance span is credited when paid and ignored when not.
-    use chrono::TimeZone;
+async fn an_excuse_never_credits_time_the_person_was_there_for(pool: PgPool) {
+    // The pure shape of the rule (owner decision D2): worked time is real
+    // presence. An excuse, paid or not, adds nothing to it (a paid one used
+    // to credit its window on top of the time worked); the minutes the pings
+    // put the person away inside the window come off it.
+    use chrono::{DateTime, TimeZone};
     use madar_rust::staff::attendance::{DayAdjustments, WindowRequest, derive};
 
     let at = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 8, 10, h, m, 0).unwrap();
-    let excuse = |paid: bool| DayAdjustments {
+    let excuse = |paid: bool, away: Vec<(DateTime<Utc>, DateTime<Utc>)>| DayAdjustments {
         excuses: vec![WindowRequest {
             candidates: vec![(at(12, 0), at(14, 0))],
             work_shift_id: None,
             paid,
         }],
+        away,
         ..Default::default()
     };
+    let day = |adj: &DayAdjustments| {
+        derive(
+            Some(at(9, 0)),
+            Some(at(17, 0)),
+            Some(at(9, 0)),
+            Some(at(17, 0)),
+            None,
+            adj,
+        )
+    };
 
-    let paid = derive(
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        None,
-        &excuse(true),
-    );
-    let unpaid = derive(
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        Some(at(9, 0)),
-        Some(at(17, 0)),
-        None,
-        &excuse(false),
-    );
-
-    assert_eq!(unpaid.worked_minutes, 480, "the clocked span, unchanged");
     assert_eq!(
-        paid.worked_minutes, 600,
-        "a paid excuse credits the two hours back"
+        day(&excuse(false, vec![])).worked_minutes,
+        480,
+        "there all along"
     );
+    assert_eq!(
+        day(&excuse(true, vec![])).worked_minutes,
+        480,
+        "no credit on top"
+    );
+    // Away 12:30-13:30: an hour not worked, paid or not.
+    let away = vec![(at(12, 30), at(13, 30))];
+    assert_eq!(day(&excuse(true, away.clone())).worked_minutes, 420);
+    assert_eq!(day(&excuse(false, away)).worked_minutes, 420);
+    // Away outside the window is the left-mid-shift flag's, not the excuse's.
+    let later = vec![(at(15, 0), at(16, 0))];
+    assert_eq!(day(&excuse(true, later)).worked_minutes, 480);
     let _ = pool;
 }
 
@@ -2344,7 +2350,7 @@ async fn attendance_coordinates_are_wiped_once_their_month_is_approved(pool: PgP
         .expect("the wipe should succeed");
 
     // The approved month keeps everything payroll needs, minus the coordinates.
-    let (lat, lng, out_lat, out_lng, checked_in, distance, method): (
+    type Row = (
         Option<f64>,
         Option<f64>,
         Option<f64>,
@@ -2352,7 +2358,8 @@ async fn attendance_coordinates_are_wiped_once_their_month_is_approved(pool: PgP
         Option<chrono::DateTime<chrono::Utc>>,
         Option<f64>,
         Option<String>,
-    ) = sqlx::query_as(
+    );
+    let (lat, lng, out_lat, out_lng, checked_in, distance, method): Row = sqlx::query_as(
         "SELECT check_in_latitude, check_in_longitude, check_out_latitude, \
                 check_out_longitude, check_in_at, check_in_distance_meters, check_in_method \
            FROM attendance_records WHERE id = $1",
@@ -2521,4 +2528,137 @@ async fn discipline_report_is_scoped_to_the_callers_branches(pool: PgPool) {
     let teller = phone_token(&pool, f.employee).await;
     let resp = auth_get!(app, uri, teller);
     assert_eq!(resp.status(), 403, "a teller holds no hr.attendance.read");
+}
+
+/// E2E B-SETUP-1 (RU-8, AV-5, RU-13, AT-11): impossible rates, caps and limits
+/// are refused at the door with a plain message and a code — never stored,
+/// and never a raw "Database error" — and the row is unchanged.
+#[sqlx::test]
+async fn settings_refuse_impossible_rates_and_caps(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "UTC").await;
+    let admin = token_for(f.admin, f.org, UserRole::OrgAdmin);
+    let snapshot = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, serde_json::Value>(
+                "SELECT to_jsonb(s) - 'updated_at' FROM attendance_settings s \
+                  WHERE org_id = $1 AND branch_id IS NULL",
+            )
+            .bind(f.org)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = snapshot().await;
+    for body in [
+        json!({ "overtime_day_multiplier": 0 }),
+        json!({ "overtime_day_multiplier": -1 }),
+        json!({ "overtime_day_multiplier": 100 }),
+        json!({ "overtime_night_multiplier": 0.5 }),
+        json!({ "holiday_multiplier": 0 }),
+        json!({ "default_overtime_multiplier": 100 }),
+        json!({ "advance_cap_percent": 101 }),
+        json!({ "advance_cap_percent": -1 }),
+        json!({ "absence_deduction_days": -1 }),
+        json!({ "absence_deduction_days": 32 }),
+        json!({ "working_days_per_month": 40 }),
+        json!({ "limit_day_hours": 200 }),
+        json!({ "limit_day_hours": 0 }),
+        json!({ "limit_week_hours": 169 }),
+        json!({ "limit_presence_hours": -2 }),
+        json!({ "limit_rest_hours": -1 }),
+        json!({ "limit_overtime_day_hours": 169 }),
+        json!({ "orders_per_staff": -3 }),
+        json!({ "orders_per_staff": 0 }),
+        json!({ "overtime_mode": "bogus" }),
+        json!({ "half_day_leave_counts": "x" }),
+        json!({ "period_start_day": 29 }),
+    ] {
+        let resp = auth_send!(app, put, "/staff/attendance/settings", admin, body);
+        assert_eq!(resp.status(), 400, "{body}");
+        let err: serde_json::Value = test::read_body_json(resp).await;
+        let text = err["error"].as_str().unwrap_or_default();
+        assert!(!text.contains("Database error"), "{body}: {err}");
+        assert_eq!(err["code"], "SETTING_OUT_OF_RANGE", "{body}: {err}");
+        let field = body.as_object().unwrap().keys().next().unwrap();
+        assert_eq!(err["vars"]["field"], json!(field), "{body}: {err}");
+    }
+    assert_eq!(snapshot().await, before, "nothing was stored");
+    // The edges themselves are fine.
+    let resp = auth_send!(
+        app,
+        put,
+        "/staff/attendance/settings",
+        admin,
+        json!({ "overtime_day_multiplier": 1, "holiday_multiplier": 99.99,
+                "advance_cap_percent": 0, "limit_day_hours": 168, "limit_rest_hours": 0,
+                "orders_per_staff": 1, "overtime_mode": "approval",
+                "half_day_leave_counts": "whole_day" })
+    );
+    assert_eq!(resp.status(), 200);
+}
+
+/// E2E B-SETUP-2 (D-046, D-047, PAY-7): switching an employee to cash drops
+/// the old bank account or wallet, `pay_account: null` clears it, and
+/// `gender: null` is "Not set". An omitted field still keeps what is there.
+#[sqlx::test]
+async fn cash_clears_the_pay_account_and_gender_can_be_unset(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool, "UTC").await;
+    let admin = token_for(f.admin, f.org, UserRole::OrgAdmin);
+    let uri = format!("/staff/employees/{}", f.employee);
+    let iban = "EG380019000500000000263180002";
+    macro_rules! put {
+        ($body:expr) => {{
+            let resp = auth_send!(app, put, uri, admin, $body);
+            assert_eq!(resp.status(), 200, "{}", $body);
+        }};
+    }
+    let facts = || {
+        let pool = pool.clone();
+        let id = f.employee;
+        async move {
+            sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+                "SELECT pay_method, pay_account, gender FROM employees WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    put!(json!({ "pay_method": "bank", "pay_account": iban, "gender": "m" }));
+    assert_eq!(
+        facts().await,
+        ("bank".into(), Some(iban.into()), Some("m".into()))
+    );
+    // Omitted: kept.
+    put!(json!({ "job_title": "Barista" }));
+    assert_eq!(
+        facts().await,
+        ("bank".into(), Some(iban.into()), Some("m".into()))
+    );
+    // Cash, as the dashboard sends it.
+    put!(json!({ "pay_method": "cash", "pay_account": null }));
+    assert_eq!(facts().await.1, None, "cash drops the account");
+    // Cash with the account omitted, or even sent: still none.
+    put!(json!({ "pay_method": "wallet", "pay_account": "01012345678" }));
+    put!(json!({ "pay_method": "cash" }));
+    assert_eq!(facts().await.1, None);
+    put!(json!({ "pay_method": "cash", "pay_account": "stale" }));
+    assert_eq!(facts().await.1, None);
+    // An explicit null or empty account clears it on bank too.
+    put!(json!({ "pay_method": "bank", "pay_account": iban }));
+    put!(json!({ "pay_account": "" }));
+    assert_eq!(facts().await.1, None);
+    // Gender "Not set".
+    put!(json!({ "gender": null }));
+    assert_eq!(facts().await.2, None, "gender can be unset");
+    put!(json!({ "gender": "f" }));
+    put!(json!({ "notes": "x" }));
+    assert_eq!(facts().await.2, Some("f".into()), "omitted keeps it");
+    put!(json!({ "gender": "" }));
+    assert_eq!(facts().await.2, None);
 }

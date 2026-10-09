@@ -233,6 +233,35 @@ async fn rehash_if_stale(
     }
 }
 
+/// A PIN just verified for `user_id` outside the sign-in path (the till
+/// punch): re-hash it at the current cost and stamp its keyed fingerprint,
+/// exactly as PIN sign-in does, so a holder who only ever punches at the
+/// till also leaves the slow scan a wrong PIN runs over un-fingerprinted
+/// holders (POS E2E B-POS-3). Best-effort, like both halves at sign-in.
+pub(crate) async fn upgrade_verified_pin(
+    pool: &PgPool,
+    org_id: Uuid,
+    user_id: Uuid,
+    pin: &str,
+    current_hash: Option<&str>,
+) {
+    if let Some(h) = current_hash {
+        rehash_if_stale(pool, user_id, PasswordColumn::Pin, pin, h).await;
+    }
+    let fp = crate::auth::pin_fingerprint::fingerprint(org_id, pin);
+    if let Err(e) = sqlx::query(
+        "UPDATE users SET pin_fingerprint = $1 WHERE id = $2
+           AND (pin_fingerprint IS NULL OR pin_fingerprint <> $1)",
+    )
+    .bind(&fp)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(%user_id, "pin fingerprint not stored: {e}");
+    }
+}
+
 /// Which credential is being re-hashed. An enum rather than a `&str` so no
 /// column name can ever be assembled from a request.
 #[derive(Clone, Copy)]
@@ -353,7 +382,7 @@ pub async fn login(
                   AND deleted_at IS NULL
                 "#,
             )
-            .bind(email)
+            .bind(crate::auth::email::normalize(email))
             .bind(body.org_id)
             .fetch_optional(pool.get_ref())
             .await?
@@ -494,9 +523,14 @@ pub async fn login(
                     device_id.as_deref(),
                 )
                 .await;
-                return Err(AppError::Forbidden(
-                    "You can't sign in at a till in this branch".into(),
-                ));
+                // Coded, so the till says WHY (a correct PIN at the wrong
+                // branch, or a tablet the dashboard moved) instead of a bare
+                // "no permission". The sentence is unchanged for old tablets.
+                return Err(AppError::Coded {
+                    status: 403,
+                    code: "PIN_WRONG_BRANCH",
+                    reason: "You can't sign in at a till in this branch".into(),
+                });
             }
 
             // A correct PIN ends the run of failures for this device and shop.

@@ -1,5 +1,5 @@
 //! Shared menu-item configuration resolution (sizes, addons, optionals, inventory).
-//! Used by standalone order lines and bundle component lines.
+//! Used by order lines (the till's checkout and a waiter's fire).
 
 use crate::errors::AppError;
 use crate::orders::catalog_view::Catalog;
@@ -15,25 +15,13 @@ pub struct AddonInput {
     pub quantity: i32,
     /// Charged unit price (piastres) the POS applied for this addon. When present
     /// it is RECORDED as the addon's unit_price; absent → the server's expected
-    /// (catalog) price is used. Bundle-component addons ignore this (server-priced).
+    /// (catalog) price is used.
     #[serde(default)]
     pub unit_price: Option<i32>,
 }
 
 pub fn default_qty() -> i32 {
     1
-}
-
-#[derive(Deserialize, Serialize, Clone, ToSchema)]
-pub struct BundleComponentInput {
-    pub item_id: Uuid,
-    pub quantity: i32,
-    #[serde(default)]
-    pub size_label: Option<String>,
-    #[serde(default)]
-    pub addons: Vec<AddonInput>,
-    #[serde(default)]
-    pub optional_field_ids: Vec<Uuid>,
 }
 
 #[derive(Clone)]
@@ -117,7 +105,7 @@ pub fn merge_sized_option_lines(
 }
 
 /// Resolve a menu item configuration (same rules as a standalone POS line).
-/// [line_quantity] is the total multiplier for inventory (e.g. bundle line qty × component qty per bundle).
+/// [line_quantity] is the total multiplier for inventory (the line's quantity).
 pub async fn resolve_menu_item_configuration(
     pool: &PgPool,
     menu_item_id: Uuid,
@@ -125,8 +113,8 @@ pub async fn resolve_menu_item_configuration(
     line_quantity: i32,
     addons: &[AddonInput],
     optional_field_ids: &[Uuid],
-    // Branch the line is sold at — addon prices are resolved branch-effective so a
-    // bundle's component-addon surcharge matches what the branch POS charged.
+    // Branch the line is sold at — addon prices are resolved branch-effective,
+    // as the branch POS charged them.
     branch_id: Uuid,
 ) -> Result<MenuItemResolution, AppError> {
     if line_quantity <= 0 {
@@ -186,8 +174,6 @@ pub fn resolve_loaded(
     let mut deductions: Vec<InventoryDeduction> = Vec::new();
     let mut resolved_addons: Vec<ResolvedAddon> = Vec::new();
     let mut resolved_optionals: Vec<ResolvedOptional> = Vec::new();
-    // Ingredient categories swapped by an explicit choice on this line.
-    let mut swap_slugs: Vec<String> = Vec::new();
     let mut warnings: Vec<ResolveWarning> = Vec::new();
 
     // Base drink recipe: the line's size, else the item's first size.
@@ -258,9 +244,6 @@ pub fn resolve_loaded(
 
         if let Some(target) = &p.target {
             let cat = target.slug.as_str();
-            if !swap_slugs.iter().any(|s| s == cat) {
-                swap_slugs.push(cat.to_string());
-            }
             // The recipe's own choice changes nothing; an option with nothing
             // to swap in is charged and changes nothing either.
             let Some(repl) = p.replacement.as_ref().filter(|_| !p.is_base) else {
@@ -337,59 +320,50 @@ pub fn resolve_loaded(
 
     // An ADDITIVE addon in a swap family follows the drink's own choice: an
     // extra shot on a decaf latte is a decaf shot, and extra milk on an oat
-    // latte is oat. Without this the addon keeps whatever bean the catalog
-    // happened to name, so the sale charges for one thing and deducts another.
-    // Milk and coffee always follow (as before); an explicit custom swap family
-    // follows only on lines where one of its choices was made.
-    //
-    // A second pass, because the swaps above are applied as the addons are
-    // walked — the line's final choice is only known once that loop is done.
-    let mut follow_slugs: Vec<String> = vec!["milk".into(), "coffee_bean".into()];
-    for s in swap_slugs {
-        if !follow_slugs.contains(&s) {
-            follow_slugs.push(s);
-        }
-    }
-    for cat in follow_slugs.iter().map(String::as_str) {
-        let chosen = deductions
-            .iter()
-            .find(|d| d.category == cat && d.source != "addon")
-            .map(|d| {
-                (
-                    d.org_ingredient_id,
-                    d.ingredient_name.clone(),
-                    d.unit.clone(),
-                )
-            });
-        let Some((id, name, unit)) = chosen else {
-            continue;
-        };
-        for d in deductions.iter_mut() {
-            if d.source == "addon" && d.category == cat && d.org_ingredient_id != id {
-                // Convert first: the addon's quantity is in ITS unit, and the
-                // chosen ingredient may be stocked in another (g vs ml).
-                match crate::units::convert(d.quantity, &d.unit, &unit) {
-                    Ok(q) => {
-                        d.quantity = q;
-                        d.org_ingredient_id = id;
-                        d.ingredient_name = name.clone();
-                        d.unit = unit.clone();
-                        d.note = Some(format!("follows the chosen {name}"));
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            from_unit = %d.unit, to_unit = %unit, addon = %d.ingredient_name,
-                            "addon follow-the-drink across incompatible units; left as authored"
-                        );
-                        warnings.push(ResolveWarning {
-                            rule: "unit_conversion".into(),
-                            message: format!(
-                                "{} ({}) should follow {name} ({unit}): incompatible units, deducted as authored",
-                                d.ingredient_name, d.unit
-                            ),
-                        });
-                    }
-                }
+    // latte is oat. The rule is madar-shared's (`madar_catalog::follow`, which
+    // the POS core runs for its recipe preview too); this maps the deductions
+    // onto it and its answer back. Optionals are pushed below, after it, as
+    // they always were. Run after the swaps: the line's final choice is only
+    // known once that loop is done.
+    let mut lines: Vec<madar_catalog::follow::DrinkLine> = deductions
+        .iter()
+        .map(|d| madar_catalog::follow::DrinkLine {
+            ingredient_id: d.org_ingredient_id.map(|u| u.to_string()),
+            name: d.ingredient_name.clone(),
+            unit: d.unit.clone(),
+            quantity: d.quantity,
+            category: d.category.clone(),
+            additive: d.source == "addon",
+        })
+        .collect();
+    let families = madar_catalog::follow::families(&priced);
+    for f in madar_catalog::follow::follow_the_drink(&mut lines, &families) {
+        match f {
+            madar_catalog::follow::Followed::Followed { line, to, .. } => {
+                let (d, l) = (&mut deductions[line], &lines[line]);
+                d.org_ingredient_id = l.ingredient_id.as_deref().and_then(|i| i.parse().ok());
+                d.ingredient_name = l.name.clone();
+                d.unit = l.unit.clone();
+                d.quantity = l.quantity;
+                d.note = Some(format!("follows the chosen {to}"));
+            }
+            madar_catalog::follow::Followed::Unconvertible {
+                line,
+                to_name,
+                to_unit,
+            } => {
+                let d = &deductions[line];
+                tracing::warn!(
+                    from_unit = %d.unit, to_unit = %to_unit, addon = %d.ingredient_name,
+                    "addon follow-the-drink across incompatible units; left as authored"
+                );
+                warnings.push(ResolveWarning {
+                    rule: "unit_conversion".into(),
+                    message: format!(
+                        "{} ({}) should follow {to_name} ({to_unit}): incompatible units, deducted as authored",
+                        d.ingredient_name, d.unit
+                    ),
+                });
             }
         }
     }

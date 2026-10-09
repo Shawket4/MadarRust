@@ -9,7 +9,7 @@
 //!     order_item_addons.addon_item_id and order_item_optionals.optional_field_id
 //!     (immutable order history) keep resolving. We copy the source id verbatim.
 //!   * Order history (order_items / order_item_addons / order_item_optionals /
-//!     order_line_bundle_components / *_cost / size_label) is NEVER touched.
+//!     *_cost / size_label) is NEVER touched.
 //!   * Recipe lines become id-keyed (ingredient_id FK), fixing the rename-orphan bug.
 //!     Legacy rows keyed only by ingredient NAME are resolved by (org_id, name); a row
 //!     whose name can't be resolved is reported, not silently dropped.

@@ -141,14 +141,42 @@ pub(crate) fn validate_range(
     max_days: i64,
 ) -> Result<(), AppError> {
     if to < from {
-        return Err(AppError::BadRequest("`to` is before `from`".into()));
+        return Err(coded(400, "RANGE_BACKWARDS", "`to` is before `from`"));
     }
     if (to - from).num_days() > max_days {
-        return Err(AppError::BadRequest(format!(
-            "Range too wide — at most {max_days} days per request"
-        )));
+        return Err(AppError::CodedVars {
+            status: 400,
+            code: "RANGE_TOO_WIDE",
+            reason: format!("Range too wide — at most {max_days} days per request"),
+            vars: serde_json::json!({ "max_days": max_days }),
+        });
     }
     Ok(())
+}
+
+/// A coded refusal (AT-13, hunt H2-B9): `code` for the client's own words in
+/// either language, `reason` the English fallback.
+pub(crate) fn coded(status: u16, code: &'static str, reason: impl Into<String>) -> AppError {
+    AppError::Coded {
+        status,
+        code,
+        reason: reason.into(),
+    }
+}
+
+/// [`coded`] with the figures the client words it with.
+pub(crate) fn coded_vars(
+    status: u16,
+    code: &'static str,
+    reason: impl Into<String>,
+    vars: serde_json::Value,
+) -> AppError {
+    AppError::CodedVars {
+        status,
+        code,
+        reason: reason.into(),
+        vars,
+    }
 }
 
 /// The four-state request machine shared by leave requests, late passes, and
@@ -158,8 +186,11 @@ pub(crate) fn validate_decision(status: &str) -> Result<&'static str, AppError> 
         "approved" => Ok("approved"),
         "rejected" => Ok("rejected"),
         "cancelled" => Ok("cancelled"),
-        other => Err(AppError::BadRequest(format!(
-            "Unknown decision '{other}' — expected approved, rejected, or cancelled"
-        ))),
+        other => Err(coded_vars(
+            400,
+            "STATUS_UNKNOWN",
+            format!("Unknown decision '{other}' — expected approved, rejected, or cancelled"),
+            serde_json::json!({ "status": other }),
+        )),
     }
 }

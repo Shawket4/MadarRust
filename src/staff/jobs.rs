@@ -119,6 +119,7 @@ pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
         "monthly_fairness",
         crate::staff::dawam::suggest::monthly_fairness(pool).await,
     );
+    step("remind_holidays", remind_holidays(pool).await);
     step("phones_that_died", phones_that_died(pool).await);
     step("tracking_went_quiet", tracking_went_quiet(pool).await);
     first.map_or(Ok(()), Err)
@@ -201,6 +202,64 @@ pub async fn open_pay_periods(pool: &PgPool) -> Result<(), AppError> {
         };
         if let Err(e) = opened.await {
             skipped("open_pay_periods", org_id, None, &e);
+        }
+    }
+    Ok(())
+}
+
+/// How far ahead an undecided public holiday is brought up.
+const HOLIDAY_REMINDER_DAYS: i64 = 7;
+
+/// A public holiday a week away that nobody has decided yet: whoever
+/// decides (the owners, D3) is told once, so it is set up before the day
+/// (minor default M24). Once per holiday date and person, however many
+/// ticks run inside the week.
+#[doc(hidden)]
+pub async fn remind_holidays(pool: &PgPool) -> Result<(), AppError> {
+    let orgs: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
+        "SELECT o.id, (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id \
+                         AND b.deleted_at IS NULL ORDER BY b.created_at LIMIT 1) \
+           FROM organizations o WHERE {LIVE_ORG}"
+    ))
+    .fetch_all(pool)
+    .await?;
+    for (org_id, tz) in orgs {
+        let told = async {
+            let today =
+                crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo"))
+                    .await?;
+            let due: Vec<_> = crate::staff::dawam::holidays::holidays_in(
+                pool,
+                org_id,
+                today,
+                today + chrono::Duration::days(HOLIDAY_REMINDER_DAYS),
+            )
+            .await?
+            .into_iter()
+            .filter(|h| h.decision.is_none())
+            .collect();
+            if due.is_empty() {
+                return Ok::<(), AppError>(());
+            }
+            let owners = crate::staff::dawam::owners(pool, org_id).await?;
+            for h in &due {
+                for o in &owners {
+                    crate::staff::dawam::notify_once(
+                        pool,
+                        org_id,
+                        *o,
+                        "staff.n_holiday_undecided",
+                        serde_json::json!({ "date": h.on_date, "name_en": h.name_en,
+                                            "name_ar": h.name_ar }),
+                        &format!("holiday:{}", h.on_date),
+                    )
+                    .await;
+                }
+            }
+            Ok(())
+        };
+        if let Err(e) = told.await {
+            skipped("remind_holidays", org_id, None, &e);
         }
     }
     Ok(())
@@ -461,7 +520,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
         business_date: NaiveDate,
         scheduled_start_at: DateTime<Utc>,
         scheduled_end_at: DateTime<Utc>,
-        excused: bool,
+        tz: String,
     }
 
     // Yesterday and today only, in each shift's BRANCH-local calendar (AT-1):
@@ -487,16 +546,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
               JOIN employees e ON e.id = r.employee_id
         )
         SELECT r.org_id, r.employee_id, r.branch_id, r.work_shift_id, r.business_date,
-               r.start_at AS scheduled_start_at, r.end_at AS scheduled_end_at,
-               -- One table covers leave AND missions: both are whole-day
-               -- approvals, so a day either is excused or is an absence.
-               EXISTS (
-                   SELECT 1 FROM staff_requests sr
-                    WHERE sr.employee_id = r.employee_id AND sr.status = 'approved'
-                      AND sr.kind IN ('leave', 'mission')
-                      AND sr.on_date <= r.business_date
-                      AND COALESCE(sr.end_date, sr.on_date) >= r.business_date
-               ) AS excused
+               r.start_at AS scheduled_start_at, r.end_at AS scheduled_end_at, r.tz
           FROM rostered r
          WHERE r.branch_id IS NOT NULL
            AND r.business_date >= (now() AT TIME ZONE r.tz)::date - 1
@@ -511,6 +561,12 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
                SELECT 1 FROM attendance_settings s
                 WHERE s.org_id = r.org_id AND s.branch_id IS NULL
                   AND s.rules_saved_at IS NOT NULL AND s.rules_saved_at <= r.start_at
+           )
+           -- Nothing is written into an approved or paid month (BC-3).
+           AND NOT EXISTS (
+               SELECT 1 FROM payroll_periods pp
+                WHERE pp.org_id = r.org_id AND pp.status IN ('generated', 'paid', 'closed')
+                  AND pp.start_date <= r.business_date AND pp.end_date >= r.business_date
            )
            -- A confirmed public holiday marks nobody absent (RU-10).
            AND NOT EXISTS (
@@ -533,7 +589,47 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
     .fetch_all(pool)
     .await?;
 
+    // On leave or absent is decided by the same function pricing uses
+    // (`adjustments_for(..).for_shift(..)`): a full-day leave or mission, or
+    // a half-day leave that covers this whole block, is `on_leave`; a
+    // half-day leave that leaves part of the block to work is an ABSENCE
+    // from that part, priced with its leave half (RQ-3, RQ-8, Mac E2E RQ-F1).
+    let mut rules: std::collections::HashMap<
+        (Uuid, Uuid),
+        crate::staff::attendance::AttendanceSettings,
+    > = std::collections::HashMap::new();
     for row in missing {
+        let off = async {
+            let key = (row.org_id, row.branch_id);
+            if let std::collections::hash_map::Entry::Vacant(e) = rules.entry(key) {
+                let s = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
+                e.insert(s);
+            }
+            let adjustments = crate::staff::attendance::adjustments_for(
+                pool,
+                &rules[&key],
+                row.employee_id,
+                row.business_date,
+                &row.tz,
+            )
+            .await?;
+            Ok::<bool, AppError>(
+                adjustments
+                    .for_shift(
+                        Some(row.scheduled_start_at),
+                        Some(row.scheduled_end_at),
+                        Some(row.work_shift_id),
+                    )
+                    .on_leave,
+            )
+        };
+        let on_leave = match off.await {
+            Ok(v) => v,
+            Err(e) => {
+                skipped("mark_absences", row.org_id, Some(row.employee_id), &e);
+                continue;
+            }
+        };
         if let Err(e) = sqlx::query(
             "INSERT INTO attendance_records \
                  (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
@@ -548,7 +644,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
         .bind(row.branch_id)
         .bind(row.work_shift_id)
         .bind(row.business_date)
-        .bind(if row.excused { "on_leave" } else { "absent" })
+        .bind(if on_leave { "on_leave" } else { "absent" })
         .bind(row.scheduled_start_at)
         .bind(row.scheduled_end_at)
         .execute(pool)
@@ -595,6 +691,9 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), AppError> {
             AND (a.check_out_at IS NOT NULL OR a.status IN ('absent', 'on_leave')) \
             AND (a.late_minutes > 0 OR a.status IN ('absent', 'on_leave')) \
             AND NOT COALESCE(COALESCE(a.scheduled_start_at, a.check_in_at) < rs.rules_saved_at, false) \
+            AND NOT EXISTS (SELECT 1 FROM payroll_periods pp \
+                             WHERE pp.org_id = a.org_id AND pp.status IN ('generated', 'paid', 'closed') \
+                               AND pp.start_date <= a.business_date AND pp.end_date >= a.business_date) \
             AND NOT EXISTS ( \
                 SELECT 1 FROM payroll_deductions d \
                  WHERE d.attendance_record_id = a.id AND d.source <> 'manual' \

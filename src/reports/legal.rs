@@ -27,6 +27,13 @@ pub struct AuditBreakdownEntry {
     pub label: String,
     pub count: i64,
     pub amount_minor: i64,
+    /// A stable code for a label the SERVER wrote (`unspecified`,
+    /// `correction_request`, `auto_closed`, a void reason), so a client
+    /// words it in its own language (AT-13, E2E B-PAY-5). Absent for a
+    /// person's own words (a typed reason, a name): `label` is the text.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Serialize, serde::Deserialize, ToSchema)]
@@ -45,6 +52,36 @@ pub struct AuditReport {
     /// (at most 200). Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entries: Option<Vec<DiscountAuditEntry>>,
+    /// Deduction overrides audit only: every waive, unwaive and override
+    /// event with who, when and why, newest first (at most 500) — the
+    /// history, so a waiver later undone still shows (owner decision D8,
+    /// AT-10). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<Vec<DeductionOverrideEvent>>,
+}
+
+/// One waive, unwaive or override of a payroll deduction, from the money
+/// audit log (D8).
+#[derive(Debug, Serialize, serde::Deserialize, sqlx::FromRow, ToSchema)]
+pub struct DeductionOverrideEvent {
+    pub deduction_id: Uuid,
+    pub employee_id: Option<Uuid>,
+    pub employee_name: Option<String>,
+    /// `waive` · `unwaive` · `override`
+    pub action: String,
+    pub actor_id: Option<Uuid>,
+    pub actor_name: Option<String>,
+    pub at: DateTime<Utc>,
+    pub reason: Option<String>,
+    /// What the line charged before and after this event (a waiver: after
+    /// 0; undoing one: before 0).
+    pub amount_before_piastres: Option<i64>,
+    pub amount_after_piastres: Option<i64>,
+    /// The line itself: its day, what made it (`absence`, `late_penalty`,
+    /// …) and its rule's reason code. Null if the line is gone.
+    pub effective_date: Option<chrono::NaiveDate>,
+    pub source: Option<String>,
+    pub reason_code: Option<String>,
 }
 
 /// One discounted sale in the discounts audit.
@@ -109,7 +146,7 @@ pub async fn refunds_audit(
     let org_id = org_id.into_inner();
     let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(r.amount), 0)::bigint
         FROM order_refunds r
@@ -118,7 +155,7 @@ pub async fn refunds_audit(
           AND ($2::timestamptz IS NULL OR r.issued_at >= $2)
           AND ($3::timestamptz IS NULL OR r.issued_at <= $3)
         "#,
-    ))
+    )
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -126,8 +163,7 @@ pub async fn refunds_audit(
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(r#"
         SELECT r.reason AS label, COUNT(*)::bigint AS count, COALESCE(SUM(r.amount), 0)::bigint AS amount_minor
         FROM order_refunds r
         JOIN branches b ON b.id = r.branch_id
@@ -136,8 +172,7 @@ pub async fn refunds_audit(
           AND ($3::timestamptz IS NULL OR r.issued_at <= $3)
         GROUP BY r.reason
         ORDER BY count DESC
-        "#,
-    ))
+        "#)
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -145,8 +180,7 @@ pub async fn refunds_audit(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(r.amount), 0)::bigint AS amount_minor
         FROM order_refunds r
         JOIN branches b ON b.id = r.branch_id
@@ -157,8 +191,7 @@ pub async fn refunds_audit(
         GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
-        "#,
-    ))
+        "#)
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -175,6 +208,7 @@ pub async fn refunds_audit(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: None,
     }))
 }
 
@@ -198,7 +232,7 @@ pub async fn voids_audit(
     let org_id = org_id.into_inner();
     let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(
         r#"
         SELECT COUNT(*)::bigint, COALESCE(SUM(o.total_amount), 0)::bigint
         FROM orders o
@@ -207,7 +241,7 @@ pub async fn voids_audit(
           AND ($2::timestamptz IS NULL OR o.voided_at >= $2)
           AND ($3::timestamptz IS NULL OR o.voided_at <= $3)
         "#,
-    ))
+    )
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -215,10 +249,11 @@ pub async fn voids_audit(
     .fetch_one(pool.get_ref())
     .await?;
 
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
+    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(
         r#"
         SELECT COALESCE(o.void_reason::text, 'unspecified') AS label,
-               COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
+               COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor,
+               COALESCE(o.void_reason::text, 'unspecified') AS code
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.status = 'voided'
@@ -227,7 +262,7 @@ pub async fn voids_audit(
         GROUP BY o.void_reason
         ORDER BY count DESC
         "#,
-    ))
+    )
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -235,8 +270,7 @@ pub async fn voids_audit(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
+    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(r#"
         SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.total_amount), 0)::bigint AS amount_minor
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
@@ -247,8 +281,7 @@ pub async fn voids_audit(
         GROUP BY u.id, u.name
         ORDER BY count DESC
         LIMIT 10
-        "#,
-    ))
+        "#)
     .bind(org_id)
     .bind(query.from)
     .bind(query.to)
@@ -265,6 +298,7 @@ pub async fn voids_audit(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: None,
     }))
 }
 
@@ -309,7 +343,10 @@ pub async fn discounts_audit(
     let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         r#"
         SELECT COALESCE(d.name, o.discount_type::text, 'unspecified') AS label,
-               COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
+               COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor,
+               -- A named discount is its own words; a bare type or nothing is a code.
+               MIN(CASE WHEN d.name IS NULL
+                        THEN COALESCE(o.discount_type::text, 'unspecified') END) AS code
         FROM orders o
         JOIN branches b ON b.id = o.branch_id
         LEFT JOIN discounts d ON d.id = o.discount_id
@@ -407,6 +444,7 @@ pub async fn discounts_audit(
         by_issuer,
         by_kind: Some(by_kind),
         entries: Some(entries),
+        history: None,
     }))
 }
 
@@ -501,6 +539,7 @@ pub async fn waivers_audit(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: None,
     }))
 }
 
@@ -590,6 +629,7 @@ pub async fn price_overrides(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: None,
     }))
 }
 
@@ -693,6 +733,7 @@ pub async fn manual_deductions_audit(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: None,
     }))
 }
 
@@ -709,7 +750,7 @@ END";
     tag = "reports",
     params(("org_id" = Uuid, Path, description = "Organization ID")),
     params(DateRangeQuery),
-    responses((status = 200, description = "Automatic payroll deductions a manager overrode or waived, by type and by issuer", body = AuditReport), AppErrorResponse),
+    responses((status = 200, description = "Automatic payroll deductions a manager overrode or waived, by type and by issuer, with `history`: every waive, unwaive and override event (who, when, why)", body = AuditReport), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn deduction_overrides_audit(
@@ -772,6 +813,41 @@ pub async fn deduction_overrides_audit(
     .fetch_all(pool.get_ref())
     .await?;
 
+    // The history (D8): every waive, unwaive and override from the money
+    // audit log, not just each line's state today.
+    let history: Vec<DeductionOverrideEvent> = sqlx::query_as(
+        "SELECT l.entity_id AS deduction_id, l.employee_id, e.name AS employee_name,
+                split_part(l.action, '.', 2) AS action, l.actor_id, u.name AS actor_name,
+                l.created_at AS at, l.reason,
+                CASE l.action
+                    WHEN 'deduction.override' THEN (l.details->>'from_piastres')::bigint
+                    WHEN 'deduction.waive' THEN (l.details->>'amount_piastres')::bigint
+                    ELSE 0 END AS amount_before_piastres,
+                CASE l.action
+                    WHEN 'deduction.override' THEN (l.details->>'to_piastres')::bigint
+                    WHEN 'deduction.unwaive' THEN (l.details->>'amount_piastres')::bigint
+                    ELSE 0 END AS amount_after_piastres,
+                pd.effective_date, pd.source, pd.reason_code
+           FROM payroll_audit_log l
+           LEFT JOIN payroll_deductions pd ON pd.id = l.entity_id
+           LEFT JOIN employees e ON e.id = l.employee_id
+           LEFT JOIN users u ON u.id = l.actor_id
+          WHERE l.org_id = $1 AND l.entity = 'payroll_deductions' AND l.entity_id IS NOT NULL
+            AND l.action IN ('deduction.waive', 'deduction.unwaive', 'deduction.override')
+            AND ($4::uuid[] IS NULL OR EXISTS (
+                SELECT 1 FROM employee_branches eb
+                 WHERE eb.employee_id = l.employee_id AND eb.branch_id = ANY($4)))
+            AND ($2::timestamptz IS NULL OR l.created_at >= $2)
+            AND ($3::timestamptz IS NULL OR l.created_at <= $3)
+          ORDER BY l.created_at DESC, l.id LIMIT 500",
+    )
+    .bind(org_id)
+    .bind(query.from)
+    .bind(query.to)
+    .bind(&scope)
+    .fetch_all(pool.get_ref())
+    .await?;
+
     Ok(HttpResponse::Ok().json(AuditReport {
         from: query.from,
         to: query.to,
@@ -781,6 +857,7 @@ pub async fn deduction_overrides_audit(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: Some(history),
     }))
 }
 
@@ -858,6 +935,7 @@ pub async fn loyalty_adjustments_audit(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: None,
     }))
 }
 
@@ -904,7 +982,13 @@ pub async fn attendance_corrections_audit(
 
     let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
         "SELECT COALESCE(a.edit_reason, 'unspecified') AS label, COUNT(*)::bigint AS count,
-                0::bigint AS amount_minor
+                0::bigint AS amount_minor,
+                CASE WHEN a.edit_reason IS NULL THEN 'unspecified'
+                     WHEN a.edit_reason = 'Approved punch correction request' THEN 'correction_request'
+                     WHEN a.edit_reason = 'Written by an approved punch correction' THEN 'correction_request'
+                     WHEN a.edit_reason = 'Auto-closed: no checkout recorded' THEN 'auto_closed'
+                     WHEN a.edit_reason = 'Marked automatically: no check-in' THEN 'marked_absent'
+                END AS code
          FROM attendance_records a WHERE {filter}
          GROUP BY a.edit_reason ORDER BY count DESC LIMIT 10"
     ))
@@ -937,5 +1021,6 @@ pub async fn attendance_corrections_audit(
         by_issuer,
         by_kind: None,
         entries: None,
+        history: None,
     }))
 }

@@ -1,4 +1,4 @@
-use actix_governor::{Governor, GovernorConfigBuilder};
+use actix_governor::Governor;
 use actix_web::{middleware::Condition, web};
 
 use crate::rate_limit::{PathToken, PeerIpOrLocalhost, rate_limiting_enabled};
@@ -9,37 +9,20 @@ use crate::{
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     // Opening the ordering page from a card: the budget the card page gets.
-    let browse_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(1)
-        .burst_size(30)
-        .finish()
-        .expect("Invalid order-now browse rate limiter");
+    let browse_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "CUSTOMERS", "BROWSE");
     // Changing who a profile belongs to: as tight as a loyalty signup.
-    let identity_gov = GovernorConfigBuilder::default()
-        .key_extractor(PeerIpOrLocalhost)
-        .seconds_per_request(6)
-        .burst_size(5)
-        .finish()
-        .expect("Invalid order-now identity rate limiter");
+    let identity_gov =
+        crate::rate_limit::route_governor(PeerIpOrLocalhost, "CUSTOMERS", "IDENTITY");
     // The same two budgets again, per CARD (design §4.2): a card's token is a
     // bearer secret printed on a pass, and guessing at what is behind it from
     // many addresses never touches a per-IP bucket. One person opening their
-    // own page is nowhere near twenty a burst; an identity change is something
+    // own page is nowhere near forty a burst; an identity change is something
     // a person does a couple of times a month, so its bucket is tighter than
-    // the OTP behind it: three tries, then one every two minutes.
-    let browse_token_gov = GovernorConfigBuilder::default()
-        .key_extractor(PathToken)
-        .seconds_per_request(2)
-        .burst_size(20)
-        .finish()
-        .expect("Invalid order-now per-token browse rate limiter");
-    let identity_token_gov = GovernorConfigBuilder::default()
-        .key_extractor(PathToken)
-        .seconds_per_request(120)
-        .burst_size(3)
-        .finish()
-        .expect("Invalid order-now per-token identity rate limiter");
+    // the OTP behind it: six tries, then one a minute (doubled 2026-09-25).
+    let browse_token_gov =
+        crate::rate_limit::route_governor(PathToken, "CUSTOMERS", "BROWSE_TOKEN");
+    let identity_token_gov =
+        crate::rate_limit::route_governor(PathToken, "CUSTOMERS", "IDENTITY_TOKEN");
     let limited = rate_limiting_enabled();
 
     cfg.service(

@@ -249,7 +249,7 @@ struct SalesRow {
     snapshot_cost: Option<i64>,
 }
 
-/// Aggregate non-voided, non-bundle item sales per SKU over a window.
+/// Aggregate non-voided item sales per SKU over a window.
 async fn sales_agg(
     pool: &PgPool,
     branch_ids: &[Uuid],
@@ -277,7 +277,7 @@ async fn sales_agg(
         WHERE o.branch_id = ANY($1)
           AND o.status NOT IN ('voided', 'refunded')
           AND oi.menu_item_id IS NOT NULL
-          AND oi.bundle_id IS NULL
+          AND oi.line_kind <> 'combo'
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
         GROUP BY oi.menu_item_id, COALESCE(oi.size_label::text, 'one_size'),
@@ -312,6 +312,7 @@ async fn catalog_skus(pool: &PgPool, org_id: Uuid) -> Result<Vec<CatalogSku>, Ap
         JOIN menu_items mi ON mi.id = s.menu_item_id
         LEFT JOIN categories c ON c.id = mi.category_id
         WHERE mi.org_id = $1 AND mi.is_active = true AND s.is_active = true
+          AND mi.kind = 'item'
         "#,
     )
     .bind(org_id)
@@ -533,8 +534,8 @@ async fn sku_windows_batch(
                    OR (s.branch_id IS NULL AND o.branch_id = ANY($7)))
         LEFT JOIN order_items oi
                ON oi.order_id = o.id
-              AND oi.bundle_id IS NULL
               AND oi.menu_item_id = s.item_id
+              AND oi.line_kind <> 'combo'
               AND COALESCE(oi.size_label::text, 'one_size') = s.size_label
         GROUP BY s.idx
         ORDER BY s.idx
@@ -1573,8 +1574,8 @@ async fn sku_window(
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
-          AND oi.bundle_id IS NULL
           AND oi.menu_item_id = $2
+          AND oi.line_kind <> 'combo'
           AND COALESCE(oi.size_label::text, 'one_size') = $3
           AND o.created_at >= $4 AND o.created_at < $5
         HAVING SUM(oi.quantity) IS NOT NULL

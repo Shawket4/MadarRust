@@ -239,12 +239,14 @@ pub async fn create_code(
     // lends its name as the label.
     let slot: Option<(String, String)> = match body.slot_id {
         Some(slot_id) => Some(
-            sqlx::query_as("SELECT kind, name FROM branch_device_slots WHERE id = $1 AND branch_id = $2")
-                .bind(slot_id)
-                .bind(body.branch_id)
-                .fetch_optional(pool.get_ref())
-                .await?
-                .ok_or_else(|| AppError::NotFound("That slot is not in this branch's plan".into()))?,
+            sqlx::query_as(
+                "SELECT kind, name FROM branch_device_slots WHERE id = $1 AND branch_id = $2",
+            )
+            .bind(slot_id)
+            .bind(body.branch_id)
+            .fetch_optional(pool.get_ref())
+            .await?
+            .ok_or_else(|| AppError::NotFound("That slot is not in this branch's plan".into()))?,
         ),
         None => None,
     };
@@ -274,13 +276,13 @@ pub async fn create_code(
     // A handful of tries: a collision with another live code is a unique
     // violation, and the space is a hundred million.
     for _ in 0..8 {
-        let inserted: Result<CodeRow, sqlx::Error> = sqlx::query_as(&format!(
+        let inserted: Result<CodeRow, sqlx::Error> = sqlx::query_as(
             "INSERT INTO device_activation_codes
                  (org_id, branch_id, code, label, kind, created_by, expires_at, slot_id)
              VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(hours => $7), $8)
              RETURNING id, branch_id, code, label, kind, created_at, expires_at,
-                       used_at, used_by_device, revoked_at, slot_id"
-        ))
+                       used_at, used_by_device, revoked_at, slot_id",
+        )
         .bind(org)
         .bind(body.branch_id)
         .bind(new_code())
@@ -384,6 +386,7 @@ pub async fn activate(
     let mut tx = pool.begin().await?;
     // Claim the code in one statement, so two tablets typing it at once cannot
     // both win.
+    #[allow(clippy::type_complexity)]
     let claimed: Option<(Uuid, Uuid, Uuid, String, Option<String>, Option<Uuid>)> = sqlx::query_as(
         "UPDATE device_activation_codes SET used_at = now(), used_by_device = NULL
           WHERE code = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()
@@ -455,16 +458,20 @@ pub async fn activate(
     if let Some(slot_id) = slot_id {
         // The device fills the slot the code was made for, leaving any slot it
         // filled before (one install, one slot).
-        sqlx::query("UPDATE branch_device_slots SET device_id = NULL WHERE device_id = $1 AND id <> $2")
-            .bind(body.device_id)
-            .bind(slot_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE branch_device_slots SET device_id = $2, updated_at = now() WHERE id = $1")
-            .bind(slot_id)
-            .bind(body.device_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE branch_device_slots SET device_id = NULL WHERE device_id = $1 AND id <> $2",
+        )
+        .bind(body.device_id)
+        .bind(slot_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE branch_device_slots SET device_id = $2, updated_at = now() WHERE id = $1",
+        )
+        .bind(slot_id)
+        .bind(body.device_id)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
 

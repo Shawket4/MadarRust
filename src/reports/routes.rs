@@ -1,6 +1,6 @@
 use crate::{
     auth::middleware::JwtMiddleware,
-    reports::{handlers, legal, pos_metrics},
+    reports::{bundles, handlers, legal, pos_metrics},
 };
 use actix_web::web;
 use sqlx::PgPool;
@@ -14,6 +14,11 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
         web::scope("/reports")
             .app_data(read_pool)
             .wrap(JwtMiddleware)
+            .route("/bundles", web::get().to(bundles::bundles_report))
+            .route(
+                "/bundles/combos/{id}/mix",
+                web::get().to(bundles::combo_mix),
+            )
             .route(
                 "/tills/{till_id}/summary",
                 web::get().to(handlers::till_summary),
@@ -69,10 +74,6 @@ pub fn configure(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>) {
             .route(
                 "/branches/{branch_id}/stock",
                 web::get().to(handlers::branch_stock),
-            )
-            .route(
-                "/branches/{branch_id}/bundles",
-                web::get().to(handlers::branch_bundle_sales),
             )
             .route(
                 "/branches/{branch_id}/items-combined",

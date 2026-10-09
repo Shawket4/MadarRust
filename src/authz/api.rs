@@ -93,6 +93,11 @@ pub struct MyAuthz {
     pub ask_manager: Vec<String>,
     /// Limits on held capabilities, by key; absent = unlimited.
     pub limits: BTreeMap<String, LimitsView>,
+    /// The capabilities held at EVERY branch of the business — what an
+    /// org-wide act (a department, a shift block, a public holiday, the
+    /// rules) needs. `/authz/me` only; absent elsewhere. (E2E B-SETUP-3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub everywhere: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -408,13 +413,24 @@ pub async fn get_my_authz(
     let eff = actor_eff(pool.get_ref(), &claims, branch).await?;
     let mut conn = pool.acquire().await?;
     let epoch = super::load::epoch_of(&mut conn, claims.user_id()).await?;
-    Ok(HttpResponse::Ok().json(my_authz(
+    drop(conn);
+    let mut mine = my_authz(
         claims.user_id(),
         branch,
         epoch,
         &eff,
         claims.role == UserRole::SuperAdmin,
-    )))
+    );
+    if let Some(org) = claims.org_id() {
+        let all = crate::staff::access::caps_everywhere(pool.get_ref(), &claims, org).await?;
+        mine.everywhere = Some(
+            all.iter()
+                .filter(|c| c.meta().tier != Tier::Legacy)
+                .map(|c| c.key().to_string())
+                .collect(),
+        );
+    }
+    Ok(HttpResponse::Ok().json(mine))
 }
 
 pub fn my_authz(
@@ -449,6 +465,7 @@ pub fn my_authz(
             .iter()
             .filter_map(|(id, l)| Cap::from_id(*id).map(|c| (c.key().to_string(), (*l).into())))
             .collect(),
+        everywhere: None,
     }
 }
 
@@ -1434,7 +1451,11 @@ async fn review_authority(
     let Some(a) = approval else {
         // The plain path, untouched.
         super::require::require(pool, claims, Cap::ApprovalsReview, None).await?;
-        return Ok(ReviewAuthority { reviewer: me, branch_scope: None, approval: None });
+        return Ok(ReviewAuthority {
+            reviewer: me,
+            branch_scope: None,
+            approval: None,
+        });
     };
     let eff = super::require::effective_for_claims(pool, claims, None).await?;
     let decision = madar_authz::decide(&eff, &madar_authz::Request::of(Cap::ApprovalsReview));
@@ -1456,7 +1477,11 @@ async fn review_authority(
     )
     .await?;
     if outright {
-        return Ok(ReviewAuthority { reviewer: me, branch_scope: None, approval: None });
+        return Ok(ReviewAuthority {
+            reviewer: me,
+            branch_scope: None,
+            approval: None,
+        });
     }
     Ok(ReviewAuthority {
         reviewer: a.approver_id,
@@ -1467,8 +1492,12 @@ async fn review_authority(
 
 /// The approver's own name, for the note that records who cleared a flag.
 async fn approver_label(pool: &sqlx::PgPool, approver: Uuid) -> String {
-    let name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM users WHERE id = $1").bind(approver).fetch_optional(pool).await.ok().flatten();
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM users WHERE id = $1")
+        .bind(approver)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
     match name {
         Some(n) if !n.trim().is_empty() => format!("{n} ({approver})"),
         _ => approver.to_string(),
@@ -1651,18 +1680,24 @@ pub async fn bulk_review_flags(
     let org = org_of(&req, &claims)?;
     // Permission FIRST, before the id list is even looked at — the bearer's
     // own `approvals.review`, or a verified one-time approval for it.
-    let authority =
-        review_authority(pool.get_ref(), &claims, org, body.approval.clone()).await?;
+    let authority = review_authority(pool.get_ref(), &claims, org, body.approval.clone()).await?;
     let me = authority.reviewer;
     let note = match authority.approval.as_ref() {
         // The note is the server's word, not the till's: it names the person
         // who actually approved, whatever the client sent along.
         Some(a) => {
             let who = approver_label(pool.get_ref(), a.approver_id).await;
-            Some(match body.note.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-                Some(n) => format!("{n} \u{2014} approved by {who}"),
-                None => format!("approved by {who}"),
-            })
+            Some(
+                match body
+                    .note
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                {
+                    Some(n) => format!("{n} \u{2014} approved by {who}"),
+                    None => format!("approved by {who}"),
+                },
+            )
         }
         None => body.note.clone(),
     };

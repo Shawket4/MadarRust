@@ -484,7 +484,7 @@ async fn a_join_creates_the_customer_and_the_card_under_one_id(pool: PgPool) {
     .await;
     assert!(resp.status().is_success(), "{}", resp.status());
 
-    let rows: Vec<(
+    type Rows = Vec<(
         Uuid,
         Uuid,
         String,
@@ -492,7 +492,8 @@ async fn a_join_creates_the_customer_and_the_card_under_one_id(pool: PgPool) {
         Option<String>,
         String,
         Option<String>,
-    )> = sqlx::query_as(
+    )>;
+    let rows: Rows = sqlx::query_as(
         "SELECT c.id, m.id, c.name, c.phone, c.phone_key, c.source, c.locale \
                FROM customers c JOIN loyalty_customers m ON m.id = c.id WHERE c.org_id = $1",
     )
@@ -832,7 +833,7 @@ async fn customers_unification_migrates_seeded_data(pool: PgPool) {
 
     // The folded member: the customer's spelling, notes and typed phone; the
     // member's preferences; the old row steps aside and its order follows.
-    let (name, phone, key, notes, locale, month, opt_out): (
+    type Row = (
         String,
         Option<String>,
         Option<String>,
@@ -840,7 +841,8 @@ async fn customers_unification_migrates_seeded_data(pool: PgPool) {
         Option<String>,
         Option<i16>,
         bool,
-    ) = sqlx::query_as(
+    );
+    let (name, phone, key, notes, locale, month, opt_out): Row = sqlx::query_as(
         "SELECT name, phone, phone_key, notes, locale, birth_month, marketing_opt_out \
            FROM customers WHERE id = $1",
     )

@@ -762,38 +762,85 @@ async fn a_permissions_editor_cannot_escalate(pool: PgPool) {
     let mt = token(mgr, o, UserRole::BranchManager);
     let ot = token(owner, o, UserRole::OrgAdmin);
     let put = |id: Uuid| test::TestRequest::put().uri(&format!("/authz/users/{id}/overrides"));
-    let ask = |cap: &str, effect: &str| json!({"capability": cap, "effect": effect, "reason": "test"});
+    let ask =
+        |cap: &str, effect: &str| json!({"capability": cap, "effect": effect, "reason": "test"});
 
     // Default: a manager holds no staff.permissions.edit.
     let (s, me) = call(&app, test::TestRequest::get().uri("/authz/me"), &mt).await;
     assert_eq!(s, StatusCode::OK);
-    assert!(!has(&me, "staff.permissions.edit"), "off for managers by default");
-    let (s, _) = call(&app, put(teller).set_json(ask("refunds.create", "deny")), &mt).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "no editing without the capability");
+    assert!(
+        !has(&me, "staff.permissions.edit"),
+        "off for managers by default"
+    );
+    let (s, _) = call(
+        &app,
+        put(teller).set_json(ask("refunds.create", "deny")),
+        &mt,
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "no editing without the capability"
+    );
 
-    let (s, _) = call(&app, put(mgr).set_json(ask("staff.permissions.edit", "allow")), &ot).await;
+    let (s, _) = call(
+        &app,
+        put(mgr).set_json(ask("staff.permissions.edit", "allow")),
+        &ot,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     // Granted: a held capability, to someone below, works.
-    let (s, body) = call(&app, put(teller).set_json(ask("refunds.create", "deny")), &mt).await;
+    let (s, body) = call(
+        &app,
+        put(teller).set_json(ask("refunds.create", "deny")),
+        &mt,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{body}");
     // Role and owner management it lacks cannot be handed on.
-    for cap in ["staff.roles.manage", "staff.owners.manage", "staff.permissions.reset"] {
+    for cap in [
+        "staff.roles.manage",
+        "staff.owners.manage",
+        "staff.permissions.reset",
+    ] {
         let (s, _) = call(&app, put(teller).set_json(ask(cap, "allow")), &mt).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{cap} handed on");
     }
     // Revoking what the editor does not hold is refused too.
-    let (s, _) = call(&app, put(teller).set_json(ask("hr.payroll.read", "deny")), &mt).await;
+    let (s, _) = call(
+        &app,
+        put(teller).set_json(ask("hr.payroll.read", "deny")),
+        &mt,
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "revoke of a capability not held");
     // No peer writes: not another manager, even one holding less.
     let (s, _) = call(&app, put(peer).set_json(ask("refunds.create", "deny")), &mt).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "a peer manager");
-    let (s, _) = call(&app, put(peer).set_json(ask("staff.permissions.edit", "allow")), &mt).await;
+    let (s, _) = call(
+        &app,
+        put(peer).set_json(ask("staff.permissions.edit", "allow")),
+        &mt,
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "editing power to a peer");
     // Not themselves, not the owner.
-    let (s, _) = call(&app, put(mgr).set_json(ask("staff.roles.manage", "allow")), &mt).await;
+    let (s, _) = call(
+        &app,
+        put(mgr).set_json(ask("staff.roles.manage", "allow")),
+        &mt,
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "self");
-    let (s, _) = call(&app, put(owner).set_json(ask("refunds.create", "deny")), &mt).await;
+    let (s, _) = call(
+        &app,
+        put(owner).set_json(ask("refunds.create", "deny")),
+        &mt,
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "the owner");
 }
 
@@ -840,7 +887,11 @@ async fn a_teller_till_pulls_and_clears_its_flags_with_a_managers_one_time_appro
 
     // Unchanged without an approval: the teller may neither pull nor clear.
     let (s, _) = call(&app, test::TestRequest::get().uri("/authz/flags"), &tt).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "the plain path is exactly as before");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "the plain path is exactly as before"
+    );
     let (s, _) = call(
         &app,
         test::TestRequest::post()
@@ -883,17 +934,29 @@ async fn a_teller_till_pulls_and_clears_its_flags_with_a_managers_one_time_appro
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(by, Some(manager), "the approver's name is on it, not the teller's");
+    assert_eq!(
+        by,
+        Some(manager),
+        "the approver's name is on it, not the teller's"
+    );
     let note = note.unwrap();
-    assert!(note.contains("till 3"), "the till's own note is kept: {note}");
-    assert!(note.contains("Mona"), "and the note names the approver: {note}");
+    assert!(
+        note.contains("till 3"),
+        "the till's own note is kept: {note}"
+    );
+    assert!(
+        note.contains("Mona"),
+        "and the note names the approver: {note}"
+    );
 
     // Idempotent re-submit with the same approval: still resolved, still clean.
     let (s, again) = call(
         &app,
         test::TestRequest::post()
             .uri("/authz/flags/bulk-review")
-            .set_json(json!({ "flag_ids": [id], "approval": approval("approvals.review", manager) })),
+            .set_json(
+                json!({ "flag_ids": [id], "approval": approval("approvals.review", manager) }),
+            ),
         &tt,
     )
     .await;
@@ -1032,7 +1095,9 @@ async fn a_flag_approval_is_refused_unless_the_approver_really_holds_the_review(
         &app,
         test::TestRequest::post()
             .uri("/authz/flags/bulk-review")
-            .set_json(json!({ "flag_ids": [id], "approval": approval("approvals.review", manager) })),
+            .set_json(
+                json!({ "flag_ids": [id], "approval": approval("approvals.review", manager) }),
+            ),
         &no_branch,
     )
     .await;
@@ -1108,7 +1173,11 @@ async fn a_reason_is_never_required_on_an_override(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(stored.as_deref(), Some("covering the late shift"), "trimmed and kept");
+    assert_eq!(
+        stored.as_deref(),
+        Some("covering the late shift"),
+        "trimmed and kept"
+    );
 
     // And the reason-less saves really are rows, with no reason on them.
     let nulls: i64 = sqlx::query_scalar(
@@ -1120,4 +1189,73 @@ async fn a_reason_is_never_required_on_an_override(pool: PgPool) {
     .await
     .unwrap();
     assert!(nulls >= 2, "reason-less overrides are stored, got {nulls}");
+}
+
+fn everywhere(v: &Value) -> Vec<String> {
+    v["everywhere"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no everywhere list: {v}"))
+        .iter()
+        .map(|c| c.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// E2E B-SETUP-3 (AT-11, PM-4): `/authz/me` says which capabilities the
+/// caller holds at EVERY branch of the business — the test the org-wide acts
+/// use (a new department, a new shift block, public holidays) — so the UI
+/// hides what the server would refuse. The owner holds them all; a manager
+/// of one branch holds `hr.staff.create` there but not everywhere.
+#[sqlx::test]
+async fn authz_me_lists_every_branch_caps(pool: PgPool) {
+    seed(&pool).await;
+    let app = app!(pool);
+    let o = org(&pool).await;
+    let b1 = branch(&pool, o).await;
+    let _b2 = branch(&pool, o).await;
+    let owner = user(&pool, o, "org_admin", "Owner", None).await;
+    let karim = user(&pool, o, "branch_manager", "Karim", None).await;
+    let ot = token(owner, o, UserRole::OrgAdmin);
+    let (_, roles) = call(&app, test::TestRequest::get().uri("/authz/roles"), &ot).await;
+    let bm = roles
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "branch_manager")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (s, body) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/authz/users/{karim}/assignments"))
+            .set_json(json!({"assignments": [
+                {"role_id": bm, "all_branches": false, "branch_ids": [b1]},
+            ]})),
+        &ot,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+
+    let (s, me) = call(&app, test::TestRequest::get().uri("/authz/me"), &ot).await;
+    assert_eq!(s, StatusCode::OK);
+    let all = everywhere(&me);
+    for cap in [
+        "hr.staff.create",
+        "hr.schedule.create",
+        "hr.schedule.publish",
+    ] {
+        assert!(all.contains(&cap.to_string()), "owner: {cap}");
+    }
+
+    let kt = token(karim, o, UserRole::BranchManager);
+    for uri in ["/authz/me".to_string(), format!("/authz/me?branch_id={b1}")] {
+        let (s, me) = call(&app, test::TestRequest::get().uri(&uri), &kt).await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(has(&me, "hr.staff.create"), "{uri}: held at A");
+        assert!(
+            !everywhere(&me).contains(&"hr.staff.create".to_string()),
+            "{uri}: not at every branch"
+        );
+    }
 }

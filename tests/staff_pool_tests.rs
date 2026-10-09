@@ -46,13 +46,15 @@ async fn seed_org(pool: &PgPool) -> Uuid {
 /// A branch in a fixed, whole-hour zone so the business day is never ambiguous.
 async fn seed_branch(pool: &PgPool, org: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO branches (id, org_id, name, timezone) VALUES ($1, $2, $3, 'Africa/Cairo')")
-        .bind(id)
-        .bind(org)
-        .bind(format!("Branch {id}"))
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO branches (id, org_id, name, timezone) VALUES ($1, $2, $3, 'Africa/Cairo')",
+    )
+    .bind(id)
+    .bind(org)
+    .bind(format!("Branch {id}"))
+    .execute(pool)
+    .await
+    .unwrap();
     id
 }
 
@@ -162,12 +164,25 @@ async fn a_teller_without_the_grant_is_refused_before_the_body_is_read(pool: PgP
         &app,
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
-            .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
-            .set_json(&drink_body(Uuid::new_v4(), branch, item, "Sara", "2026-09-19T09:00:00Z"))
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", token(teller, org, UserRole::Teller)),
+            ))
+            .set_json(drink_body(
+                Uuid::new_v4(),
+                branch,
+                item,
+                "Sara",
+                "2026-09-19T09:00:00Z",
+            ))
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), 403, "a teller holds no staff drink by default");
+    assert_eq!(
+        resp.status(),
+        403,
+        "a teller holds no staff drink by default"
+    );
 
     // A body that is not even a staff drink is rejected by the extractor, one
     // step before the guard. That ordering is actix's, not a decision here —
@@ -176,8 +191,11 @@ async fn a_teller_without_the_grant_is_refused_before_the_body_is_read(pool: PgP
         &app,
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
-            .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
-            .set_json(&json!({"branch_id": branch}))
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", token(teller, org, UserRole::Teller)),
+            ))
+            .set_json(json!({"branch_id": branch}))
             .to_request(),
     )
     .await;
@@ -200,14 +218,26 @@ async fn a_granted_teller_records_one_and_the_note_is_kept(pool: PgPool) {
         &app,
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
-            .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
-            .set_json(&drink_body(id, branch, item, "  for Sara, closing shift  ", "2026-09-19T09:00:00Z"))
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", token(teller, org, UserRole::Teller)),
+            ))
+            .set_json(drink_body(
+                id,
+                branch,
+                item,
+                "  for Sara, closing shift  ",
+                "2026-09-19T09:00:00Z",
+            ))
             .to_request(),
     )
     .await;
     assert_eq!(resp.status(), 201);
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["note"], "for Sara, closing shift", "the note is trimmed, not lost");
+    assert_eq!(
+        body["note"], "for Sara, closing shift",
+        "the note is trimmed, not lost"
+    );
     assert_eq!(body["overspent"], false);
     assert_eq!(body["business_date"], "2026-09-19");
     // Nobody is named as the drinker: the note is the only record of that.
@@ -230,7 +260,13 @@ async fn the_live_route_refuses_a_drink_with_no_note(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/staff-pool/drinks")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&drink_body(Uuid::new_v4(), branch, item, note, "2026-09-19T09:00:00Z"))
+                .set_json(drink_body(
+                    Uuid::new_v4(),
+                    branch,
+                    item,
+                    note,
+                    "2026-09-19T09:00:00Z",
+                ))
                 .to_request(),
         )
         .await;
@@ -255,7 +291,13 @@ async fn an_item_off_the_list_and_an_empty_list_are_both_refused_live(pool: PgPo
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&drink_body(Uuid::new_v4(), branch, cake, "Sara", "2026-09-19T09:00:00Z"))
+            .set_json(drink_body(
+                Uuid::new_v4(),
+                branch,
+                cake,
+                "Sara",
+                "2026-09-19T09:00:00Z",
+            ))
             .to_request(),
     )
     .await;
@@ -268,7 +310,13 @@ async fn an_item_off_the_list_and_an_empty_list_are_both_refused_live(pool: PgPo
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&drink_body(Uuid::new_v4(), branch, latte, "Sara", "2026-09-19T09:00:00Z"))
+            .set_json(drink_body(
+                Uuid::new_v4(),
+                branch,
+                latte,
+                "Sara",
+                "2026-09-19T09:00:00Z",
+            ))
             .to_request(),
     )
     .await;
@@ -297,7 +345,10 @@ async fn a_branch_override_replaces_the_org_allowance_wholesale(pool: PgPool) {
     .await;
     assert_eq!(today.status(), 200);
     let body: Value = test::read_body_json(today).await;
-    assert_eq!(body["allowance"], 1, "the branch's own number, not the org's 5");
+    assert_eq!(
+        body["allowance"], 1,
+        "the branch's own number, not the org's 5"
+    );
     assert_eq!(body["enabled"], true);
 }
 
@@ -326,9 +377,15 @@ async fn an_overspend_lands_on_replay_and_is_flagged_never_refused(pool: PgPool)
             test::TestRequest::post()
                 .uri("/sync/replay")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&replay_envelope(
+                .set_json(replay_envelope(
                     teller,
-                    drink_body(Uuid::new_v4(), branch, item, "the morning shift", "2026-09-19T09:00:00Z"),
+                    drink_body(
+                        Uuid::new_v4(),
+                        branch,
+                        item,
+                        "the morning shift",
+                        "2026-09-19T09:00:00Z",
+                    ),
                 ))
                 .to_request(),
         )
@@ -337,7 +394,11 @@ async fn an_overspend_lands_on_replay_and_is_flagged_never_refused(pool: PgPool)
         let body: Value = test::read_body_json(resp).await;
         marked.push(body["overspent"].as_bool().unwrap());
     }
-    assert_eq!(marked, vec![false, true], "the second drink is the overspend");
+    assert_eq!(
+        marked,
+        vec![false, true],
+        "the second drink is the overspend"
+    );
     assert_eq!(rows_on(&pool, branch, "2026-09-19").await, 2);
 
     let f = flags(&pool, teller).await;
@@ -366,7 +427,7 @@ async fn replaying_the_same_drink_twice_spends_one(pool: PgPool) {
             test::TestRequest::post()
                 .uri("/sync/replay")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&replay_envelope(
+                .set_json(replay_envelope(
                     teller,
                     drink_body(id, branch, item, "Sara", "2026-09-19T09:00:00Z"),
                 ))
@@ -393,8 +454,11 @@ async fn a_teller_with_no_grant_still_lands_the_drink_on_replay_and_is_flagged(p
         &app,
         test::TestRequest::post()
             .uri("/sync/replay")
-            .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
-            .set_json(&replay_envelope(
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", token(teller, org, UserRole::Teller)),
+            ))
+            .set_json(replay_envelope(
                 teller,
                 drink_body(Uuid::new_v4(), branch, item, "Sara", "2026-09-19T09:00:00Z"),
             ))
@@ -421,8 +485,11 @@ async fn replay_refuses_only_the_one_thing_it_cannot_store_a_blank_note(pool: Pg
         &app,
         test::TestRequest::post()
             .uri("/sync/replay")
-            .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
-            .set_json(&replay_envelope(
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", token(teller, org, UserRole::Teller)),
+            ))
+            .set_json(replay_envelope(
                 teller,
                 drink_body(Uuid::new_v4(), branch, item, "   ", "2026-09-19T09:00:00Z"),
             ))
@@ -449,8 +516,11 @@ async fn an_item_that_left_the_list_while_the_till_was_offline_lands_and_is_flag
         &app,
         test::TestRequest::post()
             .uri("/sync/replay")
-            .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
-            .set_json(&replay_envelope(
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", token(teller, org, UserRole::Teller)),
+            ))
+            .set_json(replay_envelope(
                 teller,
                 drink_body(Uuid::new_v4(), branch, tea, "Omar", "2026-09-19T09:00:00Z"),
             ))
@@ -459,9 +529,15 @@ async fn an_item_that_left_the_list_while_the_till_was_offline_lands_and_is_flag
     .await;
     assert_eq!(resp.status(), 201, "the tea was drunk");
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["overspent"], true, "outside the rules reads as over, for the owner");
+    assert_eq!(
+        body["overspent"], true,
+        "outside the rules reads as over, for the owner"
+    );
     let f = flags(&pool, teller).await;
-    assert!(f.iter().any(|(cap, _)| cap.contains("item_not_eligible")), "{f:?}");
+    assert!(
+        f.iter().any(|(cap, _)| cap.contains("item_not_eligible")),
+        "{f:?}"
+    );
 }
 
 // ── The reset ───────────────────────────────────────────────────────────────
@@ -483,7 +559,7 @@ async fn the_pool_resets_on_the_branch_business_day_not_midnight_utc(pool: PgPoo
             test::TestRequest::post()
                 .uri("/sync/replay")
                 .insert_header(("Authorization", format!("Bearer {b}")))
-                .set_json(&replay_envelope(
+                .set_json(replay_envelope(
                     teller,
                     drink_body(Uuid::new_v4(), branch, item, "shift", at),
                 ))
@@ -505,7 +581,10 @@ async fn the_pool_resets_on_the_branch_business_day_not_midnight_utc(pool: PgPoo
     let resp = test::call_service(&app, ring("2026-09-19T21:00:00Z").await).await;
     assert_eq!(resp.status(), 201);
     let body: Value = test::read_body_json(resp).await;
-    assert_eq!(body["business_date"], "2026-09-20", "the branch turned the page, not UTC");
+    assert_eq!(
+        body["business_date"], "2026-09-20",
+        "the branch turned the page, not UTC"
+    );
     assert_eq!(
         body["overspent"], false,
         "the third drink of the UTC day is the first of the branch's day"
@@ -525,13 +604,16 @@ async fn the_report_lists_the_drinks_with_their_notes_newest_first(pool: PgPool)
     let bearer = token(admin, org, UserRole::OrgAdmin);
     set_pool(&pool, org, None, 1, &[item]).await;
 
-    for (note, at) in [("for Sara", "2026-09-19T09:00:00Z"), ("for Omar", "2026-09-19T10:00:00Z")] {
+    for (note, at) in [
+        ("for Sara", "2026-09-19T09:00:00Z"),
+        ("for Omar", "2026-09-19T10:00:00Z"),
+    ] {
         let resp = test::call_service(
             &app,
             test::TestRequest::post()
                 .uri("/staff-pool/drinks")
                 .insert_header(("Authorization", format!("Bearer {bearer}")))
-                .set_json(&drink_body(Uuid::new_v4(), branch, item, note, at))
+                .set_json(drink_body(Uuid::new_v4(), branch, item, note, at))
                 .to_request(),
         )
         .await;
@@ -541,7 +623,9 @@ async fn the_report_lists_the_drinks_with_their_notes_newest_first(pool: PgPool)
     let resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri(&format!("/staff-pool/drinks?branch_id={branch}&from=2026-09-19&to=2026-09-19"))
+            .uri(&format!(
+                "/staff-pool/drinks?branch_id={branch}&from=2026-09-19&to=2026-09-19"
+            ))
             .insert_header(("Authorization", format!("Bearer {bearer}")))
             .to_request(),
     )
@@ -553,7 +637,10 @@ async fn the_report_lists_the_drinks_with_their_notes_newest_first(pool: PgPool)
     // Newest first, and the note — the only record of who drank it — is there.
     assert_eq!(rows[0]["note"], "for Omar");
     assert_eq!(rows[1]["note"], "for Sara");
-    assert_eq!(rows[0]["overspent"], true, "the second drink went past an allowance of 1");
+    assert_eq!(
+        rows[0]["overspent"], true,
+        "the second drink went past an allowance of 1"
+    );
     assert_eq!(rows[1]["overspent"], false);
 
     // The owner's "what went over" view.
@@ -586,7 +673,10 @@ async fn a_teller_without_the_grant_cannot_read_the_notes(pool: PgPool) {
         &app,
         test::TestRequest::get()
             .uri(&format!("/staff-pool/drinks?branch_id={branch}"))
-            .insert_header(("Authorization", format!("Bearer {}", token(teller, org, UserRole::Teller))))
+            .insert_header((
+                "Authorization",
+                format!("Bearer {}", token(teller, org, UserRole::Teller)),
+            ))
             .to_request(),
     )
     .await;
@@ -615,7 +705,13 @@ async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) 
         test::TestRequest::post()
             .uri("/staff-pool/drinks")
             .insert_header(("Authorization", format!("Bearer {bearer}")))
-            .set_json(&drink_body(drink_id, branch, item, "for Sara", "2026-09-19T09:00:00Z"))
+            .set_json(drink_body(
+                drink_id,
+                branch,
+                item,
+                "for Sara",
+                "2026-09-19T09:00:00Z",
+            ))
             .to_request(),
     )
     .await;
@@ -625,18 +721,29 @@ async fn the_feed_carries_the_settings_and_the_drinks_to_the_till(pool: PgPool) 
 
     // The allowance rides the projection the tablet already reads.
     let settings = madar_rust::sync::pull::projection::project(
-        &mut conn, org, branch, "branch_settings", &[branch],
+        &mut conn,
+        org,
+        branch,
+        "branch_settings",
+        &[branch],
     )
     .await
     .unwrap();
     let sp = settings[&branch]["staff_pool"].clone();
-    assert_eq!(sp["enabled"], true, "the till must not read the pool as off: {settings:?}");
+    assert_eq!(
+        sp["enabled"], true,
+        "the till must not read the pool as off: {settings:?}"
+    );
     assert_eq!(sp["daily_allowance"], 4);
     assert_eq!(sp["eligible_item_ids"][0], item.to_string());
 
     // And the drink itself reaches every device of the branch.
     let drinks = madar_rust::sync::pull::projection::project(
-        &mut conn, org, branch, "staff_drink", &[drink_id],
+        &mut conn,
+        org,
+        branch,
+        "staff_drink",
+        &[drink_id],
     )
     .await
     .unwrap();
@@ -672,7 +779,11 @@ async fn the_projection_prefers_the_branch_override(pool: PgPool) {
 
     let mut conn = pool.acquire().await.unwrap();
     let settings = madar_rust::sync::pull::projection::project(
-        &mut conn, org, branch, "branch_settings", &[branch],
+        &mut conn,
+        org,
+        branch,
+        "branch_settings",
+        &[branch],
     )
     .await
     .unwrap();

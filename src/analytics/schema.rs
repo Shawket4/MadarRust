@@ -370,7 +370,7 @@ const ORDERS_JOINS: &[Join] = &[
         sql: "LEFT JOIN LATERAL (SELECT COALESCE(SUM(oi.quantity),0) AS units, \
               COUNT(oi.id) AS lines, SUM(oi.line_cost) AS cost, \
               bool_or(oi.line_cost IS NULL) AS cost_missing \
-              FROM order_items oi WHERE oi.order_id = o.id) it ON true",
+              FROM order_items oi WHERE oi.order_id = o.id AND oi.line_kind <> 'combo') it ON true",
     },
     // Money returned against the order. One row per order (the view groups by
     // order_id), so it cannot fan out either. `refunded_amount` is NULL for an
@@ -917,10 +917,6 @@ const ITEM_JOINS: &[Join] = &[
         id: "category",
         sql: "LEFT JOIN categories c ON c.id = mi.category_id",
     },
-    Join {
-        id: "bundle",
-        sql: "LEFT JOIN bundles bn ON bn.id = oi.bundle_id",
-    },
 ];
 
 const ITEM_MEASURES: &[Meas] = &[
@@ -1041,14 +1037,6 @@ const ITEM_DIMS: &[Dim] = dims_with_time!(
             expr: "COALESCE(oi.size_label, 'Regular')",
             kind: ColumnKind::Label,
             joins: &[],
-            time: false
-        },
-        Dim {
-            id: "bundle",
-            label: "Bundle",
-            expr: "COALESCE(bn.name, 'Not in a bundle')",
-            kind: ColumnKind::Label,
-            joins: &["bundle"],
             time: false
         },
         Dim {
@@ -1358,7 +1346,7 @@ const INV_MEASURES: &[Meas] = &[
     Meas {
         id: "movement_cost",
         label: "Value",
-        expr: "COALESCE(ROUND(SUM(ABS(im.quantity) * COALESCE(im.unit_cost,0))),0)::bigint",
+        expr: "COALESCE(ROUND(SUM(ABS(im.quantity) * COALESCE(im.unit_cost_exact,im.unit_cost,0))),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Value of the stock moved, at the cost recorded on the movement.",
@@ -1887,7 +1875,7 @@ const PUR_MEASURES: &[Meas] = &[
     Meas {
         id: "purchase_cost",
         label: "Spend",
-        expr: "COALESCE(ROUND(SUM(COALESCE(pol.quantity_received,0) * COALESCE(pol.unit_cost,0))),0)::bigint",
+        expr: "COALESCE(ROUND(SUM(COALESCE(pol.quantity_received,0) * pol.line_cost / NULLIF(pol.quantity_ordered,0))),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Money spent on goods actually received.",
@@ -1895,7 +1883,7 @@ const PUR_MEASURES: &[Meas] = &[
     Meas {
         id: "ordered_cost",
         label: "Committed",
-        expr: "COALESCE(ROUND(SUM(pol.quantity_ordered * COALESCE(pol.unit_cost,0))),0)::bigint",
+        expr: "COALESCE(SUM(pol.line_cost),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Value of what was ordered, received or not.",
@@ -1903,7 +1891,7 @@ const PUR_MEASURES: &[Meas] = &[
     Meas {
         id: "avg_unit_cost",
         label: "Avg unit cost",
-        expr: "COALESCE(ROUND(AVG(pol.unit_cost)),0)::bigint",
+        expr: "COALESCE(ROUND(AVG(pol.unit_cost_exact)),0)::bigint",
         kind: ColumnKind::Money,
         joins: &[],
         help: "Average purchase price per unit.",
@@ -2124,14 +2112,15 @@ pub const DATASETS: &[Dataset] = &[
     Dataset {
         id: "order_items",
         title: "Order items",
-        help: "One row per line on an order. Use for product, category, size and bundle \
+        help: "One row per line on an order. Use for product, category and size \
                questions, item profitability, and units sold. Line revenue excludes \
                order-level discounts and tax.",
         from: "order_items oi JOIN orders o ON o.id = oi.order_id",
         branch_col: "o.branch_id",
         time_col: "o.created_at",
         time_is_date: false,
-        base_pred: "",
+        // A combo's header carries no money; its parts count as their items.
+        base_pred: "AND oi.line_kind <> 'combo'",
         joins: ITEM_JOINS,
         dims: ITEM_DIMS,
         measures: ITEM_MEASURES,

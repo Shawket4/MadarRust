@@ -52,7 +52,7 @@ pub struct PosMetricsTender {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct PosMetricsItem {
-    /// The menu item or bundle; null for a line with neither.
+    /// The menu item; null for a line with none.
     pub item_id: Option<Uuid>,
     pub item_name: String,
     pub quantity: i64,
@@ -210,12 +210,13 @@ pub async fn compute(
     .await?;
 
     let top_items = sqlx::query_as::<_, PosMetricsItem>(&format!(
-        "SELECT COALESCE(oi.menu_item_id, oi.bundle_id) AS item_id, oi.item_name,
+        "SELECT oi.menu_item_id AS item_id, oi.item_name,
                 SUM(oi.quantity)::bigint AS quantity, SUM(oi.line_total)::bigint AS revenue
            FROM order_items oi
            JOIN orders o ON o.id = oi.order_id
           WHERE o.branch_id = $1 AND o.{sold} AND o.created_at >= $2 AND o.created_at < $3
-          GROUP BY COALESCE(oi.menu_item_id, oi.bundle_id), oi.item_name
+            AND oi.line_kind <> 'combo'
+          GROUP BY oi.menu_item_id, oi.item_name
           ORDER BY quantity DESC, revenue DESC, oi.item_name COLLATE \"C\"
           LIMIT $4"
     ))

@@ -81,10 +81,6 @@ SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
 SELECT pg_temp.purge('modifier_groups', format('org_id = %L', :'org'));
 SELECT pg_temp.purge('menu_items', format('org_id = %L', :'org'));
 SELECT pg_temp.purge('categories', format('org_id = %L', :'org'));
-SELECT CASE WHEN to_regclass('bundles') IS NOT NULL
-             AND EXISTS (SELECT 1 FROM information_schema.columns
-                         WHERE table_name = 'bundles' AND column_name = 'org_id')
-            THEN pg_temp.purge('bundles', format('org_id = %L', :'org')) END;
 \o
 UPDATE organizations o SET is_demo = k.is_demo FROM keep_org k WHERE o.id = k.id;
 \echo '== Replace menu: rows deleted =='
@@ -95,8 +91,9 @@ SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
 -- one of them is cleared without editing this list. What is deliberately NOT a
 -- root: branches, users/roles/permissions/overrides, devices, the menu, recipes,
 -- org_ingredients/suppliers/packaging, floor sections + branch_tables, payment
--- methods, discounts, bundles, work_shifts + staff_schedules/profiles, loyalty
--- settings and reward catalog, qr_short_links, asset_* (menu images).
+-- methods, discounts, the Dawam setup (employees, salary history, documents,
+-- departments, leave types, holidays, shift templates), loyalty settings and
+-- reward catalog, qr_short_links, asset_* (menu images).
 CREATE FUNCTION pg_temp.purge_activity(tbl text, col text DEFAULT 'org_id')
 RETURNS void LANGUAGE plpgsql AS $fn$
 DECLARE o uuid := current_setting('app.org_id')::uuid;
@@ -138,15 +135,48 @@ SELECT pg_temp.purge_activity('loyalty_transactions');
 SELECT pg_temp.purge_activity('customers');
 SELECT pg_temp.purge_activity('loyalty_customers');
 
--- HR activity (work_shifts, staff_schedules, staff_profiles/documents stay).
+-- Dawam (the staff app): everything that HAPPENED, and the rota built on top
+-- of the setup. KEPT, as the setup: the employees themselves (profile, app
+-- access, department, job title, base salary, pay method/account, preferences),
+-- their salary history, their branches and their documents; and the Dawam
+-- configuration (departments, leave types, holidays, shift templates +
+-- day times, attendance settings). Owner, 2026-09-26: "clear all dawam data
+-- except employees and salary data for the employee, basically the setup".
+-- Attendance.
 SELECT pg_temp.purge_activity('attendance_records');
-SELECT pg_temp.purge_activity('payslips');
-SELECT pg_temp.purge_activity('payroll_periods');
-SELECT pg_temp.purge_activity('payroll_bonuses');
-SELECT pg_temp.purge_activity('payroll_deductions');
-SELECT pg_temp.purge_activity('salary_advances');
+SELECT pg_temp.purge_activity('attendance_pings');
+SELECT pg_temp.purge_activity('attendance_flags');
+SELECT pg_temp.purge_activity('attendance_tombstones');
+-- Requests and the balances they drew on.
 SELECT pg_temp.purge_activity('staff_requests');
 SELECT pg_temp.purge_activity('leave_balances');
+-- Pay: runs, payslips, one-off bonuses/deductions, advances.
+SELECT pg_temp.purge_activity('payslips');
+SELECT pg_temp.purge_activity('payroll_bonuses');
+SELECT pg_temp.purge_activity('payroll_deductions');
+SELECT pg_temp.purge_activity('payroll_audit_log');
+SELECT pg_temp.purge_activity('payroll_periods');
+SELECT pg_temp.purge_activity('salary_advance_collections');
+SELECT pg_temp.purge_activity('salary_advances');
+SELECT pg_temp.purge_activity('expense_advances');
+-- The rota: schedules, overrides, open shifts, swaps, publications.
+SELECT pg_temp.purge_activity('staff_schedule_overrides');
+SELECT pg_temp.purge_activity('staff_schedules');
+SELECT pg_temp.purge_activity('staff_open_shift_claims');
+SELECT pg_temp.purge_activity('staff_open_shifts');
+SELECT pg_temp.purge_activity('staff_swaps');
+SELECT pg_temp.purge_activity('staff_roster_changes');
+SELECT pg_temp.purge_activity('staff_week_publications');
+SELECT pg_temp.purge_activity('staff_coverage_needs');
+-- What Dawam learned or told people.
+SELECT pg_temp.purge_activity('staff_notifications');
+SELECT pg_temp.purge_activity('staff_suggestion_events');
+SELECT pg_temp.purge_activity('staff_suggestion_cache');
+SELECT pg_temp.purge_activity('staff_learning_state');
+SELECT pg_temp.purge_activity('staff_fairness_audits');
+SELECT pg_temp.purge_activity('staff_preference_log');
+-- Staff drinks poured from the pool (the pool's settings stay).
+SELECT pg_temp.purge_activity('staff_drinks');
 
 -- Decisions, approvals and assistant history.
 SELECT pg_temp.purge_activity('approvals');
@@ -167,16 +197,64 @@ SELECT pg_temp.purge_activity('delivery_ref_counters', 'branch_id');
 -- come back to zero with it — the one sanctioned direct write (see the
 -- branch_stock_on_hand_guard trigger). The rows themselves stay: they carry the
 -- unit, par level and cost the catalog set up.
+-- --keep-stock: remember today's levels before they go to zero with the ledger.
+\if :keep_stock
+CREATE TEMP TABLE keep_stock_levels AS
+SELECT id, branch_id, org_ingredient_id, on_hand, cost_per_unit
+FROM branch_stock
+WHERE branch_id IN (SELECT id FROM branches WHERE org_id = :'org'::uuid)
+  AND on_hand <> 0;
+\endif
 SELECT set_config('madar.stock_rebase', 'on', true) AS stock_rebase \gset
 UPDATE branch_stock SET on_hand = 0
 WHERE branch_id IN (SELECT id FROM branches WHERE org_id = :'org'::uuid)
   AND on_hand <> 0;
 SELECT set_config('madar.stock_rebase', 'off', true) AS stock_rebase \gset
+-- --keep-stock: each remembered level comes back as one opening stock count, the
+-- ordinary way stock moves (the movement trigger rebuilds on_hand from 0), so
+-- the counts stay and the new ledger explains them.
+\if :keep_stock
+INSERT INTO inventory_movements
+  (id, branch_id, org_ingredient_id, branch_stock_id, type, quantity, balance_after,
+   unit_cost, reason, below_zero, source_type, note, created_at)
+SELECT gen_random_uuid(), k.branch_id, k.org_ingredient_id, k.id, 'stock_count', k.on_hand, 0,
+       k.cost_per_unit, 'Opening balance after reset', false, 'reset',
+       'Stock level carried over by import-foodics.sh --reset-activity --keep-stock', now()
+FROM keep_stock_levels k;
+\echo '== Stock carried over (opening counts) =='
+SELECT count(*) AS items, sum(on_hand) AS total_units FROM keep_stock_levels;
+\endif
 
 -- Occupancy lives on the table row too; every table is free again.
 UPDATE branch_tables SET status = 'free'
 WHERE org_id = :'org'::uuid AND status IS DISTINCT FROM 'free';
 
+-- Optional extras on top of the activity (flags; see import-foodics.sh).
+\o /dev/null
+\if :reset_devices
+SELECT pg_temp.purge_activity('device_payment_methods');
+SELECT pg_temp.purge_activity('device_activation_codes');
+SELECT pg_temp.purge_activity('push_devices');
+SELECT pg_temp.purge_activity('staff_devices');
+SELECT pg_temp.purge_activity('devices');
+\endif
+\if :reset_tables
+SELECT pg_temp.purge_activity('branch_tables');
+SELECT pg_temp.purge_activity('floor_sections');
+\endif
+\if :reset_loyalty
+SELECT pg_temp.purge_activity('loyalty_pass_cache');
+SELECT pg_temp.purge_activity('loyalty_token_aliases');
+SELECT pg_temp.purge_activity('loyalty_winbacks');
+SELECT pg_temp.purge_activity('loyalty_birthday_greetings');
+SELECT pg_temp.purge_activity('loyalty_earning_items');
+SELECT pg_temp.purge_activity('loyalty_reward_items');
+SELECT pg_temp.purge_activity('loyalty_settings');
+\endif
+\if :reset_qr
+SELECT pg_temp.purge_activity('qr_short_links');
+\endif
+\o
 UPDATE organizations o SET is_demo = k.is_demo FROM keep_org k WHERE o.id = k.id;
 \echo '== Reset activity: rows deleted (setup kept) =='
 SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;

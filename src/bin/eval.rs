@@ -306,10 +306,10 @@ async fn run_case(provider: &dyn LlmProvider, case: &Case) -> Outcome {
             }
         }
     }
-    if let Some(d) = &e.dataset {
-        if got("dataset") != d {
-            return Outcome::Wrong(format!("dataset '{}' (expected '{d}')", got("dataset")));
-        }
+    if let Some(d) = &e.dataset
+        && got("dataset") != d
+    {
+        return Outcome::Wrong(format!("dataset '{}' (expected '{d}')", got("dataset")));
     }
     if let Some(period) = &e.period {
         let actual = args

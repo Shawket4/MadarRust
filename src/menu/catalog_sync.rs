@@ -88,6 +88,11 @@ pub struct SyncSize {
 pub struct SyncOption {
     pub id: Uuid,
     pub name: String,
+    /// `{locale: name}`, as the dashboard authored it (`{}` when untranslated):
+    /// a till shows the option in its own language. Additive.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub name_translations: serde_json::Value,
     /// Effective price in piastres (branch_channel → branch → channel → catalog default).
     pub price: i32,
     /// Effective availability (branch_channel → branch → channel → TRUE).
@@ -140,6 +145,15 @@ pub struct SyncItem {
     pub category_id: Option<Uuid>,
     pub sizes: Vec<SyncSize>,
     pub modifier_groups: Vec<SyncModifierGroup>,
+    /// `item` | `combo` (combos module). Additive.
+    #[serde(default = "crate::combos::types::item_kind")]
+    pub kind: String,
+    /// A kind=item row: its "make it a meal" upsell (C14).
+    #[serde(default)]
+    pub meal: Option<crate::combos::types::MealLink>,
+    /// A kind=combo row: its slots, windows and resolved channel toggles.
+    #[serde(default)]
+    pub combo: Option<crate::combos::types::ComboFeed>,
 }
 
 /// An org ingredient referenced by a returned option recipe.
@@ -268,12 +282,16 @@ pub async fn catalog_sync(
         }));
     }
 
+    // Combos (COMBOS_CONTRACT.md §2.4): a till older than POS 0.9.0 builds its
+    // menu from this snapshot and cannot sell a combo; it gets none.
+    let sells_combos = crate::client_seen::sells_combos(req.headers());
     let snapshot = build_catalog_snapshot(
         pool.get_ref(),
         org_id,
         q.branch_id,
         q.channel.as_deref(),
         catalog_revision,
+        sells_combos,
     )
     .await?;
     Ok(HttpResponse::Ok().json(snapshot))
@@ -290,21 +308,23 @@ async fn build_catalog_snapshot(
     branch_id: Uuid,
     channel: Option<&str>,
     catalog_revision: i64,
+    sells_combos: bool,
 ) -> Result<CatalogSyncResponse, AppError> {
     // One connection for the whole build (never two at once from one request).
     let mut conn = pool.acquire().await?;
     let conn: &mut PgConnection = &mut conn;
     // ── Active items for the org. ──
-    let item_rows: Vec<(Uuid, String, serde_json::Value, Option<Uuid>)> = sqlx::query_as(
-        "SELECT id, name, name_translations, category_id \
-         FROM menu_items \
-         WHERE org_id = $1 AND is_active = true AND deleted_at IS NULL \
-         ORDER BY name, id",
-    )
+    let item_rows: Vec<ItemRow> = sqlx::query_as(&format!(
+        "{ITEM_SELECT} WHERE mi.org_id = $1 AND mi.is_active = true AND mi.deleted_at IS NULL \
+           AND ($2 OR mi.kind <> 'combo') \
+         ORDER BY mi.name, mi.id"
+    ))
     .bind(org_id)
+    .bind(sells_combos)
     .fetch_all(&mut *conn)
     .await?;
     let item_ids: Vec<Uuid> = item_rows.iter().map(|r| r.0).collect();
+    let mut combos = combo_feeds(&mut *conn, org_id, branch_id, &item_rows).await?;
 
     // ── Sizes (active) with price/availability resolved per §3. ──
     // LEFT JOIN the three scope rows and COALESCE most-specific-first; price and
@@ -318,7 +338,7 @@ async fn build_catalog_snapshot(
 
     // ── Assemble items. ──
     let mut items = Vec::with_capacity(item_rows.len());
-    for (id, name, name_translations, category_id) in item_rows {
+    for (id, name, name_translations, category_id, kind, meal_combo, meal_slot) in item_rows {
         items.push(SyncItem {
             id,
             name,
@@ -326,6 +346,9 @@ async fn build_catalog_snapshot(
             category_id,
             sizes: sizes_by_item.get(&id).cloned().unwrap_or_default(),
             modifier_groups: groups_by_item.get(&id).cloned().unwrap_or_default(),
+            kind,
+            meal: meal_of(meal_combo, meal_slot),
+            combo: combos.remove(&id),
         });
     }
 
@@ -534,6 +557,7 @@ async fn load_modifier_groups(
                 options.push(SyncOption {
                     id: o.id,
                     name: o.name.clone(),
+                    name_translations: o.name_translations.clone(),
                     price: o.price,
                     is_available: o.is_available,
                     replaces_ingredient_id: o.replaces_ingredient_id,
@@ -569,6 +593,7 @@ async fn load_modifier_groups(
 struct RawOption {
     id: Uuid,
     name: String,
+    name_translations: serde_json::Value,
     price: i32,
     is_available: bool,
     replaces_ingredient_id: Option<Uuid>,
@@ -603,8 +628,17 @@ async fn load_group_options(
 
     // Options with price/availability resolved (same COALESCE shape as sizes, but
     // target_type='modifier_option' and default price = mo.price).
-    let opt_rows: Vec<(Uuid, Uuid, String, i32, bool, Option<Uuid>, bool)> = sqlx::query_as(
-        "SELECT mo.group_id, mo.id, mo.name, \
+    let opt_rows: Vec<(
+        Uuid,
+        Uuid,
+        String,
+        serde_json::Value,
+        i32,
+        bool,
+        Option<Uuid>,
+        bool,
+    )> = sqlx::query_as(
+        "SELECT mo.group_id, mo.id, mo.name, mo.name_translations, \
                 COALESCE(bc.price, b.price, c.price, mo.price) AS price, \
                 COALESCE(bc.is_available, b.is_available, c.is_available, TRUE) AS is_available, \
                 mo.replaces_ingredient_id, mo.is_default \
@@ -629,11 +663,22 @@ async fn load_group_options(
     .await?;
 
     let mut option_ids = Vec::with_capacity(opt_rows.len());
-    for (group_id, id, name, price, is_available, replaces_ingredient_id, is_default) in opt_rows {
+    for (
+        group_id,
+        id,
+        name,
+        name_translations,
+        price,
+        is_available,
+        replaces_ingredient_id,
+        is_default,
+    ) in opt_rows
+    {
         option_ids.push(id);
         by_group.entry(group_id).or_default().push(RawOption {
             id,
             name,
+            name_translations,
             price,
             is_available,
             replaces_ingredient_id,
@@ -709,7 +754,6 @@ async fn load_referenced_ingredients(
         .collect())
 }
 
-
 /// `SyncItem`s for a set of ids, resolved for `branch_id` (default channel).
 /// Inactive or deleted items are omitted (sync pull projection).
 pub(crate) async fn sync_items_by_ids(
@@ -718,10 +762,11 @@ pub(crate) async fn sync_items_by_ids(
     branch_id: Uuid,
     ids: &[Uuid],
 ) -> Result<Vec<SyncItem>, AppError> {
-    let item_rows: Vec<(Uuid, String, serde_json::Value, Option<Uuid>)> = sqlx::query_as(
-        "SELECT id, name, name_translations, category_id FROM menu_items \
-         WHERE org_id = $1 AND id = ANY($2) AND is_active = true AND deleted_at IS NULL",
-    )
+    // The feed carries combo rows to every till (the checksums stay equal); an
+    // old core stores them and never builds its menu from them.
+    let item_rows: Vec<ItemRow> = sqlx::query_as(&format!(
+        "{ITEM_SELECT} WHERE mi.org_id = $1 AND mi.id = ANY($2) AND mi.is_active = true AND mi.deleted_at IS NULL"
+    ))
     .bind(org_id)
     .bind(ids)
     .fetch_all(&mut *conn)
@@ -729,17 +774,64 @@ pub(crate) async fn sync_items_by_ids(
     let item_ids: Vec<Uuid> = item_rows.iter().map(|r| r.0).collect();
     let sizes_by_item = load_sizes(&mut *conn, &item_ids, branch_id, None).await?;
     let (groups_by_item, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, None).await?;
+    let mut combos = combo_feeds(&mut *conn, org_id, branch_id, &item_rows).await?;
     Ok(item_rows
         .into_iter()
-        .map(|(id, name, name_translations, category_id)| SyncItem {
-            id,
-            name,
-            name_translations,
-            category_id,
-            sizes: sizes_by_item.get(&id).cloned().unwrap_or_default(),
-            modifier_groups: groups_by_item.get(&id).cloned().unwrap_or_default(),
-        })
+        .map(
+            |(id, name, name_translations, category_id, kind, meal_combo, meal_slot)| SyncItem {
+                id,
+                name,
+                name_translations,
+                category_id,
+                sizes: sizes_by_item.get(&id).cloned().unwrap_or_default(),
+                modifier_groups: groups_by_item.get(&id).cloned().unwrap_or_default(),
+                kind,
+                meal: meal_of(meal_combo, meal_slot),
+                combo: combos.remove(&id),
+            },
+        )
         .collect())
+}
+
+/// `(id, name, name_translations, category_id, kind, meal combo, meal slot)`.
+type ItemRow = (
+    Uuid,
+    String,
+    serde_json::Value,
+    Option<Uuid>,
+    String,
+    Option<Uuid>,
+    Option<Uuid>,
+);
+
+/// An item row with its kind and its "make it a meal" link, kept only while
+/// the linked combo is a live combo.
+const ITEM_SELECT: &str = "SELECT mi.id, mi.name, mi.name_translations, mi.category_id, mi.kind, \
+        CASE WHEN c.id IS NOT NULL THEN mi.meal_combo_id END, \
+        CASE WHEN c.id IS NOT NULL THEN mi.meal_slot_id END \
+   FROM menu_items mi \
+   LEFT JOIN menu_items c ON c.id = mi.meal_combo_id AND c.kind = 'combo' AND c.deleted_at IS NULL";
+
+fn meal_of(combo: Option<Uuid>, slot: Option<Uuid>) -> Option<crate::combos::types::MealLink> {
+    Some(crate::combos::types::MealLink {
+        combo_id: combo?,
+        slot_id: slot?,
+    })
+}
+
+/// The `combo` object of every combo row, for `branch_id`.
+async fn combo_feeds(
+    conn: &mut PgConnection,
+    org_id: Uuid,
+    branch_id: Uuid,
+    rows: &[ItemRow],
+) -> Result<std::collections::HashMap<Uuid, crate::combos::types::ComboFeed>, AppError> {
+    let ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|r| r.4 == "combo")
+        .map(|r| r.0)
+        .collect();
+    crate::combos::load::feeds_for(conn, org_id, Some(branch_id), &ids).await
 }
 
 /// Per delivery channel, the sizes and modifier options of `ids` whose price or

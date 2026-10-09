@@ -116,7 +116,10 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "menu_item" => {
             "EXISTS (SELECT 1 FROM menu_items x WHERE x.id = $ID AND sync_live_menu_item(x))"
         }
-        "bundle" => "EXISTS (SELECT 1 FROM bundles x WHERE x.id = $ID AND sync_live_bundle(x))",
+        // COMPAT STUB: combos were removed (2026-09-25). The wire type stays
+        // (madar-sync's ALL_TYPES; tills v0.7+ ask for it and v0.8 counts a
+        // full snapshot complete only when it is answered), with nothing in it.
+        "bundle" => "false",
         "ingredient" => {
             "EXISTS (SELECT 1 FROM org_ingredients x WHERE x.id = $ID AND sync_live_ingredient(x))"
         }
@@ -158,8 +161,12 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         "cash_movement" => "EXISTS (SELECT 1 FROM till_cash_movements x WHERE x.id = $ID)",
         "order" => "EXISTS (SELECT 1 FROM orders x WHERE x.id = $ID)",
         "refund" => "EXISTS (SELECT 1 FROM order_refunds x WHERE x.id = $ID)",
+        // An option of a CUSTOM group (no legacy type) is in the shim's view
+        // with `type` NULL but is not an add-on: old tills cannot carry it
+        // (`menu::handlers::AddonItem`). Its feed rows go out as deletes.
         "addon_item" => {
-            "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND sync_live_addon_item(x.id))"
+            "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND x.type IS NOT NULL \
+                     AND sync_live_addon_item(x.id))"
         }
         "customer" => {
             "EXISTS (SELECT 1 FROM customers x WHERE x.id = $ID AND sync_live_customer(x))"
@@ -167,6 +174,12 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         // A recorded staff drink is an immutable audit row: once it exists it
         // is live, and it is never edited or withdrawn. Nothing to age out.
         "staff_drink" => "EXISTS (SELECT 1 FROM staff_drinks x WHERE x.id = $ID)",
+        // Combos module: an active, undeleted rule. Its branch override and
+        // the channel toggles ride IN the row (`is_active`, `sell`), so a
+        // branch switch-off never makes the row vanish from one till only.
+        "deal_rule" => {
+            "EXISTS (SELECT 1 FROM deal_rules x WHERE x.id = $ID AND sync_live_deal_rule(x))"
+        }
         _ => return None,
     })
 }
@@ -295,25 +308,9 @@ pub async fn project(
             )
             .await?
         }
-        "bundle" => {
-            let mut out = keyed(
-                crate::bundles::handlers::fetch_bundles_full(&mut *conn, ids).await?,
-                &["org_id", "created_at", "updated_at", "created_by", "image_url"],
-            );
-            let hashes: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
-                "SELECT b.id, {} FROM bundles b WHERE b.id = ANY($1)",
-                tile_hash("b.image_group_id")
-            ))
-            .bind(ids)
-            .fetch_all(&mut *conn)
-            .await?;
-            for (id, h) in hashes {
-                if let Some(Value::Object(m)) = out.get_mut(&id) {
-                    m.insert("image_hash".into(), json!(h));
-                }
-            }
-            out
-        }
+        // COMPAT STUB: always empty; see `projects_sql`.
+        "bundle" => HashMap::new(),
+        "deal_rule" => crate::deals::load::feed_rows(&mut *conn, org_id, branch_id, ids).await?,
         "ingredient" => {
             by_sql(
                 conn,
@@ -623,6 +620,16 @@ keyed(crate::kitchen::kitchen_ticket_views(&mut *conn, ids).await?, &["org_id"])
                 }
             }
             let mut items = crate::orders::handlers::fetch_orders_items_full_batch_on(&mut *conn, ids).await?;
+            // The deals applied to each sale (combos module; additive).
+            let mut deals = crate::deals::order::of_orders(&mut *conn, ids).await?;
+            for (id, v) in out.iter_mut() {
+                if let Value::Object(m) = v {
+                    m.insert(
+                        "deals".into(),
+                        serde_json::to_value(deals.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([])),
+                    );
+                }
+            }
             for (id, v) in out.iter_mut() {
                 let mut lines = serde_json::to_value(items.remove(id).unwrap_or_default()).unwrap_or_else(|_| json!([]));
                 for key in ["deductions_snapshot", "line_cost", "unit_cost", "cost_missing", "cost", "quantity_deducted",

@@ -1064,16 +1064,18 @@ async fn a_swap_moves_one_block_and_keeps_the_rest_of_both_days(pool: PgPool) {
         "Amal keeps her evening"
     );
     assert_eq!(shifts_on(&pool, f.b, d).await, vec![m]);
-    // One decision only.
-    let (s, _) = done(call!(
-        app,
-        "PATCH",
-        format!("/staff/swaps/{id}/decision"),
-        owner,
-        json!({ "approve": true })
-    ))
-    .await;
-    assert_eq!(s, 404);
+    // One decision only: a second is ALREADY_DECIDED (hunt H2-B9).
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/swaps/{id}/decision"),
+            owner,
+            json!({ "approve": true })
+        ),
+        409,
+        "ALREADY_DECIDED"
+    );
     // Told once, by the approval; both days are marked changed.
     let keys = keys_for(&pool, f.a).await;
     assert!(
@@ -1300,7 +1302,7 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
     ))
     .await;
     assert_eq!(s, 200, "{body}");
-    let (s, _) = done(call!(
+    let (s, body) = done(call!(
         app,
         "PATCH",
         format!("/staff/open-shifts/{lunch}/decision"),
@@ -1308,7 +1310,25 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
         json!({ "approve": true })
     ))
     .await;
-    assert_eq!(s, 204);
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["status"], "approved");
+    // Minor default M26 (RU-13): 4 + 3 + 4 hours is past the 8-hour day,
+    // and 08:00–21:00 past the 10-hour presence cap: warned, not blocked.
+    let warned: Vec<(String, i64, i64)> = body["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|w| w["date"] == json!(d))
+        .map(|w| {
+            (
+                w["kind"].as_str().unwrap().to_string(),
+                w["minutes"].as_i64().unwrap(),
+                w["limit_minutes"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert!(warned.contains(&("day_hours".into(), 660, 480)), "{body}");
+    assert!(warned.contains(&("presence".into(), 780, 600)), "{body}");
     assert_eq!(shifts_on(&pool, f.a, d).await, vec![m, l, e]);
     let keys = keys_for(&pool, f.a).await;
     assert!(
@@ -1320,15 +1340,18 @@ async fn a_claimed_open_shift_joins_the_rest_of_the_day(pool: PgPool) {
         "told once: {keys:?}"
     );
     assert!(changed(&pool, f.a, d).await);
-    let (s, _) = done(call!(
-        app,
-        "PATCH",
-        format!("/staff/open-shifts/{lunch}/decision"),
-        owner,
-        json!({ "approve": true })
-    ))
-    .await;
-    assert_eq!(s, 404, "one decision only");
+    // One decision only: a second is ALREADY_DECIDED (hunt H2-B9).
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/open-shifts/{lunch}/decision"),
+            owner,
+            json!({ "approve": true })
+        ),
+        409,
+        "ALREADY_DECIDED"
+    );
     // A filled shift can't be cancelled.
     let (s, _) = done(call!(
         app,
@@ -2903,18 +2926,21 @@ async fn confirming_a_cover_flag_confirms_the_cover_and_deciding_a_cover_resolve
     assert_eq!(s, 200);
     assert_eq!(status_of(rec4).await.0.as_deref(), Some("rejected"));
 
-    // "Ignore" on a cover flag decides nothing: the cover still waits.
+    // "Ignore" on a cover flag would decide nothing and leave the cover
+    // waiting for ever: refused (hunt H2-B3), the cover and its flag open.
     let (rec3, flag3) = cover(3).await;
-    let (s, _) = done(call!(
-        app,
-        "PATCH",
-        format!("/staff/flags/{flag3}"),
-        f.owner(),
-        json!({ "action": "ignore" })
-    ))
-    .await;
-    assert_eq!(s, 200);
-    assert_eq!(status_of(rec3).await.0.as_deref(), Some("pending"));
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/flags/{flag3}"),
+            f.owner(),
+            json!({ "action": "ignore" })
+        ),
+        400,
+        "FLAG_COVER_CONFIRM_OR_REJECT"
+    );
+    assert_eq!(status_of(rec3).await, (Some("pending".into()), None));
 }
 
 /// Mac E2E R-B1 (SC-8): the manager's approval re-checks what the ask
@@ -3036,4 +3062,2507 @@ async fn a_swap_is_not_approved_once_its_shift_started_or_its_week_is_unpublishe
     .await;
     assert_eq!(st, 204);
     assert_eq!(status().await, "rejected");
+}
+
+/// E2E B-ROTA-1 (SC-5c): moving a block to someone already on that block
+/// that day is refused (409 ALREADY_ROSTERED) and nothing changes. It used to
+/// answer 200, give the first person a day off and leave the second with one
+/// Morning: the day's headcount silently dropped by one.
+#[sqlx::test]
+async fn moving_a_block_to_someone_already_on_it_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    pattern(&pool, &f, f.a, m, None).await;
+    pattern(&pool, &f, f.b, m, None).await;
+    let d = today() + Duration::days(3);
+    refused!(
+        call!(
+            app,
+            "POST",
+            "/staff/schedules/days/move",
+            f.manager(),
+            json!({ "employee_id": f.a, "to_employee_id": f.b, "on_date": d, "work_shift_id": m })
+        ),
+        409,
+        "ALREADY_ROSTERED"
+    );
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![m], "Amal keeps it");
+    assert_eq!(shifts_on(&pool, f.b, d).await, vec![m]);
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM staff_schedule_overrides WHERE on_date = $1")
+            .bind(d)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "nothing written");
+}
+
+/// Mac E2E (roster): a claim that loses to a colleague's is 409
+/// ALREADY_CLAIMED — a code the phone words — not an uncoded "Conflict:".
+#[sqlx::test]
+async fn claiming_a_taken_open_shift_is_already_claimed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/open-shifts",
+        f.owner(),
+        json!({ "branch_id": f.br_a, "work_shift_id": l, "on_date": d })
+    ))
+    .await;
+    assert_eq!(s, 201, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        phone_token(&pool, f.a).await
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    refused!(
+        call!(
+            app,
+            "POST",
+            format!("/staff/open-shifts/{id}/claim"),
+            phone_token(&pool, f.b).await
+        ),
+        409,
+        "ALREADY_CLAIMED"
+    );
+}
+
+/// Mac E2E R-B2 (SC-9, N-031): publishing a week tells each person of every
+/// open shift in it by its OWN date — one notice per date, not one dated at
+/// the week's start.
+#[sqlx::test]
+async fn publishing_announces_the_weeks_open_shifts_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(17, 0), t(21, 0)).await;
+    let ws = madar_rust::staff::dawam::week_start(today() + Duration::days(7));
+    let (d1, d2) = (ws + Duration::days(1), ws + Duration::days(4));
+    for (shift, on) in [(l, d1), (e, d2), (l, d2)] {
+        let (s, body) = done(call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.owner(),
+            json!({ "branch_id": f.br_a, "work_shift_id": shift, "on_date": on })
+        ))
+        .await;
+        assert_eq!(s, 201, "{body}");
+    }
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    publish(&app, &f, f.br_a, ws).await;
+    // Minor default M21: ONE notice per publish ("3 open shifts this week")
+    // that opens the list, with the dates; no per-date notices.
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications \
+          WHERE employee_id = $1 AND key = 'staff.n_open_shifts_week'",
+    )
+    .bind(f.a)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["count"], 3);
+    assert_eq!(told[0]["week_start"], json!(ws));
+    assert_eq!(told[0]["dates"], json!([d1, d2]));
+    let per_date: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(per_date, 0);
+}
+
+/// E2E B-ROTA-4 (SC-9, SC-5): an open shift can't be posted on a
+/// switched-off block — nobody could ever claim it. 400 SHIFT_INACTIVE, like
+/// a day edit; nothing posted and nobody told.
+#[sqlx::test]
+async fn posting_an_open_shift_on_a_switched_off_block_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let night = block(&pool, &f, Some(f.br_a), "Night", t(22, 0), t(23, 0)).await;
+    sqlx::query("UPDATE work_shifts SET is_active = false WHERE id = $1")
+        .bind(night)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    refused!(
+        call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.owner(),
+            json!({ "branch_id": f.br_a, "work_shift_id": night, "on_date": d })
+        ),
+        400,
+        "SHIFT_INACTIVE"
+    );
+    let (posted, told): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM staff_open_shifts), \
+                (SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((posted, told), (0, 0));
+}
+
+/// E2E B-ROTA-5 (SC-4): accepting a PATTERN suggestion that changes a day
+/// of a published week tells the person and marks the day, as every other
+/// change to a published week does.
+#[sqlx::test]
+async fn accepting_a_pattern_suggestion_in_a_published_week_notifies(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let d = today() + Duration::days(3);
+    let ws = madar_rust::staff::dawam::week_start(d);
+    publish(&app, &f, f.br_a, d).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = format!("pattern|{d}|{m}|{}", f.a);
+    let payload = json!([{
+        "id": id, "date": d, "work_shift_id": m, "shift_name": "Morning",
+        "employee_id": f.a, "employee_name": "Amal",
+        "from_employee_id": null, "from_employee_name": null,
+        "reason_key": "staff.sg_pattern", "reason_args": {}, "confidence": 80,
+        "by_default": false
+    }]);
+    sqlx::query(
+        "INSERT INTO staff_suggestion_cache (org_id, branch_id, week_start, payload) \
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(f.org)
+    .bind(f.br_a)
+    .bind(ws)
+    .bind(&payload)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/roster/suggestions/decide",
+        f.manager(),
+        json!({ "branch_id": f.br_a, "id": id, "accept": true })
+    ))
+    .await;
+    assert!(s == 200 || s == 204, "{s} {body}");
+    assert_eq!(
+        shifts_on(&pool, f.a, d).await,
+        vec![m],
+        "the pattern changed"
+    );
+    assert!(changed(&pool, f.a, d).await, "the day is marked changed");
+    let keys = keys_for(&pool, f.a).await;
+    assert!(
+        keys.contains(&"staff.n_shift_changed".to_string()),
+        "{keys:?}"
+    );
+}
+
+/// E2E B-ROTA-7 (SC-8): the same swap can't be asked twice while the first
+/// is open — 409 SWAP_EXISTS, one row, and the colleague is asked once.
+#[sqlx::test]
+async fn asking_the_same_swap_twice_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(17, 0), t(21, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    for (who, s) in [(f.a, m), (f.b, e)] {
+        let (st, body) = done(call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            f.owner(),
+            json!({ "employee_id": who, "on_date": d, "shifts": [{ "work_shift_id": s }] })
+        ))
+        .await;
+        assert_eq!(st, 200, "{body}");
+    }
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let ta = phone_token(&pool, f.a).await;
+    let ask = json!({ "my_date": d, "my_shift_id": m, "peer_id": f.b, "peer_date": d, "peer_shift_id": e });
+    let (st, body) = done(call!(app, "POST", "/staff/me/swaps", ta, ask.clone())).await;
+    assert_eq!(st, 201, "{body}");
+    refused!(
+        call!(app, "POST", "/staff/me/swaps", ta, ask.clone()),
+        409,
+        "SWAP_EXISTS"
+    );
+    let (rows, asked): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM staff_swaps), \
+                (SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_swap_asked')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((rows, asked), (1, 1));
+    // Once the first is cancelled, it may be asked again.
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM staff_swaps")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (st, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/me/swaps/{id}/cancel"),
+        ta
+    ))
+    .await;
+    assert_eq!(st, 200);
+    let (st, body) = done(call!(app, "POST", "/staff/me/swaps", ta, ask)).await;
+    assert_eq!(st, 201, "{body}");
+}
+
+/// E2E B-ROTA-2 (AT-13): deleting a shift block still on the roster is a
+/// coded refusal with its figures — SHIFT_IN_USE {n, name} — not a raw
+/// "Bad request:" sentence.
+#[sqlx::test]
+async fn deleting_a_block_in_use_is_coded(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    pattern(&pool, &f, f.a, m, None).await;
+    let (s, body) = done(call!(
+        app,
+        "DELETE",
+        format!("/staff/work-shifts/{m}"),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 409, "{body}");
+    assert_eq!(body["code"], "SHIFT_IN_USE", "{body}");
+    assert_eq!(body["vars"]["n"], 1, "{body}");
+    assert_eq!(body["vars"]["name"], "Morning", "{body}");
+    assert!(!body["error"].as_str().unwrap().starts_with("Bad request:"));
+}
+
+/// E2E B-ROTA-3 (AT-13): SHIFTS_OVERLAP names the two blocks and their
+/// dates, and SHIFT_DAYS_IN_USE the count and the block, so the client can
+/// say which ones — not a generic "a night shift runs into the morning".
+#[sqlx::test]
+async fn roster_conflicts_carry_their_figures(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let d = today() + Duration::days(3);
+    let a = block(&pool, &f, Some(f.br_a), "Day", t(9, 0), t(15, 0)).await;
+    let b = block(&pool, &f, Some(f.br_a), "Afternoon", t(14, 0), t(18, 0)).await;
+    let (s, body) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d,
+                "shifts": [{ "work_shift_id": a }, { "work_shift_id": b }] })
+    ))
+    .await;
+    assert_eq!(s, 409, "{body}");
+    assert_eq!(body["code"], "SHIFTS_OVERLAP", "{body}");
+    let names = [body["vars"]["a"].clone(), body["vars"]["b"].clone()];
+    assert!(
+        names.contains(&json!("Day")) && names.contains(&json!("Afternoon")),
+        "{body}"
+    );
+    assert_eq!(body["vars"]["date"], json!(d), "{body}");
+
+    // Taking a weekday away from a block someone's weekday row names.
+    let wed = next_on(1, 3);
+    let brunch = block(&pool, &f, Some(f.br_a), "Brunch", t(10, 0), t(14, 0)).await;
+    pattern(&pool, &f, f.b, brunch, Some(dow(wed))).await;
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/work-shifts/{brunch}"),
+        f.owner(),
+        json!({ "branch_id": f.br_a, "name": "Brunch", "start_time": "10:00:00",
+                "end_time": "14:00:00", "valid_days": [6, 0, 1, 2, 4, 5] })
+    ))
+    .await;
+    assert_eq!(s, 409, "{body}");
+    assert_eq!(body["code"], "SHIFT_DAYS_IN_USE", "{body}");
+    assert_eq!(body["vars"]["n"], 1, "{body}");
+    assert_eq!(body["vars"]["name"], "Brunch", "{body}");
+}
+
+/// E2E B-ROTA-8: a PATCH of a block that leaves out branch_id keeps its
+/// branch; only an explicit null makes it the whole business's.
+#[sqlx::test]
+async fn patch_without_branch_keeps_the_branch(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let branch_of = || {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Uuid>>("SELECT branch_id FROM work_shifts WHERE id = $1")
+                .bind(m)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/work-shifts/{m}"),
+        f.owner(),
+        json!({ "name": "Morning", "start_time": "08:00:00", "end_time": "12:30:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(branch_of().await, Some(f.br_a), "omitted: kept");
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/work-shifts/{m}"),
+        f.owner(),
+        json!({ "branch_id": null, "name": "Morning", "start_time": "08:00:00", "end_time": "12:30:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(branch_of().await, None, "null: the whole business");
+}
+
+/// Owner decision D3 (24 Sep 2026, supersedes Mac E2E R-B3): a public holiday
+/// is the business's, every branch at once, so only the owner (whoever holds
+/// the rules right at every branch) decides or dismisses it. A branch
+/// manager is refused with OWNER_ONLY and still reads the holidays; the
+/// owner's decision records who and when.
+#[sqlx::test]
+async fn only_the_owner_decides_a_holiday(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let d = chrono::NaiveDate::from_ymd_opt(2026, 10, 6).unwrap(); // Armed Forces Day
+    for (who, token) in [("manager", f.manager()), ("teller", f.teller())] {
+        for decision in ["holiday", "dismissed"] {
+            let (s, body) = done(call!(
+                app,
+                "PUT",
+                format!("/staff/holidays/{d}"),
+                token.clone(),
+                json!({ "decision": decision })
+            ))
+            .await;
+            assert_eq!(s, 403, "{who} {decision}: {body}");
+            assert_eq!(body["code"], "OWNER_ONLY", "{who}: {body}");
+            assert!(body.get("vars").is_none(), "{body}");
+        }
+    }
+    // Managers still read them.
+    let (s, body) = done(call!(
+        app,
+        "GET",
+        format!("/staff/roster?branch_id={}&from={d}&to={d}", f.br_a),
+        f.manager()
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert!(
+        body["holidays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["on_date"] == json!(d)),
+        "{body}"
+    );
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM staff_holidays WHERE org_id = $1")
+        .bind(f.org)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 0, "nothing was decided");
+    let (s, body) = done(call!(
+        app,
+        "PUT",
+        format!("/staff/holidays/{d}"),
+        f.owner(),
+        json!({ "decision": "holiday" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["decision"], "holiday");
+    assert_eq!(body["decided_by"], json!(f.owner), "{body}");
+    assert!(body["decided_at"].is_string(), "{body}");
+
+    // The staff app never calls /authz/me: its context says who may decide
+    // (`caps_everywhere` holds `hr.rules.edit` for the owner only).
+    sqlx::query("UPDATE employees SET phone = '+201060000009', app_access = true WHERE id = $1")
+        .bind(f.owner_emp)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let karim = employee(
+        &pool,
+        f.org,
+        "Karim",
+        Some(f.manager),
+        Some("+201060000008"),
+        true,
+        &[f.br_a],
+        600_000,
+    )
+    .await;
+    let everywhere = |ctx: &Value| -> Vec<String> {
+        ctx["caps_everywhere"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{ctx}"))
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, ctx) = done(call!(
+        app,
+        "GET",
+        "/staff/me/context",
+        phone_token(&pool, f.owner_emp).await
+    ))
+    .await;
+    assert!(
+        everywhere(&ctx).contains(&"hr.rules.edit".to_string()),
+        "{ctx}"
+    );
+    let (_, ctx) = done(call!(
+        app,
+        "GET",
+        "/staff/me/context",
+        phone_token(&pool, karim).await
+    ))
+    .await;
+    assert!(
+        !everywhere(&ctx).contains(&"hr.rules.edit".to_string()),
+        "{ctx}"
+    );
+    let (_, ctx) = done(call!(
+        app,
+        "GET",
+        "/staff/me/context",
+        phone_token(&pool, f.b).await
+    ))
+    .await;
+    assert!(everywhere(&ctx).is_empty(), "no Madar account: {ctx}");
+}
+
+async fn absence_lines(pool: &PgPool, who: Uuid, on: NaiveDate) -> Vec<(Option<Uuid>, i64, bool)> {
+    sqlx::query_as(
+        "SELECT attendance_record_id, amount_piastres, waived_at IS NOT NULL \
+           FROM payroll_deductions WHERE employee_id = $1 AND source = 'absence' \
+            AND effective_date = $2 ORDER BY created_at",
+    )
+    .bind(who)
+    .bind(on)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn absent_at(pool: &PgPool, who: Uuid, on: NaiveDate) -> Vec<(Uuid, DateTime<Utc>)> {
+    sqlx::query_as(
+        "SELECT id, scheduled_start_at FROM attendance_records \
+          WHERE employee_id = $1 AND business_date = $2 AND status = 'absent' \
+          ORDER BY scheduled_start_at",
+    )
+    .bind(who)
+    .bind(on)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Owner decision D4 (24 Sep 2026): a roster edit that changes a shift's
+/// times, block or person clears the sweep's absence on it (and its
+/// automatic deduction), so the new times are judged from scratch. A
+/// manager's own decision is kept (AT-7): a waived line stays, and a day a
+/// manager set by hand stays.
+#[sqlx::test]
+async fn a_roster_edit_clears_the_sweeps_absence_on_the_changed_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let y = today() - Duration::days(1);
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    pattern(&pool, &f, f.a, m, None).await;
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let first = absent_at(&pool, f.a, y).await;
+    assert_eq!(first.len(), 1, "the sweep marked the morning");
+    assert_eq!(
+        absence_lines(&pool, f.a, y).await,
+        vec![(Some(first[0].0), 20_000, false)]
+    );
+
+    // Own times: the absence at 08:00 goes with its deduction.
+    let (s, b) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days/times",
+        f.manager(),
+        json!({ "employee_id": f.a, "on_date": y, "work_shift_id": m,
+                "start_time": "13:00:00", "end_time": "17:00:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert!(
+        absent_at(&pool, f.a, y).await.is_empty(),
+        "judged from scratch"
+    );
+    assert!(
+        absence_lines(&pool, f.a, y).await.is_empty(),
+        "its deduction went too"
+    );
+    // The sweep judges the new times.
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let second = absent_at(&pool, f.a, y).await;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].1, y.and_time(t(13, 0)).and_utc(), "the new times");
+
+    // The owner waives that line; then the shift is given to Bassem. Amal's
+    // absence goes (she isn't on it any more); the waived line is kept.
+    let line: Uuid = sqlx::query_scalar(
+        "SELECT id FROM payroll_deductions WHERE employee_id = $1 AND source = 'absence' \
+            AND effective_date = $2",
+    )
+    .bind(f.a)
+    .bind(y)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (s, b) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/payroll/deductions/{line}/waive"),
+        f.owner(),
+        json!({ "reason": "Her phone died" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules/days/move",
+        f.manager(),
+        json!({ "employee_id": f.a, "to_employee_id": f.b, "on_date": y, "work_shift_id": m })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert!(absent_at(&pool, f.a, y).await.is_empty());
+    assert_eq!(
+        absence_lines(&pool, f.a, y).await,
+        vec![(None, 20_000, true)],
+        "the manager's waiver stays (AT-7)"
+    );
+
+    // A day a manager set by hand is theirs: a later edit leaves it.
+    madar_rust::staff::jobs::run_tick(&pool).await.unwrap();
+    let bassem = absent_at(&pool, f.b, y).await;
+    assert_eq!(bassem.len(), 1, "the sweep judged Bassem's new shift");
+    let (s, b) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/attendance/{}", bassem[0].0),
+        f.manager(),
+        json!({ "status": "absent", "reason": "Called in sick, no leave" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days/times",
+        f.manager(),
+        json!({ "employee_id": f.b, "on_date": y, "work_shift_id": m,
+                "start_time": "14:00:00", "end_time": "18:00:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(
+        absent_at(&pool, f.b, y).await,
+        bassem,
+        "a manager's day stays"
+    );
+}
+
+// ── hunt: open-shift claims (H1) ───────────────────────────────────────────
+
+/// Post an open shift as the owner; its id.
+async fn post_open(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    f: &F,
+    shift: Uuid,
+    on: NaiveDate,
+) -> String {
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/open-shifts",
+        f.owner(),
+        json!({ "branch_id": f.br_a, "work_shift_id": shift, "on_date": on })
+    ))
+    .await;
+    assert_eq!(s, 201, "{body}");
+    body["id"].as_str().unwrap().to_string()
+}
+
+/// `my_claims` of `/staff/me/roster` over a window.
+async fn my_claims(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    token: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Vec<Value> {
+    let (s, body) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={from}&to={to}"),
+        token
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    body["my_claims"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("no my_claims: {body}"))
+}
+
+/// Hunt B-H1-1 (SC-9, S-162): a decided claim stays in the claimer's
+/// Requests, as every other kind of request does. Declined and approved
+/// alike; a pending one shows whatever window the app fetched; the manager's
+/// queue still lists the shift once it is open again.
+#[sqlx::test]
+async fn a_decided_claim_stays_in_the_claimers_requests(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
+    let (from, to) = (today(), today() + Duration::days(13));
+
+    // Bassem claims: pending, in any window.
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    let far = today() + Duration::days(40);
+    let pending = my_claims(&app, &tb, far, far + Duration::days(6)).await;
+    assert_eq!(pending.len(), 1, "a pending claim shows outside the window");
+    assert_eq!(pending[0]["open_shift_id"], json!(id));
+    assert_eq!(pending[0]["status"], json!("pending"));
+    assert_eq!(pending[0]["on_date"], json!(d));
+    assert_eq!(pending[0]["work_shift_id"], json!(l));
+    assert!(pending[0]["claimed_at"].is_string(), "{pending:?}");
+    assert!(pending[0]["decided_at"].is_null(), "{pending:?}");
+
+    // The owner declines: Bassem's claim stays, declined.
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": false })
+    ))
+    .await;
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
+    let declined = my_claims(&app, &tb, from, to).await;
+    assert_eq!(declined.len(), 1, "{declined:?}");
+    assert_eq!(declined[0]["status"], json!("declined"));
+    assert!(declined[0]["decided_at"].is_string(), "{declined:?}");
+    assert!(
+        my_claims(&app, &tb, far, far + Duration::days(6))
+            .await
+            .is_empty(),
+        "a decided claim shows only in its window"
+    );
+    // The manager's queue lists the shift open again.
+    let (s, queue) = done(call!(
+        app,
+        "GET",
+        format!("/staff/open-shifts?from={from}&to={to}"),
+        f.manager()
+    ))
+    .await;
+    assert_eq!(s, 200, "{queue}");
+    assert_eq!(queue[0]["id"], json!(id));
+    assert_eq!(queue[0]["status"], json!("open"));
+
+    // Amal claims it now, and the owner approves.
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        ta
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    let (s, queue) = done(call!(
+        app,
+        "GET",
+        format!("/staff/open-shifts?from={from}&to={to}"),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{queue}");
+    assert_eq!(queue[0]["status"], json!("claimed"), "waiting for approval");
+    assert_eq!(queue[0]["claimed_by"], json!(f.a));
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let approved = my_claims(&app, &ta, from, to).await;
+    assert_eq!(approved.len(), 1, "{approved:?}");
+    assert_eq!(approved[0]["status"], json!("approved"));
+    assert!(approved[0]["decided_at"].is_string(), "{approved:?}");
+    // Bassem's decline is still his.
+    let still = my_claims(&app, &tb, from, to).await;
+    assert_eq!(still.len(), 1);
+    assert_eq!(still[0]["status"], json!("declined"));
+    // The log holds both, each decided by the owner.
+    let log: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT employee_id, status, decided_by FROM staff_open_shift_claims ORDER BY created_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        log,
+        vec![
+            (f.b, "declined".to_string(), Some(f.owner)),
+            (f.a, "approved".to_string(), Some(f.owner)),
+        ]
+    );
+}
+
+/// Hunt B-H1-1: a manager taking a shift back while its claim waits closes
+/// the claim as declined; it stays in the claimer's Requests.
+#[sqlx::test]
+async fn a_claim_on_a_shift_taken_back_is_declined(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let tb = phone_token(&pool, f.b).await;
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/cancel"),
+        f.manager()
+    ))
+    .await;
+    assert_eq!(s, 204);
+    let mine = my_claims(&app, &tb, today(), today() + Duration::days(13)).await;
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0]["status"], json!("declined"));
+    assert!(mine[0]["decided_at"].is_string());
+}
+
+/// Hunt B-H1-1: the claims the open shifts still remember are carried into
+/// the log — claimed → pending, filled → approved, taken back while waiting
+/// → declined — and a shift already logged is not logged twice.
+#[sqlx::test]
+async fn the_claims_log_is_backfilled_from_the_open_shifts(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let row = async |status: &str, who: Option<Uuid>| -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date, status, \
+                 claimed_by, claimed_at, decided_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, now() - INTERVAL '1 day', \
+                     CASE WHEN $5 = 'claimed' THEN NULL ELSE $7 END) RETURNING id",
+        )
+        .bind(f.org)
+        .bind(f.br_a)
+        .bind(l)
+        .bind(d)
+        .bind(status)
+        .bind(who)
+        .bind(f.owner)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let claimed = row("claimed", Some(f.a)).await;
+    let filled = row("filled", Some(f.b)).await;
+    let taken_back = row("cancelled", Some(f.a)).await;
+    row("open", None).await;
+    row("cancelled", None).await;
+    let backfill =
+        include_str!("../migrations/20261003100100_dawam_open_shift_claims_backfill.sql");
+    for _ in 0..2 {
+        sqlx::raw_sql(backfill).execute(&pool).await.unwrap();
+    }
+    let mut log: Vec<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT open_shift_id, employee_id, status, decided_by FROM staff_open_shift_claims",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    log.sort();
+    let mut want = vec![
+        (claimed, f.a, "pending".to_string(), None),
+        (filled, f.b, "approved".to_string(), Some(f.owner)),
+        (taken_back, f.a, "declined".to_string(), Some(f.owner)),
+    ];
+    want.sort();
+    assert_eq!(log, want, "once each");
+    let ta = phone_token(&pool, f.a).await;
+    let mut amal: Vec<String> = my_claims(&app, &ta, d, d)
+        .await
+        .iter()
+        .map(|c| c["status"].as_str().unwrap().to_string())
+        .collect();
+    amal.sort();
+    assert_eq!(amal, ["declined", "pending"]);
+}
+
+/// Hunt B-H1-2 (SC-9): an open shift whose start has passed — on_date plus
+/// the block's start, in the branch's time zone — can't be posted (the
+/// owner's 19 Sep post on 24 Sep went out to all five staff) nor claimed:
+/// 409 SHIFT_STARTED, nothing posted, nobody told. One left from before is
+/// not offered to staff, and publishing its week doesn't announce it.
+#[sqlx::test]
+async fn an_open_shift_that_already_started_is_refused(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let dawn = block(&pool, &f, Some(f.br_a), "Dawn", t(0, 0), t(4, 0)).await;
+    let y = today() - Duration::days(1);
+    publish(&app, &f, f.br_a, y).await;
+    publish(&app, &f, f.br_a, today()).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let post = async |shift: Uuid, on: NaiveDate| {
+        call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.owner(),
+            json!({ "branch_id": f.br_a, "work_shift_id": shift, "on_date": on })
+        )
+    };
+    refused!(post(l, y).await, 409, "SHIFT_STARTED");
+    // Today, but the block began at midnight.
+    refused!(post(dawn, today()).await, 409, "SHIFT_STARTED");
+    let (posted, told): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM staff_open_shifts), \
+                (SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((posted, told), (0, 0), "nothing posted, nobody told");
+
+    // The branch's own clock: at UTC+14, a block starting an hour from now
+    // on the UTC clock started 13 hours ago.
+    sqlx::query("UPDATE branches SET timezone = 'Pacific/Kiritimati'::timezone_name WHERE id = $1")
+        .bind(f.br_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let soon = Utc::now() + Duration::hours(1);
+    let later = block(
+        &pool,
+        &f,
+        Some(f.br_a),
+        "Later",
+        t(soon.hour(), soon.minute()),
+        t((soon.hour() + 2) % 24, soon.minute()),
+    )
+    .await;
+    refused!(post(later, today()).await, 409, "SHIFT_STARTED");
+    sqlx::query("UPDATE branches SET timezone = 'UTC'::timezone_name WHERE id = $1")
+        .bind(f.br_a)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // One posted before the check: not offered, not claimable.
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date) \
+         VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.br_a)
+    .bind(l)
+    .bind(y)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let ta = phone_token(&pool, f.a).await;
+    let (s, mine) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={y}&to={y}"),
+        ta
+    ))
+    .await;
+    assert_eq!(s, 200, "{mine}");
+    assert_eq!(mine["open_shifts"], json!([]), "not offered: {mine}");
+    refused!(
+        call!(app, "POST", format!("/staff/open-shifts/{old}/claim"), ta),
+        409,
+        "SHIFT_STARTED"
+    );
+    let (status, logged): (String, i64) = sqlx::query_as(
+        "SELECT status, (SELECT COUNT(*) FROM staff_open_shift_claims) \
+           FROM staff_open_shifts WHERE id = $1",
+    )
+    .bind(old)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), logged), ("open", 0));
+    // Publishing its week again (after an unpublish) doesn't announce it.
+    sqlx::query("DELETE FROM staff_week_publications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    publish(&app, &f, f.br_a, y).await;
+    let told: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE key = 'staff.n_open_shift'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(told, 0, "a started shift is not announced");
+}
+
+/// Hunt B-H1-3 (SC-9): a manager who posts an open shift — or publishes the
+/// week that announces it — isn't told to claim it; the rest of the branch
+/// is.
+#[sqlx::test]
+async fn the_poster_is_not_told_of_their_own_open_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Karim, the manager, also works at A.
+    employee(
+        &pool,
+        f.org,
+        "Karim",
+        Some(f.manager),
+        Some("+201060000009"),
+        true,
+        &[f.br_a],
+        600_000,
+    )
+    .await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let told = async || -> Vec<Uuid> {
+        let mut who: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT employee_id FROM staff_notifications \
+              WHERE key IN ('staff.n_open_shift', 'staff.n_open_shifts_week')",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        who.sort();
+        sqlx::query("DELETE FROM staff_notifications")
+            .execute(&pool)
+            .await
+            .unwrap();
+        who
+    };
+    told().await;
+    let mut others = vec![f.a, f.b];
+    others.sort();
+    let post = async |on: NaiveDate| {
+        let (s, body) = done(call!(
+            app,
+            "POST",
+            "/staff/open-shifts",
+            f.manager(),
+            json!({ "branch_id": f.br_a, "work_shift_id": l, "on_date": on })
+        ))
+        .await;
+        assert_eq!(s, 201, "{body}");
+    };
+    post(d).await;
+    assert_eq!(told().await, others, "Karim posted it");
+    // Posted into a draft week, announced when Karim publishes it.
+    let next = d + Duration::days(7);
+    post(next).await;
+    assert_eq!(
+        told().await,
+        Vec::<Uuid>::new(),
+        "a draft week tells nobody"
+    );
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/roster/publish",
+        f.manager(),
+        json!({ "branch_id": f.br_a, "week_start": next })
+    ))
+    .await;
+    assert_eq!(s, 204, "{body}");
+    assert_eq!(told().await, others, "Karim published it");
+}
+
+/// Hunt B-H1-4 (SC-9): an open shift carries when it was claimed — the app
+/// stamped claims with its refresh time, so each looked newest. Null while
+/// open; the claim's own time on every view of it.
+#[sqlx::test]
+async fn an_open_shift_says_when_it_was_claimed(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let (from, to) = (today(), today() + Duration::days(13));
+    let queue = async || -> Value {
+        let (s, body) = done(call!(
+            app,
+            "GET",
+            format!("/staff/open-shifts?from={from}&to={to}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+        body[0].clone()
+    };
+    assert!(queue().await["claimed_at"].is_null(), "open: not claimed");
+    let tb = phone_token(&pool, f.b).await;
+    let (s, claimed) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200, "{claimed}");
+    let at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT claimed_at FROM staff_open_shifts WHERE id = $1::uuid")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let parse = |v: &Value| -> DateTime<Utc> {
+        v.as_str()
+            .unwrap_or_else(|| panic!("no claimed_at: {v}"))
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(parse(&claimed["claimed_at"]), at, "the claim's answer");
+    assert_eq!(
+        parse(&queue().await["claimed_at"]),
+        at,
+        "the manager's queue"
+    );
+    let (s, mine) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={from}&to={to}"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200, "{mine}");
+    assert_eq!(
+        parse(&mine["open_shifts"][0]["claimed_at"]),
+        at,
+        "my roster"
+    );
+    assert_eq!(parse(&mine["my_claims"][0]["claimed_at"]), at, "my claims");
+}
+
+/// Hunt B-H1-5 (SC-9, S-162): the claimer takes back a claim while it waits,
+/// as every other pending request can be cancelled by the one who asked. The
+/// shift is open again, the claim stays in their Requests as withdrawn, and
+/// the managers told of the claim hear. Anything else is a coded 409.
+#[sqlx::test]
+async fn a_claimer_withdraws_a_waiting_claim(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
+    let withdraw = async |token: &str| {
+        call!(
+            app,
+            "POST",
+            format!("/staff/open-shifts/{id}/withdraw"),
+            token
+        )
+    };
+    refused!(withdraw(&tb).await, 409, "NO_PENDING_CLAIM");
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let told = async |key: &str| -> Vec<Uuid> {
+        let mut who: Vec<Uuid> =
+            sqlx::query_scalar("SELECT employee_id FROM staff_notifications WHERE key = $1")
+                .bind(key)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        who.sort();
+        who
+    };
+    let managers = told("staff.n_claim").await;
+    assert!(managers.contains(&f.owner_emp), "{managers:?}");
+
+    // Only the claimer, only from the app.
+    refused!(withdraw(&ta).await, 409, "NO_PENDING_CLAIM");
+    let (s, _) = done(withdraw(&f.owner()).await).await;
+    assert_eq!(s, 403, "a manager's account isn't the claimer");
+    let (s, row) = done(withdraw(&tb).await).await;
+    assert_eq!(s, 200, "{row}");
+    assert_eq!(row["id"], json!(id));
+    assert_eq!(row["status"], json!("open"));
+    assert!(
+        row["claimed_by"].is_null() && row["claimed_at"].is_null(),
+        "{row}"
+    );
+    let mine = my_claims(&app, &tb, d, d).await;
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0]["status"], json!("withdrawn"));
+    assert!(mine[0]["decided_at"].is_string(), "{mine:?}");
+    assert_eq!(told("staff.n_claim_withdrawn").await, managers);
+    let args: Value = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE key = 'staff.n_claim_withdrawn' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(args, json!({ "name": "Bassem", "date": d }));
+    refused!(withdraw(&tb).await, 409, "NO_PENDING_CLAIM");
+
+    // Open again: Amal claims it and the owner approves — too late to withdraw.
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        ta
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
+    refused!(withdraw(&ta).await, 409, "CLAIM_ALREADY_DECIDED");
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{}/withdraw", Uuid::new_v4()),
+        ta
+    ))
+    .await;
+    assert_eq!(s, 404);
+}
+
+/// A pending cover by Amal of Bassem's Morning `day` days ago, with its flag.
+async fn pending_cover(pool: &PgPool, f: &F, shift: Uuid, day: i64) -> (Uuid, Uuid) {
+    let rec: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
+         business_date, status, check_in_method, covered_employee_id, cover_status) \
+         VALUES ($1, $2, $3, $4, $5, 'present', 'cover', $6, 'pending') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .bind(shift)
+    .bind(today() - Duration::days(day))
+    .bind(f.b)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind) \
+         VALUES ($1, $2, $3, $4, 'cover') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .bind(rec)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (rec, flag)
+}
+
+/// Hunt H2-B3 (CV-3, CV-5): a cover flag is settled only by settling its
+/// cover. Ignore, excuse or deduct resolved the flag and left the cover
+/// pending for ever: now 400 FLAG_COVER_CONFIRM_OR_REJECT, nothing written.
+/// "reject" on the flag rejects the cover, as "confirm" confirms it.
+#[sqlx::test]
+async fn a_cover_flag_is_confirmed_or_rejected_only(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let (rec, flag) = pending_cover(&pool, &f, m, 1).await;
+    for action in ["ignore", "excuse_paid", "excuse_unpaid", "deduct", "revoke"] {
+        refused!(
+            call!(
+                app,
+                "PATCH",
+                format!("/staff/flags/{flag}"),
+                f.owner(),
+                json!({ "action": action, "amount_piastres": 5_000 })
+            ),
+            400,
+            "FLAG_COVER_CONFIRM_OR_REJECT"
+        );
+    }
+    let state = async || -> (Option<String>, Option<String>, i64) {
+        sqlx::query_as(
+            "SELECT a.cover_status, f.resolution, \
+                    (SELECT COUNT(*) FROM payroll_deductions WHERE employee_id = a.employee_id) \
+               FROM attendance_records a \
+               JOIN attendance_flags f ON f.attendance_record_id = a.id AND f.kind = 'cover' \
+              WHERE a.id = $1",
+        )
+        .bind(rec)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        state().await,
+        (Some("pending".into()), None, 0),
+        "nothing written"
+    );
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/flags/{flag}"),
+        f.owner(),
+        json!({ "action": "reject" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["resolution"], json!("rejected"));
+    assert_eq!(
+        state().await,
+        (Some("rejected".into()), Some("rejected".into()), 0)
+    );
+    assert!(
+        keys_for(&pool, f.a)
+            .await
+            .contains(&"staff.n_cover_rejected".to_string())
+    );
+    refused!(
+        call!(
+            app,
+            "PATCH",
+            format!("/staff/flags/{flag}"),
+            f.owner(),
+            json!({ "action": "confirm" })
+        ),
+        404,
+        "FLAG_HANDLED"
+    );
+}
+
+/// Hunt H2-B3: a flag is handled once. Two deductions landing at the same
+/// moment wrote two pay lines (the flag's UPDATE had no `resolution IS
+/// NULL` guard); now one wins and the other is FLAG_HANDLED.
+#[sqlx::test]
+async fn a_flag_is_deducted_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind, minutes_away) \
+         VALUES ($1, $2, $3, 'left_mid_shift', 30) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let owner = f.owner();
+    let deduct = || {
+        let req = authed(
+            test::TestRequest::patch().uri(&format!("/staff/flags/{flag}")),
+            &owner,
+        )
+        .set_json(json!({ "action": "deduct", "amount_piastres": 5_000 }))
+        .to_request();
+        test::call_service(&app, req)
+    };
+    let (one, two) = futures::join!(deduct(), deduct());
+    let mut codes = [one.status().as_u16(), two.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 404], "one wins");
+    let lines: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM payroll_deductions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(lines, 1, "one pay line");
+    // The D8 audit row is written with the line, so once too.
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM payroll_audit_log WHERE action = 'adjustment.create' \
+          AND details->>'flag_id' = $1",
+    )
+    .bind(flag.to_string())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1, "audited once");
+    let told = keys_for(&pool, f.a)
+        .await
+        .iter()
+        .filter(|k| *k == "staff.n_deduction_added")
+        .count();
+    assert_eq!(told, 1, "told once");
+    refused!(deduct().await, 404, "FLAG_HANDLED");
+}
+
+/// Hunt H2-B6: an old pending swap stays visible and decidable behind any
+/// number of newer ones. The list stopped at the newest 100 (so Approvals
+/// lost it), and a decision looked the swap up in that same page (404).
+#[sqlx::test]
+async fn an_old_pending_swap_is_listed_and_decided(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(17, 0), t(21, 0)).await;
+    // 1 old pending, then 105 newer pending and 105 newer rejected ones.
+    let old: Uuid = sqlx::query_scalar(
+        "INSERT INTO staff_swaps (org_id, requester_id, requester_date, requester_shift_id, \
+             peer_id, peer_date, peer_shift_id, status, created_at) \
+         VALUES ($1, $2, DATE '2027-01-01', $4, $3, DATE '2027-01-01', $5, 'pending', \
+                 now() - INTERVAL '90 days') RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.b)
+    .bind(m)
+    .bind(e)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO staff_swaps (org_id, requester_id, requester_date, requester_shift_id, \
+             peer_id, peer_date, peer_shift_id, status, created_at) \
+         SELECT $1, $2, DATE '2027-02-01' + g, $4, $3, DATE '2027-02-01' + g, $5, \
+                CASE WHEN g % 2 = 0 THEN 'pending' ELSE 'rejected' END, \
+                now() - INTERVAL '1 minute' * g \
+           FROM generate_series(1, 210) g",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.b)
+    .bind(m)
+    .bind(e)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let listed = async |uri: &str| -> Vec<Value> {
+        let (s, body) = done(call!(app, "GET", uri, f.owner())).await;
+        assert_eq!(s, 200, "{body}");
+        body.as_array().unwrap().clone()
+    };
+    let all = listed("/staff/swaps").await;
+    assert!(
+        all.iter().any(|s| s["id"] == json!(old)),
+        "the old pending swap is listed ({} rows)",
+        all.len()
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|s| s["status"] == json!("pending"))
+            .count(),
+        106,
+        "every pending one"
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|s| s["status"] == json!("rejected"))
+            .count(),
+        100,
+        "decided ones stay a page"
+    );
+    let pending = listed("/staff/swaps?status=pending").await;
+    assert_eq!(pending.len(), 106);
+    let (s, body) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/swaps/{old}/decision"),
+        f.owner(),
+        json!({ "approve": false })
+    ))
+    .await;
+    assert_eq!(s, 204, "{body}");
+    // The staff app's list keeps every open one of mine too.
+    let (s, mine) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={}&to={}", today(), today()),
+        phone_token(&pool, f.a).await
+    ))
+    .await;
+    assert_eq!(s, 200, "{mine}");
+    let swaps = mine["swaps"].as_array().unwrap();
+    assert_eq!(
+        swaps
+            .iter()
+            .filter(|s| s["status"] == json!("pending"))
+            .count(),
+        105
+    );
+}
+
+/// Hunt H2-B8 (SC-5, RO-6): a business-wide block put on a two-branch
+/// person's day from branch B's board is worked at B — it landed on their
+/// first branch A's roster and vanished from B's board. The day records
+/// the branch it was set from (`PutDayRequest.branch_id`) for a
+/// business-wide block; a claim, a move or a swap carries where the shift
+/// was worked; an old client that sends no branch keeps what the day had.
+#[sqlx::test]
+async fn a_business_wide_block_set_from_branch_b_is_worked_at_b(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    // Amal works at A (first) and B.
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let w = block(&pool, &f, None, "Wide", t(9, 0), t(13, 0)).await;
+    let own = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let d = today() + Duration::days(3);
+    let board = async |branch: Uuid, on: NaiveDate| -> Vec<(Uuid, Uuid)> {
+        let (s, body) = done(call!(
+            app,
+            "GET",
+            format!("/staff/roster?branch_id={branch}&from={on}&to={on}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+        body["shifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["employee_id"].as_str().unwrap().parse().unwrap(),
+                    s["work_shift_id"].as_str().unwrap().parse().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let put = async |body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", f.owner(), body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": w }, { "work_shift_id": own }] }),
+    )
+    .await;
+    assert_eq!(board(f.br_b, d).await, vec![(f.a, w)], "on B's board");
+    assert_eq!(
+        board(f.br_a, d).await,
+        vec![(f.a, own)],
+        "A keeps its own block"
+    );
+    // An old client sends no branch: the day keeps where each block is.
+    put(json!({ "employee_id": f.a, "on_date": d,
+                "shifts": [{ "work_shift_id": w, "start_time": "09:30:00", "end_time": "13:00:00" },
+                           { "work_shift_id": own }] }))
+    .await;
+    assert_eq!(board(f.br_b, d).await, vec![(f.a, w)], "still B's");
+    // Not one of Amal's branches; and not the A manager's to set at B.
+    let br_c = branch(&pool, f.org, "C").await;
+    refused!(
+        call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            f.owner(),
+            json!({ "employee_id": f.a, "on_date": d, "branch_id": br_c,
+                    "shifts": [{ "work_shift_id": w }] })
+        ),
+        400,
+        "EMPLOYEE_NOT_AT_BRANCH"
+    );
+    let (s, _) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.manager(),
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": w }] })
+    ))
+    .await;
+    assert_eq!(s, 403, "the A manager can't set a day at B");
+
+    // Moved to Xavier (B only), it stays at B.
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules/days/move",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d, "work_shift_id": w, "to_employee_id": f.x })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(board(f.br_b, d).await, vec![(f.x, w)], "moved, still at B");
+
+    // An open shift on the business-wide block posted at B: claimed and
+    // approved, it is worked at B.
+    let d2 = d + Duration::days(1);
+    publish(&app, &f, f.br_b, d2).await;
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        "/staff/open-shifts",
+        f.owner(),
+        json!({ "branch_id": f.br_b, "work_shift_id": w, "on_date": d2 })
+    ))
+    .await;
+    assert_eq!(s, 201, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    let (s, body) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        phone_token(&pool, f.a).await
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
+    assert_eq!(board(f.br_b, d2).await, vec![(f.a, w)], "the claim is at B");
+    assert!(board(f.br_a, d2).await.is_empty());
+}
+
+/// Hunt H2-B9 (AT-13): the refusals a person can hit on claims, swaps, days,
+/// requests and decisions carry a machine `code` (and `vars` where a figure
+/// matters), so the Arabic apps word them instead of showing English.
+#[sqlx::test]
+async fn roster_refusals_carry_codes(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let l = block(&pool, &f, Some(f.br_a), "Lunch", t(13, 0), t(16, 0)).await;
+    let d = today() + Duration::days(3);
+    publish(&app, &f, f.br_a, d).await;
+    let id = post_open(&app, &f, l, d).await;
+    let (ta, tb) = (phone_token(&pool, f.a).await, phone_token(&pool, f.b).await);
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        format!("/staff/open-shifts/{id}/claim"),
+        tb
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let (s, _) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(s, 200, "a claim decision answers ClaimDecision (M26)");
+    let flag: Uuid = sqlx::query_scalar(
+        "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind, minutes_away) \
+         VALUES ($1, $2, $3, 'left_mid_shift', 30) RETURNING id",
+    )
+    .bind(f.org)
+    .bind(f.a)
+    .bind(f.br_a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let nobody = Uuid::new_v4();
+    let owner = f.owner();
+    let cases: Vec<(&str, String, &str, Value, u16, &str)> = vec![
+        // claims
+        (
+            "PATCH",
+            format!("/staff/open-shifts/{id}/decision"),
+            &owner,
+            json!({ "approve": false }),
+            409,
+            "ALREADY_DECIDED",
+        ),
+        (
+            "PATCH",
+            format!("/staff/open-shifts/{nobody}/decision"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_CLAIM_WAITING",
+        ),
+        (
+            "POST",
+            format!("/staff/open-shifts/{nobody}/claim"),
+            &ta,
+            Value::Null,
+            404,
+            "OPEN_SHIFT_NOT_FOUND",
+        ),
+        (
+            "POST",
+            format!("/staff/open-shifts/{id}/cancel"),
+            &owner,
+            Value::Null,
+            409,
+            "OPEN_SHIFT_CLOSED",
+        ),
+        // swaps
+        (
+            "POST",
+            "/staff/me/swaps".into(),
+            &ta,
+            json!({ "my_date": d, "my_shift_id": l, "peer_id": f.a, "peer_date": d, "peer_shift_id": l }),
+            400,
+            "PICK_A_COLLEAGUE",
+        ),
+        (
+            "POST",
+            "/staff/me/swaps".into(),
+            &ta,
+            json!({ "my_date": d, "my_shift_id": l, "peer_id": nobody, "peer_date": d, "peer_shift_id": l }),
+            404,
+            "EMPLOYEE_NOT_FOUND",
+        ),
+        (
+            "POST",
+            "/staff/me/swaps".into(),
+            &ta,
+            json!({ "my_date": d, "my_shift_id": l, "peer_id": f.b, "peer_date": d, "peer_shift_id": l }),
+            409,
+            "NOT_ROSTERED",
+        ),
+        (
+            "PATCH",
+            format!("/staff/me/swaps/{nobody}"),
+            &ta,
+            json!({ "approve": true }),
+            404,
+            "NO_SWAP_WAITING",
+        ),
+        (
+            "POST",
+            format!("/staff/me/swaps/{nobody}/cancel"),
+            &ta,
+            Value::Null,
+            404,
+            "NO_SWAP_TO_CANCEL",
+        ),
+        (
+            "PATCH",
+            format!("/staff/swaps/{nobody}/decision"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_SWAP_WAITING",
+        ),
+        // ranges
+        (
+            "GET",
+            format!("/staff/me/roster?from={d}&to={}", d + Duration::days(100)),
+            &ta,
+            Value::Null,
+            400,
+            "RANGE_TOO_WIDE",
+        ),
+        (
+            "GET",
+            format!("/staff/me/roster?from={d}&to={}", d - Duration::days(1)),
+            &ta,
+            Value::Null,
+            400,
+            "RANGE_BACKWARDS",
+        ),
+        // days and blocks
+        (
+            "PUT",
+            "/staff/schedules/days".into(),
+            &owner,
+            json!({ "employee_id": f.a, "on_date": d, "shifts": [{ "work_shift_id": l, "start_time": "10:00:00" }] }),
+            400,
+            "TIMES_BOTH_OR_NEITHER",
+        ),
+        (
+            "PUT",
+            "/staff/schedules/overrides".into(),
+            &owner,
+            json!({ "employee_id": f.a, "on_date": d, "work_shift_id": null, "start_time": "10:00:00", "end_time": "12:00:00" }),
+            400,
+            "DAY_OFF_NO_TIMES",
+        ),
+        (
+            "POST",
+            "/staff/schedules/days/move".into(),
+            &owner,
+            json!({ "employee_id": f.a, "to_employee_id": f.a, "on_date": d, "work_shift_id": l }),
+            400,
+            "PICK_SOMEONE_ELSE",
+        ),
+        (
+            "POST",
+            "/staff/work-shifts".into(),
+            &owner,
+            json!({ "name": " ", "start_time": "08:00:00", "end_time": "12:00:00" }),
+            400,
+            "SHIFT_NAME_REQUIRED",
+        ),
+        (
+            "DELETE",
+            format!("/staff/schedules/{nobody}"),
+            &owner,
+            Value::Null,
+            404,
+            "ASSIGNMENT_NOT_FOUND",
+        ),
+        (
+            "PUT",
+            "/staff/me/preferences".into(),
+            &ta,
+            json!({ "pref_time": "night", "cant_work_days": [] }),
+            400,
+            "PREFERENCES_INVALID",
+        ),
+        // requests
+        (
+            "POST",
+            "/staff/me/requests".into(),
+            &ta,
+            json!({ "kind": "nap", "on_date": d }),
+            400,
+            "REQUEST_KIND_UNKNOWN",
+        ),
+        (
+            "POST",
+            "/staff/me/requests".into(),
+            &ta,
+            json!({ "kind": "late_arrival", "on_date": d }),
+            400,
+            "LATE_ARRIVAL_TIME_REQUIRED",
+        ),
+        (
+            "PATCH",
+            format!("/staff/requests/{nobody}/decision"),
+            &owner,
+            json!({ "status": "approved" }),
+            404,
+            "REQUEST_NOT_FOUND",
+        ),
+        (
+            "GET",
+            "/staff/requests?status=maybe".into(),
+            &owner,
+            Value::Null,
+            400,
+            "STATUS_UNKNOWN",
+        ),
+        // decisions on attendance
+        (
+            "PATCH",
+            format!("/staff/attendance/{nobody}/cover"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_COVER_WAITING",
+        ),
+        (
+            "PATCH",
+            format!("/staff/attendance/{nobody}/overtime"),
+            &owner,
+            json!({ "approve": true }),
+            404,
+            "NO_OVERTIME_WAITING",
+        ),
+        (
+            "PATCH",
+            format!("/staff/flags/{flag}"),
+            &owner,
+            json!({ "action": "deduct" }),
+            400,
+            "AMOUNT_REQUIRED",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (method, uri, token, body, status, code) in cases {
+        let (s, out) = done(call!(app, method, uri, token, body)).await;
+        if s != status || out["code"] != json!(code) {
+            wrong.push(format!(
+                "{method} {uri}: want {status} {code}, got {s} {out}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // A figure the app words: the widest range.
+    let (_, out) = done(call!(
+        app,
+        "GET",
+        format!("/staff/me/roster?from={d}&to={}", d + Duration::days(100)),
+        ta
+    ))
+    .await;
+    assert_eq!(out["vars"]["max_days"], json!(62), "{out}");
+    let (_, out) = done(call!(
+        app,
+        "PATCH",
+        format!("/staff/open-shifts/{id}/decision"),
+        f.owner(),
+        json!({ "approve": true })
+    ))
+    .await;
+    assert_eq!(out["vars"]["status"], json!("approved"), "{out}");
+}
+
+/// Minor default M22: one edit, one "your shift changed" notice per person.
+/// A drag to another day reaches the server as two day edits; the second
+/// joins the first (unread, within two minutes) with both dates.
+#[sqlx::test]
+async fn one_edit_tells_each_person_once(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    let m = block(&pool, &f, Some(f.br_a), "Morning", t(8, 0), t(12, 0)).await;
+    let e = block(&pool, &f, Some(f.br_a), "Evening", t(15, 0), t(19, 0)).await;
+    let ws = week_start(today() + Duration::days(7));
+    publish(&app, &f, f.br_a, ws).await;
+    let (d1, d2) = (ws + Duration::days(1), ws + Duration::days(3));
+    override_row(&pool, &f, f.a, d1, Some(m)).await;
+    sqlx::query("DELETE FROM staff_notifications")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The drag: Morning leaves d1 and lands on d2.
+    for (on, shifts) in [(d1, json!([])), (d2, json!([{ "work_shift_id": m }]))] {
+        let (s, body) = done(call!(
+            app,
+            "PUT",
+            "/staff/schedules/days",
+            f.manager(),
+            json!({ "employee_id": f.a, "on_date": on, "shifts": shifts })
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+    }
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_shift_changed'",
+    )
+    .bind(f.a)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["date"], json!(d1));
+    assert_eq!(told[0]["dates"], json!([d1, d2]));
+    // Read, the next edit is a new notice.
+    sqlx::query("UPDATE staff_notifications SET read_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (s, _) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.manager(),
+        json!({ "employee_id": f.a, "on_date": d2, "shifts": [{ "work_shift_id": e }] })
+    ))
+    .await;
+    assert_eq!(s, 200);
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_shift_changed'",
+    )
+    .bind(f.a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 2);
+}
+
+/// Minor default M24: a public holiday a week away that nobody has decided
+/// is brought to whoever decides it (the owner, D3), once, by the sweep.
+/// Decided or far-off holidays aren't.
+#[sqlx::test]
+async fn an_undecided_holiday_a_week_away_is_brought_to_the_owner_once(pool: PgPool) {
+    let f = seed(&pool).await;
+    let (soon, decided, far) = (
+        today() + Duration::days(3),
+        today() + Duration::days(2),
+        today() + Duration::days(20),
+    );
+    for (on, decision) in [(soon, None), (decided, Some("holiday")), (far, None)] {
+        sqlx::query(
+            "INSERT INTO staff_holidays (org_id, on_date, name_en, name_ar, decision) \
+             VALUES ($1, $2, 'Test day', 'يوم تجربة', $3)",
+        )
+        .bind(f.org)
+        .bind(on)
+        .bind(decision)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    for _ in 0..2 {
+        madar_rust::staff::jobs::remind_holidays(&pool)
+            .await
+            .unwrap();
+    }
+    let told: Vec<Value> = sqlx::query_scalar(
+        "SELECT args FROM staff_notifications WHERE employee_id = $1 \
+            AND key = 'staff.n_holiday_undecided' ORDER BY args->>'date'",
+    )
+    .bind(f.owner_emp)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let ours: Vec<&Value> = told
+        .iter()
+        .filter(|a| [json!(soon), json!(decided), json!(far)].contains(&a["date"]))
+        .collect();
+    assert_eq!(ours.len(), 1, "{told:?}");
+    assert_eq!(ours[0]["date"], json!(soon));
+    assert_eq!(ours[0]["name_en"], "Test day");
+    let staff: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM staff_notifications WHERE employee_id = ANY($1) \
+            AND key = 'staff.n_holiday_undecided'",
+    )
+    .bind(vec![f.a, f.b, f.x])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(staff, 0, "only whoever decides");
+}
+
+/// Hunt H2-B8b (SC-5, RO-6): a business-wide PATTERN for a two-branch
+/// person, set from branch B's board, is worked at B every week — it
+/// resolved to their first branch A. `POST /staff/schedules` takes the
+/// board's `branch_id`; a day edit on such a date keeps it at B.
+#[sqlx::test]
+async fn a_business_wide_pattern_set_from_branch_b_is_worked_at_b(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let w = block(&pool, &f, None, "Wide", t(9, 0), t(13, 0)).await;
+    let d = today() + Duration::days(3);
+    let board = async |branch: Uuid, on: NaiveDate| -> Vec<(Uuid, Uuid)> {
+        let (s, body) = done(call!(
+            app,
+            "GET",
+            format!("/staff/roster?branch_id={branch}&from={on}&to={on}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{body}");
+        body["shifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["employee_id"].as_str().unwrap().parse().unwrap(),
+                    s["work_shift_id"].as_str().unwrap().parse().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let (s, row) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules",
+        f.owner(),
+        json!({ "employee_id": f.a, "work_shift_id": w, "day_of_week": dow(d),
+                "effective_from": today(), "branch_id": f.br_b })
+    ))
+    .await;
+    assert_eq!(s, 201, "{row}");
+    assert_eq!(row["branch_id"], json!(f.br_b), "{row}");
+    for week in [0, 7, 14] {
+        let on = d + Duration::days(week);
+        assert_eq!(board(f.br_b, on).await, vec![(f.a, w)], "B's, week +{week}");
+        assert!(board(f.br_a, on).await.is_empty(), "not A's, week +{week}");
+    }
+    // A day edit on that date keeps the pattern's block at B.
+    let (s, body) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days/times",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d, "work_shift_id": w,
+                "start_time": "09:30:00", "end_time": "13:00:00" })
+    ))
+    .await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(
+        board(f.br_b, d).await,
+        vec![(f.a, w)],
+        "still B's after an edit"
+    );
+    // Not one of Amal's branches; not the A manager's to set at B.
+    let br_c = branch(&pool, f.org, "C").await;
+    refused!(
+        call!(
+            app,
+            "POST",
+            "/staff/schedules",
+            f.owner(),
+            json!({ "employee_id": f.a, "work_shift_id": w, "branch_id": br_c })
+        ),
+        400,
+        "EMPLOYEE_NOT_AT_BRANCH"
+    );
+    let (s, _) = done(call!(
+        app,
+        "POST",
+        "/staff/schedules",
+        f.manager(),
+        json!({ "employee_id": f.a, "work_shift_id": w, "branch_id": f.br_b })
+    ))
+    .await;
+    assert_eq!(s, 403);
+    // The list says where each row is worked.
+    let (s, rows) = done(call!(
+        app,
+        "GET",
+        format!("/staff/schedules?employee_id={}", f.a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{rows}");
+    assert_eq!(rows[0]["branch_id"], json!(f.br_b), "{rows}");
+}
+
+/// Hunt H2-D15 [data loss] (SC-5): the boards send only the viewed branch's
+/// blocks, and `PUT /staff/schedules/days` replaced the WHOLE date — a
+/// two-branch person's shift at the other branch vanished. With
+/// `branch_id` the PUT replaces only the blocks worked at that branch.
+#[sqlx::test]
+async fn a_day_put_from_one_branch_keeps_the_other_branchs_blocks(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let a_late = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(7, 0), t(10, 0)).await;
+    let b_noon = block(&pool, &f, Some(f.br_b), "B noon", t(11, 0), t(14, 0)).await;
+    let wide = block(&pool, &f, None, "Wide", t(15, 0), t(17, 0)).await;
+    let d = today() + Duration::days(3);
+    let put = async |body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", f.owner(), body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    // A's board sets the day: A late (own times) and the business-wide
+    // block at A; B's board adds its morning.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a,
+                "shifts": [{ "work_shift_id": a_late, "start_time": "18:30:00", "end_time": "22:00:00" },
+                           { "work_shift_id": wide }] }))
+    .await;
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] }),
+    )
+    .await;
+    let mut want = vec![b_morning, wide, a_late];
+    assert_eq!(shifts_on(&pool, f.a, d).await, want, "B added, A's kept");
+    // B clears its part: A's blocks stay, with A late's own times.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b, "shifts": [] })).await;
+    want = vec![wide, a_late];
+    assert_eq!(
+        shifts_on(&pool, f.a, d).await,
+        want,
+        "a PUT from B with [] keeps A's"
+    );
+    let times: (NaiveTime, bool) = sqlx::query_as(
+        "SELECT start_local, times_edited FROM dawam_roster(ARRAY[$1]::uuid[], $2, $2) \
+          WHERE work_shift_id = $3",
+    )
+    .bind(f.a)
+    .bind(d)
+    .bind(a_late)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(times, (t(18, 30), true), "A late keeps its own times");
+    // B sets a new block: A's still kept.
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_noon }] }),
+    )
+    .await;
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_noon, wide, a_late]);
+    // B may take the business-wide block over by naming it.
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_noon }, { "work_shift_id": wide }] }),
+    )
+    .await;
+    let at: Uuid = sqlx::query_scalar(
+        "SELECT branch_id FROM dawam_roster(ARRAY[$1]::uuid[], $2, $2) WHERE work_shift_id = $3",
+    )
+    .bind(f.a)
+    .bind(d)
+    .bind(wide)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(at, f.br_b);
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_noon, wide, a_late]);
+    // A clears its part and B its own: a day off.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a, "shifts": [] })).await;
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_noon, wide]);
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b, "shifts": [] })).await;
+    assert!(shifts_on(&pool, f.a, d).await.is_empty(), "a day off");
+
+    // A date on the pattern: A's pattern block stays when B sets its part.
+    pattern(&pool, &f, f.a, a_late, None).await;
+    let d2 = d + Duration::days(1);
+    put(
+        json!({ "employee_id": f.a, "on_date": d2, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] }),
+    )
+    .await;
+    assert_eq!(shifts_on(&pool, f.a, d2).await, vec![b_morning, a_late]);
+    // An old client (no branch) still sets the whole date.
+    put(json!({ "employee_id": f.a, "on_date": d2, "shifts": [{ "work_shift_id": b_morning }] }))
+        .await;
+    assert_eq!(shifts_on(&pool, f.a, d2).await, vec![b_morning]);
+}
+
+/// `a` works at A and B too (A stays their first branch).
+async fn also_at_b(pool: &PgPool, f: &F) {
+    sqlx::query(
+        "INSERT INTO employee_branches (org_id, employee_id, branch_id, assigned_at) \
+         VALUES ($3, $1, $2, now() + INTERVAL '1 day')",
+    )
+    .bind(f.a)
+    .bind(f.br_b)
+    .bind(f.org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn overrides_on(pool: &PgPool, who: Uuid, on: NaiveDate) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2",
+    )
+    .bind(who)
+    .bind(on)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// BUG-4 / P7 [data loss]: "Back to pattern" on branch A's board deleted
+/// the person's shift at branch B too. A reset with `branch_id` puts only
+/// that branch's part of the date back on the pattern; the other branch's
+/// blocks stay. With no branch, only what the caller may edit is reset
+/// (an owner: the whole date, as before).
+#[sqlx::test]
+async fn back_to_pattern_at_one_branch_keeps_the_other_branchs_shift(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    also_at_b(&pool, &f).await;
+    let a_late = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let a_early = block(&pool, &f, Some(f.br_a), "A early", t(6, 0), t(9, 0)).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(10, 0), t(13, 0)).await;
+    pattern(&pool, &f, f.a, a_late, None).await;
+    let d = today() + Duration::days(3);
+    let put = async |token: String, body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", token, body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    let set_up = async || {
+        put(
+            f.owner(),
+            json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a,
+                    "shifts": [{ "work_shift_id": a_early }] }),
+        )
+        .await;
+        put(
+            f.owner(),
+            json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                    "shifts": [{ "work_shift_id": b_morning }] }),
+        )
+        .await;
+        assert_eq!(shifts_on(&pool, f.a, d).await, vec![a_early, b_morning]);
+    };
+    set_up().await;
+
+    // A's board: A back on its pattern, B's morning kept.
+    let (s, out) = done(call!(
+        app,
+        "DELETE",
+        format!(
+            "/staff/schedules/days?employee_id={}&on_date={d}&branch_id={}",
+            f.a, f.br_a
+        ),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(
+        shifts_on(&pool, f.a, d).await,
+        vec![b_morning, a_late],
+        "{out}"
+    );
+    // B's board then: nothing of the date's own is left, so no rows at all.
+    let (s, out) = done(call!(
+        app,
+        "DELETE",
+        format!(
+            "/staff/schedules/days?employee_id={}&on_date={d}&branch_id={}",
+            f.a, f.br_b
+        ),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![a_late]);
+    assert_eq!(overrides_on(&pool, f.a, d).await, 0, "back on the pattern");
+    assert_eq!(out["follows_pattern"], json!(true), "{out}");
+
+    // With no branch, A's manager (who can't edit B) resets only A's part.
+    set_up().await;
+    let (s, out) = done(call!(
+        app,
+        "DELETE",
+        format!("/staff/schedules/days?employee_id={}&on_date={d}", f.a),
+        f.manager()
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_morning, a_late]);
+    // The owner, with no branch, resets the whole date, as before.
+    let (s, _) = done(call!(
+        app,
+        "DELETE",
+        format!("/staff/schedules/days?employee_id={}&on_date={d}", f.a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200);
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![a_late]);
+    assert_eq!(overrides_on(&pool, f.a, d).await, 0);
+
+    // A branch the person doesn't work at is refused.
+    refused!(
+        call!(
+            app,
+            "DELETE",
+            format!(
+                "/staff/schedules/days?employee_id={}&on_date={d}&branch_id={}",
+                f.b, f.br_b
+            ),
+            f.owner()
+        ),
+        400,
+        "EMPLOYEE_NOT_AT_BRANCH"
+    );
+}
+
+/// BUG-4 / P7: the board of branch A showed a person's shift at branch B as
+/// "Off". It stays out of `shifts` (a PUT from A never sends it) and is
+/// listed under `elsewhere`, with the branch's name.
+#[sqlx::test]
+async fn the_roster_lists_a_shift_at_another_branch_under_elsewhere(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    also_at_b(&pool, &f).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(10, 0), t(13, 0)).await;
+    let d = today() + Duration::days(3);
+    let (s, out) = done(call!(
+        app,
+        "PUT",
+        "/staff/schedules/days",
+        f.owner(),
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] })
+    ))
+    .await;
+    assert_eq!(s, 200, "{out}");
+    let (s, v) = done(call!(
+        app,
+        "GET",
+        format!("/staff/roster?branch_id={}&from={d}&to={d}", f.br_a),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(
+        v["shifts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["employee_id"] != json!(f.a)),
+        "{v}"
+    );
+    let elsewhere = v["elsewhere"].as_array().expect("elsewhere");
+    assert_eq!(elsewhere.len(), 1, "{v}");
+    let e = &elsewhere[0];
+    assert_eq!(e["employee_id"], json!(f.a));
+    assert_eq!(e["date"], json!(d));
+    assert_eq!(e["branch_id"], json!(f.br_b));
+    assert_eq!(e["branch_name"], json!("B"));
+    assert_eq!(e["work_shift_id"], json!(b_morning));
+    assert_eq!(e["shift_name"], json!("B morning"));
+    assert_eq!(e["start_time"], json!("10:00:00"));
+    assert_eq!(e["end_time"], json!("13:00:00"));
+    // B's own board lists it as its shift, nothing elsewhere.
+    let (_, v) = done(call!(
+        app,
+        "GET",
+        format!("/staff/roster?branch_id={}&from={d}&to={d}", f.br_b),
+        f.owner()
+    ))
+    .await;
+    assert_eq!(v["shifts"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["elsewhere"], json!([]), "{v}");
+}
+
+/// BUG-4 / P7: `date_sets` (what "Back to pattern" is offered on) are per
+/// board: a date changed at B only is not a change on A's board.
+#[sqlx::test]
+async fn date_sets_are_the_boards_own(pool: PgPool) {
+    let app = app!(pool);
+    let f = seed(&pool).await;
+    also_at_b(&pool, &f).await;
+    let a_late = block(&pool, &f, Some(f.br_a), "A late", t(18, 0), t(22, 0)).await;
+    let b_morning = block(&pool, &f, Some(f.br_b), "B morning", t(10, 0), t(13, 0)).await;
+    pattern(&pool, &f, f.a, a_late, None).await;
+    let d = today() + Duration::days(3);
+    let put = async |body: Value| {
+        let (s, out) = done(call!(app, "PUT", "/staff/schedules/days", f.owner(), body)).await;
+        assert_eq!(s, 200, "{out}");
+    };
+    let sets = async |br: Uuid| -> Value {
+        let (s, v) = done(call!(
+            app,
+            "GET",
+            format!("/staff/roster?branch_id={br}&from={d}&to={d}"),
+            f.owner()
+        ))
+        .await;
+        assert_eq!(s, 200, "{v}");
+        v["date_sets"].clone()
+    };
+    put(
+        json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_b,
+                "shifts": [{ "work_shift_id": b_morning }] }),
+    )
+    .await;
+    assert_eq!(
+        sets(f.br_a).await,
+        json!([]),
+        "A's part follows the pattern"
+    );
+    assert_eq!(
+        sets(f.br_b).await,
+        json!([{ "employee_id": f.a, "date": d, "day_off": false }])
+    );
+    // A day off from A's board: a change at A (a day off there), B's kept.
+    put(json!({ "employee_id": f.a, "on_date": d, "branch_id": f.br_a, "shifts": [] })).await;
+    assert_eq!(shifts_on(&pool, f.a, d).await, vec![b_morning]);
+    assert_eq!(
+        sets(f.br_a).await,
+        json!([{ "employee_id": f.a, "date": d, "day_off": true }])
+    );
+    assert_eq!(
+        sets(f.br_b).await,
+        json!([{ "employee_id": f.a, "date": d, "day_off": false }])
+    );
 }

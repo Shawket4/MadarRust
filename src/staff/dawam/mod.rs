@@ -26,7 +26,6 @@ pub mod signin;
 pub mod suggest;
 
 use actix_web::{HttpResponse, web};
-use chrono::{Datelike, Duration, NaiveDate};
 use serde::Deserialize;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -45,10 +44,20 @@ const PUSH_TITLE_KEY: &str = "staff.dawam_by_madar";
 /// The header the staff app sends its device token in (RO-3).
 pub use crate::staff::principal::DEVICE_HEADER;
 
-/// A roster week starts on Saturday.
-pub fn week_start(d: NaiveDate) -> NaiveDate {
-    let back = (d.weekday().num_days_from_sunday() + 1) % 7; // Sat=0 … Fri=6
-    d - Duration::days(i64::from(back))
+/// A roster week starts on Saturday: madar-shared's `madar_time::week_start`,
+/// the one week every report and the staff app use.
+pub use madar_time::week_start;
+
+/// A second decision on something already decided — a pay line, an advance,
+/// a shift's overtime (hunt H2-B2): 409 `ALREADY_DECIDED` with the status it
+/// has (`approved`, `rejected`, …), for the client's wording (AT-13).
+pub(crate) fn already_decided(status: &str) -> AppError {
+    AppError::CodedVars {
+        status: 409,
+        code: "ALREADY_DECIDED",
+        reason: format!("This was already decided ({status})."),
+        vars: serde_json::json!({ "status": status }),
+    }
 }
 
 pub(crate) fn hash_token(token: &str) -> String {
@@ -59,6 +68,18 @@ pub(crate) fn hash_token(token: &str) -> String {
 /// arguments, so it reads in the person's own language.
 pub(crate) async fn notify(pool: &PgPool, org_id: Uuid, employee_id: Uuid, key: &str, args: Value) {
     notify_keyed(pool, org_id, employee_id, key, args, None).await;
+}
+
+/// [`notify`] at most once per `dedupe` key for this person.
+pub(crate) async fn notify_once(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    key: &str,
+    args: Value,
+    dedupe: &str,
+) {
+    notify_keyed(pool, org_id, employee_id, key, args, Some(dedupe)).await;
 }
 
 /// [`notify`], at most once per `dedupe` key per person when one is given
@@ -315,6 +336,7 @@ pub async fn revoke_for_user(pool: &PgPool, user_id: Uuid) -> Result<u64, AppErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, NaiveDate};
 
     #[test]
     fn weeks_start_on_saturday() {

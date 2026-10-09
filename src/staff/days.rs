@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::errors::AppError;
 use crate::staff::access::Subject;
 use crate::staff::dawam::{notify, week_start};
-use crate::staff::schedules::{ResolvedShift, resolve_range};
+use crate::staff::schedules::{ResolvedShift, pattern_range, resolve_range};
 
 const NIL: &str = "'00000000-0000-0000-0000-000000000000'::uuid";
 
@@ -31,6 +31,21 @@ const NIL: &str = "'00000000-0000-0000-0000-000000000000'::uuid";
 pub(crate) struct Block {
     pub work_shift_id: Uuid,
     pub times: Option<(NaiveTime, NaiveTime)>,
+    /// Where a business-wide block is worked that date (hunt H2-B8): the
+    /// board it was set from, or where a claimed, moved or swapped shift was
+    /// worked. Kept only for a business-wide block and one of the person's
+    /// branches; `None` = the person's first branch (or, on a whole-day
+    /// write, what the date already had).
+    pub branch_id: Option<Uuid>,
+}
+
+/// What [`remove_block`] took off a date.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Removed {
+    /// The assignment's own from/to, if it had any.
+    pub times: Option<(NaiveTime, NaiveTime)>,
+    /// Where it was worked.
+    pub branch_id: Option<Uuid>,
 }
 
 /// What a block allows.
@@ -135,14 +150,24 @@ async fn insert_row(
     times: Option<(NaiveTime, NaiveTime)>,
     reason: Option<&str>,
     by: Option<Uuid>,
+    branch: Option<Uuid>,
 ) -> Result<(), AppError> {
+    // The branch is kept only for a business-wide block (a branch's own block
+    // counts at that branch) and only when the person works there.
     sqlx::query(&format!(
         "INSERT INTO staff_schedule_overrides \
-             (org_id, employee_id, on_date, work_shift_id, start_time, end_time, reason, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+             (org_id, employee_id, on_date, work_shift_id, start_time, end_time, reason, \
+              created_by, branch_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
+                 (SELECT $9::uuid \
+                   WHERE EXISTS (SELECT 1 FROM work_shifts w \
+                                  WHERE w.id = $4 AND w.branch_id IS NULL) \
+                     AND EXISTS (SELECT 1 FROM employee_branches eb \
+                                  WHERE eb.employee_id = $2 AND eb.branch_id = $9))) \
          ON CONFLICT (employee_id, on_date, COALESCE(work_shift_id, {NIL})) DO UPDATE SET \
              start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time, \
-             reason = EXCLUDED.reason, created_by = EXCLUDED.created_by"
+             reason = EXCLUDED.reason, created_by = EXCLUDED.created_by, \
+             branch_id = EXCLUDED.branch_id"
     ))
     .bind(org_id)
     .bind(employee_id)
@@ -152,6 +177,7 @@ async fn insert_row(
     .bind(times.map(|t| t.1))
     .bind(reason)
     .bind(by)
+    .bind(branch)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -171,8 +197,20 @@ async fn materialise(
     }
     let pattern = resolve_range(&mut *conn, &[employee_id], date, date, None).await?;
     if pattern.is_empty() {
-        insert_row(conn, org_id, employee_id, date, None, None, reason, by).await?;
+        insert_row(
+            conn,
+            org_id,
+            employee_id,
+            date,
+            None,
+            None,
+            reason,
+            by,
+            None,
+        )
+        .await?;
     }
+    // Each block where the pattern has it worked (hunt H2-B8b).
     for s in pattern {
         insert_row(
             conn,
@@ -183,6 +221,7 @@ async fn materialise(
             None,
             reason,
             by,
+            s.branch_id,
         )
         .await?;
     }
@@ -199,13 +238,29 @@ pub(crate) async fn replace_day(
     reason: Option<&str>,
     by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2")
-        .bind(employee_id)
-        .bind(date)
-        .execute(&mut *conn)
-        .await?;
+    // Where each block was worked, kept when the write doesn't say (an old
+    // client, a legacy single override).
+    let had: Vec<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2 \
+         RETURNING work_shift_id, branch_id",
+    )
+    .bind(employee_id)
+    .bind(date)
+    .fetch_all(&mut *conn)
+    .await?;
     if blocks.is_empty() {
-        insert_row(conn, org_id, employee_id, date, None, None, reason, by).await?;
+        insert_row(
+            conn,
+            org_id,
+            employee_id,
+            date,
+            None,
+            None,
+            reason,
+            by,
+            None,
+        )
+        .await?;
     }
     let mut seen = BTreeSet::new();
     for b in blocks {
@@ -214,6 +269,10 @@ pub(crate) async fn replace_day(
                 "A block can be on a day only once.".into(),
             ));
         }
+        let kept = had
+            .iter()
+            .find(|(w, _)| *w == Some(b.work_shift_id))
+            .and_then(|(_, at)| *at);
         insert_row(
             conn,
             org_id,
@@ -223,26 +282,85 @@ pub(crate) async fn replace_day(
             b.times,
             reason,
             by,
+            b.branch_id.or(kept),
         )
         .await?;
     }
     Ok(())
 }
 
-/// Back to the pattern: the date's own set is dropped. Rows removed.
+/// Back to the pattern at the branches in `scope` (BUG-4): their blocks
+/// become the pattern's there, and the blocks worked at any other branch
+/// stay as they are, own times and all. When what stays is the pattern too,
+/// the date's own set is dropped and it follows the pattern again. `None` =
+/// every branch: the whole set goes. Whether anything changed.
 pub(crate) async fn reset_day(
     conn: &mut PgConnection,
+    org_id: Uuid,
     employee_id: Uuid,
     date: NaiveDate,
-) -> Result<u64, AppError> {
-    Ok(
-        sqlx::query("DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2")
-            .bind(employee_id)
-            .bind(date)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected(),
-    )
+    scope: Option<&[Uuid]>,
+    by: Option<Uuid>,
+) -> Result<bool, AppError> {
+    let drop_all = async |conn: &mut PgConnection| -> Result<bool, AppError> {
+        Ok(sqlx::query(
+            "DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2",
+        )
+        .bind(employee_id)
+        .bind(date)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected()
+            > 0)
+    };
+    let Some(scope) = scope else {
+        return drop_all(conn).await;
+    };
+    if day_rows(conn, employee_id, date).await?.is_empty() {
+        return Ok(false);
+    }
+    let here = |b: Option<Uuid>| b.is_none_or(|b| scope.contains(&b));
+    let kept: Vec<ResolvedShift> = resolve_range(&mut *conn, &[employee_id], date, date, None)
+        .await?
+        .into_iter()
+        .filter(|s| s.on_date == date && !here(s.branch_id))
+        .collect();
+    let pattern: Vec<ResolvedShift> = pattern_range(&mut *conn, &[employee_id], date, date, None)
+        .await?
+        .into_iter()
+        .filter(|s| s.on_date == date)
+        .collect();
+    let times = |s: &ResolvedShift| s.times_edited.then_some((s.start_time, s.end_time));
+    let mut stays: Vec<_> = kept
+        .iter()
+        .map(|s| (s.work_shift_id, s.branch_id, times(s)))
+        .collect();
+    let mut pattern_else: Vec<_> = pattern
+        .iter()
+        .filter(|s| !here(s.branch_id))
+        .map(|s| (s.work_shift_id, s.branch_id, None))
+        .collect();
+    stays.sort();
+    pattern_else.sort();
+    if stays == pattern_else {
+        return drop_all(conn).await;
+    }
+    let blocks: Vec<Block> = pattern
+        .iter()
+        .filter(|s| here(s.branch_id) && !kept.iter().any(|k| k.work_shift_id == s.work_shift_id))
+        .map(|s| Block {
+            work_shift_id: s.work_shift_id,
+            times: None,
+            branch_id: s.branch_id,
+        })
+        .chain(kept.iter().map(|s| Block {
+            work_shift_id: s.work_shift_id,
+            times: times(s),
+            branch_id: s.branch_id,
+        }))
+        .collect();
+    replace_day(conn, org_id, employee_id, date, &blocks, None, by).await?;
+    Ok(true)
 }
 
 /// Put one more block on a date; the rest of the day stays.
@@ -273,13 +391,14 @@ pub(crate) async fn add_block(
         block.times,
         reason,
         by,
+        block.branch_id,
     )
     .await
 }
 
 /// Take one block off a date; the rest of the day stays. `None` when the
 /// person wasn't on that block that day (nothing changed); otherwise the
-/// assignment's own times, if it had any.
+/// assignment's own times, if it had any, and where it was worked.
 pub(crate) async fn remove_block(
     conn: &mut PgConnection,
     org_id: Uuid,
@@ -288,7 +407,12 @@ pub(crate) async fn remove_block(
     work_shift_id: Uuid,
     reason: Option<&str>,
     by: Option<Uuid>,
-) -> Result<Option<Option<(NaiveTime, NaiveTime)>>, AppError> {
+) -> Result<Option<Removed>, AppError> {
+    let at = resolve_range(&mut *conn, &[employee_id], date, date, None)
+        .await?
+        .into_iter()
+        .find(|s| s.work_shift_id == work_shift_id)
+        .and_then(|s| s.branch_id);
     materialise(conn, org_id, employee_id, date, reason, by).await?;
     let gone: Option<(Option<NaiveTime>, Option<NaiveTime>)> = sqlx::query_as(
         "DELETE FROM staff_schedule_overrides \
@@ -304,9 +428,23 @@ pub(crate) async fn remove_block(
         return Ok(None);
     };
     if day_rows(conn, employee_id, date).await?.is_empty() {
-        insert_row(conn, org_id, employee_id, date, None, None, reason, by).await?;
+        insert_row(
+            conn,
+            org_id,
+            employee_id,
+            date,
+            None,
+            None,
+            reason,
+            by,
+            None,
+        )
+        .await?;
     }
-    Ok(Some(s.zip(e)))
+    Ok(Some(Removed {
+        times: s.zip(e),
+        branch_id: at,
+    }))
 }
 
 /// This one assignment's own from/to (`None` = back to the block's times).
@@ -354,12 +492,17 @@ pub(crate) async fn check_overlaps(
     )
     .await?;
     if let Some((a, b)) = first_overlap(&rows, from, to) {
-        return Err(AppError::Refused {
+        // The two blocks and their dates, for the client's own wording
+        // (AT-13, E2E B-ROTA-3): `date` is the first one's.
+        return Err(AppError::CodedVars {
+            status: 409,
             code: "SHIFTS_OVERLAP",
             reason: format!(
                 "{} on {} and {} on {} overlap.",
                 a.name, a.on_date, b.name, b.on_date
             ),
+            vars: json!({ "a": a.name, "b": b.name, "date": a.on_date,
+                          "a_date": a.on_date, "b_date": b.on_date }),
         });
     }
     Ok(())
@@ -482,6 +625,87 @@ pub(crate) async fn published_horizon(
     }))
 }
 
+/// A roster edit changed a person's date (its times, a block, or who works
+/// it): the absences the sweep wrote on it that no longer match the roster go,
+/// with the automatic deductions they carried, so the new times are judged
+/// from scratch (owner decision D4, 24 Sep 2026). Before, the old absence
+/// stayed charged and nobody could punch in or cover at the new times.
+///
+/// Only the sweep's own rows (no punch, not manual, not written or edited by
+/// anyone, no status set by hand, no request pointing at them), and never in
+/// an approved month. A manager's decision on a line is kept (AT-7): a waived
+/// or overridden deduction stays, detached from the record, as a holiday
+/// does it.
+pub(crate) async fn clear_stale_absences(
+    pool: &PgPool,
+    employee_id: Uuid,
+    date: NaiveDate,
+) -> Result<(), AppError> {
+    let org_id: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM employees WHERE id = $1")
+        .bind(employee_id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(org_id) = org_id else {
+        return Ok(());
+    };
+    if crate::staff::period_lock::is_closed(pool, org_id, date).await? {
+        return Ok(());
+    }
+    let rostered: Vec<(Uuid, DateTime<Utc>, DateTime<Utc>)> =
+        resolve_range(pool, &[employee_id], date, date, None)
+            .await?
+            .into_iter()
+            .map(|s| (s.work_shift_id, s.scheduled_start_at, s.scheduled_end_at))
+            .collect();
+    type Candidates = Vec<(
+        Uuid,
+        Option<Uuid>,
+        Option<DateTime<Utc>>,
+        Option<DateTime<Utc>>,
+    )>;
+    let candidates: Candidates = sqlx::query_as(
+        "SELECT a.id, a.work_shift_id, a.scheduled_start_at, a.scheduled_end_at \
+               FROM attendance_records a \
+              WHERE a.employee_id = $1 AND a.business_date = $2 \
+                AND a.status IN ('absent', 'on_leave') AND a.check_in_at IS NULL \
+                AND NOT a.is_manual AND a.created_by IS NULL AND a.edited_by IS NULL \
+                AND NOT a.status_overridden AND a.covered_employee_id IS NULL \
+                AND NOT EXISTS (SELECT 1 FROM staff_requests r \
+                                 WHERE r.attendance_record_id = a.id)",
+    )
+    .bind(employee_id)
+    .bind(date)
+    .fetch_all(pool)
+    .await?;
+    let stale: Vec<Uuid> = candidates
+        .into_iter()
+        .filter(|(_, shift, start, end)| {
+            !rostered
+                .iter()
+                .any(|(s, a, b)| Some(*s) == *shift && Some(*a) == *start && Some(*b) == *end)
+        })
+        .map(|(id, ..)| id)
+        .collect();
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM payroll_deductions \
+          WHERE attendance_record_id = ANY($1) AND source <> 'manual' \
+            AND created_by IS NULL AND waived_at IS NULL AND overridden_at IS NULL",
+    )
+    .bind(&stale)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM attendance_records WHERE id = ANY($1)")
+        .bind(&stale)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 /// A published week changed for these people on these dates: mark each day
 /// "changed" (the app shows it) and tell each person once (SC-4). Days in
 /// weeks nobody published stay drafts and are silent.
@@ -501,8 +725,10 @@ pub(crate) async fn mark_changed_and_tell(
     changes: &BTreeSet<(Uuid, NaiveDate)>,
     tell: bool,
 ) -> Result<(), AppError> {
-    let mut told: BTreeSet<Uuid> = BTreeSet::new();
+    let mut to_tell: std::collections::BTreeMap<Uuid, Vec<NaiveDate>> = Default::default();
     for &(employee_id, date) in changes {
+        // The shift changed: the sweep's absence on it no longer holds (D4).
+        clear_stale_absences(pool, employee_id, date).await?;
         let published: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM staff_week_publications p \
                              JOIN employee_branches eb ON eb.branch_id = p.branch_id \
@@ -524,16 +750,60 @@ pub(crate) async fn mark_changed_and_tell(
         .bind(date)
         .execute(pool)
         .await?;
-        if tell && told.insert(employee_id) {
-            notify(
-                pool,
-                org_id,
-                employee_id,
-                "staff.n_shift_changed",
-                json!({ "date": date }),
-            )
-            .await;
+        if tell {
+            to_tell.entry(employee_id).or_default().push(date);
         }
+    }
+    for (employee_id, dates) in to_tell {
+        tell_shift_changed(pool, org_id, employee_id, &dates).await?;
+    }
+    Ok(())
+}
+
+/// How long one edit's notices are one notice: a drag to another day or a
+/// block swapped in the day editor reaches the server as two writes.
+const ONE_EDIT_SECONDS: i64 = 120;
+
+/// "Your shift changed", once per person per edit (minor default M22): the
+/// dates of a change made within [`ONE_EDIT_SECONDS`] of an unread notice
+/// join that notice (its `dates`) instead of pushing a second one. `date`
+/// stays the first date for older apps.
+async fn tell_shift_changed(
+    pool: &PgPool,
+    org_id: Uuid,
+    employee_id: Uuid,
+    dates: &[NaiveDate],
+) -> Result<(), AppError> {
+    let Some(first) = dates.first() else {
+        return Ok(());
+    };
+    let joined: Option<Uuid> = sqlx::query_scalar(
+        "UPDATE staff_notifications n SET args = jsonb_set(n.args, '{dates}', \
+                (SELECT jsonb_agg(DISTINCT d ORDER BY d) FROM ( \
+                     SELECT jsonb_array_elements_text( \
+                                COALESCE(n.args->'dates', jsonb_build_array(n.args->>'date'))) AS d \
+                     UNION SELECT unnest($3::date[])::text) x)) \
+          WHERE n.id = (SELECT id FROM staff_notifications \
+                         WHERE employee_id = $1 AND key = 'staff.n_shift_changed' \
+                           AND read_at IS NULL \
+                           AND created_at > now() - make_interval(secs => $2) \
+                         ORDER BY created_at DESC LIMIT 1) \
+          RETURNING n.id",
+    )
+    .bind(employee_id)
+    .bind(ONE_EDIT_SECONDS as f64)
+    .bind(dates)
+    .fetch_optional(pool)
+    .await?;
+    if joined.is_none() {
+        notify(
+            pool,
+            org_id,
+            employee_id,
+            "staff.n_shift_changed",
+            json!({ "date": first, "dates": dates }),
+        )
+        .await;
     }
     Ok(())
 }

@@ -12,7 +12,8 @@
 //!     it, or waive it. A missed shift of a split day costs its share of the
 //!     day (RU-5), and unpaid leave is priced like an absence (RQ-3).
 //!   * `source = 'excused_unpaid'` — approved but unpaid time off inside a
-//!     shift: an unpaid excuse or early departure (RQ-7).
+//!     shift: an unpaid excuse or early departure (RQ-7), only the minutes
+//!     actually away inside its window (owner decision D2).
 //!
 //! THE MATHS LIVES IN `pricing::price_shift` (AT-9): this module only gathers
 //! the facts of a day (the record, the roster, the approved requests, the
@@ -396,11 +397,8 @@ pub async fn load_facts(
             status,
             leave_minutes,
             leave_paid,
-            unpaid_excused_minutes: adjustments.unpaid_excused_minutes(
-                row.check_in_at,
-                row.check_out_at,
-                row.scheduled_end_at,
-            ),
+            unpaid_excused_minutes: adjustments
+                .unpaid_excused_minutes(row.check_in_at, row.check_out_at),
             late_minutes: i64::from(row.late_minutes),
             worked_minutes: i64::from(row.worked_minutes),
             overtime_minutes: i64::from(row.overtime_minutes),

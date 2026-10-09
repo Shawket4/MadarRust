@@ -343,7 +343,8 @@ async fn a_model_cannot_exceed_the_row_cap(pool: PgPool) {
     let (status, body) = ask(&app, &org_admin_token(s.org), "daily revenue").await;
     assert!(status.is_success());
     assert!(
-        body["results"][0]["rows"].as_array().unwrap().len() <= madar_rust::analytics::execute::MAX_ROWS
+        body["results"][0]["rows"].as_array().unwrap().len()
+            <= madar_rust::analytics::execute::MAX_ROWS
     );
 }
 
@@ -509,7 +510,9 @@ impl LlmProvider for FollowUp {
 
         // Find the replayed spec from the previous turn.
         let replayed = req.messages.iter().find_map(|m| match m {
-            madar_rust::ai::llm::Message::Assistant { text: Some(t), .. } if t.contains("[ran ") => {
+            madar_rust::ai::llm::Message::Assistant { text: Some(t), .. }
+                if t.contains("[ran ") =>
+            {
                 let start = t.find('{')?;
                 let end = t.rfind('}')?;
                 Some(t[start..=end].to_string())

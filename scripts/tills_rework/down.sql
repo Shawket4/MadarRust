@@ -15,6 +15,9 @@
 --   3. The rolled-back binary must not see the five migration rows: this script
 --      deletes them from _sqlx_migrations as its last step (so
 --      Migrator.ignore_missing is not needed).
+--   4. After 20261004120000_remove_combos the rework can still be taken DOWN,
+--      but not brought up again: its changefeed migration names the `bundles`
+--      table that migration dropped.
 --
 -- LOSSY BY NECESSITY (only for data created AFTER the migration):
 --   * devices, device columns, reconciliation lines, availability lists,
@@ -67,7 +70,8 @@ DROP FUNCTION IF EXISTS asset_ref_changed_recipe_step_presets();
 DROP FUNCTION IF EXISTS asset_mark_org_dirty(uuid);
 ALTER TABLE menu_items          DROP COLUMN IF EXISTS image_group_id;
 ALTER TABLE categories          DROP COLUMN IF EXISTS image_group_id;
-ALTER TABLE bundles             DROP COLUMN IF EXISTS image_group_id;
+-- `bundles` is gone once 20261004120000_remove_combos has run.
+ALTER TABLE IF EXISTS bundles   DROP COLUMN IF EXISTS image_group_id;
 ALTER TABLE organizations       DROP COLUMN IF EXISTS logo_group_id, DROP COLUMN IF EXISTS brand_card_image_group_id;
 ALTER TABLE recipe_step_presets DROP COLUMN IF EXISTS animation_group_id;
 DROP TABLE IF EXISTS asset_backfill_items, asset_legacy_paths, asset_bundle_dirty, asset_bundles, asset_jobs, assets, asset_groups;

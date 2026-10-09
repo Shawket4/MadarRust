@@ -140,6 +140,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/open-shifts/{id}/cancel",
                 web::post().to(roster::cancel_open_shift),
             )
+            .route(
+                "/open-shifts/{id}/withdraw",
+                web::post().to(roster::withdraw_claim),
+            )
             .route("/swaps", web::get().to(roster::list_swaps))
             .route("/swaps/{id}/decision", web::patch().to(roster::decide_swap))
             .route("/holidays/{date}", web::put().to(roster::decide_holiday))
@@ -170,6 +174,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/expense-advances",
                 web::post().to(pay::log_expense_advance),
+            )
+            .route(
+                "/expense-advances/{id}",
+                web::delete().to(pay::clear_expense_advance),
+            )
+            .route(
+                "/expense-advances/{id}",
+                web::patch().to(pay::reassign_expense_advance),
             )
             // ── Directory ────────────────────────────────────────
             .route("/departments", web::get().to(directory::list_departments))

@@ -123,6 +123,8 @@ async fn run() -> std::io::Result<()> {
     let read_pool = web::Data::new(read_pool);
     // Optional per-org menu cache; a no-op unless MENU_CACHE_TTL_SECS>0.
     let menu_cache = web::Data::new(menu::cache::MenuCache::from_env());
+    // Where the shop apps' entry HTML is mounted, for the tenant shell.
+    let shell_config = web::Data::new(madar_rust::tenant_shell::ShellConfig::from_env());
     let jwt_secret = web::Data::new(auth::jwt::JwtSecret(jwt_secret));
     // Per-process org-suspension cache, consulted by JwtMiddleware on every
     // authenticated request. Registering it is what arms the kill-switch.
@@ -167,6 +169,24 @@ async fn run() -> std::io::Result<()> {
     }
     let demo_enabled = demo_settings.enabled;
     let demo_cfg = web::Data::new(demo_settings);
+    // App Review's staff sign-in (`staff::dawam::signin::ReviewLogin`): on
+    // only with BOTH env vars set. Said loudly at boot; the code never is.
+    let review_login = madar_rust::staff::dawam::signin::ReviewLogin::from_env();
+    match &review_login {
+        Some(r) => tracing::warn!(
+            phone = %r.phone(),
+            "⚠️  App Review sign-in ON: a staff code asked for this phone is MADAR_REVIEW_OTP and no WhatsApp is sent. Unset MADAR_REVIEW_PHONE and MADAR_REVIEW_OTP after the review."
+        ),
+        None if env::var_os("MADAR_REVIEW_PHONE").is_some()
+            || env::var_os("MADAR_REVIEW_OTP").is_some() =>
+        {
+            tracing::warn!(
+                "App Review sign-in OFF: it needs both MADAR_REVIEW_PHONE (a valid phone) and MADAR_REVIEW_OTP (six digits)"
+            )
+        }
+        None => {}
+    }
+    let review_login = review_login.map(web::Data::new);
     // Shlink short-URL provider (reads env vars on each call; degrade-safe).
     let qr_provider = qr_card::routes::make_provider();
     let uploads_clone = uploads_dir.clone();
@@ -234,6 +254,10 @@ async fn run() -> std::io::Result<()> {
         // Build the App. All `.wrap()` calls happen first so the App's
         // generic type is stable when we conditionally add Swagger UI.
         let mut app = App::new()
+            // `/v1/…` → the public API's routes, just before routing (innermost).
+            .wrap(actix_web::middleware::from_fn(
+                madar_rust::public_api::versioned,
+            ))
             // The general limiter (and whole-dataset exports) — see
             // `rate_limit::throttle_exports`. INSIDE CORS, so its 429 carries
             // the CORS headers: outside it, the browser hid the 429 and the
@@ -262,6 +286,7 @@ async fn run() -> std::io::Result<()> {
             .wrap(sentry_middleware.clone())
             .app_data(pool.clone())
             .app_data(menu_cache.clone())
+            .app_data(shell_config.clone())
             .app_data(jwt_secret.clone())
             .app_data(org_status.clone())
             .app_data(realtime_bus.clone())
@@ -282,7 +307,15 @@ async fn run() -> std::io::Result<()> {
                 madar_rust::errors::AppError::BadRequest(err.to_string()).into()
             }))
             // Every API route. The route-coverage guard mounts exactly this.
-            .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone()));
+            .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone()))
+            // An address nothing serves says so in the API's own shape, not
+            // with an empty body.
+            .default_service(web::to(madar_rust::public_api::not_found));
+
+        // App Review's sign-in, only when both of its env vars are set.
+        if let Some(review) = &review_login {
+            app = app.app_data(review.clone());
+        }
 
         // Public demo endpoints only when DEMO_MODE is on.
         if demo_enabled {

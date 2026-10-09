@@ -426,4 +426,3 @@ async fn swap_defaults(
         .filter_map(|(g, o)| o.map(|o| (g, o)))
         .collect())
 }
-

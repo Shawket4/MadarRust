@@ -239,7 +239,7 @@ pub async fn provision_org(
         return Err(AppError::BadRequest("branch.name is required".into()));
     }
     let owner_name = b.owner.name.trim().to_string();
-    let email = b.owner.email.trim().to_lowercase();
+    let email = crate::auth::email::normalize(&b.owner.email);
     if owner_name.is_empty() || !email.contains('@') {
         return Err(AppError::BadRequest(
             "owner.name and a valid owner.email are required".into(),

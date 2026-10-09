@@ -447,7 +447,10 @@ mod tests {
     fn a_comped_bill_still_collects_its_stamps_in_line_mode() {
         // The money is irrelevant to stamps — the items left the counter.
         let comped = amounts(5_000, 9_000, 0);
-        assert_eq!(points_for_order(comped, &[line(LATTE, 2)], &[], PER_LINE), 2);
+        assert_eq!(
+            points_for_order(comped, &[line(LATTE, 2)], &[], PER_LINE),
+            2
+        );
     }
 
     #[test]

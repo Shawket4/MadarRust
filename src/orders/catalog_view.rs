@@ -21,8 +21,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use madar_catalog::{
-    BaseCandidate, BaseCandidates, CatalogView, IngredientLine, IngredientRef, ItemView,
-    OptionView, OptionalView, RecipeLine, SizeView, SizedLine,
+    BaseCandidate, BaseCandidates, CatalogView, GroupOption, GroupView, IngredientLine,
+    IngredientRef, ItemView, OptionView, OptionalView, RecipeLine, SizeView, SizedLine,
 };
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -291,6 +291,70 @@ impl Catalog {
 
         let recipes = load_recipes(conn, ids).await?;
 
+        // The choice groups attached to each item (active groups only), every
+        // option with its catalogue price, the branch's price and whether it is
+        // on — what madar-catalog's staff comp input reads (`staff`). Ordered
+        // as the staff pool always read them: attachment sort, group name, id,
+        // then option sort, name, id.
+        let group_rows: Vec<(
+            Uuid,
+            Uuid,
+            i32,
+            bool,
+            Option<Vec<Uuid>>,
+            String,
+            Option<String>,
+            Uuid,
+            i32,
+            Option<i32>,
+            bool,
+            bool,
+        )> = sqlx::query_as(
+            "SELECT a.menu_item_id, g.id, COALESCE(a.min_override, g.min_selections),
+                    COALESCE(a.is_required_override, g.is_required), a.included_option_ids,
+                    g.effect, g.legacy_addon_type,
+                    mo.id, ai.default_price, bao.price_override, mo.is_default,
+                    (mo.is_active AND ai.is_active AND COALESCE(bao.is_available, true))
+               FROM menu_item_modifier_groups a
+               JOIN modifier_groups g ON g.id = a.group_id AND g.is_active
+               JOIN modifier_options mo ON mo.group_id = g.id
+               JOIN addon_items ai ON ai.id = mo.id
+               LEFT JOIN branch_addon_overrides bao
+                      ON bao.addon_item_id = mo.id AND bao.branch_id = $2
+              WHERE a.menu_item_id = ANY($1)
+              ORDER BY a.menu_item_id, a.sort, g.name, g.id, mo.sort, mo.name, mo.id",
+        )
+        .bind(ids)
+        .bind(branch)
+        .fetch_all(&mut *conn)
+        .await?;
+        let mut groups_of: HashMap<Uuid, Vec<GroupView>> = HashMap::new();
+        for (item, gid, min, required, included, effect, legacy, oid, price, bp, default, on) in
+            group_rows
+        {
+            let groups = groups_of.entry(item).or_default();
+            if groups.last().is_none_or(|g| g.id != s(gid)) {
+                groups.push(GroupView {
+                    id: s(gid),
+                    min: i64::from(min),
+                    is_required: required,
+                    effect,
+                    legacy_type: legacy,
+                    included: included.map(|ids| ids.into_iter().map(s).collect()),
+                    options: Vec::new(),
+                });
+            }
+            if let Some(g) = groups.last_mut() {
+                g.options.push(GroupOption {
+                    id: s(oid),
+                    price: i64::from(price),
+                    branch_price: bp.map(i64::from),
+                    is_default: default,
+                    is_active: on,
+                });
+            }
+        }
+
         let optionals: Vec<(
             Uuid,
             Uuid,
@@ -325,6 +389,9 @@ impl Catalog {
             .collect();
         base_ids.sort();
         base_ids.dedup();
+        // A custom group's option (no legacy type: `a.type` NULL, see
+        // `menu::handlers::AddonItem`) is a candidate like any other, with no
+        // add-on type, so it never matches an inferred milk / coffee family.
         let candidates: Vec<(Uuid, Uuid, String, String, i32, Option<Uuid>, Option<Uuid>)> =
             if base_ids.is_empty() {
                 Vec::new()
@@ -337,7 +404,7 @@ impl Catalog {
                          SELECT mo.replaces_ingredient_id, mo.id
                            FROM modifier_options mo WHERE mo.replaces_ingredient_id = ANY($1)
                      )
-                     SELECT c.ing, a.id, a.name, a.type,
+                     SELECT c.ing, a.id, a.name, COALESCE(a.type, ''),
                             COALESCE(bao.price_override, a.default_price),
                             mo.group_id, mg.swap_category_id
                        FROM c
@@ -437,6 +504,7 @@ impl Catalog {
                         size_label: o.size_label.clone(),
                     })
                     .collect(),
+                groups: groups_of.remove(&id).unwrap_or_default(),
             };
             self.items.insert(
                 id,
@@ -470,9 +538,10 @@ impl Catalog {
             Option<String>,
             Option<String>,
         );
+        // A custom group's option is sold like any other, with no add-on type.
         let rows: Vec<OptRow> = sqlx::query_as(
             "SELECT a.id, a.name, a.name_translations,
-                    COALESCE(bao.price_override, a.default_price), a.type,
+                    COALESCE(bao.price_override, a.default_price), COALESCE(a.type, ''),
                     mo.group_id, g.effect, g.swap_category_id, c.slug,
                     ri.id, ri.name, ri.unit::text
                FROM addon_items a

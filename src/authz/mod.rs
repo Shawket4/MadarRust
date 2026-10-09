@@ -13,7 +13,6 @@ pub mod scope;
 pub mod shadow;
 pub mod snapshot;
 
-
 pub use madar_authz::*;
 
 #[cfg(test)]

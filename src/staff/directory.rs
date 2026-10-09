@@ -81,8 +81,14 @@ pub struct Employee {
     pub termination_date: Option<NaiveDate>,
     /// `active` · `suspended` · `terminated`
     pub employment_status: String,
-    /// `None` when the caller may not read this person's pay — see the module docs.
+    /// `None` when the caller may not read this person's pay — see the module
+    /// docs — or when no salary is set (`salary_set` tells the two apart).
     pub base_salary_piastres: Option<i64>,
+    /// A salary is on file (owner decision D9): false = "not set" (someone a
+    /// manager added or imported), shown as "—" and flagged by payroll.
+    /// Never hidden: it says nothing about the amount.
+    #[sqlx(default)]
+    pub salary_set: bool,
     pub national_id: Option<String>,
     pub photo_url: Option<String>,
     pub emergency_contact_name: Option<String>,
@@ -103,6 +109,10 @@ pub struct Employee {
     /// Hidden with the salary.
     #[sqlx(default)]
     pub advance_cap_piastres: Option<i64>,
+    /// What they owe in salary advances (pending ones counted) is within the
+    /// cap. Never hidden: what a manager sees instead of the cap (D7).
+    #[sqlx(default)]
+    pub advance_within_cap: bool,
     /// `morning` · `evening` · null
     pub pref_time: Option<String>,
     /// Days they can't work: 0 = Sunday … 6 = Saturday.
@@ -242,14 +252,25 @@ pub struct PutEmployeeRequest {
     pub emergency_contact_phone: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
-    /// `m` · `f`; omitted keeps what is there.
-    #[serde(default)]
-    pub gender: Option<String>,
-    /// `cash` · `bank` · `wallet`; omitted keeps what is there.
+    /// `m` · `f`; `null` or empty = not set; omitted keeps what is there.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(nullable, value_type = Option<String>)]
+    pub gender: Option<Option<String>>,
+    /// `cash` · `bank` · `wallet`; omitted keeps what is there. Cash clears
+    /// the account.
     #[serde(default)]
     pub pay_method: Option<String>,
-    #[serde(default)]
-    pub pay_account: Option<String>,
+    /// The IBAN or wallet number; `null` or empty clears it; omitted keeps
+    /// it. Always cleared when the method is (or stays) `cash`.
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(nullable, value_type = Option<String>)]
+    pub pay_account: Option<Option<String>>,
     /// Paid through Dawam. Like the salary, ignored unless the caller has
     /// `hr.payroll.edit` for every branch.
     #[serde(default)]
@@ -484,10 +505,14 @@ const EMPLOYEE_SELECT: &str = r#"
            e.name, e.phone, e.app_access, u.role::text AS role, u.email,
            e.department_id, d.name AS department_name, e.employee_code, e.job_title,
            e.hire_date, e.termination_date, e.employment_status, e.base_salary_piastres,
+           e.base_salary_piastres IS NOT NULL AS salary_set,
            e.national_id, e.photo_url, e.emergency_contact_name, e.emergency_contact_phone,
            e.notes, e.gender, e.pay_method, e.pay_account, e.pref_time, e.cant_work_days,
            e.on_payroll,
            dawam_advance_cap(e.org_id, e.base_salary_piastres) AS advance_cap_piastres,
+           COALESCE((SELECT SUM(sa.remaining_piastres) FROM salary_advances sa
+                      WHERE sa.employee_id = e.id AND sa.status IN ('pending', 'approved')), 0)
+               <= dawam_advance_cap(e.org_id, e.base_salary_piastres) AS advance_within_cap,
            COALESCE(ARRAY(SELECT eb.branch_id FROM employee_branches eb
                            WHERE eb.employee_id = e.id ORDER BY eb.assigned_at, eb.branch_id),
                     '{}') AS branch_ids,
@@ -796,8 +821,10 @@ pub async fn create_employee(
                     .fetch_one(pool)
                     .await?;
             if already {
-                return Err(AppError::Conflict(
-                    "That user is already an employee.".into(),
+                return Err(crate::staff::coded(
+                    409,
+                    "ALREADY_EMPLOYEE",
+                    "That user is already an employee.",
                 ));
             }
             guard_linked_user(pool, &claims, user, Cap::HrStaffCreate).await?;
@@ -828,13 +855,19 @@ pub async fn create_employee(
         && let Some(p) = &phone
         && phone_taken(pool, org_id, p, None).await?
     {
-        return Err(AppError::Conflict(format!(
-            "Someone here already signs in with {p}."
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PHONE_TAKEN",
+            format!("Someone here already signs in with {p}."),
+            serde_json::json!({ "phone": p }),
+        ));
     }
     if body.base_salary_piastres.is_some_and(|s| s < 0) {
         return Err(AppError::BadRequest("Salary cannot be negative".into()));
     }
+    // Without the pay right the figure is ignored (a manager may not set pay)
+    // and the salary is "not set", never a silent 0 (owner decision D9); the
+    // owner is told below.
     let may_edit_pay = access::can_everywhere(pool, &claims, org_id, Cap::HrPayrollEdit).await?;
     let salary = if may_edit_pay {
         body.base_salary_piastres
@@ -858,7 +891,7 @@ pub async fn create_employee(
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO employees (org_id, user_id, name, phone, app_access, job_title, hire_date, \
              base_salary_piastres, gender, department_id, employee_code) \
-         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_DATE), COALESCE($8, 0), $9, $10, $11) \
+         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, CURRENT_DATE), $8, $9, $10, $11) \
          RETURNING id",
     )
     .bind(org_id)
@@ -887,6 +920,21 @@ pub async fn create_employee(
         .await?;
     }
     tx.commit().await?;
+    // Added by someone who may not set pay: the owner hears (D9), so the
+    // salary is set before payroll (which refuses approval until then).
+    if salary.is_none() && !may_edit_pay {
+        let by = crate::staff::dawam::user_name(pool, claims.user_id_safe()?).await;
+        for owner in crate::staff::dawam::owners(pool, org_id).await? {
+            crate::staff::dawam::notify(
+                pool,
+                org_id,
+                owner,
+                "staff.n_salary_missing",
+                serde_json::json!({ "name": name, "employee_id": id, "by": by }),
+            )
+            .await;
+        }
+    }
     let (pay, may_pay) = pay_scope(pool, &claims, org_id).await?;
     let row = load_employee(pool, org_id, id).await?;
     Ok(HttpResponse::Created().json(row.redact_salary(&pay, may_pay)))
@@ -972,9 +1020,12 @@ pub async fn put_employee(
         && let Some(Some(p)) = &phone
         && phone_taken(pool, org_id, p, Some(*employee_id)).await?
     {
-        return Err(AppError::Conflict(format!(
-            "Someone here already signs in with {p}."
-        )));
+        return Err(crate::staff::coded_vars(
+            409,
+            "PHONE_TAKEN",
+            format!("Someone here already signs in with {p}."),
+            serde_json::json!({ "phone": p }),
+        ));
     }
 
     // Branches: the caller must run every branch they add or take away.
@@ -1032,9 +1083,13 @@ pub async fn put_employee(
             emergency_contact_name  = $16,
             emergency_contact_phone = $17,
             notes                   = $18,
-            gender                  = COALESCE($19, gender),
+            -- Sent (even null) replaces; omitted keeps (E2E B-SETUP-2).
+            gender                  = CASE WHEN $23 THEN $19 ELSE gender END,
             pay_method              = COALESCE($20, pay_method),
-            pay_account             = COALESCE($21, pay_account),
+            -- A cash payee has no account: a stale IBAN or wallet would
+            -- feed the bank and wallet lists (PAY-7, PAY-8).
+            pay_account             = CASE WHEN COALESCE($20, pay_method) = 'cash' THEN NULL
+                                           WHEN $24 THEN $21 ELSE pay_account END,
             on_payroll              = COALESCE($22, on_payroll),
             updated_at              = now()
         WHERE id = $1 AND org_id = $2
@@ -1058,10 +1113,12 @@ pub async fn put_employee(
     .bind(blank_to_none(body.emergency_contact_name.clone()))
     .bind(blank_to_none(body.emergency_contact_phone.clone()))
     .bind(blank_to_none(body.notes.clone()))
-    .bind(blank_to_none(body.gender.clone()))
+    .bind(blank_to_none(body.gender.clone().flatten()))
     .bind(blank_to_none(body.pay_method.clone()))
-    .bind(blank_to_none(body.pay_account.clone()))
+    .bind(blank_to_none(body.pay_account.clone().flatten()))
     .bind(on_payroll)
+    .bind(body.gender.is_some())
+    .bind(body.pay_account.is_some())
     .execute(&mut *tx)
     .await?;
     if let Some(wanted) = &body.branch_ids {

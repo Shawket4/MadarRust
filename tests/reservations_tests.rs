@@ -116,7 +116,7 @@ async fn floor_section_and_table_crud(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/floor/sections")
         .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(&serde_json::json!({ "branch_id": branch_id, "name": "Patio" }))
+        .set_json(serde_json::json!({ "branch_id": branch_id, "name": "Patio" }))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert!(
@@ -131,7 +131,7 @@ async fn floor_section_and_table_crud(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/floor/tables")
         .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "branch_id": branch_id, "label": "T1", "section_id": section.id,
             "seats": 4, "shape": "circle", "pos_x": 100.0, "pos_y": 50.0
         }))
@@ -150,20 +150,20 @@ async fn floor_section_and_table_crud(pool: PgPool) {
     assert_eq!(tables.len(), 1);
 }
 
-/// The host board's default view — `GET /reservations?branch_id=…` with no
-/// status and no date — plus each filter combination. Every branch of the
-/// query builder must bind exactly the parameters its SQL references.
+// The host board's default view — `GET /reservations?branch_id=…` with no
+// status and no date — plus each filter combination. Every branch of the
+// query builder must bind exactly the parameters its SQL references.
 
-/// The date filter must resolve in the BRANCH's effective timezone, the way
-/// every other date bucket in the codebase does — not in whatever zone the
-/// Postgres server happens to be configured with. Casting a `timestamptz`
-/// straight to `::date` silently uses the session zone, so a late-night
-/// booking lands on the wrong calendar day (and the day it lands on changes
-/// between dev, CI and prod depending on the server's `TimeZone` setting).
+// The date filter must resolve in the BRANCH's effective timezone, the way
+// every other date bucket in the codebase does — not in whatever zone the
+// Postgres server happens to be configured with. Casting a `timestamptz`
+// straight to `::date` silently uses the session zone, so a late-night
+// booking lands on the wrong calendar day (and the day it lands on changes
+// between dev, CI and prod depending on the server's `TimeZone` setting).
 
-/// Times that reach a CUSTOMER (the WhatsApp departure nudge) must be the
-/// branch's local wall clock, not the UTC instant. Formatting `reserved_for`
-/// directly told a customer with an 8pm Cairo booking to arrive at 17:00.
+// Times that reach a CUSTOMER (the WhatsApp departure nudge) must be the
+// branch's local wall clock, not the UTC instant. Formatting `reserved_for`
+// directly told a customer with an 8pm Cairo booking to arrive at 17:00.
 
 // ── Layout autosave: optimistic concurrency ─────────────────────────────────
 
@@ -178,7 +178,7 @@ async fn seed_one_table(pool: &PgPool, label: &str) -> (String, Uuid, FloorTable
     let req = test::TestRequest::post()
         .uri("/floor/tables")
         .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "branch_id": branch_id, "label": label,
             "seats": 2, "shape": "rect", "pos_x": 0.0, "pos_y": 0.0
         }))
@@ -316,7 +316,7 @@ async fn a_conflict_rolls_back_the_whole_batch(pool: PgPool) {
     let req = test::TestRequest::post()
         .uri("/floor/tables")
         .insert_header(("Authorization", format!("Bearer {token}")))
-        .set_json(&serde_json::json!({
+        .set_json(serde_json::json!({
             "branch_id": branch_id, "label": "A2",
             "seats": 2, "shape": "rect", "pos_x": 0.0, "pos_y": 0.0
         }))

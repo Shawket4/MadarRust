@@ -445,11 +445,8 @@ pub fn resolve_adjustment_piastres(
 ) -> i64 {
     match (amount_piastres, percent_of_base) {
         (Some(amount), _) => amount.max(0),
-        (None, Some(percent)) => round_piastres(
-            Decimal::from(base_salary_piastres.max(0)) * percent.max(Decimal::ZERO)
-                / Decimal::from(100),
-        )
-        .max(0),
+        // A percentage of the salary: madar-shared's rule (DW3).
+        (None, Some(percent)) => madar_dawam::pay::percent_of_salary(base_salary_piastres, percent),
         (None, None) => 0,
     }
 }

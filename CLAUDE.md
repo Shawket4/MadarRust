@@ -44,7 +44,7 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
 - **OpenAPI Export**: `cargo run --bin export-openapi`
 - **Reprice order cost snapshots at current recipes & ingredient costs** (operator-only, never exposed over HTTP):
   `cargo run --bin backfill-cost-snapshots -- (--org <uuid> | --branch <uuid>) [--dry-run]`
-  Rewrites `order_items.unit_cost/line_cost` + addon/optional/bundle-component costs as if each
+  Rewrites `order_items.unit_cost/line_cost` + addon/optional costs as if each
   line were ordered today (current recipe/addon rollups × quantities — mirrors the menu-engineering
   `cost_basis=current` view). Always `--dry-run` first.
 
@@ -154,6 +154,7 @@ Notes:
 - Tests + mutants need Postgres and `DATABASE_URL` set **at build time** (the suite uses the `sqlx::query!` compile-time macro and `#[sqlx::test]` per-test DBs): `DATABASE_URL=postgres://shawket@localhost:5432/madar cargo test --lib` (local dev DB is `madar`, owned by superuser `shawket`).
 - Legacy `sufrix` role: several pre-rebrand migrations (`GRANT ALL ... TO sufrix`) target a role from the Sufrix era. Each `#[sqlx::test]` rebuilds a DB from the full migration set, so that **cluster-global** role must exist or every DB test aborts with SQLSTATE 42704 (`role "sufrix" does not exist`). `preflight.sh` / `api-fuzz.sh` / CI auto-create it (idempotent `CREATE ROLE sufrix NOLOGIN`); to do it by hand once: `psql -c "CREATE ROLE sufrix NOLOGIN"`. Don't edit those applied migrations to rename the role — it changes their checksums and the live dev/prod DBs (which re-run `sqlx::migrate!` on boot) would fail to start.
 - Fuzz/API-fuzz runs set `MADAR_DISABLE_AUTO_TRANSLATION=1` (no outbound Google Translate) and `MADAR_DISABLE_RATE_LIMIT=1` (no 429 throttling). **Never set these in production.**
+- **Rate limits are all env variables** (owner, 2026-09-25; defaults doubled then). General bucket: `MADAR_RATE_LIMIT_PER_MINUTE` (400, per signed-in person — a staff-app phone counts per device — else per IP), `MADAR_RATE_LIMIT_PER_ADDRESS_PER_MINUTE` (20,000, one IP across all its accounts), `MADAR_EXPORT_MAX_PER_MINUTE` (10). Every per-route actix-governor is listed ONCE in `rate_limit::ROUTE_LIMITS` and built with `rate_limit::route_governor(key, AREA, LIMITER)`; each reads `MADAR_RL_<AREA>_<LIMITER>_BURST` and `MADAR_RL_<AREA>_<LIMITER>_MS_PER_REQUEST`. A bad or missing value falls back to the default. `.env.example` ("Rate limits" block) lists every variable with its default and what it guards, and a test fails if one is missing. A new limiter = a row in `ROUTE_LIMITS` + its two lines in `.env.example`; tests that count against a burst read `rate_limit::limit_of(AREA, LIMITER)`, never a literal.
 - DB-error → HTTP mapping is centralized in `src/errors.rs` (`status_for_sqlstate`): client-caused SQLSTATEs become 4xx, not 500. Keep new handlers leaning on `AppError` so they inherit this.
 
 ## Coding Guidelines
@@ -184,9 +185,11 @@ Each feature module owns its routes, handlers and tests together.
 
 - **Identity & access** — `auth`, `users`, `orgs`, `branches`, `permissions`
   (role × resource × action, seeded by `permissions::seeder`).
-- **Selling** — `orders`, `tickets` (waiter open tickets), `held_orders` (POS parked
-  carts + table occupancy + transfer waitlist), `tills`, `shifts`, `payment_methods`,
-  `discounts`, `bundles`.
+- **Selling** — `orders`, `tickets` (waiter open tickets), `floor_ops` (table
+  occupancy + transfer waitlist), `tills`, `shifts`, `payment_methods`, `discounts`.
+  There is no held-orders module: a POS parked cart is device-local (see "Held
+  orders" below). (Combos/bundles were removed 2026-09-25; `src/bundles` is only
+  the old-till `GET /bundles` empty-page stub.)
 - **Catalog & cost** — `menu`, `menu_unification`, `recipes`, `costing`, `units`,
   `inventory`, `purchasing`, `stocktakes`.
 - **Floor** — `reservations` (`floor.rs` = sections + table geometry + live status;
@@ -201,7 +204,7 @@ Each feature module owns its routes, handlers and tests together.
 The POS is offline-first. Every mutating POS operation is split **live route** /
 `*_inner` core so `/sync/replay` can flush a till's queued backlog through exactly the
 same code path (see `src/sync/handlers.rs` and the `*_inner` fns in `tickets`,
-`held_orders`). If you add a POS-facing mutation, split it the same way or offline
+`floor_ops`). If you add a POS-facing mutation, split it the same way or offline
 tills silently lose the write.
 
 ### The POS changefeed (`/sync/pull`, offline plan B)
@@ -212,13 +215,19 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   `tills_migration_tests::every_projection_source_table_has_emitter` fails
   otherwise. A projection change for a type is enough when the table already
   re-emits that type.
-- **A report formula change regenerates the shared vectors.** Changing
-  `compute_system_cash`, `report_figures` or the close-method figures means
-  `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run --test tills_report_vectors_tests`,
-  which writes `till_report_vectors.json` / `till_edge_vectors.json` into the
-  madar-shared checkout beside this one (`crates/madar-till/vectors/`); the fold
-  there (`madar_till::report`, the POS core's too) must agree, and the change
-  ships with a madar-shared tag.
+- **The till's money is madar-shared's fold.** `compute_system_cash`,
+  `report_figures` and the close-method figures are `madar_till::report` over
+  the rows `tills::rows` loads (the POS core runs the same fold offline), and
+  the drawer carryover is `madar_till::carryover`'s pick over its two
+  candidates. A formula change is a change in madar-shared, released with a
+  tag; `MADAR_WRITE_TILL_VECTORS=1 cargo nextest run --test
+  tills_report_vectors_tests` rewrites `till_report_vectors.json` /
+  `till_edge_vectors.json` in the madar-shared checkout beside this one.
+- **The bill is madar-shared's too.** `create_order_inner` hands its lines to
+  `madar_money::bill::price_bill_on` (staff comp, reward, discount, tax), a
+  sale's rewards are planned by `madar_loyalty::plan` (strict here, trimming on
+  the till) and a staff line's comp input is `madar_catalog::staff::comp_input`
+  over the order's loaded catalogue.
 - Additive fields only on payloads the POS mirrors (old tablets decode them).
 - **Catalogue pricing is madar-shared's `madar-catalog`** (the size price, swaps
   over the recipe's own choice, add-ons, optional fields). The order path loads
@@ -239,14 +248,22 @@ Publish **after** `tx.commit()`, never inside the transaction.
 ### The floor / tables feature (spans all three repos)
 - `branch_tables` is one entity shared by three features: QR targets, floor geometry,
   and live occupancy. It is also the **per-table mutex** — every occupancy mutation
-  locks its row (`SELECT … FOR UPDATE`) and then checks both held orders and open
-  tickets in the same transaction. Invariant: at most one live occupant per table.
+  locks its row (`SELECT … FOR UPDATE`) and then checks the live occupancy (a ticket,
+  a till's `party` hold, a booking) in the same transaction. Invariant: at most one
+  live occupant per table (`table_occupancies`, partial unique index).
 - Permissions are split on purpose: `floor_plan` = geometry authoring (managers,
   dashboard), `reservations` = live table status (host/teller, POS).
-- **Bussing:** a checkout does NOT free its table. `complete` (held order) and settle
-  (open ticket) call `bus_table` → status `dirty`; the table stays there until a human
-  clears it on the POS. Moves/voids/discards call `free_table` → `free`, because no
-  party vacated. Both live in `src/held_orders/mod.rs`.
+- **Bussing:** a checkout does NOT free its table. Settling a ticket, or a till
+  releasing its party hold with `bus: true` (it checked a parked order out), ends the
+  occupancy with `needs_bussing` → status `dirty`; the table stays there until a human
+  clears it on the POS. Moves/voids/discards end it without → `free`, because no
+  party vacated. All in `src/floor_ops/mod.rs` (`end_occupancy_row` and friends).
+- **Held orders are not a server entity.** A POS parked cart lives only on the
+  terminal that parked it (removed server-side 2026-09-05). Only its claim on a
+  table crosses the wire: `hold_table` / `release_table` (a `party` occupancy owned
+  by that till). A till close records what it left parked
+  (`tills.held_orders_left_open` / `_total`, sent by the till). Visibility is the
+  POS's business: whoever is signed in on that device sees all of them.
 - The booking flow (`/reservations`, `/public/reservations`) is **deprecated** and only
   mounts behind `MADAR_ENABLE_RESERVATIONS`; `/floor/*` is always mounted.
 

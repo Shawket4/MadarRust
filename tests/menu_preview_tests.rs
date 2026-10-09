@@ -8,8 +8,8 @@ use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use madar_rust::menu::preview::{PreviewDeduction, PreviewRequest, PreviewResponse, preview};
 use madar_rust::auth::jwt::JwtSecret;
+use madar_rust::menu::preview::{PreviewDeduction, PreviewRequest, PreviewResponse, preview};
 use madar_rust::models::UserRole;
 
 struct Fx {
@@ -373,9 +373,15 @@ async fn preview_endpoint_is_org_scoped(pool: PgPool) {
     sqlx::query("INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1, $2, 'U', $3, 'hash', 'org_admin'::user_role)")
         .bind(user).bind(fx.org).bind(format!("u-{user}@t.com")).execute(&pool).await.unwrap();
     let secret = JwtSecret("secret".to_string());
-    let token =
-        madar_rust::auth::jwt::create_token(&secret, user, Some(fx.org), UserRole::OrgAdmin, None, 24)
-            .unwrap();
+    let token = madar_rust::auth::jwt::create_token(
+        &secret,
+        user,
+        Some(fx.org),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))

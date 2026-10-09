@@ -7,8 +7,8 @@ use actix_web::web;
 use sqlx::PgPool;
 
 use crate::{
-    ai, analytics, auth, bookings, branch_plan, branches, bundles, costing, customers, delivery, devices,
-    discounts, insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs,
+    ai, analytics, auth, bookings, branch_plan, branches, bundles, costing, customers, delivery,
+    devices, discounts, insights, integrations, inventory, kitchen, loyalty, menu, orders, orgs,
     payment_methods, permissions, purchasing, push, qr_card, realtime, recipes, refunds, reports,
     reservations, staff, stocktakes, sync, tickets, tills, uploads, users,
 };
@@ -18,6 +18,13 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
         "/health",
         web::get().to(|| async { actix_web::HttpResponse::Ok().finish() }),
     )
+    // `GET /` and `GET /openapi.json`: what this host is, for someone who
+    // did not sign in.
+    .configure(crate::public_api::configure)
+    // POST /mcp: the MCP server, read-only tools over the public API.
+    .configure(crate::mcp::configure)
+    // A shop page's HTML, asked for by nginx on the shop's own host.
+    .configure(crate::tenant_shell::configure)
     .configure(auth::routes::configure)
     .configure(orgs::routes::configure)
     .configure(users::routes::configure)
@@ -54,7 +61,8 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
     // and both are dashboard-driven bursts.
     .configure(|cfg| analytics::routes::configure(cfg, read_pool.clone()))
     .configure(uploads::routes::configure)
-    .configure(bundles::routes::configure)
+    .configure(bundles::configure)
+    .configure(crate::combos::routes::configure)
     .configure(insights::routes::configure)
     .configure(integrations::routes::configure)
     .configure(payment_methods::routes::configure)

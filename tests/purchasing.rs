@@ -848,6 +848,111 @@ async fn test_receive_cheap_cost_not_rounded_to_zero(pool: PgPool) {
     );
 }
 
+/// The milk on the field report: 12 000 g of Full Cream Milk for 548.16 EGP.
+/// A whole-piastre unit cost made it 5 piastres/g and a 600.00 EGP order. The
+/// line total is the truth now, and every figure downstream keeps 4.568/g:
+/// the line, each partial delivery, the ledger and the branch's average cost.
+#[sqlx::test]
+async fn test_line_total_is_kept_exactly_down_to_the_ledger(pool: PgPool) {
+    use rust_decimal::prelude::ToPrimitive;
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
+    let milk = Uuid::new_v4();
+    sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, category_id, cost_per_unit) VALUES ($1, $2, 'Full Cream Milk', 'g'::inventory_unit, ingredient_category_id($2, 'dry'), NULL)")
+        .bind(milk).bind(org_id).execute(&pool).await.unwrap();
+    let token = org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+    let order = |body: serde_json::Value| {
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/branches/{branch_id}/orders"))
+            .insert_header(auth.clone())
+            .set_json(body)
+            .to_request()
+    };
+
+    let resp = test::call_service(&app, order(serde_json::json!({"lines":[{
+        "org_ingredient_id": milk, "purchase_unit": "g", "quantity_ordered": 12000.0, "line_cost": 54816
+    }]}))).await;
+    assert_eq!(resp.status(), 201);
+    let po: PurchaseOrderFull = test::read_body_json(resp).await;
+    let line = &po.lines[0];
+    assert_eq!(line.line_cost, 54816, "the invoice total, untouched");
+    assert!(
+        (line.unit_cost_exact.to_f64().unwrap() - 4.568).abs() < 1e-9,
+        "{}",
+        line.unit_cost_exact
+    );
+    assert_eq!(line.unit_cost, 5, "older readers get the rounded unit cost");
+
+    // Two deliveries of 6 000 g, no price given: each costs half the line.
+    for _ in 0..2 {
+        let resp = test::call_service(&app, test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id)).insert_header(auth.clone())
+            .set_json(serde_json::json!({"lines":[{"line_id": line.id, "quantity_received": 6000.0}]}))
+            .to_request()).await;
+        assert!(resp.status().is_success());
+    }
+    let spent: i64 = sqlx::query_scalar(
+        "SELECT SUM(line_cost)::bigint FROM goods_receipt_lines WHERE purchase_order_line_id = $1",
+    )
+    .bind(line.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        spent, 54816,
+        "the deliveries add up to the invoice, not to 600.00"
+    );
+    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2")
+        .bind(branch_id).bind(milk).fetch_one(&pool).await.unwrap();
+    assert!(
+        (cost - 4.568).abs() < 1e-9,
+        "average cost keeps 4.568/g, got {cost}"
+    );
+    let ledger: Vec<(Option<i64>, Option<f64>)> = sqlx::query_as("SELECT unit_cost, unit_cost_exact::float8 FROM inventory_movements WHERE source_type='purchase' AND source_id=$1")
+        .bind(po.order.id).fetch_all(&pool).await.unwrap();
+    assert_eq!(ledger.len(), 2);
+    for (rounded, exact) in ledger {
+        assert_eq!(rounded, Some(5));
+        assert!((exact.unwrap() - 4.568).abs() < 1e-9);
+    }
+
+    // An actual invoice total on the receive overrides the ordered price.
+    let po2: PurchaseOrderFull = test::read_body_json(test::call_service(&app, order(serde_json::json!({"lines":[{
+        "org_ingredient_id": milk, "purchase_unit": "g", "quantity_ordered": 1000.0, "line_cost": 4568
+    }]}))).await).await;
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/orders/{}/receive", po2.order.id)).insert_header(auth.clone())
+        .set_json(serde_json::json!({"lines":[{"line_id": po2.lines[0].id, "quantity_received": 1000.0, "line_cost": 5000}]}))
+        .to_request()).await;
+    assert!(resp.status().is_success());
+    let (lc, exact): (Option<i64>, Option<f64>) = sqlx::query_as("SELECT line_cost, unit_cost_exact::float8 FROM goods_receipt_lines WHERE purchase_order_line_id = $1")
+        .bind(po2.lines[0].id).fetch_one(&pool).await.unwrap();
+    assert_eq!(lc, Some(5000));
+    assert!((exact.unwrap() - 5.0).abs() < 1e-9);
+
+    // An older client's per-unit price still works, multiplied out.
+    let po3: PurchaseOrderFull = test::read_body_json(test::call_service(&app, order(serde_json::json!({"lines":[{
+        "org_ingredient_id": milk, "purchase_unit": "kg", "quantity_ordered": 2.0, "unit_cost": 4568
+    }]}))).await).await;
+    assert_eq!(po3.lines[0].line_cost, 9136);
+    assert_eq!(po3.lines[0].unit_cost, 4568);
+
+    // No cost at all, or a negative total: refused.
+    for bad in [
+        serde_json::json!({"org_ingredient_id": milk, "purchase_unit": "g", "quantity_ordered": 10.0}),
+        serde_json::json!({"org_ingredient_id": milk, "purchase_unit": "g", "quantity_ordered": 10.0, "line_cost": -1}),
+    ] {
+        let resp = test::call_service(&app, order(serde_json::json!({"lines": [bad]}))).await;
+        assert_eq!(resp.status(), 400);
+    }
+}
+
 /// V8: a receive request with the same line_id twice is rejected (would
 /// otherwise double-apply stock and cost).
 #[sqlx::test]

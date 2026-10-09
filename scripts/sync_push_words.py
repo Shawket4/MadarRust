@@ -14,8 +14,10 @@ src = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
 text = open(src).read()
 
 # Key prefixes copied in, one row per app. Add a new app's prefixes here when
-# it starts sending pushes.
-PREFIXES = (r'staff\.n_[a-z_]+', r'staff\.kind_[a-z_]+', r'staff\.dawam_by_madar', r'push\.[a-z_]+')
+# it starts sending pushes. The month names write a push's dates as the
+# phone's inbox does ("3 Oct", "3 أكتوبر").
+PREFIXES = (r'staff\.n_[a-z_]+', r'staff\.kind_[a-z_]+', r'staff\.month_[0-9]+',
+            r'staff\.dawam_by_madar', r'push\.[a-z_]+')
 pat = re.compile(r'^\s*"(' + '|'.join(PREFIXES) + r')" => "((?:[^"\\]|\\.)*)",', re.M)
 
 def block(fn):

@@ -213,7 +213,7 @@ pub struct PassLinks {
     /// is served from the same origin as the API — so a pass needs a
     /// CERTIFICATE, not a configured base URL.
     pub apple_url: Option<String>,
-    /// `https://pay.google.com/gp/v/save/<jwt>`.
+    /// The Google Wallet save link: the signed JWT on pay.google.com's save path.
     pub google_url: Option<String>,
     /// False when neither wallet is configured — the site shows the member's
     /// QR on the page instead of dead buttons.

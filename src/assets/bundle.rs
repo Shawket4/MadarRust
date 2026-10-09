@@ -97,7 +97,6 @@ pub async fn referenced_files(
         "WITH g AS ( \
             SELECT image_group_id AS gid FROM menu_items WHERE org_id = $1 AND deleted_at IS NULL AND image_group_id IS NOT NULL \
             UNION SELECT image_group_id FROM categories WHERE org_id = $1 AND deleted_at IS NULL AND image_group_id IS NOT NULL \
-            UNION SELECT image_group_id FROM bundles WHERE org_id = $1 AND image_group_id IS NOT NULL \
             UNION SELECT logo_group_id FROM organizations WHERE id = $1 AND logo_group_id IS NOT NULL \
             UNION SELECT p.animation_group_id FROM recipe_step_presets p \
                    JOIN menu_item_recipe_steps s ON s.preset_slug = p.slug \
