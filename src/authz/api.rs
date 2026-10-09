@@ -1602,11 +1602,17 @@ pub async fn list_flags(
     Ok(HttpResponse::Ok().json(rows))
 }
 
+/// `POST /authz/flags/{id}/review` answers only that it was done.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ReviewedOut {
+    pub reviewed: bool,
+}
+
 /// Mark one flag as looked at. It is an acknowledgement, not an approval: the
 /// act is already on the books either way, so there is nothing here to undo or
 /// let through.
 #[utoipa::path(post, path = "/authz/flags/{id}/review", tag = "authz",
-    responses((status = 200, description = "Flag reviewed", body = ReplayFlag), AppErrorResponse),
+    responses((status = 200, description = "Flag reviewed", body = ReviewedOut), AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn review_flag(
     req: HttpRequest,
@@ -1630,7 +1636,7 @@ pub async fn review_flag(
     if updated.rows_affected() == 0 {
         return Err(AppError::NotFound("No such open flag".into()));
     }
-    Ok(HttpResponse::Ok().json(serde_json::json!({ "reviewed": true })))
+    Ok(HttpResponse::Ok().json(ReviewedOut { reviewed: true }))
 }
 
 #[derive(serde::Deserialize, utoipa::ToSchema)]

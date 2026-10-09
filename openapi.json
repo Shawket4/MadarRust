@@ -2420,7 +2420,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReplayFlag"
+                  "$ref": "#/components/schemas/ReviewedOut"
                 }
               }
             }
@@ -75728,7 +75728,6 @@
           "detail",
           "baseline",
           "created_at",
-          "impact",
           "impact_complete"
         ],
         "properties": {
@@ -75764,7 +75763,10 @@
             "format": "uuid"
           },
           "impact": {
-            "type": "object",
+            "type": [
+              "object",
+              "null"
+            ],
             "description": "Measured after-window aggregate; `null` until ≥1 day of after-data."
           },
           "impact_complete": {
@@ -93630,6 +93632,18 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ReviewedOut": {
+        "type": "object",
+        "description": "`POST /authz/flags/{id}/review` answers only that it was done.",
+        "required": [
+          "reviewed"
+        ],
+        "properties": {
+          "reviewed": {
+            "type": "boolean"
           }
         }
       },
