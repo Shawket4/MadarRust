@@ -164,7 +164,7 @@ pub async fn public_branches(
            FROM branches b
            JOIN organizations o ON o.id = b.org_id
            LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
-           WHERE b.org_id = $1 AND b.is_active = true AND b.deleted_at IS NULL
+           WHERE b.org_id = $1 AND b.is_active = true AND b.deleted_at IS NULL AND b.kind = 'branch'
              AND ($2 OR COALESCE(s.in_mall_enabled, false) OR COALESCE(s.outside_enabled, false)
                   OR COALESCE(s.umbrella_enabled, false) OR COALESCE(s.pickup_enabled, false))
            ORDER BY b.name"#,
@@ -214,7 +214,7 @@ pub(crate) async fn channel_open_now(
            FROM branches b
            JOIN organizations o ON o.id = b.org_id
            LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id
-           WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL"#,
+           WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL AND b.kind = 'branch'"#,
     ))
     .bind(branch_id)
     .fetch_optional(pool)
@@ -438,7 +438,7 @@ pub async fn public_menu(
     let branch: Option<(Uuid, bool)> = sqlx::query_as(&format!(
         "SELECT b.org_id, COALESCE(s.{}_enabled, false) \
          FROM branches b LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id \
-         WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL",
+         WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL AND b.kind = 'branch'",
         query.channel
     ))
     .bind(branch_id)
@@ -1360,7 +1360,7 @@ pub async fn delivery_quote(
     let row: Option<(bool, i32)> = sqlx::query_as(&format!(
         "SELECT COALESCE(s.{ch}_enabled, false), COALESCE(s.{fee_col}, 0) \
          FROM branches b LEFT JOIN branch_delivery_settings s ON s.branch_id = b.id \
-         WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL",
+         WHERE b.id = $1 AND b.is_active = true AND b.deleted_at IS NULL AND b.kind = 'branch'",
         ch = query.channel,
         fee_col = fee_col,
     ))

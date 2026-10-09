@@ -482,7 +482,7 @@ impl Availability {
 async fn availability(pool: &PgPool, org_id: Uuid) -> Result<Availability, AppError> {
     let branches: Vec<BranchRow> = sqlx::query_as(
         "SELECT id, name, address, phone, latitude, longitude FROM branches \
-          WHERE org_id = $1 AND is_active AND deleted_at IS NULL ORDER BY name",
+          WHERE org_id = $1 AND is_active AND deleted_at IS NULL AND kind = 'branch' ORDER BY name",
     )
     .bind(org_id)
     .fetch_all(pool)

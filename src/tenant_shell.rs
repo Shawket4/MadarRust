@@ -389,7 +389,7 @@ async fn menu_branch(pool: &PgPool, org_id: Uuid, full_path: &str) -> Option<Uui
 pub(crate) async fn shop_branch(pool: &PgPool, org_id: Uuid, wanted: Option<Uuid>) -> Option<Uuid> {
     sqlx::query_scalar::<_, Uuid>(
         "SELECT id FROM branches \
-          WHERE org_id = $1 AND is_active AND deleted_at IS NULL \
+          WHERE org_id = $1 AND is_active AND deleted_at IS NULL AND kind = 'branch' \
           ORDER BY (id = $2) DESC, created_at, id LIMIT 1",
     )
     .bind(org_id)

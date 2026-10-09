@@ -294,6 +294,7 @@ paths(
         crate::inventory::transfers::list_transfers,
         crate::inventory::transfers::replenishment,
         crate::inventory::transfers::transfer_differences,
+        crate::inventory::transfers::transfer_locations,
         // ── recipes ───────────────────────────────────────────────────
         crate::recipes::steps::list_step_presets,
         crate::recipes::steps::list_recipe_steps,

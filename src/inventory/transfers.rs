@@ -238,10 +238,31 @@ fn same_org(claims: &Claims, org_id: Uuid) -> Result<(), AppError> {
     }
 }
 
+/// "receive" + "ed" read "receiveed": each verb's own past form.
+fn past(action: Action) -> String {
+    let verb = format!("{action:?}").to_lowercase();
+    if verb.ends_with('e') {
+        format!("{verb}d")
+    } else {
+        format!("{verb}ed")
+    }
+}
+
+/// "Every location" is every location the caller works at (None = the whole
+/// org, for an org-wide reader): transfers carry costs.
+async fn my_locations(pool: &PgPool, claims: &Claims) -> Result<Option<Vec<Uuid>>, AppError> {
+    Ok(
+        match crate::authz::scope::branch_scope(pool, claims).await? {
+            crate::authz::scope::BranchScope::All => None,
+            crate::authz::scope::BranchScope::Only(ids) => Some(ids),
+        },
+    )
+}
+
 fn not_open(status: TransferStatus, action: Action) -> AppError {
     AppError::Refused {
         code: "TRANSFER_STEP_NOT_OPEN",
-        reason: format!("A {status:?} transfer can't be {action:?}ed.").to_lowercase(),
+        reason: format!("A {status:?} transfer can't be {}.", past(action)).to_lowercase(),
     }
 }
 
@@ -865,7 +886,8 @@ pub async fn receive_transfer(
         }
         sqlx::query(
             "UPDATE stock_transfer_lines SET qty_received = round($2::numeric, 3), \
-             note = COALESCE($3, note) WHERE id = $1",
+             note = CASE WHEN $3::text IS NULL THEN note WHEN note IS NULL THEN $3 \
+             ELSE note || E'\\n' || $3 END WHERE id = $1",
         )
         .bind(l.id)
         .bind(g.qty_received)
@@ -983,9 +1005,15 @@ pub async fn list_transfers(
         Some(s @ ("requested" | "draft" | "dispatched" | "received" | "cancelled")) => Some(s),
         Some(_) => return Err(AppError::BadRequest("Unknown transfer status.".into())),
     };
+    let mine = match all {
+        true => my_locations(pool.get_ref(), &claims).await?,
+        false => None,
+    };
     let side = |col: &str| {
         if all {
-            format!("t.org_id = $1 AND {col} IS NOT NULL")
+            format!(
+                "t.org_id = $1 AND {col} IS NOT NULL AND ($5::uuid[] IS NULL OR {col} = ANY($5))"
+            )
         } else {
             format!("{col} = $1")
         }
@@ -993,7 +1021,9 @@ pub async fn list_transfers(
     let cond = match query.direction.as_deref() {
         Some("incoming") => side("t.destination_branch_id"),
         Some("outgoing") => side("t.source_branch_id"),
-        _ if all => "t.org_id = $1".to_string(),
+        _ if all => "t.org_id = $1 AND ($5::uuid[] IS NULL \
+                     OR t.source_branch_id = ANY($5) OR t.destination_branch_id = ANY($5))"
+            .to_string(),
         _ => "(t.source_branch_id = $1 OR t.destination_branch_id = $1)".to_string(),
     };
     let (limit, offset) = (
@@ -1005,13 +1035,15 @@ pub async fn list_transfers(
          ORDER BY t.initiated_at DESC, t.number DESC LIMIT $3 OFFSET $4"
     );
     let mut conn = pool.get_ref().acquire().await?;
-    let headers: Vec<HeaderRow> = sqlx::query_as(&sql)
+    let mut list = sqlx::query_as::<_, HeaderRow>(&sql)
         .bind(scope)
         .bind(status)
         .bind(limit)
-        .bind(offset)
-        .fetch_all(&mut *conn)
-        .await?;
+        .bind(offset);
+    if all {
+        list = list.bind(mine);
+    }
+    let headers = list.fetch_all(&mut *conn).await?;
     Ok(HttpResponse::Ok().json(assemble(&mut conn, headers).await?))
 }
 
@@ -1201,11 +1233,13 @@ pub async fn transfer_differences(
          WHERE t.org_id = $1 AND t.status = 'received' AND l.qty_received <> l.qty_sent \
            AND ($2::timestamptz IS NULL OR t.received_at >= $2) \
            AND ($3::timestamptz IS NULL OR t.received_at < $3) \
+           AND ($4::uuid[] IS NULL OR t.source_branch_id = ANY($4) OR t.destination_branch_id = ANY($4)) \
          ORDER BY t.received_at DESC, oi.name LIMIT 2000",
     )
     .bind(*org_id)
     .bind(query.from)
     .bind(query.to)
+    .bind(my_locations(pool.get_ref(), &claims).await?)
     .fetch_all(pool.get_ref())
     .await?;
     let out: Vec<TransferDifferenceRow> = rows
@@ -1231,4 +1265,42 @@ pub async fn transfer_differences(
         })
         .collect();
     Ok(HttpResponse::Ok().json(out))
+}
+
+/// A location a transfer can go to or come from.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema, sqlx::FromRow)]
+pub struct TransferLocation {
+    pub id: Uuid,
+    pub name: String,
+    /// `branch` | `warehouse`
+    pub kind: String,
+}
+
+/// Every live location of the org, for the other side of a transfer. Someone
+/// who works at one shop still sends to, and requests from, the rest; `GET
+/// /branches` lists only where the caller works.
+#[utoipa::path(
+    get,
+    path = "/inventory/orgs/{org_id}/transfer-locations",
+    tag = "inventory",
+    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    responses((status = 200, body = Vec<TransferLocation>), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn transfer_locations(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    same_org(&claims, *org_id)?;
+    require(pool.get_ref(), &claims, Cap::InventoryTransfersCreate, None).await?;
+    let rows: Vec<TransferLocation> = sqlx::query_as(
+        "SELECT id, name, kind::text AS kind FROM branches \
+          WHERE org_id = $1 AND is_active AND deleted_at IS NULL ORDER BY kind, name",
+    )
+    .bind(*org_id)
+    .fetch_all(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(rows))
 }

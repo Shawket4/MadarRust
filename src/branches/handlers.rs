@@ -828,8 +828,23 @@ async fn check_warehouse_limit(
 /// A branch becomes a warehouse only once nothing is selling there: no open
 /// till, no unfinished order or open bill, no paired device.
 async fn check_not_selling(conn: &mut sqlx::PgConnection, branch_id: Uuid) -> Result<(), AppError> {
-    let (tills, orders, tickets, devices): (bool, bool, bool, bool) = sqlx::query_as(
-        "SELECT EXISTS (SELECT 1 FROM tills WHERE branch_id = $1 AND status = 'open'),                 EXISTS (SELECT 1 FROM orders WHERE branch_id = $1                         AND status IN ('pending', 'preparing', 'ready')),                 EXISTS (SELECT 1 FROM open_tickets WHERE branch_id = $1 AND status = 'open'),                 EXISTS (SELECT 1 FROM devices WHERE branch_id = $1 AND retired_at IS NULL)",
+    // Held until the kind is written: the selling guard reads the row FOR
+    // SHARE, so nothing new starts selling here between this check and the switch.
+    sqlx::query("SELECT 1 FROM branches WHERE id = $1 FOR UPDATE")
+        .bind(branch_id)
+        .execute(&mut *conn)
+        .await?;
+    #[allow(clippy::type_complexity)]
+    let (tills, orders, tickets, devices, integrations, delivery, bookings): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM tills WHERE branch_id = $1 AND status = 'open'),                 EXISTS (SELECT 1 FROM orders WHERE branch_id = $1                         AND status IN ('pending', 'preparing', 'ready')),                 EXISTS (SELECT 1 FROM open_tickets WHERE branch_id = $1 AND status = 'open'),                 EXISTS (SELECT 1 FROM devices WHERE branch_id = $1 AND retired_at IS NULL),                 EXISTS (SELECT 1 FROM integration_credentials WHERE branch_id = $1 AND revoked_at IS NULL),                 EXISTS (SELECT 1 FROM branch_delivery_settings WHERE branch_id = $1                         AND (in_mall_enabled OR outside_enabled OR umbrella_enabled OR pickup_enabled)),                 EXISTS (SELECT 1 FROM branch_booking_settings WHERE branch_id = $1 AND enabled)",
     )
     .bind(branch_id)
     .fetch_one(conn)
@@ -846,6 +861,15 @@ async fn check_not_selling(conn: &mut sqlx::PgConnection, branch_id: Uuid) -> Re
     }
     if devices {
         busy.push("unpair its devices");
+    }
+    if integrations {
+        busy.push("disconnect its delivery-app integrations");
+    }
+    if delivery {
+        busy.push("turn off its delivery and pickup");
+    }
+    if bookings {
+        busy.push("turn off its bookings");
     }
     if busy.is_empty() {
         return Ok(());

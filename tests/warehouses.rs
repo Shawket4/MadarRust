@@ -602,6 +602,27 @@ async fn warehouse_limit_and_kind_change(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    // Pickup still on: online orders would land at a warehouse.
+    sqlx::query(
+        "INSERT INTO branch_delivery_settings (branch_id, pickup_enabled) VALUES ($1, true)",
+    )
+    .bind(w.shop)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let resp = call!(
+        app,
+        patch,
+        format!("/branches/{}", w.shop),
+        w.owner,
+        json!({ "kind": "warehouse" })
+    );
+    assert_eq!(resp.status(), 409);
+    sqlx::query("UPDATE branch_delivery_settings SET pickup_enabled = false WHERE branch_id = $1")
+        .bind(w.shop)
+        .execute(&pool)
+        .await
+        .unwrap();
     let resp = call!(
         app,
         patch,
@@ -630,4 +651,100 @@ async fn warehouse_limit_and_kind_change(pool: PgPool) {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], json!(w.shop));
     assert_eq!(rows[0]["kind"], json!("warehouse"));
+}
+
+/// Someone who works at one shop picks the other side from every location,
+/// but "all locations" lists only transfers touching where they work.
+#[sqlx::test]
+async fn a_shop_manager_sees_every_location_and_only_their_transfers(pool: PgPool) {
+    let app = app!(pool);
+    let w = world(&pool).await;
+    let other = location(&pool, w.org, "branch").await;
+    for action in ["create", "read"] {
+        sqlx::query(
+            "INSERT INTO role_permissions (role, resource, action, granted) \
+             VALUES ('branch_manager', 'inventory_transfers', $1::permission_action, true) ON CONFLICT DO NOTHING",
+        )
+        .bind(action)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let mgr = user(&pool, w.org, "branch_manager").await;
+    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
+        .bind(mgr)
+        .bind(w.shop)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mgr = token(mgr, w.org, UserRole::BranchManager);
+
+    let resp = call!(
+        app,
+        get,
+        format!("/inventory/orgs/{}/transfer-locations", w.org),
+        mgr
+    );
+    assert_eq!(resp.status(), 200);
+    let places: Vec<serde_json::Value> = test::read_body_json(resp).await;
+    let ids: Vec<String> = places
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().to_string())
+        .collect();
+    for id in [w.wh, w.shop, other] {
+        assert!(ids.contains(&id.to_string()), "{places:?}");
+    }
+
+    let mine = draft!(app, w, 2.0);
+    let resp = call!(
+        app,
+        post,
+        "/inventory/transfers",
+        w.owner,
+        json!({
+            "source_branch_id": w.wh, "destination_branch_id": other,
+            "lines": [{ "org_ingredient_id": w.beans, "quantity": 1.0 }]
+        })
+    );
+    assert_eq!(resp.status(), 201);
+    let resp = call!(
+        app,
+        get,
+        format!("/inventory/branches/{}/transfers", Uuid::nil()),
+        mgr
+    );
+    assert_eq!(resp.status(), 200);
+    let seen: Vec<StockTransfer> = test::read_body_json(resp).await;
+    assert_eq!(seen.iter().map(|t| t.id).collect::<Vec<_>>(), vec![mine.id]);
+    let resp = call!(
+        app,
+        get,
+        format!("/inventory/branches/{}/transfers", Uuid::nil()),
+        w.owner
+    );
+    let all: Vec<StockTransfer> = test::read_body_json(resp).await;
+    assert_eq!(all.len(), 2, "the owner sees the whole org");
+}
+
+#[sqlx::test]
+async fn an_ingredient_on_an_open_transfer_cannot_be_deleted(pool: PgPool) {
+    let app = app!(pool);
+    let w = world(&pool).await;
+    let t = draft!(app, w, 20.0);
+    let resp = call!(
+        app,
+        post,
+        format!("/inventory/transfers/{}/dispatch", t.id),
+        w.owner,
+        json!({})
+    );
+    assert_eq!(resp.status(), 200);
+    // The warehouse is empty now; the beans are on the road.
+    let resp = call!(
+        app,
+        delete,
+        format!("/inventory/orgs/{}/catalog/{}", w.org, w.beans),
+        w.owner
+    );
+    assert_eq!(resp.status(), 409);
 }

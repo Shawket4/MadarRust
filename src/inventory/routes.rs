@@ -116,6 +116,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/orgs/{org_id}/transfer-differences",
                 web::get().to(transfers::transfer_differences),
+            )
+            .route(
+                "/orgs/{org_id}/transfer-locations",
+                web::get().to(transfers::transfer_locations),
             ),
     );
 }

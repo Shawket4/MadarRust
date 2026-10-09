@@ -24,10 +24,15 @@ ALTER TABLE organizations
 -- ── A warehouse never sells ────────────────────────────────────────────
 CREATE FUNCTION assert_selling_branch() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE k branch_kind;
 BEGIN
-    IF NEW.branch_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM branches WHERE id = NEW.branch_id AND kind = 'warehouse'
-    ) THEN
+    -- FOR SHARE waits out a kind switch in flight (it holds the row FOR
+    -- UPDATE while it checks the branch isn't selling), so a till opened at
+    -- that moment sees the new kind instead of slipping in.
+    IF NEW.branch_id IS NOT NULL THEN
+        SELECT kind INTO k FROM branches WHERE id = NEW.branch_id FOR SHARE;
+    END IF;
+    IF k = 'warehouse' THEN
         RAISE EXCEPTION 'WAREHOUSE_CANNOT_SELL: % rows cannot belong to a warehouse', TG_TABLE_NAME
             USING ERRCODE = '23514';
     END IF;

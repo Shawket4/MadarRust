@@ -1011,6 +1011,13 @@ pub async fn delete_catalog_item(
                 SELECT 1 FROM menu_item_optional_fields WHERE org_ingredient_id = $1
             ),
             EXISTS (SELECT 1 FROM branch_stock WHERE org_ingredient_id = $1 AND on_hand <> 0)
+                -- In transit counts as stock: receiving or cancelling it needs the ingredient.
+                OR EXISTS (
+                    SELECT 1 FROM stock_transfer_lines l
+                    JOIN stock_transfers t ON t.id = l.transfer_id
+                    WHERE l.org_ingredient_id = $1
+                      AND t.status IN ('requested', 'draft', 'dispatched')
+                )
         "#,
     )
     .bind(id)
@@ -1025,7 +1032,7 @@ pub async fn delete_catalog_item(
     }
     if stocked {
         return Err(AppError::Conflict(
-            "Ingredient still has stock at a branch. Count or waste it to zero first.".into(),
+            "Ingredient still has stock at a branch or on an open transfer. Count or waste it to zero, and finish or cancel the transfer, first.".into(),
         ));
     }
 
