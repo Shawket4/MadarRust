@@ -85069,7 +85069,7 @@
               "string",
               "null"
             ],
-            "description": "`https://pay.google.com/gp/v/save/<jwt>`."
+            "description": "The Google Wallet save link: the signed JWT on pay.google.com's save path."
           }
         }
       },
@@ -88244,7 +88244,7 @@
           },
           "url": {
             "type": "string",
-            "description": "`https://…` and nothing else — checked on write and again on read, see\n`orgs::social::links_of`."
+            "description": "An https address and nothing else — checked on write and again on read, see\n`orgs::social::links_of`."
           }
         }
       },

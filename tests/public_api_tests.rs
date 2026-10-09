@@ -66,6 +66,19 @@ async fn the_root_says_what_this_is() {
     assert_eq!(body["name"], "Madar POS API");
     assert_eq!(body["openapi"], "https://api.madar-pos.cloud/openapi.json");
     assert_eq!(body["website"], "https://get.madar-pos.cloud/");
+
+    // Link checkers probe with HEAD: it answers like GET.
+    for uri in ["/", "/openapi.json"] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::default()
+                .method(actix_web::http::Method::HEAD)
+                .uri(uri)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200, "HEAD {uri}");
+    }
 }
 
 /// Only the `/public/` endpoints, minus the shell nginx calls, and a document

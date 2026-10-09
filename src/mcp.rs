@@ -11,6 +11,8 @@
 //! the booking-slots and tracking handlers themselves), so an answer here is the
 //! answer the public API gives. Like the API, nothing lists every shop: a tool
 //! names one shop by its address name ("drops" for drops.madar-pos.cloud).
+//!
+//! Two resources hold fixed context: `madar://about` and the public OpenAPI spec.
 
 use actix_web::{HttpResponse, http::StatusCode, web};
 use chrono::NaiveDate;
@@ -214,22 +216,61 @@ async fn call(pool: &web::Data<PgPool>, name: &str, args: &Value) -> Result<Valu
         }
         // ponytail: plans, prices and contact are copied from the marketing site
         // (site/src/i18n/en.ts pricing, site/src/lib/site.ts); change them together.
-        "about_madar" => Ok(json!({
-            "what": "Madar POS is a point of sale for cafés and restaurants in Egypt, built in Cairo: the till, kitchen screens, recipe costing, stock, loyalty with wallet cards, online ordering and table reservations, in Arabic and English, online or offline.",
-            "plans": [
-                { "name": "Essential Café", "monthly_egp_per_branch": 3000 },
-                { "name": "Advanced Operation", "monthly_egp_per_branch": 3500 },
-            ],
-            "first_month": "free",
-            "contact": { "whatsapp": "https://wa.me/201211116899", "phone": "+201211116899", "email": "shawket.4@icloud.com" },
-            "links": {
-                "site": "https://get.madar-pos.cloud/",
-                "pricing": "https://get.madar-pos.cloud/en/pricing/",
-                "contact": "https://get.madar-pos.cloud/en/contact/",
-                "developers": "https://get.madar-pos.cloud/en/developers/",
-            },
-        })),
+        "about_madar" => Ok(about()),
         other => Err(ToolError(format!("no tool named \"{other}\""))),
+    }
+}
+
+/// What `about_madar` answers and the `madar://about` resource holds.
+fn about() -> Value {
+    json!({
+        "what": "Madar POS is a point of sale for cafés and restaurants in Egypt, built in Cairo: the till, kitchen screens, recipe costing, stock, loyalty with wallet cards, online ordering and table reservations, in Arabic and English, online or offline.",
+        "plans": [
+            { "name": "Essential Café", "monthly_egp_per_branch": 3000 },
+            { "name": "Advanced Operation", "monthly_egp_per_branch": 3500 },
+        ],
+        "first_month": "free",
+        "contact": { "whatsapp": "https://wa.me/201211116899", "phone": "+201211116899", "email": "shawket.4@icloud.com" },
+        "links": {
+            "site": "https://get.madar-pos.cloud/",
+            "pricing": "https://get.madar-pos.cloud/en/pricing/",
+            "contact": "https://get.madar-pos.cloud/en/contact/",
+            "developers": "https://get.madar-pos.cloud/en/developers/",
+        },
+    })
+}
+
+fn capabilities() -> Value {
+    json!({ "tools": { "listChanged": false }, "resources": { "listChanged": false } })
+}
+
+/// Fixed documents an assistant can load as context.
+fn resources() -> Value {
+    json!([
+        {
+            "uri": "madar://about",
+            "name": "about",
+            "title": "About Madar POS",
+            "description": "What Madar POS is, its plans and monthly prices per branch, and how to reach sales (the same answer as the about_madar tool).",
+            "mimeType": "application/json",
+        },
+        {
+            "uri": format!("{}/openapi.json", crate::public_api::SERVER),
+            "name": "public-openapi",
+            "title": "The public API (OpenAPI 3.1)",
+            "description": "Every endpoint that needs no account: shop pages, menus, ordering, booking, loyalty cards and order tracking.",
+            "mimeType": "application/json",
+        },
+    ])
+}
+
+fn read_resource(uri: &str) -> Option<String> {
+    if uri == "madar://about" {
+        Some(about().to_string())
+    } else if uri == format!("{}/openapi.json", crate::public_api::SERVER) {
+        Some(crate::public_api::spec().to_string())
+    } else {
+        None
     }
 }
 
@@ -275,7 +316,7 @@ pub async fn post(pool: web::Data<PgPool>, body: web::Bytes) -> HttpResponse {
                 id,
                 Ok(json!({
                     "protocolVersion": version,
-                    "capabilities": { "tools": { "listChanged": false } },
+                    "capabilities": capabilities(),
                     "serverInfo": { "name": "madar-pos", "title": "Madar POS", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": "Read-only tools for cafés and restaurants on Madar POS (Egypt). Name a shop by its address name, e.g. \"drops\" for drops.madar-pos.cloud; there is no list of all shops. Ordering and booking need the customer's WhatsApp code, so send them the shop's links from get_shop to finish.",
                 })),
@@ -283,6 +324,24 @@ pub async fn post(pool: web::Data<PgPool>, body: web::Bytes) -> HttpResponse {
         }
         "ping" => reply(id, Ok(json!({}))),
         "tools/list" => reply(id, Ok(json!({ "tools": tools() }))),
+        "resources/list" => reply(id, Ok(json!({ "resources": resources() }))),
+        "resources/templates/list" => reply(id, Ok(json!({ "resourceTemplates": [] }))),
+        "resources/read" => {
+            let Some(uri) = params["uri"].as_str() else {
+                return reply(id, Err((-32602, "Invalid params: \"uri\" is required")));
+            };
+            match read_resource(uri) {
+                Some(text) => reply(
+                    id,
+                    Ok(
+                        json!({ "contents": [{ "uri": uri, "mimeType": "application/json", "text": text }] }),
+                    ),
+                ),
+                None => reply(id, Err((-32002, "Resource not found"))),
+            }
+        }
+        // No prompts are offered (none declared); an empty list for clients that ask anyway.
+        "prompts/list" => reply(id, Ok(json!({ "prompts": [] }))),
         "tools/call" => {
             let Some(name) = params["name"].as_str() else {
                 return reply(id, Err((-32602, "Invalid params: \"name\" is required")));
@@ -336,9 +395,10 @@ pub async fn server_card() -> HttpResponse {
             "serverInfo": { "name": "madar-pos", "title": "Madar POS", "version": env!("CARGO_PKG_VERSION") },
             "description": "Read-only tools for cafés and restaurants that run on Madar POS: a shop's details, menu, table availability and order status, and how to reach Madar.",
             "transport": { "type": "streamable-http", "endpoint": "https://api.madar-pos.cloud/mcp" },
-            "capabilities": { "tools": { "listChanged": false } },
+            "capabilities": capabilities(),
             "authentication": { "required": false },
             "tools": tools(),
+            "resources": resources(),
             "documentation": "https://get.madar-pos.cloud/en/developers/",
         }))
 }
@@ -349,8 +409,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::post().to(post))
             .route(web::get().to(get)),
     )
-    .route(
-        "/.well-known/mcp/server-card.json",
-        web::get().to(server_card),
+    .service(
+        web::resource("/.well-known/mcp/server-card.json")
+            .route(web::get().to(server_card))
+            .route(web::head().to(server_card)),
     );
 }

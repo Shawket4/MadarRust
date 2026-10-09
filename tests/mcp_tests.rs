@@ -3,8 +3,9 @@
 //! What these pin: the handshake (version negotiation, notifications), the tool
 //! list and its read-only annotations, each tool answering from the same data the
 //! public API serves, failures reported inside the result (not as protocol errors),
-//! no customer details in a tracked order, and the protocol errors for malformed
-//! messages. GET is 405: there is no server-sent stream.
+//! no customer details in a tracked order, the two resources reading cleanly, and
+//! the protocol errors for malformed messages. GET is 405: there is no server-sent
+//! stream.
 
 mod common;
 
@@ -72,6 +73,7 @@ async fn the_handshake(pool: PgPool) {
     );
     assert_eq!(v["result"]["serverInfo"]["name"], "madar-pos");
     assert!(v["result"]["capabilities"]["tools"].is_object());
+    assert!(v["result"]["capabilities"]["resources"].is_object());
 
     let (_, v) = rpc(&app, json!({ "jsonrpc": "2.0", "id": 2, "method": "initialize", "params": { "protocolVersion": "1999-01-01" } })).await;
     assert_eq!(
@@ -210,12 +212,33 @@ async fn the_server_card_matches_the_server(pool: PgPool) {
     .await;
     assert_eq!(resp.status().as_u16(), 200);
     let card: Value = test::read_body_json(resp).await;
+    let head = test::call_service(
+        &app,
+        test::TestRequest::default()
+            .method(actix_web::http::Method::HEAD)
+            .uri("/.well-known/mcp/server-card.json")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(head.status().as_u16(), 200, "HEAD answers like GET");
     let (_, listed) = rpc(
         &app,
         json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
     )
     .await;
     assert_eq!(card["tools"], listed["result"]["tools"]);
+    let (_, listed) = rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
+    )
+    .await;
+    assert_eq!(card["resources"], listed["result"]["resources"]);
+    let (_, init) = rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {} }),
+    )
+    .await;
+    assert_eq!(card["capabilities"], init["result"]["capabilities"]);
     assert_eq!(card["transport"]["type"], "streamable-http");
     assert_eq!(
         card["transport"]["endpoint"],
@@ -231,6 +254,69 @@ async fn about_madar(pool: PgPool) {
     assert_eq!(plans.len(), 2);
     assert_eq!(plans[0]["monthly_egp_per_branch"], 3000);
     assert!(r["structuredContent"]["contact"]["email"].is_string());
+}
+
+#[sqlx::test]
+async fn the_resources_read_cleanly(pool: PgPool) {
+    let app = app!(pool);
+    let (_, v) = rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" }),
+    )
+    .await;
+    let listed = v["result"]["resources"].as_array().unwrap().clone();
+    assert_eq!(listed.len(), 2);
+    for r in &listed {
+        let (_, v) = rpc(&app, json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": r["uri"] } })).await;
+        let c = &v["result"]["contents"][0];
+        assert_eq!(c["uri"], r["uri"]);
+        assert_eq!(c["mimeType"], r["mimeType"]);
+        let text: Value = serde_json::from_str(c["text"].as_str().unwrap()).unwrap();
+        assert!(text.as_object().is_some_and(|o| !o.is_empty()), "{r}");
+    }
+
+    let (_, v) = rpc(&app, json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "madar://about" } })).await;
+    let about: Value =
+        serde_json::from_str(v["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        about,
+        tool(&app, "about_madar", json!({})).await["structuredContent"],
+        "the resource is the tool's answer"
+    );
+
+    let (_, v) = rpc(&app, json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": { "uri": "https://api.madar-pos.cloud/openapi.json" } })).await;
+    let spec: Value =
+        serde_json::from_str(v["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(spec["openapi"].as_str().unwrap().starts_with("3."));
+    assert!(
+        spec["paths"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .all(|p| p.starts_with("/public/")),
+        "only the public part"
+    );
+
+    let (_, v) = rpc(&app, json!({ "jsonrpc": "2.0", "id": 5, "method": "resources/read", "params": { "uri": "madar://nothing" } })).await;
+    assert_eq!(v["error"]["code"], -32002);
+    let (_, v) = rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 6, "method": "resources/read", "params": {} }),
+    )
+    .await;
+    assert_eq!(v["error"]["code"], -32602);
+    let (_, v) = rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "resources/templates/list" }),
+    )
+    .await;
+    assert_eq!(v["result"]["resourceTemplates"], json!([]));
+    let (_, v) = rpc(
+        &app,
+        json!({ "jsonrpc": "2.0", "id": 8, "method": "prompts/list" }),
+    )
+    .await;
+    assert_eq!(v["result"]["prompts"], json!([]));
 }
 
 #[sqlx::test]
@@ -251,7 +337,7 @@ async fn malformed_messages_get_protocol_errors(pool: PgPool) {
     assert_eq!(v["error"]["code"], -32600, "no jsonrpc 2.0");
     let (_, v) = rpc(
         &app,
-        json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list" }),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "completion/complete" }),
     )
     .await;
     assert_eq!(v["error"]["code"], -32601);

@@ -18,7 +18,7 @@ use utoipa::OpenApi;
 use crate::openapi::ApiDoc;
 
 const SITE: &str = "https://get.madar-pos.cloud/";
-const SERVER: &str = "https://api.madar-pos.cloud";
+pub(crate) const SERVER: &str = "https://api.madar-pos.cloud";
 const CONTACT_EMAIL: &str = "shawket.4@icloud.com";
 
 /// Paths under `/public/` that are not for callers: the shop pages' HTML,
@@ -127,7 +127,7 @@ pub fn public_subset(full: &Value) -> Value {
     })
 }
 
-fn spec() -> &'static str {
+pub(crate) fn spec() -> &'static str {
     static SPEC: OnceLock<String> = OnceLock::new();
     SPEC.get_or_init(|| {
         let full = serde_json::to_value(ApiDoc::openapi()).unwrap_or(Value::Null);
@@ -171,6 +171,9 @@ pub async fn not_found() -> HttpResponse {
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    // HEAD as well as GET: link checkers and crawlers probe with HEAD.
     cfg.route("/", web::get().to(root))
-        .route("/openapi.json", web::get().to(openapi_json));
+        .route("/", web::head().to(root))
+        .route("/openapi.json", web::get().to(openapi_json))
+        .route("/openapi.json", web::head().to(openapi_json));
 }

@@ -64,11 +64,13 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "/",
         "the API host's own description and where its public spec is; says nothing about any shop",
     ),
+    ("HEAD", "/", "same as GET"),
     (
         "GET",
         "/.well-known/mcp/server-card.json",
         "the MCP server card: the tool list tools/list already gives anyone",
     ),
+    ("HEAD", "/.well-known/mcp/server-card.json", "same as GET"),
     (
         "POST",
         "/mcp",
@@ -79,6 +81,7 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "/openapi.json",
         "the spec of the /public/ endpoints only, which are public already",
     ),
+    ("HEAD", "/openapi.json", "same as GET"),
     (
         "POST",
         "/auth/login",
