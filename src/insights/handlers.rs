@@ -221,7 +221,7 @@ pub struct DecisionOut {
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     /// Measured after-window aggregate; `null` until ≥1 day of after-data.
-    #[schema(value_type = Object)]
+    #[schema(value_type = Option<Object>)]
     pub impact: Option<serde_json::Value>,
     /// True once the full baseline window has elapsed since the decision.
     pub impact_complete: bool,
