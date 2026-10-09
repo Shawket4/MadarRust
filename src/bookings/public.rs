@@ -50,7 +50,7 @@ pub async fn booking_branches(
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT b.id, b.name, b.code FROM branches b \
          JOIN branch_booking_settings s ON s.branch_id = b.id AND s.enabled \
-         WHERE b.org_id = $1 AND b.is_active AND b.deleted_at IS NULL ORDER BY b.name",
+         WHERE b.org_id = $1 AND b.is_active AND b.deleted_at IS NULL AND b.kind = 'branch' ORDER BY b.name",
     )
     .bind(query.org_id)
     .fetch_all(pool.get_ref())

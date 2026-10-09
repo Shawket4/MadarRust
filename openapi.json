@@ -5739,6 +5739,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Only this kind; omitted = branches and warehouses.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/BranchKind"
+            }
           }
         ],
         "responses": {
@@ -16561,7 +16570,7 @@
           {
             "name": "branch_id",
             "in": "path",
-            "description": "Branch ID",
+            "description": "Branch or warehouse ID; the nil UUID = every location in the org",
             "required": true,
             "schema": {
               "type": "string",
@@ -16571,6 +16580,16 @@
           {
             "name": "direction",
             "in": "query",
+            "description": "`incoming` | `outgoing`; omitted = both.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`requested` | `draft` | `dispatched` | `received` | `cancelled`; omitted = all.",
             "required": false,
             "schema": {
               "type": "string"
@@ -16597,7 +16616,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List transfers",
+            "description": "Transfers with their lines, newest first",
             "content": {
               "application/json": {
                 "schema": {
@@ -17952,6 +17971,227 @@
         ]
       }
     },
+    "/inventory/orgs/{org_id}/transfer-differences": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "transfer_differences",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Received on or after (inclusive).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Received before (exclusive).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Received lines that differ from what was sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TransferDifferenceRow"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/orgs/{org_id}/transfer-locations": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Every live location of the org, for the other side of a transfer. Someone\nwho works at one shop still sends to, and requests from, the rest; `GET\n/branches` lists only where the caller works.",
+        "operationId": "transfer_locations",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TransferLocation"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/inventory/transfers": {
       "post": {
         "tags": [
@@ -17970,7 +18210,7 @@
         },
         "responses": {
           "201": {
-            "description": "Transfer created",
+            "description": "Transfer created (requested or draft)",
             "content": {
               "application/json": {
                 "schema": {
@@ -18048,11 +18288,11 @@
       }
     },
     "/inventory/transfers/{id}": {
-      "delete": {
+      "get": {
         "tags": [
           "inventory"
         ],
-        "operationId": "delete_transfer",
+        "operationId": "get_transfer",
         "parameters": [
           {
             "name": "id",
@@ -18066,8 +18306,15 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Transfer reversed and deleted"
+          "200": {
+            "description": "The transfer with its lines",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockTransfer"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -18165,11 +18412,646 @@
         },
         "responses": {
           "200": {
-            "description": "Transfer updated",
+            "description": "Request or draft updated",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StockTransfer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/transfers/{id}/accept": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "accept_transfer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Transfer ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptTransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Request accepted; now the source's draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockTransfer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/transfers/{id}/cancel": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "cancel_stock_transfer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Transfer ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseTransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cancelled; a dispatched transfer's stock is back at the source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockTransfer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/transfers/{id}/decline": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "decline_transfer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Transfer ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseTransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Request declined (note required)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockTransfer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/transfers/{id}/dispatch": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "dispatch_transfer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Transfer ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dispatched: stock left the source and is in transit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockTransfer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/transfers/{id}/receive": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "receive_transfer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Transfer ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReceiveTransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Received: what arrived is on hand at the destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StockTransfer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/warehouses/{warehouse_id}/replenishment": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "replenishment",
+        "parameters": [
+          {
+            "name": "warehouse_id",
+            "in": "path",
+            "description": "Warehouse ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "branch_id",
+            "in": "query",
+            "description": "The branch to fill from this warehouse.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the branch is low on and what the warehouse can send",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReplenishmentRow"
+                  }
                 }
               }
             }
@@ -64363,6 +65245,21 @@
   },
   "components": {
     "schemas": {
+      "AcceptTransferRequest": {
+        "type": "object",
+        "description": "`POST /inventory/transfers/{id}/accept`: a request becomes the source's\ndraft, optionally with its lines changed.",
+        "properties": {
+          "lines": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TransferLineInput"
+            }
+          }
+        }
+      },
       "AcceptingInput": {
         "type": "object",
         "required": [
@@ -67123,6 +68020,7 @@
           "timezone",
           "is_active",
           "old_bill_hours",
+          "kind",
           "created_at",
           "updated_at"
         ],
@@ -67160,6 +68058,10 @@
           },
           "is_active": {
             "type": "boolean"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/BranchKind",
+            "description": "`branch` sells; `warehouse` only holds stock (WAREHOUSE_DESIGN.md)."
           },
           "latitude": {
             "type": [
@@ -67692,6 +68594,14 @@
             }
           }
         }
+      },
+      "BranchKind": {
+        "type": "string",
+        "description": "What a `branches` row is. A warehouse holds stock and never sells.",
+        "enum": [
+          "branch",
+          "warehouse"
+        ]
       },
       "BranchMenuOverride": {
         "type": "object",
@@ -70111,6 +71021,18 @@
           }
         }
       },
+      "CloseTransferRequest": {
+        "type": "object",
+        "description": "`POST /inventory/transfers/{id}/decline` (note required) and\n`POST /inventory/transfers/{id}/cancel` (note optional).",
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "Column": {
         "type": "object",
         "description": "One output column: the SQL alias (also the JSON key on every row) plus how\nto render it.",
@@ -71815,6 +72737,10 @@
             ],
             "format": "int32",
             "description": "Geofence radius in meters. Defaults to 200."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/BranchKind",
+            "description": "`warehouse` for a stock-only location; defaults to `branch`."
           },
           "latitude": {
             "type": [
@@ -73690,16 +74616,23 @@
       },
       "CreateTransferRequest": {
         "type": "object",
+        "description": "`POST /inventory/transfers`. With `request: true` the DESTINATION asks\n(status `requested`); otherwise the SOURCE starts a `draft`.",
         "required": [
           "source_branch_id",
           "destination_branch_id",
-          "org_ingredient_id",
-          "quantity"
+          "lines"
         ],
         "properties": {
           "destination_branch_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferLineInput"
+            },
+            "description": "At least one; each ingredient once."
           },
           "note": {
             "type": [
@@ -73707,13 +74640,8 @@
               "null"
             ]
           },
-          "org_ingredient_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "quantity": {
-            "type": "number",
-            "format": "double"
+          "request": {
+            "type": "boolean"
           },
           "source_branch_id": {
             "type": "string",
@@ -84648,6 +85576,14 @@
               "null"
             ]
           },
+          "max_warehouses": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many warehouses this org may have; `null` = unlimited. Set by a\nsuper admin (WAREHOUSE_DESIGN.md)."
+          },
           "modules": {
             "type": "array",
             "items": {
@@ -90633,6 +91569,52 @@
           }
         }
       },
+      "ReceiveTransferLine": {
+        "type": "object",
+        "description": "One line as it arrived.",
+        "required": [
+          "line_id",
+          "qty_received"
+        ],
+        "properties": {
+          "line_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qty_received": {
+            "type": "number",
+            "format": "double",
+            "description": "0 or more. More than sent needs `note`."
+          }
+        }
+      },
+      "ReceiveTransferRequest": {
+        "type": "object",
+        "description": "`POST /inventory/transfers/{id}/receive`: every line, once. Closes it.",
+        "required": [
+          "lines"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReceiveTransferLine"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "RecipeBaseLineInput": {
         "type": "object",
         "description": "A line as submitted: quantity in `unit`, normalized to the ingredient's base unit\n(and grossed up by yield) exactly like a size recipe line.",
@@ -92086,6 +93068,79 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "ReplenishmentRow": {
+        "type": "object",
+        "description": "`GET /inventory/warehouses/{id}/replenishment?branch_id=`: one row per\ningredient the branch is at or under its low-stock level on.",
+        "required": [
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "category_name",
+          "on_hand",
+          "par_min",
+          "in_transit",
+          "open_inbound",
+          "warehouse_on_hand",
+          "need",
+          "available",
+          "suggested"
+        ],
+        "properties": {
+          "available": {
+            "type": "number",
+            "format": "double"
+          },
+          "category_name": {
+            "type": "string"
+          },
+          "in_transit": {
+            "type": "number",
+            "format": "double"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "need": {
+            "type": "number",
+            "format": "double",
+            "description": "See [`crate::replenish::Suggestion`]."
+          },
+          "on_hand": {
+            "type": "number",
+            "format": "double"
+          },
+          "open_inbound": {
+            "type": "number",
+            "format": "double"
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "par_max": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "par_min": {
+            "type": "number",
+            "format": "double"
+          },
+          "suggested": {
+            "type": "number",
+            "format": "double"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "warehouse_on_hand": {
+            "type": "number",
+            "format": "double"
           }
         }
       },
@@ -95845,19 +96900,31 @@
         "required": [
           "id",
           "org_id",
+          "reference",
+          "status",
           "source_branch_id",
           "source_branch_name",
+          "source_kind",
           "destination_branch_id",
           "destination_branch_name",
-          "org_ingredient_id",
-          "ingredient_name",
-          "unit",
-          "quantity",
-          "initiated_by",
-          "initiated_by_name",
-          "initiated_at"
+          "destination_kind",
+          "lines",
+          "created"
         ],
         "properties": {
+          "cancelled": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TransferStamp"
+              }
+            ]
+          },
+          "created": {
+            "$ref": "#/components/schemas/TransferStamp"
+          },
           "destination_branch_id": {
             "type": "string",
             "format": "uuid"
@@ -95865,23 +96932,28 @@
           "destination_branch_name": {
             "type": "string"
           },
+          "destination_kind": {
+            "$ref": "#/components/schemas/BranchKind"
+          },
+          "dispatched": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TransferStamp"
+              }
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"
           },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "initiated_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "initiated_by": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "initiated_by_name": {
-            "type": "string"
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StockTransferLine"
+            }
           },
           "note": {
             "type": [
@@ -95893,13 +96965,29 @@
             "type": "string",
             "format": "uuid"
           },
-          "org_ingredient_id": {
-            "type": "string",
-            "format": "uuid"
+          "received": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TransferStamp"
+              }
+            ]
           },
-          "quantity": {
-            "type": "number",
-            "format": "double"
+          "reference": {
+            "type": "string",
+            "description": "`TR-1043`, per org."
+          },
+          "requested": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TransferStamp"
+              }
+            ]
           },
           "source_branch_id": {
             "type": "string",
@@ -95908,8 +96996,64 @@
           "source_branch_name": {
             "type": "string"
           },
+          "source_kind": {
+            "$ref": "#/components/schemas/BranchKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TransferStatus"
+          }
+        }
+      },
+      "StockTransferLine": {
+        "type": "object",
+        "required": [
+          "id",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "qty_sent"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "qty_received": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`None` until received."
+          },
+          "qty_sent": {
+            "type": "number",
+            "format": "double",
+            "description": "Asked for while `requested`, planned while `draft`, sent from dispatch on."
+          },
           "unit": {
             "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Frozen at dispatch from the source's cost; `None` before dispatch or unknown."
           }
         }
       },
@@ -98477,6 +99621,165 @@
           }
         }
       },
+      "TransferDifferenceRow": {
+        "type": "object",
+        "description": "`GET /reports/orgs/{org}/transfer-differences`: one received line whose\nreceived quantity differs from what was sent.",
+        "required": [
+          "transfer_id",
+          "reference",
+          "received_at",
+          "source_branch_name",
+          "destination_branch_name",
+          "org_ingredient_id",
+          "ingredient_name",
+          "unit",
+          "qty_sent",
+          "qty_received",
+          "difference"
+        ],
+        "properties": {
+          "destination_branch_name": {
+            "type": "string"
+          },
+          "difference": {
+            "type": "number",
+            "format": "double",
+            "description": "received − sent; negative = transit loss."
+          },
+          "ingredient_name": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "qty_received": {
+            "type": "number",
+            "format": "double"
+          },
+          "qty_sent": {
+            "type": "number",
+            "format": "double"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "source_branch_name": {
+            "type": "string"
+          },
+          "transfer_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "unit_cost": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "value_difference": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`difference × unit_cost`, piastres; `None` when the cost is unknown."
+          }
+        }
+      },
+      "TransferLineInput": {
+        "type": "object",
+        "description": "One ingredient and how much of it.",
+        "required": [
+          "org_ingredient_id",
+          "quantity"
+        ],
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "Greater than 0."
+          }
+        }
+      },
+      "TransferLocation": {
+        "type": "object",
+        "description": "A location a transfer can go to or come from.",
+        "required": [
+          "id",
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`branch` | `warehouse`"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TransferStamp": {
+        "type": "object",
+        "description": "Who did a step and when.",
+        "required": [
+          "at",
+          "by",
+          "by_name"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "by_name": {
+            "type": "string"
+          }
+        }
+      },
+      "TransferStatus": {
+        "type": "string",
+        "enum": [
+          "requested",
+          "draft",
+          "dispatched",
+          "received",
+          "cancelled"
+        ]
+      },
       "TransferView": {
         "type": "object",
         "required": [
@@ -98859,6 +100162,17 @@
             "type": [
               "boolean",
               "null"
+            ]
+          },
+          "kind": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BranchKind",
+                "description": "Turn a branch into a warehouse or back (WAREHOUSE_DESIGN.md §4.3)."
+              }
             ]
           },
           "latitude": {
@@ -99447,6 +100761,14 @@
             ],
             "description": "`null` clears the logo; absent leaves it unchanged. To set a new\nlogo, use `PUT /orgs/{id}/logo` (multipart) instead — JSON updates\nonly accept the clear-to-null case here."
           },
+          "max_warehouses": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Warehouses this org may have. `null` = unlimited; absent = unchanged."
+          },
           "modules": {
             "type": [
               "array",
@@ -99701,7 +101023,17 @@
       },
       "UpdateTransferRequest": {
         "type": "object",
+        "description": "`PATCH /inventory/transfers/{id}`. `lines`, when given, replaces every\nline (only while `requested` or `draft`).",
         "properties": {
+          "lines": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TransferLineInput"
+            }
+          },
           "note": {
             "type": [
               "string",

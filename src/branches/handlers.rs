@@ -1,6 +1,7 @@
 use actix_web::HttpMessage;
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::{DateTime, Utc};
+use madar_inventory::api::BranchKind;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
@@ -103,6 +104,9 @@ pub struct Branch {
     /// report's `standard_float` / `suggested_safe_drop`. `null` = none set.
     #[schema(example = 50000, minimum = 0)]
     pub standard_float: Option<i32>,
+    /// `branch` sells; `warehouse` only holds stock (WAREHOUSE_DESIGN.md).
+    #[sqlx(try_from = "String")]
+    pub kind: BranchKind,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -112,6 +116,8 @@ pub struct Branch {
 pub struct ListBranchesQuery {
     /// Organization whose branches to list. Must match the caller's JWT org.
     pub org_id: Uuid,
+    /// Only this kind; omitted = branches and warehouses.
+    pub kind: Option<BranchKind>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -133,6 +139,9 @@ pub struct CreateBranchRequest {
     pub longitude: Option<f64>,
     /// Geofence radius in meters. Defaults to 200.
     pub geo_radius_meters: Option<i32>,
+    /// `warehouse` for a stock-only location; defaults to `branch`.
+    #[serde(default)]
+    pub kind: BranchKind,
 }
 
 /// PATCH-style update. Fields fall into three categories:
@@ -212,6 +221,9 @@ pub struct UpdateBranchRequest {
     #[serde(default, deserialize_with = "double_option")]
     #[schema(nullable, value_type = Option<i32>, minimum = 0)]
     pub standard_float: Option<Option<i32>>,
+
+    /// Turn a branch into a warehouse or back (WAREHOUSE_DESIGN.md §4.3).
+    pub kind: Option<BranchKind>,
 }
 
 /// Deserializes a field that can be:
@@ -258,16 +270,18 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
-                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float, b.kind::text AS kind,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
             WHERE b.org_id = $1 AND b.id = ANY($2) AND b.deleted_at IS NULL
+              AND ($3::text IS NULL OR b.kind::text = $3)
             ORDER BY b.name
             "#,
         )
         .bind(query.org_id)
         .bind(ids)
+        .bind(query.kind.map(BranchKind::as_str))
         .fetch_all(pool.get_ref())
         .await?
     } else {
@@ -277,15 +291,17 @@ pub async fn list_branches(
                    COALESCE(b.timezone, o.timezone)::text AS timezone,
                    b.printer_brand, b.printer_ip::text, b.printer_port,
                    b.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
-                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
+                   b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float, b.kind::text AS kind,
                    b.created_at, b.updated_at
             FROM branches b
             JOIN organizations o ON o.id = b.org_id
             WHERE b.org_id = $1 AND b.deleted_at IS NULL
+              AND ($2::text IS NULL OR b.kind::text = $2)
             ORDER BY b.name
             "#,
         )
         .bind(query.org_id)
+        .bind(query.kind.map(BranchKind::as_str))
         .fetch_all(pool.get_ref())
         .await?
     };
@@ -344,21 +360,25 @@ pub async fn create_branch(
         validate_timezone(pool.get_ref(), tz).await?;
     }
 
+    let mut tx = pool.get_ref().begin().await?;
+    if body.kind == BranchKind::Warehouse {
+        check_warehouse_limit(&mut tx, body.org_id).await?;
+    }
     let branch = sqlx::query_as::<_, Branch>(
         r#"
         WITH inserted AS (
-            INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port, latitude, longitude, geo_radius_meters)
-            VALUES ($1, $2, $3, $4, $5::timezone_name, $6, $7::inet, $8, $9, $10, $11)
+            INSERT INTO branches (org_id, name, address, phone, timezone, printer_brand, printer_ip, printer_port, latitude, longitude, geo_radius_meters, kind)
+            VALUES ($1, $2, $3, $4, $5::timezone_name, $6, $7::inet, $8, $9, $10, $11, $12::branch_kind)
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, old_bill_hours, standard_float,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, old_bill_hours, standard_float, kind,
                       created_at, updated_at
         )
         SELECT i.id, i.org_id, i.code, i.name, i.address, i.phone,
                COALESCE(i.timezone, o.timezone)::text AS timezone,
                i.printer_brand, i.printer_ip::text, i.printer_port,
                i.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
-               i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable, i.require_table_for_orders, i.old_bill_hours, i.standard_float,
+               i.latitude, i.longitude, i.geo_radius_meters, i.tax_rate, i.tax_inclusive, i.service_charge_rate, i.service_charge_taxable, i.require_table_for_orders, i.old_bill_hours, i.standard_float, i.kind::text AS kind,
                i.created_at, i.updated_at
         FROM inserted i
         JOIN organizations o ON o.id = i.org_id
@@ -375,8 +395,10 @@ pub async fn create_branch(
     .bind(body.latitude)
     .bind(body.longitude)
     .bind(body.geo_radius_meters)
-    .fetch_one(pool.get_ref())
+    .bind(body.kind.as_str())
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(HttpResponse::Created().json(branch))
 }
@@ -480,6 +502,15 @@ pub async fn update_branch(
         ));
     }
 
+    // A kind change is checked and written in one transaction: the warehouse
+    // limit counts under the org row's lock, and nothing opens a till between
+    // the check and the write without the selling guard refusing it.
+    let mut tx = pool.get_ref().begin().await?;
+    let kind_change = body.kind.filter(|k| *k != existing.kind);
+    if kind_change == Some(BranchKind::Warehouse) {
+        check_warehouse_limit(&mut tx, existing.org_id).await?;
+        check_not_selling(&mut tx, existing.id).await?;
+    }
     let branch = sqlx::query_as::<_, Branch>(
         r#"
         WITH updated AS (
@@ -522,6 +553,7 @@ pub async fn update_branch(
                 require_table_for_orders = CASE WHEN $26 THEN $27 ELSE require_table_for_orders END,
                 old_bill_hours    = COALESCE($28, old_bill_hours),
                 standard_float    = CASE WHEN $29 THEN $30 ELSE standard_float END,
+                kind              = COALESCE($31::branch_kind, kind),
                 -- Editing a branch has to MOVE this, and it did not.
                 --
                 -- The loyalty pass refresh decides a card is stale by comparing
@@ -535,14 +567,14 @@ pub async fn update_branch(
             WHERE id = $1 AND deleted_at IS NULL
             RETURNING id, org_id, code, name, address, phone, timezone,
                       printer_brand, printer_ip, printer_port,
-                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, old_bill_hours, standard_float,
+                      is_active, latitude, longitude, geo_radius_meters, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, old_bill_hours, standard_float, kind,
                       created_at, updated_at
         )
         SELECT u.id, u.org_id, u.code, u.name, u.address, u.phone,
                COALESCE(u.timezone, o.timezone)::text AS timezone,
                u.printer_brand, u.printer_ip::text, u.printer_port,
                u.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
-               u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable, u.require_table_for_orders, u.old_bill_hours, u.standard_float,
+               u.latitude, u.longitude, u.geo_radius_meters, u.tax_rate, u.tax_inclusive, u.service_charge_rate, u.service_charge_taxable, u.require_table_for_orders, u.old_bill_hours, u.standard_float, u.kind::text AS kind,
                u.created_at, u.updated_at
         FROM updated u
         JOIN organizations o ON o.id = u.org_id
@@ -580,9 +612,11 @@ pub async fn update_branch(
     .bind(body.old_bill_hours)
     .bind(body.standard_float.is_some())
     .bind(body.standard_float.and_then(|o| o))
-    .fetch_optional(pool.get_ref())
+    .bind(kind_change.map(BranchKind::as_str))
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    tx.commit().await?;
 
     // Contract §2.x: tills listen for the old-bill threshold / float changing.
     if branch.old_bill_hours != existing.old_bill_hours
@@ -750,7 +784,7 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
                COALESCE(b.timezone, o.timezone)::text AS timezone,
                b.printer_brand, b.printer_ip::text, b.printer_port,
                b.is_active, o.logo_url as org_logo_url, o.receipt_footer as org_receipt_footer,
-               b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float,
+               b.latitude, b.longitude, b.geo_radius_meters, b.tax_rate, b.tax_inclusive, b.service_charge_rate, b.service_charge_taxable, b.require_table_for_orders, b.old_bill_hours, b.standard_float, b.kind::text AS kind,
                b.created_at, b.updated_at
         FROM branches b
         JOIN organizations o ON o.id = b.org_id
@@ -761,6 +795,89 @@ async fn fetch_branch(pool: &PgPool, id: Uuid) -> Result<Branch, AppError> {
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))
+}
+
+/// 409 when the org already has as many warehouses as it may. Locks the org
+/// row so two creates can't both pass the count.
+async fn check_warehouse_limit(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+) -> Result<(), AppError> {
+    let max: Option<i32> =
+        sqlx::query_scalar("SELECT max_warehouses FROM organizations WHERE id = $1 FOR UPDATE")
+            .bind(org_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .flatten();
+    let Some(max) = max else { return Ok(()) };
+    let have: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM branches WHERE org_id = $1 AND kind = 'warehouse' AND deleted_at IS NULL",
+    )
+    .bind(org_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if have >= i64::from(max) {
+        return Err(AppError::Refused {
+            code: "WAREHOUSE_LIMIT",
+            reason: format!("This organization can have {max} warehouse(s), and has {have}."),
+        });
+    }
+    Ok(())
+}
+
+/// A branch becomes a warehouse only once nothing is selling there: no open
+/// till, no unfinished order or open bill, no paired device.
+async fn check_not_selling(conn: &mut sqlx::PgConnection, branch_id: Uuid) -> Result<(), AppError> {
+    // Held until the kind is written: the selling guard reads the row FOR
+    // SHARE, so nothing new starts selling here between this check and the switch.
+    sqlx::query("SELECT 1 FROM branches WHERE id = $1 FOR UPDATE")
+        .bind(branch_id)
+        .execute(&mut *conn)
+        .await?;
+    #[allow(clippy::type_complexity)]
+    let (tills, orders, tickets, devices, integrations, delivery, bookings): (
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM tills WHERE branch_id = $1 AND status = 'open'),                 EXISTS (SELECT 1 FROM orders WHERE branch_id = $1                         AND status IN ('pending', 'preparing', 'ready')),                 EXISTS (SELECT 1 FROM open_tickets WHERE branch_id = $1 AND status = 'open'),                 EXISTS (SELECT 1 FROM devices WHERE branch_id = $1 AND retired_at IS NULL),                 EXISTS (SELECT 1 FROM integration_credentials WHERE branch_id = $1 AND revoked_at IS NULL),                 EXISTS (SELECT 1 FROM branch_delivery_settings WHERE branch_id = $1                         AND (in_mall_enabled OR outside_enabled OR umbrella_enabled OR pickup_enabled)),                 EXISTS (SELECT 1 FROM branch_booking_settings WHERE branch_id = $1 AND enabled)",
+    )
+    .bind(branch_id)
+    .fetch_one(conn)
+    .await?;
+    let mut busy = Vec::new();
+    if tills {
+        busy.push("close its open tills");
+    }
+    if orders {
+        busy.push("finish its open orders");
+    }
+    if tickets {
+        busy.push("settle its open bills");
+    }
+    if devices {
+        busy.push("unpair its devices");
+    }
+    if integrations {
+        busy.push("disconnect its delivery-app integrations");
+    }
+    if delivery {
+        busy.push("turn off its delivery and pickup");
+    }
+    if bookings {
+        busy.push("turn off its bookings");
+    }
+    if busy.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Refused {
+        code: "BRANCH_STILL_SELLING",
+        reason: format!("To make this a warehouse, first {}.", busy.join(", ")),
+    })
 }
 
 /// A rate on the wire is a JSON number; the column is `numeric(5,4)`.

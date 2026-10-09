@@ -799,3 +799,24 @@ async fn a_code_made_for_a_slot_puts_the_device_in_it(pool: PgPool) {
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+#[sqlx::test]
+async fn a_warehouse_has_no_branch_plan(pool: PgPool) {
+    let (_, branch, owner) = setup(&pool).await;
+    let app = app!(pool);
+    sqlx::query("UPDATE branches SET kind = 'warehouse' WHERE id = $1")
+        .bind(branch)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body) = call(
+        &app,
+        test::TestRequest::put().uri("/branch-plan").set_json(
+            json!({ "branch_id": branch, "expected_version": 0, "plan": till_and_screen(vec![]) }),
+        ),
+        Some(&owner),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "WAREHOUSE_CANNOT_SELL");
+}
