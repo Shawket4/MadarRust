@@ -397,3 +397,46 @@ async fn an_unavailable_choice_is_shown_greyed_and_never_the_default(pool: PgPoo
         "{drink:#}"
     );
 }
+
+/// A category choice listed before an item's own choice doesn't lend the item
+/// its surcharge: the item's own choice prices it, as the order is charged.
+#[sqlx::test]
+async fn an_item_s_own_choice_wins_over_its_category_s_wherever_listed(pool: PgPool) {
+    let s = shop(&pool).await;
+    storefront(&pool, &s).await;
+    sqlx::query(
+        "UPDATE combo_slot_choices SET sort = -1, surcharge = 700 WHERE slot_id = $1 AND category_id = $2",
+    )
+    .bind(s.slot_drink)
+    .bind(s.drinks)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = app!(pool);
+    let uri = format!(
+        "/public/branches/{}/menu?channel=pickup&preview=true",
+        s.branch
+    );
+    let (st, m) = get(&app, &uri).await;
+    assert_eq!(st, 200, "{m}");
+    let combo = &find(&m, s.combo).expect("the combo is on the menu")["combo"];
+    let drink = combo["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|sl| sl["id"] == json!(s.slot_drink))
+        .unwrap();
+    let choice_of = |id: Uuid| {
+        drink["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["menu_item_id"] == json!(id))
+            .cloned()
+            .unwrap()
+    };
+    let latte = choice_of(s.latte);
+    assert_eq!(latte["surcharge"], 0, "{drink}");
+    assert_eq!(latte["included_size_label"], "Regular");
+    assert_eq!(choice_of(s.cola)["surcharge"], 700, "{drink}");
+}
