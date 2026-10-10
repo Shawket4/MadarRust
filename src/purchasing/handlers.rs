@@ -92,12 +92,29 @@ pub struct CreateSupplierRequest {
     pub email: Option<String>,
 }
 
+/// A PATCH: an absent field is left as it is. For the contact fields, `null`
+/// or a blank value clears them.
 #[derive(Deserialize, ToSchema)]
 pub struct UpdateSupplierRequest {
     pub name: Option<String>,
-    pub contact_name: Option<String>,
-    pub phone: Option<String>,
-    pub email: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(nullable, value_type = Option<String>)]
+    pub contact_name: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(nullable, value_type = Option<String>)]
+    pub phone: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::menu::handlers::deserialize_double_option"
+    )]
+    #[schema(nullable, value_type = Option<String>)]
+    pub email: Option<Option<String>>,
     pub is_active: Option<bool>,
 }
 
@@ -258,10 +275,10 @@ pub async fn update_supplier(
         r#"
         UPDATE suppliers SET
             name         = COALESCE($2, name),
-            contact_name = COALESCE($3, contact_name),
-            phone        = COALESCE($4, phone),
-            email        = COALESCE($5, email),
-            is_active    = COALESCE($6, is_active),
+            contact_name = CASE WHEN $3 THEN NULLIF(btrim($4), '') ELSE contact_name END,
+            phone        = CASE WHEN $5 THEN NULLIF(btrim($6), '') ELSE phone END,
+            email        = CASE WHEN $7 THEN NULLIF(btrim($8), '') ELSE email END,
+            is_active    = COALESCE($9, is_active),
             updated_at   = now()
         WHERE id = $1 AND deleted_at IS NULL
         RETURNING id, org_id, name, contact_name, phone, email, is_active, created_at, updated_at
@@ -269,9 +286,12 @@ pub async fn update_supplier(
     )
     .bind(*id)
     .bind(&body.name)
-    .bind(&body.contact_name)
-    .bind(&body.phone)
-    .bind(&body.email)
+    .bind(body.contact_name.is_some())
+    .bind(body.contact_name.as_ref().and_then(|v| v.as_deref()))
+    .bind(body.phone.is_some())
+    .bind(body.phone.as_ref().and_then(|v| v.as_deref()))
+    .bind(body.email.is_some())
+    .bind(body.email.as_ref().and_then(|v| v.as_deref()))
     .bind(body.is_active)
     .fetch_one(pool.get_ref())
     .await?;

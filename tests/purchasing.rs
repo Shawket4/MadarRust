@@ -422,6 +422,77 @@ async fn test_supplier_crud_and_validation(pool: PgPool) {
     assert_eq!(list.len(), 0);
 }
 
+/// B1: a PATCH clears a contact field sent as `null` or blank, and leaves one
+/// it does not mention, so older clients that send only what changed keep
+/// their behaviour.
+#[sqlx::test]
+async fn test_supplier_update_clears_contact_fields(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id).await;
+    for a in ["create", "update"] {
+        grant(&pool, "suppliers", a).await;
+    }
+    let auth = (
+        "Authorization",
+        format!("Bearer {}", org_admin_token(user_id, org_id)),
+    );
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orgs/{org_id}/suppliers"))
+            .insert_header(auth.clone())
+            .set_json(serde_json::json!({"name": "Dairy", "contact_name": "Sara",
+                "phone": "0100", "email": "d@x.com"}))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let sup: Supplier = test::read_body_json(resp).await;
+    let patch = |body: serde_json::Value| {
+        test::TestRequest::patch()
+            .uri(&format!("/purchasing/suppliers/{}", sup.id))
+            .insert_header(auth.clone())
+            .set_json(body)
+            .to_request()
+    };
+
+    // Absent fields stay as they were.
+    let resp = test::call_service(&app, patch(serde_json::json!({"is_active": false}))).await;
+    assert_eq!(resp.status(), 200);
+    let s: Supplier = test::read_body_json(resp).await;
+    assert_eq!(
+        (
+            s.contact_name.as_deref(),
+            s.phone.as_deref(),
+            s.email.as_deref()
+        ),
+        (Some("Sara"), Some("0100"), Some("d@x.com"))
+    );
+
+    // `null` clears contact name; a blank phone clears phone; email untouched.
+    let resp = test::call_service(
+        &app,
+        patch(serde_json::json!({"name": "Dairy", "contact_name": null, "phone": "  "})),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let s: Supplier = test::read_body_json(resp).await;
+    assert_eq!(
+        (s.contact_name, s.phone, s.email.as_deref()),
+        (None, None, Some("d@x.com"))
+    );
+
+    // A value still sets (trimmed), and `null` email clears.
+    let resp = test::call_service(
+        &app,
+        patch(serde_json::json!({"phone": " 0122 ", "email": null})),
+    )
+    .await;
+    let s: Supplier = test::read_body_json(resp).await;
+    assert_eq!((s.phone.as_deref(), s.email), (Some("0122"), None));
+}
+
 #[sqlx::test]
 async fn test_supplier_cross_org_forbidden(pool: PgPool) {
     let app = init_app!(pool);
