@@ -93,6 +93,11 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "a POS redeems a one-time activation code before it has any token; rate limited",
     ),
     (
+        "POST",
+        "/auth/device-session",
+        "a kitchen screen signs itself in with the credential activation gave it (no person, no token yet); checks that credential; rate limited",
+    ),
+    (
         "GET",
         "/auth/authz-keys",
         "public verification keys for signed permission snapshots; public by design",

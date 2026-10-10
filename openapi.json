@@ -1454,6 +1454,108 @@
         }
       }
     },
+    "/auth/device-session": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "A kitchen screen's sign-in: no person, no account (owner, 2026-10-11). The\nscreen was activated once with a code from the dashboard's branch plan and\nkeeps the credential activation handed it; with it, this mints the\nscreen's session whenever the last one runs out, so the kitchen never signs\nin again.",
+        "description": "The gate is the device credential (`X-Madar-Device` + `X-Madar-Device-Token`,\nas for activation), on a live `kds` device bound to a branch. The session's\nsubject is the screen's own principal (migration\n`20261011100000_kitchen_screen_principal.sql`), made here the first time:\nrole `kitchen`, assigned to the screen's branch, so it holds exactly the\nkitchen role's capabilities there (`kitchen.display.read`, `kitchen.bump`)\nand nothing else. Same response as `/auth/login`, so a client reuses its\nwhole sign-in path.",
+        "operationId": "device_session",
+        "parameters": [
+          {
+            "name": "X-Madar-Device",
+            "in": "header",
+            "description": "The install id the device was activated as",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Madar-Device-Token",
+            "in": "header",
+            "description": "The credential issued at activation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The kitchen screen's session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auth/login": {
       "post": {
         "tags": [

@@ -11,6 +11,7 @@
 #[doc(hidden)]
 pub mod fake;
 pub mod handlers;
+pub mod kitchen;
 pub mod pos;
 pub mod routes;
 pub mod words;
@@ -143,6 +144,7 @@ fn word(key: &str, ar: bool) -> Option<&'static str> {
     words::WORDS
         .iter()
         .chain(pos::WORDS)
+        .chain(kitchen::WORDS)
         .find(|(k, ..)| *k == key)
         .map(|(_, en, a)| if ar { *a } else { *en })
 }

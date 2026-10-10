@@ -106,6 +106,7 @@ paths(
         crate::insights::handlers::list_decisions,
         // ── auth ────────────────────────────────────────────────────
         crate::auth::handlers::login,
+        crate::auth::handlers::device_session,
         crate::auth::handlers::resolve_branch,
         crate::auth::handlers::me,
         crate::auth::handlers::permissions,

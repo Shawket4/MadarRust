@@ -764,6 +764,135 @@ pub async fn login(
     }))
 }
 
+// ── POST /auth/device-session ────────────────────────────────
+
+/// A kitchen screen's sign-in: no person, no account (owner, 2026-10-11). The
+/// screen was activated once with a code from the dashboard's branch plan and
+/// keeps the credential activation handed it; with it, this mints the
+/// screen's session whenever the last one runs out, so the kitchen never signs
+/// in again.
+///
+/// The gate is the device credential (`X-Madar-Device` + `X-Madar-Device-Token`,
+/// as for activation), on a live `kds` device bound to a branch. The session's
+/// subject is the screen's own principal (migration
+/// `20261011100000_kitchen_screen_principal.sql`), made here the first time:
+/// role `kitchen`, assigned to the screen's branch, so it holds exactly the
+/// kitchen role's capabilities there (`kitchen.display.read`, `kitchen.bump`)
+/// and nothing else. Same response as `/auth/login`, so a client reuses its
+/// whole sign-in path.
+#[utoipa::path(
+    post,
+    path = "/auth/device-session",
+    tag = "auth",
+    params(
+        ("X-Madar-Device" = String, Header, description = "The install id the device was activated as"),
+        ("X-Madar-Device-Token" = String, Header, description = "The credential issued at activation"),
+    ),
+    responses(
+        (status = 200, description = "The kitchen screen's session", body = LoginResponse),
+        (status = 401, description = "Unknown or retired device, or a wrong credential"),
+        (status = 403, description = "Not a kitchen screen, or not bound to a branch"),
+        AppErrorResponse,
+    )
+)]
+pub async fn device_session(
+    req: HttpRequest,
+    pool: web::Data<PgPool>,
+    secret: web::Data<JwtSecret>,
+) -> Result<HttpResponse, AppError> {
+    let refused = || AppError::Unauthorized("This device is not activated".into());
+    let device = crate::devices::DeviceHeader::from_request_headers(&req).ok_or_else(refused)?;
+    let token = req
+        .headers()
+        .get(crate::devices::activation::DEVICE_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(refused)?;
+    if !crate::devices::activation::verify_credential(pool.get_ref(), device, token).await? {
+        return Err(refused());
+    }
+    let (org_id, branch_id, kind, name): (Uuid, Option<Uuid>, String, String) = sqlx::query_as(
+        "SELECT d.org_id, d.branch_id, d.kind,
+                COALESCE(s.name, d.label, 'Kitchen screen')
+           FROM devices d LEFT JOIN branch_device_slots s ON s.device_id = d.id
+          WHERE d.id = $1 AND d.retired_at IS NULL",
+    )
+    .bind(device)
+    .fetch_optional(pool.get_ref())
+    .await?
+    .ok_or_else(refused)?;
+    if kind != "kds" {
+        return Err(AppError::Forbidden(
+            "Only a kitchen screen signs in with its device".into(),
+        ));
+    }
+    let branch_id = branch_id.ok_or_else(|| {
+        AppError::Forbidden("This kitchen screen is not in a branch. Activate it again.".into())
+    })?;
+    if !crate::auth::org_status::org_is_allowed(pool.get_ref(), org_id).await? {
+        return Err(AppError::OrgSuspended);
+    }
+
+    // The screen's principal, made on its first sign-in and kept in step with
+    // the device: its name follows the slot, its branch follows the device.
+    let mut tx = pool.begin().await?;
+    let user_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users (org_id, name, role, is_active, device_id)
+         VALUES ($1, $2, 'kitchen', TRUE, $3)
+         ON CONFLICT (device_id) WHERE device_id IS NOT NULL
+         DO UPDATE SET name = EXCLUDED.name, is_active = TRUE, deleted_at = NULL
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(&name)
+    .bind(device)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id <> $2")
+        .bind(user_id)
+        .bind(branch_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO user_branch_assignments (user_id, branch_id)
+         SELECT $1, $2 WHERE NOT EXISTS
+           (SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)",
+    )
+    .bind(user_id)
+    .bind(branch_id)
+    .execute(&mut *tx)
+    .await?;
+    let user = sqlx::query_as::<_, User>(&format!(
+        "SELECT {PIN_USER_COLUMNS} FROM users u WHERE u.id = $1"
+    ))
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let token = create_token(
+        &secret,
+        user.id,
+        Some(org_id),
+        UserRole::Kitchen,
+        Some(branch_id),
+        12,
+    )
+    .map_err(|_| AppError::Internal)?;
+    let (tax_policy, currency_code, require_table_for_orders) =
+        resolve_tax_context(pool.get_ref(), Some(org_id), Some(branch_id)).await?;
+    let mut user_public = UserPublic::from(user);
+    user_public.branch_id = Some(branch_id);
+    Ok(HttpResponse::Ok().json(LoginResponse {
+        token,
+        user: user_public,
+        tax_rate: tax_policy.tax_rate,
+        tax_policy,
+        require_table_for_orders,
+        currency_code,
+        open_till: None,
+    }))
+}
+
 // ── GET /auth/me ─────────────────────────────────────────────
 
 #[utoipa::path(

@@ -695,7 +695,11 @@ async fn a_till_watching_the_live_stream_gets_no_push(pool: PgPool) {
     let teller = person(&pool, w.org, "teller", &[w.arkan]).await;
     let (device, fcm) = pos_device(&app, &teller, "en").await;
     let stream = open_stream(&app, &teller, w.arkan, device, "delivery,orders").await;
-    assert!(w.hub.is_connected(w.arkan, device));
+    assert!(w.hub.is_connected(
+        w.arkan,
+        device,
+        madar_rust::realtime::event::Topic::Delivery
+    ));
 
     let order = place(&app, &w).await;
     settled(&order).await;
@@ -712,7 +716,11 @@ async fn a_till_with_no_live_stream_is_pushed(pool: PgPool) {
     let app = app!(pool, w);
     let teller = person(&pool, w.org, "teller", &[w.arkan]).await;
     let (device, fcm) = pos_device(&app, &teller, "en").await;
-    assert!(!w.hub.is_connected(w.arkan, device));
+    assert!(!w.hub.is_connected(
+        w.arkan,
+        device,
+        madar_rust::realtime::event::Topic::Delivery
+    ));
 
     let order = place(&app, &w).await;
     settled(&order).await;
@@ -726,9 +734,17 @@ async fn a_till_whose_stream_dropped_is_pushed(pool: PgPool) {
     let teller = person(&pool, w.org, "teller", &[w.arkan]).await;
     let (device, fcm) = pos_device(&app, &teller, "en").await;
     let stream = open_stream(&app, &teller, w.arkan, device, "delivery").await;
-    assert!(w.hub.is_connected(w.arkan, device));
+    assert!(w.hub.is_connected(
+        w.arkan,
+        device,
+        madar_rust::realtime::event::Topic::Delivery
+    ));
     drop(stream); // the app went to the background / lost its network
-    assert!(!w.hub.is_connected(w.arkan, device));
+    assert!(!w.hub.is_connected(
+        w.arkan,
+        device,
+        madar_rust::realtime::event::Topic::Delivery
+    ));
 
     let order = place(&app, &w).await;
     settled(&order).await;
@@ -779,7 +795,11 @@ async fn a_stream_at_another_branch_or_without_delivery_does_not_count(pool: PgP
     // The manager's till watches Zamalek; the teller's stream carries no orders.
     let _a = open_stream(&app, &manager, w.zamalek, m_device, "delivery").await;
     let _b = open_stream(&app, &teller, w.arkan, t_device, "kitchen").await;
-    assert!(!w.hub.is_connected(w.arkan, t_device));
+    assert!(!w.hub.is_connected(
+        w.arkan,
+        t_device,
+        madar_rust::realtime::event::Topic::Delivery
+    ));
 
     let order = place(&app, &w).await;
     settled(&order).await;
@@ -874,15 +894,28 @@ async fn a_closed_socket_releases_the_till_at_once(pool: PgPool) {
         "{}",
         String::from_utf8_lossy(&buf[..n])
     );
-    assert!(w.hub.is_connected(w.arkan, device));
+    assert!(w.hub.is_connected(
+        w.arkan,
+        device,
+        madar_rust::realtime::event::Topic::Delivery
+    ));
 
     drop(sock);
     let start = std::time::Instant::now();
-    while w.hub.is_connected(w.arkan, device) && start.elapsed() < Duration::from_secs(5) {
+    while w.hub.is_connected(
+        w.arkan,
+        device,
+        madar_rust::realtime::event::Topic::Delivery,
+    ) && start.elapsed() < Duration::from_secs(5)
+    {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(
-        !w.hub.is_connected(w.arkan, device),
+        !w.hub.is_connected(
+            w.arkan,
+            device,
+            madar_rust::realtime::event::Topic::Delivery
+        ),
         "still 'connected' {:?} after the socket closed",
         start.elapsed()
     );
