@@ -344,7 +344,10 @@ async fn over_receive_needs_a_note_and_every_line_once(pool: PgPool) {
         w.owner,
         json!({ "lines": [{ "line_id": line, "qty_received": 6.0 }] })
     );
-    assert_eq!(resp.status(), 400, "over without a note");
+    // B6: a conflict with what was sent, coded, as the inventory doc states.
+    assert_eq!(resp.status(), 409, "over without a note");
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["code"], "OVER_RECEIVE_NEEDS_NOTE");
     assert_eq!(on_hand(&pool, w.shop, w.beans).await, 0.0);
     let resp = call!(
         app,
