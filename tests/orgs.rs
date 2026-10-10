@@ -871,6 +871,72 @@ async fn a_rate_comes_back_as_a_json_number(pool: PgPool) {
     assert_eq!(body["service_charge_rate"].as_f64().unwrap(), 0.12);
 }
 
+/// B3: a shop owner (org settings edit) saves the brand fields of their OWN
+/// org through `PATCH /orgs/{id}` (its links, clearing its logo); every other
+/// field, and every other org, stays super-admin only.
+#[sqlx::test]
+async fn an_owner_saves_their_own_brand_links_and_nothing_else(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let mine = seed_org_row(&pool).await;
+    let theirs = seed_org_row(&pool).await;
+    // Granted before the first check: the role default is cached per process.
+    grant_org_permission(&pool, "update").await;
+    let token = generate_org_admin_token(mine);
+    let patch_as = |token: String, org: Uuid, body: serde_json::Value| {
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{org}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(body)
+            .to_request()
+    };
+    let patch = |org: Uuid, body: serde_json::Value| patch_as(token.clone(), org, body);
+    let links = serde_json::json!({"social_links": {"instagram": "https://instagram.com/mine"}});
+
+    // Someone of the same org without the org settings capability: refused.
+    let teller = generate_token(Uuid::new_v4(), Some(mine), UserRole::Teller);
+    let resp = test::call_service(&app, patch_as(teller, mine, links.clone())).await;
+    assert_eq!(resp.status(), 403);
+
+    let resp = test::call_service(&app, patch(mine, links.clone())).await;
+    assert_eq!(resp.status(), 200);
+    let org: Org = test::read_body_json(resp).await;
+    assert_eq!(org.social_links["instagram"], "https://instagram.com/mine");
+
+    // Clearing the logo is a brand field too.
+    let resp = test::call_service(&app, patch(mine, serde_json::json!({"logo_url": null}))).await;
+    assert_eq!(resp.status(), 200);
+
+    // Another org's links: refused.
+    let resp = test::call_service(&app, patch(theirs, links.clone())).await;
+    assert_eq!(resp.status(), 403);
+
+    // Any other field, alone or riding with the links: refused, nothing saved.
+    for body in [
+        serde_json::json!({"name": "Renamed"}),
+        serde_json::json!({"custom_branding": true}),
+        serde_json::json!({"tax_rate": 0.1, "social_links": {"instagram": "https://instagram.com/x"}}),
+    ] {
+        let resp = test::call_service(&app, patch(mine, body.clone())).await;
+        assert_eq!(resp.status(), 403, "{body}");
+    }
+    let (name, ig): (String, Option<String>) =
+        sqlx::query_as("SELECT name, social_links->>'instagram' FROM organizations WHERE id = $1")
+            .bind(mine)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (name.as_str(), ig.as_deref()),
+        ("Onb", Some("https://instagram.com/mine"))
+    );
+}
+
 /// V16: tax_rate outside [0, 1] must be rejected (negative or >100%).
 #[sqlx::test]
 async fn test_update_org_rejects_out_of_range_tax_rate(pool: PgPool) {
