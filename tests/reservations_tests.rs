@@ -195,6 +195,63 @@ async fn seed_one_table(pool: &PgPool, label: &str) -> (String, Uuid, FloorTable
     (token, branch_id, table)
 }
 
+/// Deleting a table: a free one goes; one backing a live open ticket is
+/// refused. The check named `ready`, a status the enum lost on 2026-09-12, so
+/// every delete failed with "invalid input value for enum".
+#[sqlx::test]
+async fn a_free_table_is_deleted_and_one_with_an_open_ticket_is_refused(pool: PgPool) {
+    let (token, branch_id, table) = seed_one_table(&pool, "T2").await;
+    let app = app!(pool.clone());
+    let delete = |id: Uuid| {
+        test::TestRequest::delete()
+            .uri(&format!("/floor/tables/{id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request()
+    };
+
+    // A live open ticket on the table: refused, and the table stays.
+    let (org_id, user_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT b.org_id, u.id FROM branches b JOIN users u ON u.org_id = b.org_id \
+         WHERE b.id = $1 LIMIT 1",
+    )
+    .bind(branch_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let ticket: Uuid = sqlx::query_scalar(
+        "INSERT INTO open_tickets (org_id, branch_id, table_id, ticket_ref, opened_by) \
+         VALUES ($1, $2, $3, 'T-1', $4) RETURNING id",
+    )
+    .bind(org_id)
+    .bind(branch_id)
+    .bind(table.id)
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let resp = test::call_service(&app, delete(table.id)).await;
+    assert_eq!(resp.status(), 409, "a table with a live ticket stays");
+
+    // Settled: the table can go.
+    sqlx::query(
+        "UPDATE open_tickets SET status = 'settled', settled_at = now(), settled_by = $2 \
+         WHERE id = $1",
+    )
+    .bind(ticket)
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let resp = test::call_service(&app, delete(table.id)).await;
+    assert_eq!(resp.status(), 204, "a free table is deleted");
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM branch_tables WHERE id = $1")
+        .bind(table.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
 async fn save_layout_req(
     pool: &PgPool,
     token: &str,
