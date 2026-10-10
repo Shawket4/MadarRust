@@ -2473,6 +2473,57 @@ async fn a_new_branch_makes_existing_cards_stale(pool: PgPool) {
     assert!(!out.contains(&no_pass), "{out:?}");
 }
 
+/// A balance change nobody pushed makes the card stale. A void's or refund's
+/// clawback is written by a trigger, which moves the balance and tells no
+/// wallet, so the card kept the stamps the void took back.
+#[sqlx::test]
+async fn a_balance_change_after_the_last_push_makes_the_card_stale(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let member = seed_member(&pool, org, "201000000083", "Mstalebalance0000001").await;
+    let retired = seed_member(&pool, org, "201000000084", "Mstalebalance0000002").await;
+    sqlx::query(
+        "UPDATE loyalty_customers SET google_object_id = 'obj-' || id, pass_updated_at = now() \
+          WHERE id = ANY($1)",
+    )
+    .bind(vec![member, retired])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let stale = |pool: PgPool| async move {
+        madar_rust::loyalty::wallet::refresh::stale_passes(&pool, 50)
+            .await
+            .unwrap()
+    };
+    assert!(stale(pool.clone()).await.is_empty());
+
+    grant(&pool, org, member, branch, "points", 5).await;
+    assert_eq!(
+        stale(pool.clone()).await,
+        vec![member],
+        "the card is behind the ledger"
+    );
+
+    sqlx::query("UPDATE loyalty_customers SET pass_updated_at = now() WHERE id = $1")
+        .bind(member)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        stale(pool.clone()).await.is_empty(),
+        "pushed, so up to date"
+    );
+
+    // A retired card whose row is touched later is not chased: there is no live
+    // balance to show.
+    sqlx::query("UPDATE loyalty_customers SET deleted_at = now(), updated_at = now() + interval '1 second' WHERE id = $1")
+        .bind(retired)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(stale(pool.clone()).await.is_empty());
+}
+
 /// Where a member SHOPS beats where they signed up, and both beat guessing.
 ///
 /// The org-wide sign-up code names no branch at all, and a counter code can
@@ -3088,6 +3139,107 @@ async fn a_clawback_of_spent_points_clamps_at_zero_unless_the_shop_says_otherwis
     .await;
     assert!(resp.status().is_success());
     assert_eq!(balance_of(&pool, member).await, -10);
+}
+
+/// A stamp-ledger row written directly, `mins_ago` in the past, so a test can
+/// order earns and claims the way a member's weeks would.
+async fn stamp_row(
+    pool: &PgPool,
+    org: Uuid,
+    member: Uuid,
+    branch: Uuid,
+    kind: &str,
+    points: i32,
+    order: Uuid,
+    mins_ago: i32,
+) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO loyalty_transactions \
+             (org_id, customer_id, branch_id, kind, currency, points, order_id, created_at) \
+         VALUES ($1,$2,$3,$4::loyalty_txn_kind,'visits',$5,$6, now() - make_interval(mins => $7)) \
+         RETURNING id",
+    )
+    .bind(org)
+    .bind(member)
+    .bind(branch)
+    .bind(kind)
+    .bind(points)
+    .bind(order)
+    .bind(mins_ago)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Owner, 2026-10-10: once a reward has been claimed, voiding or refunding a
+/// sale from BEFORE the claim takes nothing back. Its stamps went into the
+/// reward; clawing them out of what the customer collected since would punish
+/// them for later visits. A sale after the claim is still clawed back.
+#[sqlx::test]
+async fn a_void_or_refund_after_a_reward_claim_spares_the_new_stamps(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 9, false).await;
+    let member = seed_member(&pool, org, "201000000091", "Mclaimtoken0000000001").await;
+
+    let early = seed_settled_order(&pool, branch, shift, teller, 5_000, 1).await;
+    let early_refunded = seed_settled_order(&pool, branch, shift, teller, 5_000, 2).await;
+    let filler = seed_settled_order(&pool, branch, shift, teller, 5_000, 3).await;
+    let claim = seed_settled_order(&pool, branch, shift, teller, 5_000, 4).await;
+    let late = seed_settled_order(&pool, branch, shift, teller, 5_000, 5).await;
+
+    stamp_row(&pool, org, member, branch, "earn", 2, early, 50).await;
+    stamp_row(&pool, org, member, branch, "earn", 3, early_refunded, 40).await;
+    stamp_row(&pool, org, member, branch, "earn", 4, filler, 30).await;
+    stamp_row(&pool, org, member, branch, "redeem", -9, claim, 20).await;
+    stamp_row(&pool, org, member, branch, "earn", 3, late, 10).await;
+    assert_eq!(
+        visits_of(&pool, member).await,
+        3,
+        "three new stamps since the claim"
+    );
+
+    void_order(&pool, early, teller).await;
+    refund_row(&pool, branch, early_refunded, shift, teller, 5_000).await;
+    assert_eq!(
+        visits_of(&pool, member).await,
+        3,
+        "sales from before the claim take nothing from the new stamps"
+    );
+    let rows = ledger_rows(&pool, member).await;
+    assert!(!rows.iter().any(|r| r.0 == "reverse_earn"), "{rows:?}");
+
+    // A sale AFTER the claim is clawed back as before.
+    void_order(&pool, late, teller).await;
+    assert_eq!(visits_of(&pool, member).await, 0);
+}
+
+/// A claim that was itself undone (its own sale voided, the reward given back)
+/// is no claim: the earlier sale's void claws back as it always did.
+#[sqlx::test]
+async fn an_undone_reward_claim_does_not_spare_an_earlier_sale(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    enable_program_mode(&pool, org, "visits", 1000, 9, false).await;
+    let member = seed_member(&pool, org, "201000000092", "Mclaimtoken0000000002").await;
+
+    let earned = seed_settled_order(&pool, branch, shift, teller, 5_000, 1).await;
+    let claim = seed_settled_order(&pool, branch, shift, teller, 5_000, 2).await;
+    stamp_row(&pool, org, member, branch, "earn", 9, earned, 20).await;
+    stamp_row(&pool, org, member, branch, "redeem", -9, claim, 10).await;
+
+    void_order(&pool, claim, teller).await;
+    assert_eq!(visits_of(&pool, member).await, 9, "the reward came back");
+    void_order(&pool, earned, teller).await;
+    assert_eq!(
+        visits_of(&pool, member).await,
+        0,
+        "and the void took its stamps"
+    );
 }
 
 /// The member's history now says WHY each row exists, so a till or a dashboard
