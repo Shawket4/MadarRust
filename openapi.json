@@ -82398,7 +82398,8 @@
           "ingredient_name",
           "ingredient_unit",
           "category",
-          "size_label"
+          "size_label",
+          "usable_quantity"
         ],
         "properties": {
           "category": {
@@ -82423,6 +82424,11 @@
           },
           "size_label": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "The usable amount before yield loss: `quantity_used` × the linked\ningredient's yield, 3 dp (madar-units `usable_qty`). What the catalog\nitem dialog shows."
           }
         }
       },

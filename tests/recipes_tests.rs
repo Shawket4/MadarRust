@@ -507,13 +507,15 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(get_secret()))
-            .configure(routes::configure),
+            .configure(routes::configure)
+            .configure(madar_rust::menu::routes::configure),
     )
     .await;
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
     grant_permission(&pool, "org_admin", "recipes", "create").await;
+    grant_permission(&pool, "org_admin", "menu_items", "read").await;
     let cat_id = seed_category(&pool, org_id, "Drinks").await;
     let item_id = seed_menu_item(&pool, org_id, cat_id, "Fried Dish", 500).await;
 
@@ -552,6 +554,20 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
         qty, 1840.0,
         "density bridge + yield gross-up applied at save"
     );
+
+    // The catalog item dialog reads the line back with its usable amount.
+    let item: serde_json::Value = test::call_and_read_body_json(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu-items/{item_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let line = &item["recipes"][0];
+    assert_eq!(line["quantity_used"], serde_json::json!(1840.0));
+    assert_eq!(line["usable_quantity"], serde_json::json!(920.0));
+    assert!(line.get("yield_pct").is_none(), "not on the wire");
 }
 
 // ──────────────────────────────────────────────────────────────
