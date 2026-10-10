@@ -272,6 +272,45 @@ async fn dispatch_then_short_receive_moves_stock_through_the_ledger(pool: PgPool
     assert_eq!(diffs[0].value_difference, Some(-20));
 }
 
+/// The difference's value rounds half away from zero (the house rule), not to
+/// even: a quarter bag short at 10 piastres is -2.5, shown as -3.
+#[sqlx::test]
+async fn a_midpoint_difference_value_rounds_away_from_zero(pool: PgPool) {
+    let app = app!(pool);
+    let w = world(&pool).await;
+    let t = draft!(app, w, 1.0);
+    let resp = call!(
+        app,
+        post,
+        format!("/inventory/transfers/{}/dispatch", t.id),
+        w.owner
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = call!(
+        app,
+        post,
+        format!("/inventory/transfers/{}/receive", t.id),
+        w.owner,
+        json!({
+            "lines": [{ "line_id": t.lines[0].id, "qty_received": 0.75, "note": "spilt" }]
+        })
+    );
+    assert_eq!(resp.status(), 200);
+    let resp = call!(
+        app,
+        get,
+        format!("/inventory/orgs/{}/transfer-differences", w.org),
+        w.owner
+    );
+    let diffs: Vec<TransferDifferenceRow> = test::read_body_json(resp).await;
+    assert_eq!(diffs[0].difference, -0.25);
+    assert_eq!(
+        diffs[0].value_difference,
+        Some(-3),
+        "-2.5 piastres, half away from zero"
+    );
+}
+
 #[sqlx::test]
 async fn dispatch_beyond_on_hand_is_refused_and_moves_nothing(pool: PgPool) {
     let app = app!(pool);

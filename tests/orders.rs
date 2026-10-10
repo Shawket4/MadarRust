@@ -4619,3 +4619,44 @@ async fn a_zero_priced_line_still_takes_its_recipe_off_the_stock(pool: PgPool) {
     .unwrap();
     assert_eq!(moves, 1);
 }
+
+/// The export's per-ingredient cost is whole piastres, half away from zero (the
+/// house rule), not to even: 12.5 piastres is 13.
+#[sqlx::test]
+async fn export_ingredient_cost_rounds_half_away_from_zero(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    grant_permission(&pool, "org_admin", "orders", "create").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let cat_id = seed_category(&pool, org_id).await;
+    let menu_item_id = seed_menu_item(&pool, org_id, cat_id).await;
+    let milk = seed_ingredient(&pool, org_id, "Milk", "ml").await;
+    seed_branch_inventory(&pool, branch_id, milk, 1000.0).await;
+    add_menu_item_recipe(&pool, menu_item_id, milk, 10.0).await;
+
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .set_json(simple_order(branch_id, shift_id, menu_item_id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+
+    sqlx::query("UPDATE org_ingredients SET cost_per_unit = 12.5 WHERE id = $1")
+        .bind(milk)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let req = test::TestRequest::get()
+        .uri("/orders/export")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["ingredient_costs"][milk.to_string()], json!(13));
+}
