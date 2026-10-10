@@ -147,7 +147,12 @@ pub struct CreateStocktakeRequest {
 #[derive(Deserialize, ToSchema)]
 pub struct ItemCountInput {
     pub org_ingredient_id: Uuid,
-    pub counted_qty: f64,
+    /// The figure counted. `null` un-counts the line: its figure, reason and
+    /// counter are cleared and finalize treats it as not counted. Required
+    /// (omitting it is refused), so no client un-counts by accident.
+    #[serde(deserialize_with = "Option::deserialize")]
+    #[schema(required = true)]
+    pub counted_qty: Option<f64>,
     pub note: Option<String>,
     /// Why the count differs from book stock. One of: theft | spoilage |
     /// breakage | miscount | supplier_short | transfer_error | other. Required
@@ -419,7 +424,21 @@ pub async fn upsert_items(
 
     let mut tx = pool.get_ref().begin().await?;
     for item in &body.items {
-        if item.counted_qty < 0.0 {
+        let Some(counted_qty) = item.counted_qty else {
+            // Un-count. A line with no row was never counted: nothing to do.
+            sqlx::query(
+                "UPDATE stocktake_items SET counted_qty = NULL, counted_by = NULL, \
+                        variance_reason = NULL, note = $3 \
+                 WHERE stocktake_id = $1 AND org_ingredient_id = $2",
+            )
+            .bind(*id)
+            .bind(item.org_ingredient_id)
+            .bind(&item.note)
+            .execute(&mut *tx)
+            .await?;
+            continue;
+        };
+        if counted_qty < 0.0 {
             return Err(AppError::BadRequest(
                 "counted_qty cannot be negative".into(),
             ));
@@ -450,7 +469,7 @@ pub async fn upsert_items(
         )
         .bind(*id)
         .bind(item.org_ingredient_id)
-        .bind(item.counted_qty)
+        .bind(counted_qty)
         .bind(&item.note)
         .bind(claims.user_id())
         .bind(&item.variance_reason)
