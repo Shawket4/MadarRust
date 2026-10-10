@@ -29672,6 +29672,7 @@
         "tags": [
           "orgs"
         ],
+        "summary": "Super admin only, except a body carrying nothing but `social_links` and/or\n`logo_url: null`: the org's own people with `org.settings.edit` may save\nthat for their own org.",
         "operationId": "update_org",
         "parameters": [
           {
@@ -46070,6 +46071,7 @@
         "tags": [
           "menu"
         ],
+        "summary": "Needs `org.settings.read` or `menu.combos.edit`.",
         "operationId": "get_settings",
         "responses": {
           "200": {
@@ -79432,8 +79434,12 @@
         ],
         "properties": {
           "counted_qty": {
-            "type": "number",
-            "format": "double"
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "The figure counted. `null` un-counts the line: its figure, reason and\ncounter are cleared and finalize treats it as not counted. Required\n(omitting it is refused), so no client un-counts by accident."
           },
           "note": {
             "type": [
@@ -96236,6 +96242,11 @@
             "type": "boolean",
             "description": "The owner's master switch for this scope."
           },
+          "inherited": {
+            "type": "boolean",
+            "description": "Read only. `true` when a branch has no override of its own and these\nare the organisation's settings (or the off default) it follows;\n`branch_id` still names the branch asked about. Ignored on PUT.",
+            "readOnly": true
+          },
           "org_id": {
             "type": "string",
             "format": "uuid"
@@ -101045,6 +101056,7 @@
       },
       "UpdateSupplierRequest": {
         "type": "object",
+        "description": "A PATCH: an absent field is left as it is. For the contact fields, `null`\nor a blank value clears them.",
         "properties": {
           "contact_name": {
             "type": [
