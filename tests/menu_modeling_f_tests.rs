@@ -399,6 +399,111 @@ async fn saving_own_lines_keeps_base_rows_and_own_overrides_base(pool: PgPool) {
 
 // ── B8 packaging rules ───────────────────────────────────────────────
 
+/// D3b for bases and packaging rules: their lines carry `usable_quantity`
+/// (before yield loss), and a line sent back as shown keeps what it stores.
+#[sqlx::test]
+async fn base_and_rule_lines_resaved_as_shown_keep_what_they_store(pool: PgPool) {
+    let o = setup(&pool).await;
+    let lettuce = ingredient(&pool, o.org, "Lettuce", "g", "veggies").await;
+    let herb = ingredient(&pool, o.org, "Herb", "g", "veggies").await;
+    let set_yield = |ing: Uuid, pct: f64| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE org_ingredients SET yield_pct = $2 WHERE id = $1")
+                .bind(ing)
+                .bind(pct)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set_yield(lettuce, 80.0).await;
+    let body = json!([
+        {"ingredient_id": lettuce, "quantity": 100, "unit": "g"},
+        {"ingredient_id": herb, "quantity": 0.001, "unit": "g"}
+    ]);
+    let shown = |lines: &Value| -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = lines
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| {
+                (
+                    l["quantity"].as_str().unwrap().to_string(),
+                    l["usable_quantity"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let want = |a: &str, b: &str, c: &str, d: &str| {
+        let mut v = vec![
+            (a.to_string(), b.to_string()),
+            (c.to_string(), d.to_string()),
+        ];
+        v.sort();
+        v
+    };
+
+    let (st, base) = call!(
+        pool,
+        o.token,
+        post,
+        "/recipe-bases".to_string(),
+        json!({"name": "Salad", "lines": body.clone()})
+    );
+    assert_eq!(st, 201, "{base}");
+    assert_eq!(shown(&base["lines"]), want("125", "100", "0.001", "0.001"));
+    let base_id = base["id"].as_str().unwrap().to_string();
+    let (st, rule) = call!(
+        pool,
+        o.token,
+        post,
+        "/packaging-rules".to_string(),
+        json!({"name": "Salad box", "match_category_id": o.cat, "lines": body.clone()})
+    );
+    assert_eq!(st, 201, "{rule}");
+    assert_eq!(shown(&rule["lines"]), want("125", "100", "0.001", "0.001"));
+    let rule_id = rule["id"].as_str().unwrap().to_string();
+
+    // 60 % set in SQL (no catalog-edit rebase): the herb line shows 0.001,
+    // which normalized again would store 0.002.
+    set_yield(herb, 60.0).await;
+    let (st, r) = call!(
+        pool,
+        o.token,
+        put,
+        format!("/recipe-bases/{base_id}/lines"),
+        json!({"lines": body.clone()})
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(
+        shown(&r["base"]["lines"]),
+        want("125", "100", "0.001", "0.001")
+    );
+    let (st, r) = call!(
+        pool,
+        o.token,
+        patch,
+        format!("/packaging-rules/{rule_id}"),
+        json!({"lines": body.clone()})
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(shown(&r["lines"]), want("125", "100", "0.001", "0.001"));
+
+    // A changed amount is normalized as before.
+    let (st, r) = call!(
+        pool,
+        o.token,
+        put,
+        format!("/recipe-bases/{base_id}/lines"),
+        json!({"lines": [{"ingredient_id": lettuce, "quantity": 110, "unit": "g"}]})
+    );
+    assert_eq!(st, 200, "{r}");
+    assert_eq!(r["base"]["lines"][0]["quantity"], "137.5");
+}
+
 #[sqlx::test]
 async fn the_most_specific_packaging_rule_wins(pool: PgPool) {
     let o = setup(&pool).await;

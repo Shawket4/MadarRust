@@ -36,6 +36,10 @@ pub struct PackagingRuleLineOut {
     pub ingredient_name: String,
     /// Base-unit quantity as a string.
     pub quantity: String,
+    /// The usable amount before yield loss, like `RecipeLineOut::usable_quantity`:
+    /// what an editor shows and sends back (a line sent back unchanged keeps
+    /// its stored `quantity`).
+    pub usable_quantity: String,
     pub unit: String,
     pub sort: i32,
 }
@@ -146,8 +150,8 @@ async fn load_rule(pool: &PgPool, id: Uuid) -> Result<PackagingRuleOut, AppError
     .await?;
     let (id, org_id, name, cat, label, item, sort, is_active, created_at, updated_at) =
         row.ok_or_else(|| AppError::NotFound("Packaging rule not found".into()))?;
-    let lines: Vec<(Uuid, String, Decimal, String, i32)> = sqlx::query_as(
-        "SELECT l.ingredient_id, oi.name, l.quantity, l.unit, l.sort \
+    let lines: Vec<(Uuid, String, Decimal, Option<f64>, String, i32)> = sqlx::query_as(
+        "SELECT l.ingredient_id, oi.name, l.quantity, oi.yield_pct::float8, l.unit, l.sort \
          FROM packaging_rule_lines l JOIN org_ingredients oi ON oi.id = l.ingredient_id \
          WHERE l.rule_id = $1 ORDER BY l.sort, oi.name",
     )
@@ -168,10 +172,11 @@ async fn load_rule(pool: &PgPool, id: Uuid) -> Result<PackagingRuleOut, AppError
         lines: lines
             .into_iter()
             .map(
-                |(ingredient_id, ingredient_name, q, unit, sort)| PackagingRuleLineOut {
+                |(ingredient_id, ingredient_name, q, yield_pct, unit, sort)| PackagingRuleLineOut {
                     ingredient_id,
                     ingredient_name,
                     quantity: q.normalize().to_string(),
+                    usable_quantity: crate::menu::studio::usable_quantity(q, yield_pct).to_string(),
                     unit,
                     sort,
                 },
@@ -230,11 +235,24 @@ async fn validate_matches(
     Ok(())
 }
 
+/// When `rule` already has lines, one sent back as its `usable_quantity` keeps
+/// what it stores (D3b, `normalize_recipe_line`).
 async fn normalize_rule_lines(
     pool: &PgPool,
     org: Uuid,
+    rule: Option<Uuid>,
     lines: &[PackagingRuleLineInput],
 ) -> Result<Vec<(Uuid, Decimal, String)>, AppError> {
+    let stored: std::collections::HashMap<Uuid, f64> = sqlx::query_as(
+        "SELECT l.ingredient_id, l.quantity::float8 \
+         FROM packaging_rule_lines l JOIN org_ingredients oi ON oi.id = l.ingredient_id \
+         WHERE l.rule_id = $1 AND l.unit = oi.unit::text",
+    )
+    .bind(rule)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(lines.len());
     for l in lines {
@@ -244,12 +262,13 @@ async fn normalize_rule_lines(
         if !l.quantity.is_finite() || l.quantity < 0.0 {
             return Err(AppError::BadRequest("quantity must be >= 0".into()));
         }
-        let (unit, q) = crate::recipes::handlers::normalize_recipe_unit(
+        let (unit, q) = crate::recipes::handlers::normalize_recipe_line(
             pool,
             org,
             Some(l.ingredient_id),
             &l.unit,
             l.quantity,
+            stored.get(&l.ingredient_id).copied(),
         )
         .await?;
         out.push((
@@ -349,7 +368,7 @@ pub async fn create_rule(
         ));
     }
     validate_matches(pool.get_ref(), org, b.match_category_id, b.match_item_id).await?;
-    let lines = normalize_rule_lines(pool.get_ref(), org, &b.lines).await?;
+    let lines = normalize_rule_lines(pool.get_ref(), org, None, &b.lines).await?;
 
     let mut tx = pool.begin().await?;
     let id: Uuid = sqlx::query_scalar(
@@ -410,7 +429,7 @@ pub async fn patch_rule(
     validate_matches(pool.get_ref(), org, cat, item).await?;
     let name = b.name.as_deref().map(clean_name).transpose()?;
     let lines = match &b.lines {
-        Some(l) => Some(normalize_rule_lines(pool.get_ref(), org, l).await?),
+        Some(l) => Some(normalize_rule_lines(pool.get_ref(), org, Some(*id), l).await?),
         None => None,
     };
 

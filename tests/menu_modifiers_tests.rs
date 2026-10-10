@@ -451,6 +451,100 @@ async fn test_group_option_recipe_roundtrip(pool: PgPool) {
     );
 }
 
+/// D3b for option recipes: the group editor reads each line's usable amount
+/// and a line sent back unchanged keeps what it stores (per size label too).
+#[sqlx::test]
+async fn test_option_recipe_resave_keeps_yield_lines(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let org = seed_org(&pool).await;
+    let user = seed_user(&pool, org).await;
+    grant(&pool, "menu_items", "read").await;
+    grant(&pool, "menu_items", "update").await;
+    let lettuce = seed_ingredient(&pool, org, "Lettuce", "g", Some(2.0)).await;
+    sqlx::query("UPDATE org_ingredients SET yield_pct = 80 WHERE id = $1")
+        .bind(lettuce)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Saved at full yield, then 60 % set in SQL (no catalog-edit rebase): 0.001 g
+    // shows 0.001, which normalized again would store 0.002.
+    let herb = seed_ingredient(&pool, org, "Herb", "g", Some(2.0)).await;
+    let group = seed_group(&pool, org, "Extras", None, "multi", 0, None, false).await;
+    let opt = seed_option(&pool, group, "Extra lettuce", 500, "addon").await;
+    let token = org_admin_token(user, org);
+
+    let put = |lines: serde_json::Value| {
+        test::TestRequest::put()
+            .uri(&format!("/modifier-options/{opt}/recipe"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(lines)
+            .to_request()
+    };
+    let stored = || async {
+        sqlx::query_as::<_, (Option<String>, String)>(
+            "SELECT size_label, quantity::text FROM recipe_lines \
+             WHERE owner_type = 'modifier_option' AND owner_id = $1 ORDER BY size_label NULLS FIRST",
+        )
+        .bind(opt)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let want = |generic: &str, cup: &str| {
+        vec![
+            (None, generic.to_string()),
+            (Some("Cup".to_string()), cup.to_string()),
+        ]
+    };
+
+    let resp = test::call_service(
+        &app,
+        put(json!([
+            { "ingredient_id": lettuce, "quantity": 100.0, "unit": "g" },
+            { "ingredient_id": herb, "quantity": 0.001, "unit": "g", "size_label": "Cup" }
+        ])),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    assert_eq!(stored().await, want("125.000", "0.001"));
+    sqlx::query("UPDATE org_ingredients SET yield_pct = 60 WHERE id = $1")
+        .bind(herb)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/modifier-groups?org_id={org}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let groups: Vec<GroupOut> = test::read_body_json(resp).await;
+    let lines = &groups[0].options[0].recipe;
+    assert_eq!(
+        (lines[0].quantity, lines[0].usable_quantity),
+        (125.0, 100.0)
+    );
+    assert_eq!(
+        (lines[1].quantity, lines[1].usable_quantity),
+        (0.001, 0.001)
+    );
+
+    // Sent back as shown: unchanged (the Cup line would otherwise become 0.002).
+    let resp = test::call_service(
+        &app,
+        put(json!([
+            { "ingredient_id": lettuce, "quantity": 100.0, "unit": "g" },
+            { "ingredient_id": herb, "quantity": 0.001, "unit": "g", "size_label": " Cup " }
+        ])),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    assert_eq!(stored().await, want("125.000", "0.001"));
+}
+
 // ════════════════════════════════════════════════════════════════════
 // Test 2: PUT /menu-items/{id}/options — create + update + deactivate
 // ════════════════════════════════════════════════════════════════════

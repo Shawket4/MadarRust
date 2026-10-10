@@ -249,6 +249,14 @@ pub struct MenuItemRecipe {
     pub ingredient_unit: String,
     pub category: String,
     pub size_label: String,
+    /// The usable amount before yield loss: `quantity_used` × the linked
+    /// ingredient's yield, 3 dp (madar-units `usable_qty`). What the catalog
+    /// item dialog shows.
+    #[sqlx(skip)]
+    pub usable_quantity: f64,
+    /// The linked ingredient's yield percentage, for `usable_quantity`.
+    #[serde(skip)]
+    pub yield_pct: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
@@ -3414,14 +3422,23 @@ async fn fetch_item_recipes(pool: &PgPool, item_id: Uuid) -> Result<Vec<MenuItem
         r#"SELECT r.org_ingredient_id, r.quantity_used,
                   r.ingredient_name, r.ingredient_unit,
                   (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category,
-                  r.size_label::text
+                  r.size_label::text,
+                  i.yield_pct::float8 AS yield_pct
            FROM   menu_item_recipes r
            LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
            WHERE  r.menu_item_id = $1"#,
     )
     .bind(item_id)
     .fetch_all(pool)
-    .await?)
+    .await?
+    .into_iter()
+    .map(|mut r| {
+        use bigdecimal::ToPrimitive;
+        let stored = r.quantity_used.to_f64().unwrap_or(0.0);
+        r.usable_quantity = madar_units::usable_qty(stored, r.yield_pct);
+        r
+    })
+    .collect())
 }
 
 /// The branch-effective `/addon-items` shape for a set of addon ids, keyed by id,

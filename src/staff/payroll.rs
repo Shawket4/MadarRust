@@ -1706,7 +1706,7 @@ pub(crate) async fn compute_payslips(
             .iter()
             .find(|p| p.employee_id == r.employee_id)
             .map_or(0, |p| p.base_salary_piastres);
-        let salary = pricing::salary_on(hist, r.business_date, fallback);
+        let salary = madar_dawam::salary::salary_on(hist, r.business_date, fallback);
         let branch_rules = rules
             .get(&Some(r.branch_id))
             .or_else(|| rules.get(&None))
@@ -1896,7 +1896,8 @@ pub(crate) async fn compute_payslips(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         // The salary in force at the window's end prices percent lines.
-        let salary_now = pricing::salary_on(hist, end_date, person.base_salary_piastres);
+        let salary_now =
+            madar_dawam::salary::salary_on(hist, end_date, person.base_salary_piastres);
 
         let resolve = |rows: Option<&Vec<AdjRow>>| -> (i64, Vec<serde_json::Value>) {
             let mut total = 0i64;
@@ -1944,7 +1945,7 @@ pub(crate) async fn compute_payslips(
             .termination_date
             .map_or(end_date, |t| t.min(end_date));
         let paid_days = ((to - from).num_days() + 1).clamp(0, window_days);
-        let base_salary = pricing::prorated_base(
+        let base_salary = madar_dawam::salary::prorated_base(
             hist,
             person.base_salary_piastres,
             start_date,

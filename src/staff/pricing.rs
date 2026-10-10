@@ -19,10 +19,11 @@ use uuid::Uuid;
 
 use crate::costing::service::round_piastres;
 use crate::staff::attendance::AttendanceSettings;
-use crate::staff::rules::{
-    AttendanceStatus, LateTier, PayRates, absence_deduction_piastres, late_deduction_piastres,
-    select_late_tier,
+use crate::staff::rules::AttendanceStatus;
+use madar_dawam::ladder::{
+    LateTier, absence_deduction_piastres, late_deduction_piastres, select_late_tier,
 };
+use madar_dawam::salary::PayRates;
 
 /// Fallback shift length when a record has no scheduled window — a standard
 /// eight-hour day. Only ever used as the per-minute divisor.
@@ -57,7 +58,7 @@ impl ShiftRules {
     ) -> Self {
         Self {
             working_days_per_month: s.working_days_per_month,
-            late_tiers: s.tiers(),
+            late_tiers: s.tiers().iter().map(Into::into).collect(),
             absence_deduction_days: s.absence_deduction_days,
             overtime_mode: s.overtime_mode.clone(),
             overtime_day_multiplier: shift_day.unwrap_or(s.overtime_day_multiplier),
@@ -386,49 +387,11 @@ pub fn round_to_five_egp(piastres: i64) -> i64 {
     (Decimal::from(units) * five).to_i64().unwrap_or(0)
 }
 
-/// The salary in force on `day` from a dated history (newest row at or
-/// before the day wins); `fallback` when the history starts later.
-pub fn salary_on(
-    history: &[(chrono::NaiveDate, i64)],
-    day: chrono::NaiveDate,
-    fallback: i64,
-) -> i64 {
-    history
-        .iter()
-        .filter(|(from, _)| *from <= day)
-        .max_by_key(|(from, _)| *from)
-        .map_or(fallback, |(_, s)| *s)
-}
-
-/// Base pay for a window, pro rata by calendar days at each day's salary
-/// (PAY-13): `Σ salary(day) ÷ window days`, summed before divided, rounded
-/// once. A full window at one salary pays exactly that salary.
-pub fn prorated_base(
-    history: &[(chrono::NaiveDate, i64)],
-    fallback_salary: i64,
-    window_start: chrono::NaiveDate,
-    window_end: chrono::NaiveDate,
-    paid_from: chrono::NaiveDate,
-    paid_to: chrono::NaiveDate,
-) -> i64 {
-    let window_days = (window_end - window_start).num_days() + 1;
-    if window_days <= 0 || paid_to < paid_from {
-        return 0;
-    }
-    let mut sum = Decimal::ZERO;
-    let mut day = paid_from.max(window_start);
-    let last = paid_to.min(window_end);
-    while day <= last {
-        sum += Decimal::from(salary_on(history, day, fallback_salary));
-        day += chrono::Duration::days(1);
-    }
-    round_piastres(sum / Decimal::from(window_days)).max(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use madar_dawam::salary::{prorated_base, salary_on};
     use rust_decimal_macros::dec;
 
     fn rules() -> ShiftRules {
@@ -438,19 +401,19 @@ mod tests {
                 LateTier {
                     from_minutes: 1,
                     to_minutes: Some(15),
-                    kind: crate::staff::rules::LateDeductionKind::Minutes,
+                    kind: madar_dawam::ladder::LateDeductionKind::Minutes,
                     value: dec!(15),
                 },
                 LateTier {
                     from_minutes: 16,
                     to_minutes: Some(30),
-                    kind: crate::staff::rules::LateDeductionKind::Minutes,
+                    kind: madar_dawam::ladder::LateDeductionKind::Minutes,
                     value: dec!(60),
                 },
                 LateTier {
                     from_minutes: 31,
                     to_minutes: None,
-                    kind: crate::staff::rules::LateDeductionKind::DayFraction,
+                    kind: madar_dawam::ladder::LateDeductionKind::DayFraction,
                     value: dec!(0.5),
                 },
             ],
@@ -1001,5 +964,341 @@ mod tests {
             overtime_piastres(600_000, dec!(26), 0, 60, 0, dec!(1.35), dec!(1.7)),
             0
         );
+    }
+
+    /// The Dawam money moved to madar-shared (`madar_dawam::salary`,
+    /// `madar_dawam::ladder`) from this file and `rules.rs`. `old` is the
+    /// backend's code as it stood, word for word; payroll, deduction and
+    /// salary figures must not move by a piastre (nor an exact `Decimal` by a
+    /// digit) for any input.
+    mod old {
+        use crate::costing::service::round_piastres;
+        use crate::staff::rules::{LateDeductionKind, LateTier};
+        use rust_decimal::Decimal;
+
+        /// The rung `late_minutes` falls on, or `None` when the ladder does not reach it
+        /// (including the always-correct case of zero lateness).
+        pub fn select_late_tier(tiers: &[LateTier], late_minutes: i64) -> Option<&LateTier> {
+            if late_minutes <= 0 {
+                return None;
+            }
+            tiers.iter().find(|t| {
+                let above = late_minutes >= t.from_minutes.max(0) as i64;
+                let below = t.to_minutes.is_none_or(|to| late_minutes <= to as i64);
+                above && below
+            })
+        }
+
+        /// Turn a matched tier into piastres.
+        ///
+        /// Takes the whole [`PayRates`] rather than pre-divided numbers so that
+        /// multiply-before-divide holds — see the note on [`PayRates`].
+        pub fn late_deduction_piastres(tier: &LateTier, rates: &PayRates) -> i64 {
+            let raw = match tier.kind {
+                LateDeductionKind::Minutes => rates.minutes_piastres(tier.value),
+                LateDeductionKind::Piastres => tier.value,
+                LateDeductionKind::DayFraction => rates.days_piastres(tier.value),
+            };
+            round_piastres(raw).max(0)
+        }
+
+        /// A monthly salary and the two divisors that break it into days and minutes.
+        ///
+        /// The rates are deliberately NOT precomputed. A per-minute rate is usually a
+        /// repeating decimal (10,000 piastres/day ÷ 480 min = 20.8333…), and dividing
+        /// first then multiplying loses the tail: 30 minutes' worth would come out as
+        /// 62.499… → 62 piastres instead of 62.5 → 63. Every accessor therefore
+        /// multiplies by the quantity BEFORE dividing by the divisors.
+        #[derive(Debug, Clone, Copy)]
+        pub struct PayRates {
+            base_salary_piastres: i64,
+            working_days_per_month: Decimal,
+            scheduled_minutes_per_day: i64,
+        }
+
+        impl PayRates {
+            /// Both divisors are guarded: a zero (or negative) `working_days_per_month`
+            /// or `scheduled_minutes_per_day` yields a zero rate rather than a panic, so
+            /// a half-configured org produces a visibly wrong-but-safe payslip instead of
+            /// taking down the generator.
+            pub fn from_base(
+                base_salary_piastres: i64,
+                working_days_per_month: Decimal,
+                scheduled_minutes_per_day: i64,
+            ) -> Self {
+                Self {
+                    base_salary_piastres: base_salary_piastres.max(0),
+                    working_days_per_month,
+                    scheduled_minutes_per_day,
+                }
+            }
+
+            fn base(&self) -> Decimal {
+                Decimal::from(self.base_salary_piastres)
+            }
+
+            /// What `days` days of work are worth.
+            pub fn days_piastres(&self, days: Decimal) -> Decimal {
+                if self.working_days_per_month <= Decimal::ZERO {
+                    return Decimal::ZERO;
+                }
+                self.base() * days / self.working_days_per_month
+            }
+
+            /// One day's pay.
+            pub fn daily_piastres(&self) -> Decimal {
+                self.days_piastres(Decimal::ONE)
+            }
+
+            /// What `minutes` minutes of work are worth, at the plain (non-overtime) rate.
+            pub fn minutes_piastres(&self, minutes: Decimal) -> Decimal {
+                if self.working_days_per_month <= Decimal::ZERO
+                    || self.scheduled_minutes_per_day <= 0
+                {
+                    return Decimal::ZERO;
+                }
+                self.base() * minutes
+                    / (self.working_days_per_month * Decimal::from(self.scheduled_minutes_per_day))
+            }
+        }
+
+        /// What one absent day costs, at the org's absence policy.
+        ///
+        /// Lives here rather than inside `compute_net_salary` because absence is now a
+        /// deduction ROW: `penalties.rs` prices the day with this, writes the row, and a
+        /// manager can then waive or override it like any other.
+        pub fn absence_deduction_piastres(
+            rates: &PayRates,
+            days_absent: Decimal,
+            deduction_days_per_absence: Decimal,
+        ) -> i64 {
+            round_piastres(rates.days_piastres(
+                days_absent.max(Decimal::ZERO) * deduction_days_per_absence.max(Decimal::ZERO),
+            ))
+            .max(0)
+        }
+
+        /// The salary in force on `day` from a dated history (newest row at or
+        /// before the day wins); `fallback` when the history starts later.
+        pub fn salary_on(
+            history: &[(chrono::NaiveDate, i64)],
+            day: chrono::NaiveDate,
+            fallback: i64,
+        ) -> i64 {
+            history
+                .iter()
+                .filter(|(from, _)| *from <= day)
+                .max_by_key(|(from, _)| *from)
+                .map_or(fallback, |(_, s)| *s)
+        }
+
+        /// Base pay for a window, pro rata by calendar days at each day's salary
+        /// (PAY-13): `Σ salary(day) ÷ window days`, summed before divided, rounded
+        /// once. A full window at one salary pays exactly that salary.
+        pub fn prorated_base(
+            history: &[(chrono::NaiveDate, i64)],
+            fallback_salary: i64,
+            window_start: chrono::NaiveDate,
+            window_end: chrono::NaiveDate,
+            paid_from: chrono::NaiveDate,
+            paid_to: chrono::NaiveDate,
+        ) -> i64 {
+            let window_days = (window_end - window_start).num_days() + 1;
+            if window_days <= 0 || paid_to < paid_from {
+                return 0;
+            }
+            let mut sum = Decimal::ZERO;
+            let mut day = paid_from.max(window_start);
+            let last = paid_to.min(window_end);
+            while day <= last {
+                sum += Decimal::from(salary_on(history, day, fallback_salary));
+                day += chrono::Duration::days(1);
+            }
+            round_piastres(sum / Decimal::from(window_days)).max(0)
+        }
+    }
+
+    #[test]
+    fn dawam_money_is_the_old_backend_arithmetic() {
+        use crate::staff::rules::{LateDeductionKind as K, LateTier as Wire};
+        use madar_dawam::{ladder, salary};
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |m: u64| {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (x >> 33) % m
+        };
+        let ds = |v: &[&str]| -> Vec<Decimal> { v.iter().map(|s| s.parse().unwrap()).collect() };
+        let mut n = 0u64;
+
+        // ── PayRates: a day's, n days' and n minutes' worth, exact ──────
+        let mut salaries = vec![
+            -5, 0, 1, 99, 30_000, 300_000, 600_000, 1_234_567, 99_999_999,
+        ];
+        salaries.extend((0..20).map(|_| next(10_000_000) as i64));
+        let days = ds(&[
+            "-1", "0", "0.01", "1", "22", "26", "26.5", "30", "30.42", "31",
+        ]);
+        let day_minutes = [-10, 0, 1, 240, 420, 450, 480, 510, 600, 1440];
+        let mut qtys = ds(&[
+            "-2", "0", "0.25", "0.5", "1", "1.5", "7", "13.333", "15", "30", "59", "60", "480",
+        ]);
+        qtys.extend((0..10).map(|_| Decimal::new(next(2_000_000) as i64, 3)));
+        let mut rates = Vec::new();
+        for &s in &salaries {
+            for &wd in &days {
+                for &m in &day_minutes {
+                    let (o, c) = (
+                        old::PayRates::from_base(s, wd, m),
+                        salary::PayRates::from_base(s, wd, m),
+                    );
+                    let same = |a: Decimal, b: Decimal| a.to_string() == b.to_string();
+                    assert!(same(o.daily_piastres(), c.daily_piastres()), "{s} {wd} {m}");
+                    for &q in &qtys {
+                        assert!(
+                            same(o.days_piastres(q), c.days_piastres(q)),
+                            "{s} {wd} {m} {q}"
+                        );
+                        assert!(
+                            same(o.minutes_piastres(q), c.minutes_piastres(q)),
+                            "{s} {wd} {m} {q}"
+                        );
+                        n += 3;
+                    }
+                    rates.push((o, c));
+                }
+            }
+        }
+
+        // ── the ladder: which rung, what it costs, what an absence costs ──
+        let tier = |from, to, kind, value: &str| Wire {
+            from_minutes: from,
+            to_minutes: to,
+            kind,
+            value: value.parse().unwrap(),
+        };
+        let kinds = [K::Minutes, K::Piastres, K::DayFraction];
+        let mut ladders = vec![
+            vec![],
+            crate::staff::attendance::suggested_tiers(),
+            vec![
+                tier(1, Some(15), K::Minutes, "30"),
+                tier(16, Some(60), K::DayFraction, "0.5"),
+                tier(61, None, K::DayFraction, "1"),
+            ],
+            vec![tier(30, Some(60), K::Piastres, "500")],
+            // Unsorted, overlapping, inverted, negative: write-validation
+            // refuses these, but a hand-edited row still prices the same.
+            vec![
+                tier(-5, Some(3), K::Piastres, "100"),
+                tier(10, Some(5), K::Minutes, "7"),
+                tier(2, None, K::Minutes, "12.5"),
+                tier(0, Some(0), K::DayFraction, "0.333"),
+                tier(4, Some(9), K::Piastres, "-40"),
+            ],
+        ];
+        for _ in 0..20 {
+            ladders.push(
+                (0..1 + next(6))
+                    .map(|_| {
+                        let from = next(120) as i32 - 5;
+                        Wire {
+                            from_minutes: from,
+                            to_minutes: (next(4) > 0).then(|| from + next(60) as i32 - 5),
+                            kind: kinds[next(3) as usize],
+                            value: Decimal::new(next(200_000) as i64, next(4) as u32),
+                        }
+                    })
+                    .collect(),
+            );
+        }
+        let mut lates: Vec<i64> = (-5..=200).collect();
+        lates.extend([
+            1_000,
+            10_000,
+            i32::MAX as i64,
+            i32::MAX as i64 + 1,
+            i64::MAX,
+        ]);
+        for l in &ladders {
+            let c: Vec<ladder::LateTier> = l.iter().map(Into::into).collect();
+            for &m in &lates {
+                let o =
+                    old::select_late_tier(l, m).map(|t| l.iter().position(|x| std::ptr::eq(x, t)));
+                let n_ = ladder::select_late_tier(&c, m)
+                    .map(|t| c.iter().position(|x| std::ptr::eq(x, t)));
+                assert_eq!(o, n_, "{l:?} late {m}");
+                n += 1;
+            }
+            for (t, ct) in l.iter().zip(&c) {
+                for (o, cr) in rates.iter().step_by(7) {
+                    assert_eq!(
+                        old::late_deduction_piastres(t, o),
+                        ladder::late_deduction_piastres(ct, cr),
+                        "{t:?} {o:?}"
+                    );
+                    n += 1;
+                }
+            }
+        }
+        let per_absence = ds(&["-1", "0", "0.5", "1", "1.5", "2"]);
+        for (o, c) in &rates {
+            for &q in &qtys {
+                for &p in &per_absence {
+                    assert_eq!(
+                        old::absence_deduction_piastres(o, q, p),
+                        ladder::absence_deduction_piastres(c, q, p),
+                        "{o:?} {q} {p}"
+                    );
+                    n += 1;
+                }
+            }
+        }
+
+        // ── salary history: the salary on a day, the pro-rated base ──
+        let day0 = NaiveDate::from_ymd_opt(2025, 12, 1).unwrap();
+        let at = |i: u64| day0 + chrono::Duration::days(i as i64);
+        let mut histories = vec![
+            vec![],
+            vec![(d(2026, 1, 1), 600_000), (d(2026, 8, 11), 660_000)],
+            vec![
+                (d(2026, 6, 1), 300),
+                (d(2026, 1, 1), 100),
+                (d(2026, 3, 1), 200),
+                (d(2026, 3, 1), 250),
+            ],
+        ];
+        for _ in 0..10 {
+            histories.push(
+                (0..1 + next(6))
+                    .map(|_| (at(next(430)), next(2_000_000) as i64))
+                    .collect(),
+            );
+        }
+        for h in &histories {
+            for fallback in [0, 7, 500_000] {
+                for i in 0..430 {
+                    assert_eq!(
+                        old::salary_on(h, at(i), fallback),
+                        salary::salary_on(h, at(i), fallback)
+                    );
+                    n += 1;
+                }
+            }
+            for _ in 0..1_500 {
+                let start = at(next(400));
+                let end = start + chrono::Duration::days(next(45) as i64 - 3);
+                let from = start + chrono::Duration::days(next(70) as i64 - 20);
+                let to = from + chrono::Duration::days(next(70) as i64 - 10);
+                let fallback = next(1_000_000) as i64;
+                assert_eq!(
+                    old::prorated_base(h, fallback, start, end, from, to),
+                    salary::prorated_base(h, fallback, start, end, from, to),
+                    "{h:?} {fallback} {start}..{end} paid {from}..{to}"
+                );
+                n += 1;
+            }
+        }
+        assert!(n > 200_000, "{n} cases");
+        println!("{n} cases compared");
     }
 }

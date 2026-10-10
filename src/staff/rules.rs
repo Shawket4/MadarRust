@@ -18,6 +18,7 @@ use utoipa::ToSchema;
 
 use crate::costing::service::round_piastres;
 use crate::errors::AppError;
+use madar_dawam::salary::PayRates;
 
 // ── Status ───────────────────────────────────────────────────────
 
@@ -204,6 +205,24 @@ pub struct LateTier {
     pub value: Decimal,
 }
 
+/// The wire rung as madar-dawam prices it (its `LateTier` has no serde or
+/// schema, so this type stays the wire's and converts here).
+impl From<&LateTier> for madar_dawam::ladder::LateTier {
+    fn from(t: &LateTier) -> Self {
+        use madar_dawam::ladder::LateDeductionKind as K;
+        Self {
+            from_minutes: t.from_minutes,
+            to_minutes: t.to_minutes,
+            kind: match t.kind {
+                LateDeductionKind::Minutes => K::Minutes,
+                LateDeductionKind::Piastres => K::Piastres,
+                LateDeductionKind::DayFraction => K::DayFraction,
+            },
+            value: t.value,
+        }
+    }
+}
+
 /// Reject a ladder an operator could not reason about: negative bounds, inverted
 /// ranges, negative penalties, or overlapping rungs. Called on write so a bad
 /// ladder can never reach payroll.
@@ -248,91 +267,7 @@ pub fn validate_tiers(tiers: &[LateTier]) -> Result<(), AppError> {
     Ok(())
 }
 
-/// The rung `late_minutes` falls on, or `None` when the ladder does not reach it
-/// (including the always-correct case of zero lateness).
-pub fn select_late_tier(tiers: &[LateTier], late_minutes: i64) -> Option<&LateTier> {
-    if late_minutes <= 0 {
-        return None;
-    }
-    tiers.iter().find(|t| {
-        let above = late_minutes >= t.from_minutes.max(0) as i64;
-        let below = t.to_minutes.is_none_or(|to| late_minutes <= to as i64);
-        above && below
-    })
-}
-
-/// Turn a matched tier into piastres.
-///
-/// Takes the whole [`PayRates`] rather than pre-divided numbers so that
-/// multiply-before-divide holds — see the note on [`PayRates`].
-pub fn late_deduction_piastres(tier: &LateTier, rates: &PayRates) -> i64 {
-    let raw = match tier.kind {
-        LateDeductionKind::Minutes => rates.minutes_piastres(tier.value),
-        LateDeductionKind::Piastres => tier.value,
-        LateDeductionKind::DayFraction => rates.days_piastres(tier.value),
-    };
-    round_piastres(raw).max(0)
-}
-
 // ── Payroll ──────────────────────────────────────────────────────
-
-/// A monthly salary and the two divisors that break it into days and minutes.
-///
-/// The rates are deliberately NOT precomputed. A per-minute rate is usually a
-/// repeating decimal (10,000 piastres/day ÷ 480 min = 20.8333…), and dividing
-/// first then multiplying loses the tail: 30 minutes' worth would come out as
-/// 62.499… → 62 piastres instead of 62.5 → 63. Every accessor therefore
-/// multiplies by the quantity BEFORE dividing by the divisors.
-#[derive(Debug, Clone, Copy)]
-pub struct PayRates {
-    base_salary_piastres: i64,
-    working_days_per_month: Decimal,
-    scheduled_minutes_per_day: i64,
-}
-
-impl PayRates {
-    /// Both divisors are guarded: a zero (or negative) `working_days_per_month`
-    /// or `scheduled_minutes_per_day` yields a zero rate rather than a panic, so
-    /// a half-configured org produces a visibly wrong-but-safe payslip instead of
-    /// taking down the generator.
-    pub fn from_base(
-        base_salary_piastres: i64,
-        working_days_per_month: Decimal,
-        scheduled_minutes_per_day: i64,
-    ) -> Self {
-        Self {
-            base_salary_piastres: base_salary_piastres.max(0),
-            working_days_per_month,
-            scheduled_minutes_per_day,
-        }
-    }
-
-    fn base(&self) -> Decimal {
-        Decimal::from(self.base_salary_piastres)
-    }
-
-    /// What `days` days of work are worth.
-    pub fn days_piastres(&self, days: Decimal) -> Decimal {
-        if self.working_days_per_month <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-        self.base() * days / self.working_days_per_month
-    }
-
-    /// One day's pay.
-    pub fn daily_piastres(&self) -> Decimal {
-        self.days_piastres(Decimal::ONE)
-    }
-
-    /// What `minutes` minutes of work are worth, at the plain (non-overtime) rate.
-    pub fn minutes_piastres(&self, minutes: Decimal) -> Decimal {
-        if self.working_days_per_month <= Decimal::ZERO || self.scheduled_minutes_per_day <= 0 {
-            return Decimal::ZERO;
-        }
-        self.base() * minutes
-            / (self.working_days_per_month * Decimal::from(self.scheduled_minutes_per_day))
-    }
-}
 
 /// Everything one payslip is computed from. Assembled by `payroll.rs` out of the
 /// attendance ledger and the approved adjustment rows.
@@ -419,22 +354,6 @@ pub fn compute_net_salary(input: &PayrollInputs) -> PayrollTotals {
     }
 }
 
-/// What one absent day costs, at the org's absence policy.
-///
-/// Lives here rather than inside `compute_net_salary` because absence is now a
-/// deduction ROW: `penalties.rs` prices the day with this, writes the row, and a
-/// manager can then waive or override it like any other.
-pub fn absence_deduction_piastres(
-    rates: &PayRates,
-    days_absent: Decimal,
-    deduction_days_per_absence: Decimal,
-) -> i64 {
-    round_piastres(rates.days_piastres(
-        days_absent.max(Decimal::ZERO) * deduction_days_per_absence.max(Decimal::ZERO),
-    ))
-    .max(0)
-}
-
 /// Resolve an adjustment row that may be either a flat sum or a percentage of
 /// base into piastres. Percent rows are frozen at generation time, which is why
 /// the payslip stores the resolved figure and not the rate.
@@ -455,6 +374,9 @@ pub fn resolve_adjustment_piastres(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use madar_dawam::ladder::{
+        absence_deduction_piastres, late_deduction_piastres, select_late_tier,
+    };
     use rust_decimal_macros::dec;
 
     fn at(hour: u32, minute: u32) -> DateTime<Utc> {
@@ -637,6 +559,11 @@ mod tests {
         ]
     }
 
+    /// The wire ladder as madar-dawam prices it.
+    fn priced(tiers: &[LateTier]) -> Vec<madar_dawam::ladder::LateTier> {
+        tiers.iter().map(Into::into).collect()
+    }
+
     #[test]
     fn a_valid_ladder_passes_validation() {
         validate_tiers(&ladder()).unwrap();
@@ -673,20 +600,45 @@ mod tests {
 
     #[test]
     fn punctuality_never_matches_a_tier() {
-        assert!(select_late_tier(&ladder(), 0).is_none());
+        assert!(select_late_tier(&priced(&ladder()), 0).is_none());
     }
 
     #[test]
     fn tier_selection_is_inclusive_at_both_bounds() {
-        assert_eq!(select_late_tier(&ladder(), 1).unwrap().from_minutes, 1);
-        assert_eq!(select_late_tier(&ladder(), 15).unwrap().from_minutes, 1);
-        assert_eq!(select_late_tier(&ladder(), 16).unwrap().from_minutes, 16);
-        assert_eq!(select_late_tier(&ladder(), 60).unwrap().from_minutes, 16);
+        assert_eq!(
+            select_late_tier(&priced(&ladder()), 1)
+                .unwrap()
+                .from_minutes,
+            1
+        );
+        assert_eq!(
+            select_late_tier(&priced(&ladder()), 15)
+                .unwrap()
+                .from_minutes,
+            1
+        );
+        assert_eq!(
+            select_late_tier(&priced(&ladder()), 16)
+                .unwrap()
+                .from_minutes,
+            16
+        );
+        assert_eq!(
+            select_late_tier(&priced(&ladder()), 60)
+                .unwrap()
+                .from_minutes,
+            16
+        );
     }
 
     #[test]
     fn the_open_ended_rung_catches_everything_above_it() {
-        assert_eq!(select_late_tier(&ladder(), 9_999).unwrap().from_minutes, 61);
+        assert_eq!(
+            select_late_tier(&priced(&ladder()), 9_999)
+                .unwrap()
+                .from_minutes,
+            61
+        );
     }
 
     #[test]
@@ -697,7 +649,7 @@ mod tests {
             kind: LateDeductionKind::Piastres,
             value: dec!(500),
         }];
-        assert!(select_late_tier(&tiers, 10).is_none());
+        assert!(select_late_tier(&priced(&tiers), 10).is_none());
     }
 
     #[test]
@@ -712,7 +664,7 @@ mod tests {
             value: dec!(30),
         };
         assert_eq!(
-            late_deduction_piastres(&minutes, &rates),
+            late_deduction_piastres(&(&minutes).into(), &rates),
             63, // 30 × 2.08333… = exactly 62.5 → half away from zero
         );
 
@@ -721,14 +673,14 @@ mod tests {
             value: dec!(250),
             ..minutes.clone()
         };
-        assert_eq!(late_deduction_piastres(&flat, &rates), 250);
+        assert_eq!(late_deduction_piastres(&(&flat).into(), &rates), 250);
 
         let fraction = LateTier {
             kind: LateDeductionKind::DayFraction,
             value: dec!(0.5),
             ..minutes
         };
-        assert_eq!(late_deduction_piastres(&fraction, &rates), 500);
+        assert_eq!(late_deduction_piastres(&(&fraction).into(), &rates), 500);
     }
 
     // ── rates ────────────────────────────────────────────────────

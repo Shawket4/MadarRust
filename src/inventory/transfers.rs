@@ -21,9 +21,9 @@ use madar_inventory::api::{
     TransferDifferenceRow, TransferLineInput, TransferStamp, UpdateTransferRequest,
 };
 use madar_inventory::transfer::{self, Action, ReceiveRefusal, Side, Step, TransferStatus};
-use madar_inventory::{milli, replenish};
+use madar_inventory::{milli, purchase::quantity_dec, replenish};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 use sqlx::{PgConnection, PgPool};
 use utoipa::IntoParams;
@@ -489,10 +489,6 @@ fn whole_piastres(c: Decimal) -> i64 {
     c.round().to_i64().unwrap_or(0)
 }
 
-fn dec(q: f64) -> Decimal {
-    Decimal::from_f64(q).unwrap_or(Decimal::ZERO).round_dp(3)
-}
-
 /// Stock lands at `branch` at a known cost: blend it into the branch's WAC
 /// first (WAC reads the prior on-hand), then post the movement.
 #[allow(clippy::too_many_arguments)]
@@ -511,7 +507,7 @@ async fn land(
             &mut *conn,
             branch,
             ingredient,
-            dec(qty),
+            quantity_dec(qty),
             c,
             user,
         )
@@ -1260,7 +1256,9 @@ pub async fn transfer_differences(
                 qty_received: r.qty_received,
                 difference,
                 unit_cost: r.unit_cost.and_then(|c| c.to_f64()),
-                value_difference: r.unit_cost.map(|c| whole_piastres(dec(difference) * c)),
+                value_difference: r
+                    .unit_cost
+                    .map(|c| whole_piastres(quantity_dec(difference) * c)),
                 note: r.note,
             }
         })

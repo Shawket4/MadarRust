@@ -35,6 +35,23 @@ pub struct AddonIngredient {
     #[schema(value_type = f64)]
     #[serde(serialize_with = "crate::decimals::serialize")]
     pub quantity_used: sqlx::types::BigDecimal,
+    /// The usable amount before yield loss: `quantity_used` × the linked
+    /// ingredient's yield, 3 dp (madar-units `usable_qty`). What an editor shows
+    /// and sends back; a line sent back unchanged keeps its stored quantity.
+    #[sqlx(skip)]
+    pub usable_quantity: f64,
+    /// The linked ingredient's yield percentage, for `usable_quantity`.
+    #[serde(skip)]
+    pub yield_pct: Option<f64>,
+}
+
+impl AddonIngredient {
+    fn with_usable(mut self) -> Self {
+        use bigdecimal::ToPrimitive;
+        let stored = self.quantity_used.to_f64().unwrap_or(0.0);
+        self.usable_quantity = madar_units::usable_qty(stored, self.yield_pct);
+        self
+    }
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -231,19 +248,22 @@ pub async fn list_addon_ingredients(
 
     let rows = sqlx::query_as::<_, AddonIngredient>(
         r#"
-        SELECT id, addon_item_id,
-               org_ingredient_id,
-               ingredient_name,
-               ingredient_unit AS unit,
-               quantity_used
-        FROM addon_item_ingredients
-        WHERE addon_item_id = $1
-        ORDER BY ingredient_name
+        SELECT aii.id, aii.addon_item_id,
+               aii.org_ingredient_id,
+               aii.ingredient_name,
+               aii.ingredient_unit AS unit,
+               aii.quantity_used,
+               oi.yield_pct::float8 AS yield_pct
+        FROM addon_item_ingredients aii
+        LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id
+        WHERE aii.addon_item_id = $1
+        ORDER BY aii.ingredient_name
         "#,
     )
     .bind(*addon_item_id)
     .fetch_all(pool.get_ref())
     .await?;
+    let rows: Vec<AddonIngredient> = rows.into_iter().map(AddonIngredient::with_usable).collect();
 
     Ok(HttpResponse::Ok().json(rows))
 }
@@ -298,7 +318,9 @@ pub async fn upsert_addon_ingredient(
                   org_ingredient_id,
                   ingredient_name,
                   ingredient_unit AS unit,
-                  quantity_used
+                  quantity_used,
+                  (SELECT oi.yield_pct::float8 FROM org_ingredients oi
+                    WHERE oi.id = addon_item_ingredients.org_ingredient_id) AS yield_pct
         "#,
     )
     .bind(*addon_item_id)
@@ -309,7 +331,7 @@ pub async fn upsert_addon_ingredient(
     .fetch_one(pool.get_ref())
     .await?;
 
-    Ok(HttpResponse::Ok().json(row))
+    Ok(HttpResponse::Ok().json(row.with_usable()))
 }
 
 // ── DELETE /recipes/addons/:addon_item_id ─────────────────────
@@ -366,6 +388,23 @@ pub async fn normalize_recipe_unit(
     recipe_unit: &str,
     qty: f64,
 ) -> Result<(String, f64), AppError> {
+    normalize_recipe_line(pool, org_id, org_ingredient_id, recipe_unit, qty, None).await
+}
+
+/// [`normalize_recipe_unit`] for a line of a recipe being saved again: `stored`
+/// is what the line stores now (in the base unit), when it exists. An editor
+/// shows and sends `usable_qty(stored)`; when the sent quantity, in the base
+/// unit, is exactly that, the line keeps `stored` instead of being grossed up
+/// again (D3b: 125 g at 80 % yield stays 125, never 156.25, and a stored
+/// amount the usable form cannot round-trip does not drift on every save).
+pub async fn normalize_recipe_line(
+    pool: &PgPool,
+    org_id: Uuid,
+    org_ingredient_id: Option<Uuid>,
+    recipe_unit: &str,
+    qty: f64,
+    stored: Option<f64>,
+) -> Result<(String, f64), AppError> {
     match org_ingredient_id {
         Some(id) => {
             // Scope the lookup to the caller's org: a recipe/addon/optional may
@@ -385,16 +424,20 @@ pub async fn normalize_recipe_unit(
                         "Linked ingredient not found in this organization's catalog".into(),
                     )
                 })?;
-            // Convert to the base unit (density bridges weight↔volume when set).
-            let base_q = crate::units::convert_with_density(qty, recipe_unit, &base_unit, density)?;
-            // Gross up by yield loss: producing `base_q` usable units consumes
-            // base_q / (yield_pct/100) of the purchased ingredient. Stored once,
-            // so deduction + every cost rollup stay correct with no runtime math.
-            let yf = yield_pct
-                .map(|y| y / 100.0)
-                .filter(|y| *y > 0.0)
-                .unwrap_or(1.0);
-            let q = ((base_q / yf) * 1000.0).round() / 1000.0;
+            if let Some(stored) = stored {
+                let sent =
+                    crate::units::convert_with_density(qty, recipe_unit, &base_unit, density)?;
+                if sent == madar_units::usable_qty(stored, yield_pct) {
+                    return Ok((base_unit, stored));
+                }
+            }
+            // Convert to the base unit (density bridges weight↔volume when set),
+            // then gross up by yield loss: `x` usable units consume x / (yield/100)
+            // of the purchased ingredient. Stored once, so deduction + every cost
+            // rollup stay correct with no runtime math. madar-shared's rule, the
+            // arithmetic this function had inline (pinned by a units.rs test).
+            let q = madar_units::recipe_base_qty(qty, recipe_unit, &base_unit, density, yield_pct)
+                .map_err(|e| AppError::BadRequest(e.to_string()))?;
             // A positive input that rounds to 0 in the base unit (e.g. 0.4 g into a
             // kg-base ingredient → 0.000 kg) would silently store a no-op recipe
             // line: no deduction, no COGS. Reject it instead of losing the quantity (V22).

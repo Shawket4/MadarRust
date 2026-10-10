@@ -44,6 +44,10 @@ pub struct RecipeBaseLineOut {
     pub ingredient_name: String,
     /// Base-unit quantity as a string (numeric fidelity).
     pub quantity: String,
+    /// The usable amount before yield loss, like `RecipeLineOut::usable_quantity`:
+    /// what an editor shows and sends back (a line sent back unchanged keeps
+    /// its stored `quantity`).
+    pub usable_quantity: String,
     pub unit: String,
     pub sort: i32,
 }
@@ -172,8 +176,18 @@ async fn load_base(pool: &PgPool, id: Uuid) -> Result<RecipeBaseOut, AppError> {
         row.ok_or_else(|| AppError::NotFound("Recipe base not found".into()))?;
 
     #[allow(clippy::type_complexity)]
-    let lines: Vec<(Uuid, Option<String>, Uuid, String, Decimal, String, i32)> = sqlx::query_as(
-        "SELECT bl.id, bl.size_label, bl.ingredient_id, oi.name, bl.quantity, bl.unit, bl.sort \
+    let lines: Vec<(
+        Uuid,
+        Option<String>,
+        Uuid,
+        String,
+        Decimal,
+        Option<f64>,
+        String,
+        i32,
+    )> = sqlx::query_as(
+        "SELECT bl.id, bl.size_label, bl.ingredient_id, oi.name, bl.quantity, \
+                oi.yield_pct::float8, bl.unit, bl.sort \
          FROM recipe_base_lines bl JOIN org_ingredients oi ON oi.id = bl.ingredient_id \
          WHERE bl.base_id = $1 ORDER BY bl.sort, bl.size_label NULLS FIRST, oi.name",
     )
@@ -194,13 +208,15 @@ async fn load_base(pool: &PgPool, id: Uuid) -> Result<RecipeBaseOut, AppError> {
         lines: lines
             .into_iter()
             .map(
-                |(id, size_label, ingredient_id, ingredient_name, q, unit, sort)| {
+                |(id, size_label, ingredient_id, ingredient_name, q, yield_pct, unit, sort)| {
                     RecipeBaseLineOut {
                         id,
                         size_label,
                         ingredient_id,
                         ingredient_name,
                         quantity: q.normalize().to_string(),
+                        usable_quantity: crate::menu::studio::usable_quantity(q, yield_pct)
+                            .to_string(),
                         unit,
                         sort,
                     }
@@ -237,11 +253,25 @@ fn clean_opt(s: Option<&str>) -> Option<String> {
 }
 
 /// Validate + normalize submitted lines to `(size_label, ingredient, qty, unit, sort)`.
+/// When `base` already has lines, one sent back as its `usable_quantity` keeps
+/// what it stores (D3b, `normalize_recipe_line`).
 pub(crate) async fn normalize_lines(
     pool: &PgPool,
     org_id: Uuid,
+    base: Option<Uuid>,
     lines: &[RecipeBaseLineInput],
 ) -> Result<Vec<(Option<String>, Uuid, Decimal, String, i32)>, AppError> {
+    let stored: std::collections::HashMap<(Option<String>, Uuid), f64> = sqlx::query_as(
+        "SELECT bl.size_label, bl.ingredient_id, bl.quantity::float8 \
+         FROM recipe_base_lines bl JOIN org_ingredients oi ON oi.id = bl.ingredient_id \
+         WHERE bl.base_id = $1 AND bl.unit = oi.unit::text",
+    )
+    .bind(base)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(label, ing, q): (Option<String>, Uuid, f64)| ((label, ing), q))
+    .collect();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(lines.len());
     for (i, l) in lines.iter().enumerate() {
@@ -254,12 +284,13 @@ pub(crate) async fn normalize_lines(
         if !l.quantity.is_finite() || l.quantity < 0.0 {
             return Err(AppError::BadRequest("quantity must be >= 0".into()));
         }
-        let (unit, q) = crate::recipes::handlers::normalize_recipe_unit(
+        let (unit, q) = crate::recipes::handlers::normalize_recipe_line(
             pool,
             org_id,
             Some(l.ingredient_id),
             &l.unit,
             l.quantity,
+            stored.get(&(label.clone(), l.ingredient_id)).copied(),
         )
         .await?;
         out.push((
@@ -365,7 +396,7 @@ pub async fn create_base(
     let b = body.into_inner();
     let name = clean_name(&b.name)?;
     let lines = match &b.lines {
-        Some(l) => normalize_lines(pool.get_ref(), org, l).await?,
+        Some(l) => normalize_lines(pool.get_ref(), org, None, l).await?,
         None => Vec::new(),
     };
 
@@ -504,7 +535,7 @@ pub async fn put_base_lines(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
     let org = base_org(pool.get_ref(), &claims, *id).await?;
-    let lines = normalize_lines(pool.get_ref(), org, &body.lines).await?;
+    let lines = normalize_lines(pool.get_ref(), org, Some(*id), &body.lines).await?;
 
     let mut tx = pool.begin().await?;
     replace_lines(&mut tx, *id, &lines).await?;

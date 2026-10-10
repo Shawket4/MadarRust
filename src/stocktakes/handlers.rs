@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+// Which counted row needs a reason: madar-shared's rule, exact in thousandths
+// (book 1, counted 0.9 at 10 % is flagged).
+use madar_inventory::count::is_variance_flagged;
+
 use crate::{
     auth::jwt::Claims,
     errors::{AppError, AppErrorResponse},
@@ -721,11 +725,7 @@ pub async fn variance_report(
             CASE WHEN si.unit_cost IS NULL OR si.counted_qty IS NULL THEN NULL
                  ELSE round((si.counted_qty - ({BOOK_EXPR})) * si.unit_cost)::bigint END AS variance_value,
             si.variance_reason::text AS variance_reason,
-            CASE
-                WHEN si.counted_qty IS NULL THEN false
-                WHEN ({BOOK_EXPR}) = 0 THEN si.counted_qty <> 0
-                ELSE (abs(si.counted_qty - ({BOOK_EXPR})) / abs({BOOK_EXPR}) * 100)::float8 >= $2
-            END AS is_flagged
+            false AS is_flagged
         FROM stocktake_items si
         JOIN stocktakes s ON s.id = si.stocktake_id
         JOIN org_ingredients oi ON oi.id = si.org_ingredient_id
@@ -735,11 +735,17 @@ pub async fn variance_report(
         ORDER BY oi.name ASC
         "#
     );
-    let rows = sqlx::query_as::<_, VarianceRow>(&sql)
+    let mut rows = sqlx::query_as::<_, VarianceRow>(&sql)
         .bind(*id)
-        .bind(threshold)
         .fetch_all(pool.get_ref())
         .await?;
+    // The flag is finalize's rule, so the report never marks a row finalize
+    // let through (or the other way round).
+    for r in &mut rows {
+        r.is_flagged = r
+            .counted_qty
+            .is_some_and(|c| is_variance_flagged(r.book_qty, c, threshold));
+    }
 
     let mut total_shrinkage_value = 0i64;
     let mut total_overage_value = 0i64;
@@ -832,16 +838,6 @@ where
     .fetch_one(executor)
     .await?;
     Ok(pct)
-}
-
-/// A counted row is "suspicious" when its |difference| is at least `pct` of the
-/// book quantity, or when stock appears from / vanishes to zero.
-fn is_variance_flagged(book: f64, counted: f64, pct: f64) -> bool {
-    if book.abs() < 1e-9 {
-        counted.abs() > 1e-9
-    } else {
-        (counted - book).abs() / book.abs() * 100.0 >= pct
-    }
 }
 
 const VARIANCE_REASONS: &[&str] = &[

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -17,12 +16,9 @@ use crate::errors::AppError;
 /// `org_ingredients.cost_per_unit` / `ingredient_cost_history.cost_per_unit`
 /// are stored in PIASTRES (the dashboard converts EGP input on entry);
 /// there is deliberately no ×100 anywhere in the backend.
-pub fn round_piastres(piastres: Decimal) -> i64 {
-    piastres
-        .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointAwayFromZero)
-        .to_i64()
-        .unwrap_or(0)
-}
+///
+/// madar-shared's (`madar_money::cost`), the one the dashboards' cost figures use.
+pub use madar_money::cost::round_piastres;
 
 /// Pure weighted moving-average blend — the arithmetic core of
 /// [`apply_weighted_average_cost`], extracted so it can be unit-tested and

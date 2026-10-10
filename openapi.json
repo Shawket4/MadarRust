@@ -65533,7 +65533,8 @@
           "addon_item_id",
           "ingredient_name",
           "unit",
-          "quantity_used"
+          "quantity_used",
+          "usable_quantity"
         ],
         "properties": {
           "addon_item_id": {
@@ -65560,6 +65561,11 @@
           },
           "unit": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "The usable amount before yield loss: `quantity_used` × the linked\ningredient's yield, 3 dp (madar-units `usable_qty`). What an editor shows\nand sends back; a line sent back unchanged keeps its stored quantity."
           }
         }
       },
@@ -78945,6 +78951,7 @@
           "ingredient_id",
           "ingredient_name",
           "quantity",
+          "usable_quantity",
           "unit"
         ],
         "properties": {
@@ -78968,6 +78975,11 @@
           },
           "unit": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "The usable amount before yield loss: `quantity` × the ingredient's yield,\n3 dp (madar-units `usable_qty`). What the editor shows and sends back; a\nline sent back unchanged keeps its stored `quantity`."
           }
         }
       },
@@ -82386,7 +82398,8 @@
           "ingredient_name",
           "ingredient_unit",
           "category",
-          "size_label"
+          "size_label",
+          "usable_quantity"
         ],
         "properties": {
           "category": {
@@ -82411,6 +82424,11 @@
           },
           "size_label": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "number",
+            "format": "double",
+            "description": "The usable amount before yield loss: `quantity_used` × the linked\ningredient's yield, 3 dp (madar-units `usable_qty`). What the catalog\nitem dialog shows."
           }
         }
       },
@@ -86139,6 +86157,7 @@
           "ingredient_id",
           "ingredient_name",
           "quantity",
+          "usable_quantity",
           "unit",
           "sort"
         ],
@@ -86160,6 +86179,10 @@
           },
           "unit": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "string",
+            "description": "The usable amount before yield loss, like `RecipeLineOut::usable_quantity`:\nwhat an editor shows and sends back (a line sent back unchanged keeps\nits stored `quantity`)."
           }
         }
       },
@@ -91709,6 +91732,7 @@
           "ingredient_id",
           "ingredient_name",
           "quantity",
+          "usable_quantity",
           "unit",
           "sort"
         ],
@@ -91741,6 +91765,10 @@
           },
           "unit": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "string",
+            "description": "The usable amount before yield loss, like `RecipeLineOut::usable_quantity`:\nwhat an editor shows and sends back (a line sent back unchanged keeps\nits stored `quantity`)."
           }
         }
       },
@@ -91947,6 +91975,7 @@
           "ingredient_id",
           "ingredient_name",
           "quantity",
+          "usable_quantity",
           "unit"
         ],
         "properties": {
@@ -91989,6 +92018,10 @@
           },
           "unit": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "string",
+            "description": "The usable amount in the base unit, before yield loss: `quantity` × the\ningredient's yield, 3 dp (madar-units `usable_qty`; 100 g at 80 % yield\nstores 125, shows 100). What an editor shows and sends back; a line sent\nback unchanged keeps its stored `quantity`."
           }
         }
       },

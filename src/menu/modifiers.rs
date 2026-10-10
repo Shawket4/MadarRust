@@ -82,6 +82,10 @@ pub struct GroupOptionRecipeLine {
     pub ingredient_id: Uuid,
     pub ingredient_name: String,
     pub quantity: f64,
+    /// The usable amount before yield loss: `quantity` × the ingredient's yield,
+    /// 3 dp (madar-units `usable_qty`). What the editor shows and sends back; a
+    /// line sent back unchanged keeps its stored `quantity`.
+    pub usable_quantity: f64,
     pub unit: String,
     /// `null` = the generic line (every size); else the per-size amount for that
     /// size label (menu modeling B9). The editor must round-trip it on save.
@@ -556,8 +560,18 @@ async fn load_option_recipes(
     if option_ids.is_empty() {
         return Ok(map);
     }
-    let rows: Vec<(Uuid, Uuid, String, Decimal, String, Option<String>)> = sqlx::query_as(
-        "SELECT rl.owner_id, rl.ingredient_id, oi.name, rl.quantity, rl.unit, rl.size_label \
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        Uuid,
+        Uuid,
+        String,
+        Decimal,
+        String,
+        Option<String>,
+        Option<f64>,
+    )> = sqlx::query_as(
+        "SELECT rl.owner_id, rl.ingredient_id, oi.name, rl.quantity, rl.unit, rl.size_label, \
+                oi.yield_pct::float8 \
          FROM recipe_lines rl JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
          WHERE rl.owner_type = 'modifier_option' AND rl.owner_id = ANY($1) \
          ORDER BY rl.owner_id, rl.size_label NULLS FIRST, oi.name, rl.ingredient_id",
@@ -565,11 +579,13 @@ async fn load_option_recipes(
     .bind(option_ids)
     .fetch_all(pool)
     .await?;
-    for (owner, ingredient_id, ingredient_name, quantity, unit, size_label) in rows {
+    for (owner, ingredient_id, ingredient_name, quantity, unit, size_label, yield_pct) in rows {
+        let quantity = quantity.to_string().parse::<f64>().unwrap_or(0.0);
         map.entry(owner).or_default().push(GroupOptionRecipeLine {
             ingredient_id,
             ingredient_name,
-            quantity: quantity.to_string().parse::<f64>().unwrap_or(0.0),
+            quantity,
+            usable_quantity: madar_units::usable_qty(quantity, yield_pct),
             unit,
             size_label,
         });
@@ -1164,22 +1180,25 @@ pub async fn put_option_recipe(
     // Normalize each line to the ingredient base unit BEFORE opening the tx. A
     // quantity of 0 (swap marker) is allowed and passes through as 0. The helper
     // also enforces that the ingredient belongs to this org.
+    // A line sent back as its `usable_quantity` keeps what it stores (D3b).
+    let stored = studio::stored_own_quantities(pool.get_ref(), "modifier_option", &[*oid]).await?;
     let mut normalized: Vec<(Uuid, f64, String, Option<String>)> = Vec::with_capacity(lines.len());
     for l in &lines {
-        let (base_unit, qty) = crate::recipes::handlers::normalize_recipe_unit(
-            pool.get_ref(),
-            org_id,
-            Some(l.ingredient_id),
-            &l.unit,
-            l.quantity,
-        )
-        .await?;
         let label = l
             .size_label
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let (base_unit, qty) = crate::recipes::handlers::normalize_recipe_line(
+            pool.get_ref(),
+            org_id,
+            Some(l.ingredient_id),
+            &l.unit,
+            l.quantity,
+            stored.get(&(*oid, l.ingredient_id, label.clone())).copied(),
+        )
+        .await?;
         normalized.push((l.ingredient_id, qty, base_unit, label));
     }
 
@@ -1515,6 +1534,10 @@ pub async fn put_item_options(
     // Normalize every recipe line up front (needs the pool; must be outside the tx),
     // grouped per incoming option by index. A missing recipe (None) means "no lines".
     // Reject duplicate ingredient ids within one option's recipe.
+    // A line sent back as its `usable_quantity` keeps what it stores (D3b).
+    let option_ids: Vec<Uuid> = incoming.iter().filter_map(|o| o.id).collect();
+    let stored =
+        studio::stored_own_quantities(pool.get_ref(), "modifier_option", &option_ids).await?;
     let mut normalized_recipes: Vec<Option<Vec<(Uuid, f64, String)>>> =
         Vec::with_capacity(incoming.len());
     for opt in &incoming {
@@ -1529,12 +1552,16 @@ pub async fn put_item_options(
                             "Duplicate ingredient in an option recipe".into(),
                         ));
                     }
-                    let (base_unit, qty) = crate::recipes::handlers::normalize_recipe_unit(
+                    let prior = opt
+                        .id
+                        .and_then(|oid| stored.get(&(oid, l.ingredient_id, None)));
+                    let (base_unit, qty) = crate::recipes::handlers::normalize_recipe_line(
                         pool.get_ref(),
                         org_id,
                         Some(l.ingredient_id),
                         &l.unit,
                         l.quantity,
+                        prior.copied(),
                     )
                     .await?;
                     norm.push((l.ingredient_id, qty, base_unit));

@@ -135,4 +135,65 @@ mod tests {
         );
         assert!(normalize_to_base(5.0, "g", "pcs").is_err());
     }
+
+    /// `recipes::handlers::normalize_recipe_unit` stored `convert_with_density`
+    /// ÷ the yield factor, rounded to 3 dp, inline. It now calls
+    /// `madar_units::recipe_base_qty`; stored quantities (and the POS's waste
+    /// values over them) must not move by a single bit for any input.
+    #[test]
+    fn recipe_base_qty_is_the_old_inline_normalization() {
+        fn old(
+            qty: f64,
+            unit: &str,
+            base: &str,
+            density: Option<f64>,
+            yield_pct: Option<f64>,
+        ) -> Result<f64, String> {
+            let base_q =
+                convert_with_density(qty, unit, base, density).map_err(|e| e.to_string())?;
+            let yf = yield_pct
+                .map(|y| y / 100.0)
+                .filter(|y| *y > 0.0)
+                .unwrap_or(1.0);
+            Ok(((base_q / yf) * 1000.0).round() / 1000.0)
+        }
+        let units = ["g", "kg", "ml", "l", "pcs", "G", " Kg ", "cups"];
+        let densities = [None, Some(0.92), Some(1.03), Some(0.0)];
+        let mut yields = vec![None, Some(0.0), Some(-5.0), Some(0.001), Some(33.333)];
+        yields.extend((1..=150).map(|y| Some(f64::from(y))));
+        yields.extend([Some(72.5), Some(99.999), Some(100.001), Some(300.0)]);
+        // Typed amounts: a dense grid near the thousandth plus pseudo-random ones.
+        let mut qtys: Vec<f64> = (0..=400).map(|m| f64::from(m) / 1000.0).collect();
+        qtys.extend([
+            0.0005, 0.0015, 0.0625, 1.0005, 2.675, 1e-7, 1e9, -1.0, 12_345.678,
+        ]);
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..200 {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            qtys.push((x >> 11) as f64 / (1u64 << 53) as f64 * 5_000.0);
+        }
+        let mut n = 0u64;
+        for &q in &qtys {
+            for (i, from) in units.iter().enumerate() {
+                // Every unit pair over a sample of the yields, to keep it fast.
+                for to in &units[..5] {
+                    for d in densities {
+                        for y in yields.iter().skip(i % 4).step_by(4) {
+                            // As the handler maps it: the same 400, word for word.
+                            let new = madar_units::recipe_base_qty(q, from, to, d, *y)
+                                .map_err(|e| AppError::BadRequest(e.to_string()).to_string());
+                            let was = old(q, from, to, d, *y);
+                            assert_eq!(
+                                new.as_ref().map(|v| v.to_bits()),
+                                was.as_ref().map(|v| v.to_bits()),
+                                "{q} {from}->{to} density {d:?} yield {y:?}: {new:?} vs {was:?}"
+                            );
+                            n += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(n > 1_000_000, "{n} cases");
+    }
 }

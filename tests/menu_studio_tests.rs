@@ -643,6 +643,118 @@ async fn test_put_size_recipe_recomputes_cost_and_bumps_revision(pool: PgPool) {
     assert_eq!(count, 1, "recipe was replaced, not appended");
 }
 
+// ── D3b: re-saving a size keeps a yield line as it is ────────────────
+
+/// D3b (SHARED_RULES_PLAN): 100 g of an 80 %-yield ingredient stores 125 g. The
+/// studio shows `usable_quantity` 100; sending it back unchanged keeps 125
+/// (it was grossed up again to 156.25 on every save); a changed amount is
+/// normalized as before (110 → 137.5).
+#[sqlx::test]
+async fn test_d3b_resaving_a_yield_line_keeps_what_it_stores(pool: PgPool) {
+    let app = app(pool.clone()).await;
+    let org = seed_org(&pool).await;
+    let user = seed_user(&pool, org).await;
+    grant(&pool, "menu_items", "read").await;
+    grant(&pool, "menu_items", "update").await;
+    let cat = seed_category(&pool, org).await;
+    let item = seed_item(&pool, org, cat, "Salad", 5000).await;
+    let size = seed_size(&pool, item, "one_size", 5000, 0).await;
+    let lettuce = seed_ingredient(&pool, org, "Lettuce", "g", Some(2.0)).await;
+    sqlx::query("UPDATE org_ingredients SET yield_pct = 80 WHERE id = $1")
+        .bind(lettuce)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let token = org_admin_token(user, org);
+
+    let put = |quantity: f64, unit: &str| {
+        test::TestRequest::put()
+            .uri(&format!("/menu-item-sizes/{size}/recipe"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(PutRecipeRequest {
+                lines: vec![RecipeLineInput {
+                    ingredient_id: lettuce,
+                    quantity,
+                    unit: unit.into(),
+                }],
+            })
+            .to_request()
+    };
+    let stored = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT quantity::text FROM recipe_lines WHERE owner_type = 'item_size' AND owner_id = $1",
+        )
+        .bind(size)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+
+    let resp = test::call_service(&app, put(100.0, "g")).await;
+    assert!(resp.status().is_success());
+    let result: RecipeCostResult = test::read_body_json(resp).await;
+    assert_eq!(result.recipe[0].quantity, "125");
+    assert_eq!(result.recipe[0].usable_quantity, "100");
+    assert_eq!(stored().await, "125.000");
+
+    // The studio shows the usable amount.
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/menu-items/{item}/studio"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let agg: StudioAggregate = test::read_body_json(resp).await;
+    let line = &agg.sizes[0].recipe[0];
+    assert_eq!(
+        (line.quantity.as_str(), line.usable_quantity.as_str()),
+        ("125", "100")
+    );
+
+    // Sent back unchanged (also as 0.1 kg): still 125, never 156.25.
+    for (q, unit) in [(100.0, "g"), (0.1, "kg"), (100.0, "g")] {
+        let resp = test::call_service(&app, put(q, unit)).await;
+        assert!(resp.status().is_success());
+        assert_eq!(stored().await, "125.000", "{q} {unit}");
+    }
+
+    // A changed amount is normalized as before.
+    let resp = test::call_service(&app, put(110.0, "g")).await;
+    assert!(resp.status().is_success());
+    let result: RecipeCostResult = test::read_body_json(resp).await;
+    assert_eq!(stored().await, "137.500");
+    assert_eq!(result.recipe[0].usable_quantity, "110");
+
+    // A stored amount its usable form cannot round-trip does not drift: 0.001 g
+    // at 60 % yield (set in SQL, without the rebase a catalog edit does) shows
+    // 0.001, which normalized again would store 0.002.
+    sqlx::query("UPDATE org_ingredients SET yield_pct = NULL WHERE id = $1")
+        .bind(lettuce)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        test::call_service(&app, put(0.001, "g"))
+            .await
+            .status()
+            .is_success()
+    );
+    sqlx::query("UPDATE org_ingredients SET yield_pct = 60 WHERE id = $1")
+        .bind(lettuce)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let resp = test::call_service(&app, put(0.001, "g")).await;
+        let result: RecipeCostResult = test::read_body_json(resp).await;
+        assert_eq!(stored().await, "0.001");
+        assert_eq!(result.recipe[0].usable_quantity, "0.001");
+    }
+}
+
 // ── Test 4: PUT /modifier-groups attach-set ──────────────────────────
 
 #[sqlx::test]
