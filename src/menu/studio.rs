@@ -31,6 +31,7 @@
 use actix_web::HttpMessage;
 use actix_web::{HttpRequest, HttpResponse, web};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -53,6 +54,11 @@ pub struct RecipeLineOut {
     pub ingredient_name: String,
     /// Base-unit, yield-normalized quantity, serialized as a string (numeric fidelity).
     pub quantity: String,
+    /// The usable amount in the base unit, before yield loss: `quantity` × the
+    /// ingredient's yield, 3 dp (madar-units `usable_qty`; 100 g at 80 % yield
+    /// stores 125, shows 100). What an editor shows and sends back; a line sent
+    /// back unchanged keeps its stored `quantity`.
+    pub usable_quantity: String,
     pub unit: String,
     /// Cost of this line in piastres. `null` = UNKNOWN (ingredient unlinked/uncosted),
     /// never shown as 0. A priced line with `quantity = 0` (swap marker) costs 0.
@@ -412,6 +418,7 @@ pub(crate) struct RawRecipeLine {
     unit: String,
     /// The org-default per-unit cost in piastres, or `None` when uncosted/unlinked.
     cost_per_unit: Option<Decimal>,
+    yield_pct: Option<f64>,
     source: Option<String>,
     size_label: Option<String>,
 }
@@ -442,11 +449,12 @@ pub(crate) async fn load_recipe_lines(
         Decimal,
         String,
         Option<Decimal>,
+        Option<f64>,
         Option<String>,
         Option<String>,
     )> = sqlx::query_as(
         "SELECT rl.owner_id, rl.id, rl.ingredient_id, oi.name, rl.quantity, rl.unit, oi.cost_per_unit, \
-                COALESCE(rl.source, 'own'), rl.size_label \
+                oi.yield_pct::float8, COALESCE(rl.source, 'own'), rl.size_label \
          FROM recipe_lines rl \
          JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
          WHERE rl.owner_type = $1 AND rl.owner_id = ANY($2) \
@@ -465,6 +473,7 @@ pub(crate) async fn load_recipe_lines(
         quantity,
         unit,
         cost_per_unit,
+        yield_pct,
         source,
         size_label,
     ) in rows
@@ -476,11 +485,36 @@ pub(crate) async fn load_recipe_lines(
             quantity,
             unit,
             cost_per_unit,
+            yield_pct,
             source,
             size_label,
         });
     }
     Ok(map)
+}
+
+/// What the OWN recipe lines of some owners store now, keyed by (owner, ingredient,
+/// size label): the `stored` of `recipes::handlers::normalize_recipe_line` for a
+/// replace-set save. A line no longer in its ingredient's base unit is left out.
+pub(crate) async fn stored_own_quantities(
+    pool: &PgPool,
+    owner_type: &str,
+    owner_ids: &[Uuid],
+) -> Result<std::collections::HashMap<(Uuid, Uuid, Option<String>), f64>, AppError> {
+    let rows: Vec<(Uuid, Uuid, Option<String>, f64)> = sqlx::query_as(
+        "SELECT rl.owner_id, rl.ingredient_id, rl.size_label, rl.quantity::float8 \
+         FROM recipe_lines rl JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
+         WHERE rl.owner_type = $1 AND rl.owner_id = ANY($2) \
+           AND (rl.source IS NULL OR rl.source = 'own') AND rl.unit = oi.unit::text",
+    )
+    .bind(owner_type)
+    .bind(owner_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(owner, ingredient, label, q)| ((owner, ingredient, label), q))
+        .collect())
 }
 
 /// Roll up a set of recipe lines into (hydrated lines, total_cost, cost_incomplete),
@@ -522,6 +556,7 @@ pub(crate) fn rollup_recipe(lines: &[RawRecipeLine]) -> (Vec<RecipeLineOut>, Opt
             ingredient_id: l.ingredient_id,
             ingredient_name: l.ingredient_name.clone(),
             quantity: l.quantity.normalize().to_string(),
+            usable_quantity: usable_quantity(l.quantity, l.yield_pct).to_string(),
             unit: l.unit.clone(),
             line_cost_piastres: line_cost,
             source: l.source.clone(),
@@ -536,6 +571,13 @@ pub(crate) fn rollup_recipe(lines: &[RawRecipeLine]) -> (Vec<RecipeLineOut>, Opt
         None
     };
     (out, total, incomplete)
+}
+
+/// A stored quantity's usable amount (`madar_units::usable_qty`), as a decimal
+/// that prints like the stored one ("100", "0.999").
+pub(crate) fn usable_quantity(stored: Decimal, yield_pct: Option<f64>) -> Decimal {
+    let usable = madar_units::usable_qty(stored.to_f64().unwrap_or(0.0), yield_pct);
+    Decimal::from_f64(usable).unwrap_or_default().normalize()
 }
 
 // ── Aggregate builder ────────────────────────────────────────────────
@@ -1117,15 +1159,18 @@ pub async fn put_size_recipe(
     }
 
     // Normalize each line to the ingredient base unit BEFORE opening the tx (the helper
-    // takes a pool). Rejects an ingredient from another org / a too-small quantity.
+    // takes a pool). Rejects an ingredient from another org / a too-small quantity. An
+    // own line sent back as its `usable_quantity` keeps what it stores (D3b).
+    let stored = stored_own_quantities(pool.get_ref(), "item_size", &[*size_id]).await?;
     let mut normalized: Vec<(Uuid, f64, String)> = Vec::with_capacity(lines.len());
     for l in &lines {
-        let (base_unit, qty) = crate::recipes::handlers::normalize_recipe_unit(
+        let (base_unit, qty) = crate::recipes::handlers::normalize_recipe_line(
             pool.get_ref(),
             org_id,
             Some(l.ingredient_id),
             &l.unit,
             l.quantity,
+            stored.get(&(*size_id, l.ingredient_id, None)).copied(),
         )
         .await?;
         normalized.push((l.ingredient_id, qty, base_unit));

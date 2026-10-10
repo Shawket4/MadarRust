@@ -445,6 +445,62 @@ async fn test_drink_recipe_subunit_rounding_to_zero_rejected(pool: PgPool) {
 
 /// Recipe depth: an ml recipe line against a gram-based ingredient converts via
 /// density, and the per-ingredient yield grosses up the stored consumption.
+/// The add-on recipe dialogs read these lines to edit them: each carries its
+/// usable amount (before yield loss) next to the stored, grossed-up one.
+#[sqlx::test]
+async fn test_addon_ingredient_carries_its_usable_quantity(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org(&pool).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "recipes", "create").await;
+    grant_permission(&pool, "org_admin", "recipes", "read").await;
+    let addon_id = seed_addon_item(&pool, org_id, "Extra Lettuce", "syrup", 50).await;
+    let ing = seed_ingredient(&pool, org_id, "Lettuce", "g").await;
+    sqlx::query("UPDATE org_ingredients SET yield_pct = 80 WHERE id = $1")
+        .bind(ing)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let token = generate_org_admin_token(user_id, org_id);
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/recipes/addons/{addon_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .set_json(UpsertAddonIngredientRequest {
+                org_ingredient_id: Some(ing),
+                ingredient_name: "Lettuce".to_string(),
+                ingredient_unit: "g".to_string(),
+                quantity_used: 100.0,
+            })
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let row: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(row["quantity_used"], serde_json::json!(125.0));
+    assert_eq!(row["usable_quantity"], serde_json::json!(100.0));
+    assert!(row.get("yield_pct").is_none(), "not on the wire");
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/recipes/addons/{addon_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    let rows: Vec<AddonIngredient> = test::read_body_json(resp).await;
+    assert_eq!(rows[0].usable_quantity, 100.0);
+}
+
 #[sqlx::test]
 async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
     let app = test::init_service(
