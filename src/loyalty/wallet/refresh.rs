@@ -100,8 +100,12 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Members whose card predates their shop's most recent branch change, and who
-/// are actually carrying one.
+/// Members whose card predates their shop's most recent branch change, or their
+/// own last balance change, and who are actually carrying one.
+///
+/// The balance case is a void or refund: its clawback is written by a trigger
+/// (`loyalty_reverse`), which bumps the member's `updated_at` and pushes nothing,
+/// so the card in the wallet kept the stamps the void took back.
 ///
 /// A member who never added a pass has nothing to refresh, and pushing to them
 /// is a round trip that always finds no devices.
@@ -119,7 +123,8 @@ pub async fn stale_passes(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, AppErr
                       ) AS changed \
                  FROM organizations o WHERE o.deleted_at IS NULL \
            ) b ON b.org_id = c.org_id \
-          WHERE (c.pass_updated_at IS NULL OR c.pass_updated_at < b.changed) \
+          WHERE (c.pass_updated_at IS NULL OR c.pass_updated_at < b.changed \
+                 OR (c.pass_updated_at < c.updated_at AND c.deleted_at IS NULL)) \
             AND ( \
                 c.google_object_id IS NOT NULL \
                 OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = c.id) \
