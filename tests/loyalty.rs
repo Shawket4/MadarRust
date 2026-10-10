@@ -3143,6 +3143,7 @@ async fn a_clawback_of_spent_points_clamps_at_zero_unless_the_shop_says_otherwis
 
 /// A stamp-ledger row written directly, `mins_ago` in the past, so a test can
 /// order earns and claims the way a member's weeks would.
+#[allow(clippy::too_many_arguments)]
 async fn stamp_row(
     pool: &PgPool,
     org: Uuid,
