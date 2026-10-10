@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use madar_inventory::purchase::{PurchaseError, delivery_cost, line_costs, quantity_dec};
+
 use crate::{
     auth::jwt::Claims,
     costing::service::{apply_weighted_average_cost, round_piastres},
@@ -409,7 +411,7 @@ pub async fn create_order(
             ));
         }
         let (line_cost, unit_cost_exact) =
-            line_costs(line.quantity_ordered, line.line_cost, line.unit_cost)?;
+            line_costs(line.quantity_ordered, line.line_cost, line.unit_cost).map_err(bad_cost)?;
 
         // Validate ingredient belongs to org + resolve its base unit and pack.
         let ing: Option<(String, Option<String>, Option<rust_decimal::Decimal>)> = sqlx::query_as(
@@ -709,12 +711,11 @@ pub async fn receive_order(
             recv.unit_cost,
             ordered_line_cost,
             qty_ordered_dec,
-        )?;
+        )
+        .map_err(bad_cost)?;
 
         let stock_qty = recv.quantity_received * factor;
-        let stock_qty_dec = Decimal::from_f64_retain(stock_qty)
-            .unwrap_or(Decimal::ZERO)
-            .round_dp(3);
+        let stock_qty_dec = quantity_dec(stock_qty);
         // Piastres per base stock unit, EXACT (6 dp): the delivery's cost over
         // the stock it brought. A cheap-per-gram ingredient keeps its fraction
         // of a piastre all the way into cost_per_unit and the ledger (V10).
@@ -1218,9 +1219,7 @@ pub async fn create_return(
             return Err(AppError::BadRequest("unit_cost cannot be negative".into()));
         }
         let unit_cost = line.unit_cost.map(Decimal::from).or(branch_cost);
-        let quantity_dec = Decimal::from_f64_retain(line.quantity)
-            .unwrap_or(Decimal::ZERO)
-            .round_dp(3);
+        let returned_qty = quantity_dec(line.quantity);
 
         record_movement(
             &mut *tx,
@@ -1249,7 +1248,7 @@ pub async fn create_return(
         .bind(-line.quantity)
         .bind(unit_cost.map(round_piastres))
         .bind(unit_cost)
-        .bind(unit_cost.map(|c| round_piastres(-(c * quantity_dec))))
+        .bind(unit_cost.map(|c| round_piastres(-(c * returned_qty))))
         .execute(&mut *tx)
         .await?;
     }
@@ -1269,66 +1268,11 @@ pub async fn create_return(
 
 // ── Helpers ───────────────────────────────────────────────────
 
-/// Piastres per stock unit can be a fraction; a line total is whole piastres.
-const LINE_COST_DP: u32 = 8;
-
-fn quantity_dec(q: f64) -> Decimal {
-    Decimal::from_f64_retain(q)
-        .unwrap_or(Decimal::ZERO)
-        .round_dp(3)
-}
-
-/// A purchase line's `(line_cost, unit_cost_exact)` from what the client sent.
-/// The invoice total is the truth: given, the unit cost is derived from it
-/// exactly; only an older client's per-unit price is multiplied out instead.
-pub(crate) fn line_costs(
-    quantity_ordered: f64,
-    line_cost: Option<i64>,
-    unit_cost: Option<i64>,
-) -> Result<(i64, Decimal), AppError> {
-    let qty = quantity_dec(quantity_ordered);
-    match (line_cost, unit_cost) {
-        (Some(lc), _) if lc < 0 => Err(AppError::BadRequest("line_cost cannot be negative".into())),
-        (Some(lc), _) if qty > Decimal::ZERO => {
-            Ok((lc, (Decimal::from(lc) / qty).round_dp(LINE_COST_DP)))
-        }
-        (Some(_), _) => Err(AppError::BadRequest(
-            "quantity_ordered must be greater than 0".into(),
-        )),
-        (None, Some(uc)) if uc < 0 => {
-            Err(AppError::BadRequest("unit_cost cannot be negative".into()))
-        }
-        (None, Some(uc)) => Ok((round_piastres(Decimal::from(uc) * qty), Decimal::from(uc))),
-        (None, None) => Err(AppError::BadRequest(
-            "each line needs its cost: line_cost (the invoice total for the line)".into(),
-        )),
-    }
-}
-
-/// Piastres one delivery cost: the actual invoice total if given, else an
-/// older client's actual per-unit price × the quantity, else the ORDERED line
-/// total pro rata to the quantity received (so receiving all of it costs
-/// exactly what was ordered, not a rounded unit price × the quantity).
-pub(crate) fn delivery_cost(
-    quantity_received: f64,
-    line_cost: Option<i64>,
-    unit_cost: Option<i64>,
-    ordered_line_cost: i64,
-    quantity_ordered: Decimal,
-) -> Result<Decimal, AppError> {
-    let qty = quantity_dec(quantity_received);
-    match (line_cost, unit_cost) {
-        (Some(lc), _) if lc < 0 => Err(AppError::BadRequest("line_cost cannot be negative".into())),
-        (Some(lc), _) => Ok(Decimal::from(lc)),
-        (None, Some(uc)) if uc < 0 => {
-            Err(AppError::BadRequest("unit_cost cannot be negative".into()))
-        }
-        (None, Some(uc)) => Ok(Decimal::from(uc) * qty),
-        (None, None) if quantity_ordered > Decimal::ZERO => {
-            Ok(Decimal::from(ordered_line_cost) * qty / quantity_ordered)
-        }
-        (None, None) => Ok(Decimal::ZERO),
-    }
+/// A purchase line's money is madar-shared's (`madar_inventory::purchase`):
+/// quantities round to 3 dp half away from zero, as `numeric(12,3)` stores
+/// them (0.0625 is 0.063). Its refusals are this server's 400s, word for word.
+fn bad_cost(e: PurchaseError) -> AppError {
+    AppError::BadRequest(e.to_string())
 }
 
 async fn fetch_lines<'e, E>(executor: E, po_id: Uuid) -> Result<Vec<PurchaseOrderLine>, AppError>

@@ -1396,3 +1396,79 @@ async fn test_submit_draft_to_ordered(pool: PgPool) {
         "placing an already-placed PO must be rejected"
     );
 }
+
+/// D7 (SHARED_RULES_PLAN): a purchase quantity rounds to 3 dp HALF AWAY FROM
+/// ZERO, as the numeric(12,3) column stores it. 0.0625 is costed on 0.063 (the
+/// stored quantity), not on the banker's 0.062: the unit cost is 1000 / 0.063,
+/// a full delivery costs exactly the line (1000, not 984), and a return of
+/// 0.0625 is valued on 0.063 too.
+#[sqlx::test]
+async fn test_d7_quantity_rounds_like_the_column(pool: PgPool) {
+    use rust_decimal::prelude::ToPrimitive;
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    for a in ["create", "read", "update"] {
+        grant(&pool, "purchase_orders", a).await;
+    }
+    let ing = seed_ingredient_g(&pool, org_id).await;
+    let token = org_admin_token(user_id, org_id);
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    let resp = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/branches/{branch_id}/orders")).insert_header(auth.clone())
+        .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"purchase_unit":"g","quantity_ordered":0.0625,"line_cost":1000}]}))
+        .to_request()).await;
+    assert_eq!(resp.status(), 201);
+    let po: PurchaseOrderFull = test::read_body_json(resp).await;
+    let line = &po.lines[0];
+    assert_eq!(line.quantity_ordered, 0.063, "the column");
+    assert_eq!(
+        line.unit_cost_exact.to_string(),
+        "15873.01587302",
+        "1000 / 0.063"
+    );
+    assert_eq!(line.unit_cost, 15873);
+
+    let recv = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/purchasing/orders/{}/receive", po.order.id))
+            .insert_header(auth.clone())
+            .set_json(
+                serde_json::json!({"lines":[{"line_id": line.id, "quantity_received": 0.0625}]}),
+            )
+            .to_request(),
+    )
+    .await;
+    assert!(recv.status().is_success());
+    let spent: i64 = sqlx::query_scalar(
+        "SELECT line_cost FROM goods_receipt_lines WHERE purchase_order_line_id = $1",
+    )
+    .bind(line.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(spent, 1000, "the whole line was received");
+    let cost: f64 = sqlx::query_scalar("SELECT cost_per_unit::float8 FROM branch_stock WHERE branch_id=$1 AND org_ingredient_id=$2")
+        .bind(branch_id).bind(ing).fetch_one(&pool).await.unwrap();
+    assert!(
+        (cost - 15873.015873).abs() < 1e-6,
+        "average cost over 0.063 g, got {cost}"
+    );
+
+    let ret = test::call_service(&app, test::TestRequest::post()
+        .uri(&format!("/purchasing/branches/{branch_id}/returns")).insert_header(auth.clone())
+        .set_json(serde_json::json!({"lines":[{"org_ingredient_id":ing,"quantity":0.0625,"unit_cost":16000}]}))
+        .to_request()).await;
+    assert_eq!(ret.status(), 201);
+    let ret_cost: i64 = sqlx::query_scalar(
+        "SELECT line_cost FROM goods_receipt_lines WHERE quantity < 0 AND org_ingredient_id = $1",
+    )
+    .bind(ing)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ret_cost, -1008, "16000 × 0.063, not × 0.062 (992)");
+}

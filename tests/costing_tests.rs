@@ -164,6 +164,71 @@ async fn test_addon_costs_rollup(pool: PgPool) {
     assert!(!oat.cost_missing);
 }
 
+/// The SQL rollup (`SUM(quantity_used × cost_per_unit)` over numeric, rounded
+/// once) is madar-money's `cost::recipe_cost`: every recipe of its
+/// hand-computed vectors, built as a menu item, costs what the crate says.
+/// One difference, kept on purpose: with no costed line the server's cost is
+/// `null` (unknown, never 0), where the crate says `{0, complete: false}` (or
+/// `{0, true}` for no lines at all, a recipe-less item here).
+#[sqlx::test]
+async fn test_sku_cost_is_madar_money_recipe_cost(pool: PgPool) {
+    use madar_money::cost::{CostLine, recipe_cost};
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(madar_rust::costing::routes::configure),
+    )
+    .await;
+    let (org_id, _user, token) = seed_basics(&pool).await;
+    let cat_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Vectors')")
+        .bind(cat_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let vectors: serde_json::Value = serde_json::from_str(madar_money::vectors::COST).unwrap();
+    let mut cases = Vec::new();
+    for case in vectors["recipe_cost"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap().to_string();
+        let lines: Vec<CostLine> = serde_json::from_value(case["lines"].clone()).unwrap();
+        let item = Uuid::new_v4();
+        sqlx::query("INSERT INTO menu_items (id, org_id, category_id, name, base_price, is_active) VALUES ($1, $2, $3, $4, 1000, true)")
+            .bind(item).bind(org_id).bind(cat_id).bind(&name).execute(&pool).await.unwrap();
+        for (i, l) in lines.iter().enumerate() {
+            let ing = Uuid::new_v4();
+            sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, 'g'::inventory_unit, $4, ingredient_category_id($2, 'dry'))")
+                .bind(ing).bind(org_id).bind(format!("{name} {i}")).bind(l.cost_per_unit).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, 'one_size', $4, 'g')")
+                .bind(item).bind(ing).bind(l.qty).bind(format!("{name} {i}")).execute(&pool).await.unwrap();
+        }
+        cases.push((name, item, lines));
+    }
+
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/costing/menu-items?org_id={org_id}"))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let rows: Vec<SkuCost> = test::read_body_json(resp).await;
+    assert!(cases.len() >= 8, "the crate's recipe_cost vectors");
+    for (name, item, lines) in &cases {
+        let row = rows.iter().find(|r| r.menu_item_id == *item).unwrap();
+        let want = recipe_cost(lines);
+        let any_known = lines.iter().any(|l| l.cost_per_unit.is_some());
+        let expected = any_known.then_some(want.piastres);
+        assert_eq!(row.cost, expected, "{name}: cost");
+        assert_eq!(row.cost_missing, !want.complete, "{name}: cost_missing");
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Backfill: reprice order snapshots at current ingredient costs
 // ─────────────────────────────────────────────────────────────────────

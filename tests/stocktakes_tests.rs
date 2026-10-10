@@ -933,3 +933,55 @@ async fn test_cycle_count_scope_and_found_item(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), 400);
 }
+
+/// D1 (SHARED_RULES_PLAN): book 1, counted 0.9 at the default 10 %. The old
+/// finalize compared floats (9.999…%) and let it through unexplained while the
+/// report, in exact numeric, flagged it. Both now use madar-inventory's exact
+/// rule: the report flags it before finalize, and finalize asks for a reason.
+#[sqlx::test]
+async fn test_d1_report_and_finalize_agree_on_a_ten_percent_difference(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    grant_all(&pool).await;
+    let ing = seed_ingredient(&pool, org_id).await;
+    seed_stock(&pool, branch_id, ing, 1.0).await;
+    let token = org_admin_token(user_id, org_id);
+
+    let full = start_stocktake!(app, branch_id, token);
+    assert_eq!(full.variance_threshold_pct, 10.0);
+    let id = full.stocktake.id;
+    assert!(
+        count!(app, id, token, [{"org_ingredient_id": ing, "counted_qty": 0.9}])
+            .status()
+            .is_success()
+    );
+    let report = variance!(app, id, token);
+    assert!(report.rows[0].is_flagged, "the report flags it");
+    assert_eq!(finalize!(app, id, token).status(), 409, "finalize asks why");
+
+    assert!(count!(app, id, token, [{"org_ingredient_id": ing, "counted_qty": 0.9, "variance_reason": "miscount"}]).status().is_success());
+    assert!(finalize!(app, id, token).status().is_success());
+    let report = variance!(app, id, token);
+    assert!(report.rows[0].is_flagged, "still flagged after finalize");
+
+    // Just under the line is not flagged by either.
+    let ing2 = seed_ing(&pool, org_id, "Sugar", "other", Some(10)).await;
+    seed_stock(&pool, branch_id, ing2, 1.0).await;
+    let full = start_stocktake!(app, branch_id, token);
+    let id = full.stocktake.id;
+    assert!(
+        count!(app, id, token, [{"org_ingredient_id": ing2, "counted_qty": 0.901}])
+            .status()
+            .is_success()
+    );
+    let report = variance!(app, id, token);
+    let row = report
+        .rows
+        .iter()
+        .find(|r| r.org_ingredient_id == ing2)
+        .unwrap();
+    assert!(!row.is_flagged);
+    assert!(finalize!(app, id, token).status().is_success());
+}
