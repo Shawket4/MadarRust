@@ -155,15 +155,15 @@ impl MemberRow {
     /// asked for.
     pub fn view(self, mode: Mode, next_reward_cost: i32) -> MemberView {
         let balance = self.balance_in(mode);
-        let (rewards_ready, progress_to_next) = earned_and_progress(balance, next_reward_cost);
+        let card = madar_loyalty::card::card(balance, next_reward_cost);
         MemberView {
             balance,
             mode: mode.as_str().into(),
             next_reward_cost,
-            rewards_ready,
-            progress_to_next,
-            points_to_next_reward: (next_reward_cost - progress_to_next).max(0),
-            can_redeem: rewards_ready > 0,
+            rewards_ready: card.rewards_ready,
+            progress_to_next: card.progress_to_next,
+            points_to_next_reward: card.points_to_next_reward,
+            can_redeem: card.can_redeem,
             id: self.id,
             org_id: self.org_id,
             name: self.name,
@@ -190,22 +190,6 @@ pub fn reward_target(settings: &LoyaltySettings, rewards: &[RewardItem]) -> i32 
         return settings.default_reward_cost;
     }
     cheapest_cost(rewards).unwrap_or(settings.default_reward_cost)
-}
-
-/// Split a balance into rewards already earned and progress towards the next.
-///
-/// The card does not stop at full, which is the whole point: six stamps against
-/// a five-stamp reward is ONE earned and ONE towards the next. Showing that as a
-/// full card and nothing else tells a customer their sixth visit did not count.
-///
-/// A zero or negative cost earns nothing rather than dividing by it — the column
-/// is `CHECK (> 0)`, but a card telling every customer they had infinite rewards
-/// would be a poor way to discover otherwise.
-pub fn earned_and_progress(balance: i32, cost: i32) -> (i32, i32) {
-    if cost <= 0 || balance <= 0 {
-        return (0, balance.max(0));
-    }
-    (balance / cost, balance % cost)
 }
 
 /// The cheapest reward on offer, or `None` when the catalogue is empty.
@@ -937,31 +921,6 @@ pub async fn merge_memberships(
 #[cfg(test)]
 mod overflow_tests {
     use super::*;
-
-    #[test]
-    fn a_full_card_starts_the_next_one() {
-        // The report this exists for: six orders against a five-order reward.
-        // One earned, one towards the next — not "five and a bit wasted".
-        assert_eq!(earned_and_progress(6, 5), (1, 1));
-        // Exactly full: one earned, and a FRESH card rather than a stuck one.
-        assert_eq!(earned_and_progress(5, 5), (1, 0));
-        // Someone who has not claimed in a while is owed more than one.
-        assert_eq!(earned_and_progress(11, 5), (2, 1));
-        assert_eq!(earned_and_progress(20, 5), (4, 0));
-        // Below the first target, nothing is earned yet.
-        assert_eq!(earned_and_progress(3, 5), (0, 3));
-        assert_eq!(earned_and_progress(0, 5), (0, 0));
-    }
-
-    #[test]
-    fn a_broken_target_earns_nothing_rather_than_everything() {
-        // The column is CHECK (> 0), but dividing by it anyway would tell every
-        // customer they had infinite rewards, which is a poor way to find out.
-        assert_eq!(earned_and_progress(9, 0), (0, 9));
-        assert_eq!(earned_and_progress(9, -5), (0, 9));
-        // A negative balance is an adjustment gone past zero, not a reward.
-        assert_eq!(earned_and_progress(-3, 5), (0, 0));
-    }
 
     #[test]
     fn the_view_counts_earned_cards_not_just_a_full_one() {

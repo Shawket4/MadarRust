@@ -522,10 +522,14 @@ pub async fn adjust(
     )
     .await?;
     wallet::push_update(pool.get_ref(), member.id);
+    // The card page's and the passes' figures (madar-shared), not balance ≥ target.
+    let card = madar_loyalty::card::card(view.balance, target);
     Ok(HttpResponse::Ok().json(MemberView {
         next_reward_cost: target,
-        points_to_next_reward: (target - view.balance).max(0),
-        can_redeem: view.balance >= target,
+        rewards_ready: card.rewards_ready,
+        progress_to_next: card.progress_to_next,
+        points_to_next_reward: card.points_to_next_reward,
+        can_redeem: card.can_redeem,
         ..view
     }))
 }
