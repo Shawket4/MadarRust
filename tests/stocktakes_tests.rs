@@ -632,6 +632,74 @@ async fn test_partial_count_leaves_uncounted_untouched(pool: PgPool) {
     assert_eq!(n, 1);
 }
 
+/// B2: `counted_qty: null` un-counts a line (its figure, reason and counter
+/// cleared), and finalize then treats it as never counted. Omitting
+/// `counted_qty` is still refused, so a client never un-counts by accident.
+#[sqlx::test]
+async fn test_null_count_uncounts_line_and_finalize_skips_it(pool: PgPool) {
+    let app = init_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id).await;
+    grant_all(&pool).await;
+    let milk = seed_ingredient(&pool, org_id).await;
+    let sugar = seed_ing(&pool, org_id, "Sugar", "dry", Some(50)).await;
+    seed_stock(&pool, branch_id, milk, 100.0).await;
+    seed_stock(&pool, branch_id, sugar, 50.0).await;
+    let token = org_admin_token(user_id, org_id);
+    let id = start_stocktake!(app, branch_id, token).stocktake.id;
+
+    let resp = count!(app, id, token, [
+        {"org_ingredient_id": milk, "counted_qty": 95.0},
+        {"org_ingredient_id": sugar, "counted_qty": 10.0, "variance_reason": "spoilage"}
+    ]);
+    assert!(resp.status().is_success());
+
+    // Absent `counted_qty` is a malformed line, not an un-count.
+    let resp = count!(app, id, token, [{"org_ingredient_id": sugar}]);
+    assert_eq!(resp.status(), 400);
+
+    let resp = count!(app, id, token, [{"org_ingredient_id": sugar, "counted_qty": null}]);
+    assert_eq!(resp.status(), 200);
+    let full: StocktakeFull = test::read_body_json(resp).await;
+    let s = full
+        .items
+        .iter()
+        .find(|i| i.org_ingredient_id == sugar)
+        .unwrap();
+    assert_eq!(
+        (
+            s.counted_qty,
+            s.variance,
+            s.variance_reason.as_deref(),
+            s.counted_by
+        ),
+        (None, None, None, None)
+    );
+    let m = full
+        .items
+        .iter()
+        .find(|i| i.org_ingredient_id == milk)
+        .unwrap();
+    assert_eq!(m.counted_qty, Some(95.0), "other lines keep their figures");
+
+    // Un-counting a line that was never counted is a no-op.
+    let resp = count!(app, id, token, [{"org_ingredient_id": sugar, "counted_qty": null}]);
+    assert_eq!(resp.status(), 200);
+
+    assert!(finalize!(app, id, token).status().is_success());
+    assert_eq!(on_hand(&pool, branch_id, milk).await, Some(95.0));
+    assert_eq!(on_hand(&pool, branch_id, sugar).await, Some(50.0));
+    let n: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM inventory_movements WHERE source_type='stocktake' AND source_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 1, "only the counted line posts");
+}
+
 #[sqlx::test]
 async fn test_variance_report_overage_and_unknown_cost(pool: PgPool) {
     let app = init_app!(pool);

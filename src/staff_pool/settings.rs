@@ -41,10 +41,17 @@ pub struct StaffPoolSettings {
     /// The menu items that count. EMPTY = the pool is off.
     #[serde(default)]
     pub eligible_item_ids: Vec<Uuid>,
+    /// Read only. `true` when a branch has no override of its own and these
+    /// are the organisation's settings (or the off default) it follows;
+    /// `branch_id` still names the branch asked about. Ignored on PUT.
+    #[serde(default)]
+    #[schema(read_only)]
+    pub inherited: bool,
 }
 
 impl StaffPoolSettings {
-    /// What a scope runs on before anyone has saved anything: off.
+    /// What a scope runs on before anyone has saved anything: off. A branch
+    /// with nothing saved follows the organisation's (unsaved) default.
     pub fn defaults(org_id: Uuid, branch_id: Option<Uuid>) -> Self {
         Self {
             org_id,
@@ -52,6 +59,7 @@ impl StaffPoolSettings {
             enabled: false,
             daily_allowance: 0,
             eligible_item_ids: Vec::new(),
+            inherited: branch_id.is_some(),
         }
     }
 
@@ -84,6 +92,7 @@ impl From<Row> for StaffPoolSettings {
             enabled: r.enabled,
             daily_allowance: r.daily_allowance,
             eligible_item_ids: r.eligible_item_ids,
+            inherited: false,
         }
     }
 }
@@ -126,6 +135,7 @@ pub async fn load_effective(
         // which scope answered.
         return Ok(StaffPoolSettings {
             branch_id: Some(branch_id),
+            inherited: true,
             ..s
         });
     }

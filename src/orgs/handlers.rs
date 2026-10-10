@@ -171,6 +171,47 @@ pub struct UpdateOrgRequest {
     pub max_warehouses: Option<Option<i32>>,
 }
 
+impl UpdateOrgRequest {
+    /// Only the shop's own brand fields: its links, and clearing its logo.
+    /// Those are the org's own to save (as the links page and the logo upload
+    /// are); everything else is super-admin only. Destructured in full so a new
+    /// field stays super-admin only until someone decides otherwise.
+    fn brand_only(&self) -> bool {
+        let Self {
+            name,
+            slug,
+            currency_code,
+            tax_rate,
+            tax_inclusive,
+            service_charge_rate,
+            service_charge_taxable,
+            require_table_for_orders,
+            receipt_footer,
+            is_active,
+            modules,
+            timezone,
+            logo_url: _,
+            custom_branding,
+            social_links: _,
+            max_warehouses,
+        } = self;
+        name.is_none()
+            && slug.is_none()
+            && currency_code.is_none()
+            && tax_rate.is_none()
+            && tax_inclusive.is_none()
+            && service_charge_rate.is_none()
+            && service_charge_taxable.is_none()
+            && require_table_for_orders.is_none()
+            && receipt_footer.is_none()
+            && is_active.is_none()
+            && modules.is_none()
+            && timezone.is_none()
+            && custom_branding.is_none()
+            && max_warehouses.is_none()
+    }
+}
+
 // ── OpenAPI-only multipart schemas ────────────────────────────
 //
 // These structs exist solely to describe the shape of multipart/form-data
@@ -705,9 +746,12 @@ pub async fn offline_auth_bundle(
     }))
 }
 
-// ── PATCH /orgs/:id  (super_admin only) ──────────────────────
+// ── PATCH /orgs/:id  (super_admin only, but an org's own brand fields) ──
 // JSON only — logo swap uses PUT /orgs/{id}/logo.
 
+/// Super admin only, except a body carrying nothing but `social_links` and/or
+/// `logo_url: null`: the org's own people with `org.settings.edit` may save
+/// that for their own org.
 #[utoipa::path(
     patch,
     path = "/orgs/{id}",
@@ -729,8 +773,13 @@ pub async fn update_org(
     body: web::Json<UpdateOrgRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
+    // `orgs:update` is the org settings capability (`org.settings.edit`).
     check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
-    require_super_admin(&claims)?;
+    if body.brand_only() {
+        require_same_org(&claims, Some(*org_id))?;
+    } else {
+        require_super_admin(&claims)?;
+    }
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
 

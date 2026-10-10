@@ -888,3 +888,29 @@ async fn a_slot_s_arabic_name_round_trips_and_a_client_without_one_still_saves(p
         assert_eq!(sl["name_translations"], json!({}), "{sl}");
     }
 }
+
+/// B5: the combo settings page opens for `menu.combos.edit` alone, so its read
+/// accepts that capability as well as `org.settings.read`.
+#[sqlx::test]
+async fn the_combo_settings_read_accepts_the_combos_edit_capability(pool: PgPool) {
+    let s = shop(&pool).await;
+    let app = app!(pool);
+    let tok = s.teller_token();
+    let (st, _) = call(&app, "GET", "/settings/combos", &tok, None).await;
+    assert_eq!(st, 403, "a teller holds neither capability");
+
+    // Allow the teller menu.combos.edit (id 250) and nothing else.
+    madar_rust::authz::sync_catalogue(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO user_overrides (org_id, user_id, capability_id, effect, reason) \
+         VALUES ($1, $2, 250, 'allow', 'test')",
+    )
+    .bind(s.org)
+    .bind(s.teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, g) = call(&app, "GET", "/settings/combos", &tok, None).await;
+    assert_eq!(st, 200, "{g}");
+    assert_eq!(g["channels"]["pos"], true);
+}

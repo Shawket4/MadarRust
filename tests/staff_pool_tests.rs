@@ -352,6 +352,51 @@ async fn a_branch_override_replaces_the_org_allowance_wholesale(pool: PgPool) {
     assert_eq!(body["enabled"], true);
 }
 
+/// B4: a branch's settings say whether they are its own override or follow the
+/// organisation (`inherited`); `branch_id` keeps naming the branch that asked.
+#[sqlx::test]
+async fn branch_settings_say_whether_they_follow_the_organisation(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_item(&pool, org, "Latte").await;
+    let admin = seed_user(&pool, org, "org_admin").await;
+    let bearer = token(admin, org, UserRole::OrgAdmin);
+    let get = |q: String| {
+        test::TestRequest::get()
+            .uri(&format!("/staff-pool/settings{q}"))
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .to_request()
+    };
+    let read = |v: &Value| {
+        (
+            v["branch_id"].as_str().map(str::to_owned),
+            v["inherited"].as_bool(),
+            v["daily_allowance"].as_i64(),
+        )
+    };
+    let b = Some(branch.to_string());
+
+    // Nothing saved anywhere: the branch follows the org (off).
+    let body: Value =
+        test::call_and_read_body_json(&app, get(format!("?branch_id={branch}"))).await;
+    assert_eq!(read(&body), (b.clone(), Some(true), Some(0)));
+
+    set_pool(&pool, org, None, 5, &[item]).await;
+    let body: Value =
+        test::call_and_read_body_json(&app, get(format!("?branch_id={branch}"))).await;
+    assert_eq!(read(&body), (b.clone(), Some(true), Some(5)));
+
+    // The org scope itself is never inherited.
+    let body: Value = test::call_and_read_body_json(&app, get(String::new())).await;
+    assert_eq!(read(&body), (None, Some(false), Some(5)));
+
+    set_pool(&pool, org, Some(branch), 2, &[item]).await;
+    let body: Value =
+        test::call_and_read_body_json(&app, get(format!("?branch_id={branch}"))).await;
+    assert_eq!(read(&body), (b, Some(false), Some(2)));
+}
+
 // ── Replay ──────────────────────────────────────────────────────────────────
 
 fn replay_envelope(teller: Uuid, request: Value) -> Value {

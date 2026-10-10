@@ -875,7 +875,8 @@ pub async fn receive_transfer(
             }
             Err(ReceiveRefusal::OverNeedsNote) => {
                 return Err(AppError::Coded {
-                    status: 400,
+                    // A conflict with what was sent, as the inventory doc states.
+                    status: 409,
                     code: "OVER_RECEIVE_NEEDS_NOTE",
                     reason: format!(
                         "More {} arrived than was sent. Add a note saying why.",
