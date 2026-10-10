@@ -97,11 +97,14 @@ def canonical(raw: str | None) -> str | None:
 
 
 def check_phone(raw) -> tuple[str | None, str | None]:
-    """(key, None) for an Egyptian mobile, else (None, why it was refused).
+    """(key, None) for an Egyptian mobile or a number written with another
+    country's code, else (None, why it was refused).
 
-    Stricter than `canonical`: the number must SAY it is Egyptian (+20, 0020,
-    20…, or the local 0…), then be a mobile — 20 + 10 digits starting 10, 11,
-    12 or 15. Nothing is guessed: a bare number or another country's is refused.
+    Stricter than `canonical` for Egypt: the number must SAY it is Egyptian
+    (+20, 0020, 20…, or the local 0…), then be a mobile — 20 + 10 digits
+    starting 10, 11, 12 or 15. A `+` number of another country is taken as
+    `canonical` reads it, as any Madar customer's would be. Nothing is guessed:
+    a bare number is refused.
     """
     if raw is None or not str(raw).strip():
         return None, "no phone"
@@ -111,7 +114,9 @@ def check_phone(raw) -> tuple[str | None, str | None]:
     d = digits(s)
     if s.startswith("+"):
         if not d.startswith("20"):
-            return None, f"not an Egyptian number (+{d[:3]}...)"
+            if canonical(str(raw)) == d:
+                return d, None
+            return None, f"not a valid international number (+{d[:3]}...)"
         n = d
     elif d.startswith("0020"):
         n = d[2:]

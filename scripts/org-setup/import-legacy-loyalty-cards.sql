@@ -113,7 +113,7 @@ BEGIN
     -- The rule the database itself applies must agree with the script's, row by row.
     SELECT count(*) INTO bad FROM import_rows
      WHERE phone_canonical(phone_raw) IS DISTINCT FROM phone_key
-        OR phone_key !~ '^20(10|11|12|15)[0-9]{8}$';
+        OR (phone_key LIKE '20%' AND phone_key !~ '^20(10|11|12|15)[0-9]{8}$');
     IF bad > 0 THEN
         RAISE EXCEPTION 'legacy import: % rows carry a phone key the database does not agree with', bad;
     END IF;

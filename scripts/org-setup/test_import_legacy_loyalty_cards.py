@@ -78,11 +78,16 @@ class CheckPhoneTests(unittest.TestCase):
         self.assertIsNone(key)
         self.assertIn("too long", why)
 
-    def test_other_countries_are_refused(self):
+    def test_other_countries_are_keyed_by_madars_rule(self):
         for raw in ("+17735550100", "+21620000000", "+966500000000"):
             key, why = imp.check_phone(raw)
-            self.assertIsNone(key, raw)
-            self.assertIn("not an Egyptian number", why)
+            self.assertEqual(key, raw[1:], raw)
+            self.assertIsNone(why)
+
+    def test_a_too_short_international_number_is_refused(self):
+        key, why = imp.check_phone("+1773555")
+        self.assertIsNone(key)
+        self.assertIn("not a valid international number", why)
 
     def test_a_landline_is_not_a_mobile(self):
         key, why = imp.check_phone("+20223456789")
