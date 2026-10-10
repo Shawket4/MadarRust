@@ -617,8 +617,11 @@ pub async fn delete_table(
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
 
     // A table backing a live open ticket can't be retired — settle/move it first.
+    // `open` is a ticket's only live status: `ready` left the enum on
+    // 2026-09-12 (the kitchen state moved to kitchen tickets), and naming it
+    // here made every delete fail with an invalid enum value.
     let has_open: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM open_tickets WHERE table_id = $1 AND status IN ('open','ready'))",
+        "SELECT EXISTS(SELECT 1 FROM open_tickets WHERE table_id = $1 AND status = 'open')",
     )
     .bind(*id)
     .fetch_one(pool.get_ref())
