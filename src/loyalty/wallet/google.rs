@@ -501,6 +501,9 @@ pub fn hero_image(org_id: uuid::Uuid, brand: &OrgBrand) -> Option<serde_json::Va
     Some(json!({ "sourceUri": { "uri": uri } }))
 }
 
+/// Past this many, the joins cost more width than they earn.
+const CONNECTED_UP_TO: i32 = 6;
+
 /// The stepper, in text, at whatever density the field can hold.
 ///
 /// A pass field is one line that iOS SHRINKS to fit its width, so the only way
@@ -509,7 +512,7 @@ pub fn hero_image(org_id: uuid::Uuid, brand: &OrgBrand) -> Option<serde_json::Va
 ///
 ///   * up to [`CONNECTED_UP_TO`] — `●─●─●─○─○`, joined, so it reads as a
 ///     journey and not a handful of dots;
-///   * up to [`MAX_STEPS`] — `●●●○○○○○○`, unjoined. The connectors are what
+///   * up to [`madar_loyalty::card::MAX_STEPS`] — `●●●○○○○○○`, unjoined. The connectors are what
 ///     make it long (they nearly double the character count), and they are the
 ///     part worth losing first: the order still reads left to right without
 ///     them.
@@ -517,16 +520,9 @@ pub fn hero_image(org_id: uuid::Uuid, brand: &OrgBrand) -> Option<serde_json::Va
 /// Past that it is not drawn at all and [`progress_line`] shows the figures
 /// alone. Twelve dots is the point where counting them stops being quicker
 /// than reading "9 / 12", and a hundred is not a stepper at any density.
-const MAX_STEPS: i32 = 12;
-
-/// Past this many, the joins cost more width than they earn.
-const CONNECTED_UP_TO: i32 = 6;
-
+/// The cap and the fill are madar-shared's `card::stamps`, the web card's too.
 pub fn stepper(balance: i32, threshold: i32) -> Option<String> {
-    if threshold <= 0 || threshold > MAX_STEPS {
-        return None;
-    }
-    let filled = balance.clamp(0, threshold);
+    let filled = madar_loyalty::card::stamps(balance, threshold)?;
     let step = |i: i32| if i < filled { "●" } else { "○" };
     let mut out = String::from(step(0));
     for i in 1..threshold {
@@ -552,7 +548,7 @@ pub fn stepper(balance: i32, threshold: i32) -> Option<String> {
 /// always done (`model::earned_and_progress`), and the earned ones get a row of
 /// their own.
 pub fn progress_line(balance: i32, threshold: i32) -> String {
-    let (_, progress) = crate::loyalty::model::earned_and_progress(balance, threshold);
+    let progress = madar_loyalty::card::card(balance, threshold).progress_to_next;
     match stepper(progress, threshold) {
         // The steps ALONE. Printing "3 / 5" beside three filled circles and two
         // empty ones says the same thing twice, in a field whose width is the
@@ -570,7 +566,7 @@ pub fn progress_line(balance: i32, threshold: i32) -> String {
 /// `None` when there are none, which is the usual case and must render as no
 /// row at all rather than as an empty one.
 pub fn earned_line(balance: i32, threshold: i32) -> Option<String> {
-    let (earned, _) = crate::loyalty::model::earned_and_progress(balance, threshold);
+    let earned = madar_loyalty::card::card(balance, threshold).rewards_ready;
     if earned <= 0 {
         return None;
     }
@@ -589,7 +585,7 @@ pub fn earned_line(balance: i32, threshold: i32) -> Option<String> {
 
 /// What to call the earned row.
 pub fn earned_label(balance: i32, threshold: i32) -> &'static str {
-    let (earned, _) = crate::loyalty::model::earned_and_progress(balance, threshold);
+    let earned = madar_loyalty::card::card(balance, threshold).rewards_ready;
     if earned > 1 {
         "Rewards ready"
     } else {
@@ -1482,6 +1478,7 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use madar_loyalty::card::MAX_STEPS;
 
     fn a_branch(lat: f64, lng: f64, name: &str) -> super::super::PassLocation {
         super::super::PassLocation {

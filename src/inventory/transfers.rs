@@ -485,10 +485,6 @@ async fn move_lines(conn: &mut PgConnection, id: Uuid) -> Result<Vec<MoveLine>, 
     .await?)
 }
 
-fn whole_piastres(c: Decimal) -> i64 {
-    c.round().to_i64().unwrap_or(0)
-}
-
 /// Stock lands at `branch` at a known cost: blend it into the branch's WAC
 /// first (WAC reads the prior on-hand), then post the movement.
 #[allow(clippy::too_many_arguments)]
@@ -1258,7 +1254,7 @@ pub async fn transfer_differences(
                 unit_cost: r.unit_cost.and_then(|c| c.to_f64()),
                 value_difference: r
                     .unit_cost
-                    .map(|c| whole_piastres(quantity_dec(difference) * c)),
+                    .map(|c| crate::costing::service::round_piastres(quantity_dec(difference) * c)),
                 note: r.note,
             }
         })

@@ -4903,8 +4903,11 @@ pub async fn export_orders(
             // so the frontend can distinguish "unknown" from a genuine 0 —
             // mirrors the catalog's Option<Decimal> contract.
             .filter_map(|(id, cost)| {
-                // cost_per_unit is stored in piastres; just round to integer.
-                cost.map(|c| (id, c.round().to_i32().unwrap_or(0)))
+                // cost_per_unit is stored in piastres; whole piastres, half away from zero.
+                cost.map(|c| {
+                    let whole = crate::costing::service::round_piastres(c);
+                    (id, i32::try_from(whole).unwrap_or(0))
+                })
             })
             .collect()
     };

@@ -1171,6 +1171,27 @@ async fn a_teller_cannot_hand_out_points_by_hand(pool: PgPool) {
         .to_request();
     let body: Value = test::call_and_read_body_json(&app, req).await;
     assert_eq!(body["points_balance"], 20);
+
+    // The answer shows the card's figures (madar-shared `card::card`), as the
+    // card page and the passes do: 120 against a 100 reward is one earned and
+    // 20 towards the next, so 80 still to go, not 0.
+    let req = test::TestRequest::post()
+        .uri("/loyalty/adjust")
+        .insert_header((
+            "Authorization",
+            format!("Bearer {}", token(admin, org, UserRole::OrgAdmin, None)),
+        ))
+        .set_json(json!({
+            "branch_id": branch, "customer_id": member, "points": 100, "note": "goodwill"
+        }))
+        .to_request();
+    let body: Value = test::call_and_read_body_json(&app, req).await;
+    assert_eq!(body["balance"], 120);
+    assert_eq!(body["next_reward_cost"], 100);
+    assert_eq!(body["rewards_ready"], 1);
+    assert_eq!(body["progress_to_next"], 20);
+    assert_eq!(body["points_to_next_reward"], 80);
+    assert_eq!(body["can_redeem"], true);
 }
 
 // ── Earning at checkout ──────────────────────────────────────────────────────
