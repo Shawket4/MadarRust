@@ -907,6 +907,7 @@ async fn settings_of(conn: &mut PgConnection, org: Uuid) -> Result<ComboSettings
     })
 }
 
+/// Needs `org.settings.read` or `menu.combos.edit`.
 #[utoipa::path(
     get,
     path = "/settings/combos",
@@ -916,7 +917,11 @@ async fn settings_of(conn: &mut PgConnection, org: Uuid) -> Result<ComboSettings
 )]
 pub async fn get_settings(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
-    require(pool.get_ref(), &claims, Cap::OrgSettingsRead, None).await?;
+    // Whoever may change combos may read the settings they are judged by.
+    let eff = crate::authz::require::effective_for_claims(pool.get_ref(), &claims, None).await?;
+    if !(eff.can(Cap::OrgSettingsRead) || eff.can(Cap::MenuCombosEdit)) {
+        return Err(crate::authz::require::denied(Cap::OrgSettingsRead));
+    }
     let org = claims_org(&claims)?;
     let mut conn = pool.acquire().await?;
     Ok(HttpResponse::Ok().json(settings_of(&mut conn, org).await?))
