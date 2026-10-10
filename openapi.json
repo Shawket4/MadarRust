@@ -86151,6 +86151,7 @@
           "ingredient_id",
           "ingredient_name",
           "quantity",
+          "usable_quantity",
           "unit",
           "sort"
         ],
@@ -86172,6 +86173,10 @@
           },
           "unit": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "string",
+            "description": "The usable amount before yield loss, like `RecipeLineOut::usable_quantity`:\nwhat an editor shows and sends back (a line sent back unchanged keeps\nits stored `quantity`)."
           }
         }
       },
@@ -91721,6 +91726,7 @@
           "ingredient_id",
           "ingredient_name",
           "quantity",
+          "usable_quantity",
           "unit",
           "sort"
         ],
@@ -91753,6 +91759,10 @@
           },
           "unit": {
             "type": "string"
+          },
+          "usable_quantity": {
+            "type": "string",
+            "description": "The usable amount before yield loss, like `RecipeLineOut::usable_quantity`:\nwhat an editor shows and sends back (a line sent back unchanged keeps\nits stored `quantity`)."
           }
         }
       },
