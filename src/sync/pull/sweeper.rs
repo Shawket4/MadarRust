@@ -34,7 +34,7 @@ pub fn spawn(pool: PgPool) {
         tracing::info!("sync changefeed sweep disabled (SYNC_SWEEP_ENABLED)");
         return;
     }
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let mut tick = tokio::time::interval(EVERY);
         loop {
             tick.tick().await;

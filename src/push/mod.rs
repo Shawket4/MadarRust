@@ -519,7 +519,7 @@ pub fn send(
         key.to_string(),
         args.clone(),
     );
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let (user_id, employee_id) = who.cols();
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT token, locale FROM push_devices \

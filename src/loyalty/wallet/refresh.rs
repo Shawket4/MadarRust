@@ -57,7 +57,7 @@ pub fn spawn(pool: PgPool) {
         .max(30);
 
     tracing::info!("Loyalty pass refresh started ({secs}s tick)");
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(secs));
         loop {
             ticker.tick().await;

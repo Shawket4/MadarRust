@@ -74,7 +74,7 @@ pub fn send_message(pool: PgPool, phone: String, message: String) {
         return;
     };
     let auth = std::env::var("WHATSAPP_AUTH_HEADER").ok();
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         if gateway::is_paused(&pool).await {
             tracing::info!(phone = %phone, "WhatsApp sending paused — skipping send");
             return;

@@ -941,7 +941,7 @@ pub fn after_merge(pool: &sqlx::PgPool, survivor: Uuid, loser: crate::loyalty::m
     crate::loyalty::wallet::push_update(pool, survivor);
     crate::loyalty::wallet::apple::void_pass(pool, &loser);
     {
-        tokio::spawn(async move {
+        crate::db::spawn(async move {
             // Google: the loser's object stops rendering. Its barcode still
             // scans to the survivor through `loyalty_token_aliases`.
             if let Err(e) = crate::loyalty::wallet::google::expire_object(&loser).await {
@@ -1387,7 +1387,7 @@ pub async fn erase_customer(
     for before in cards {
         // Apple: the devices are told to come back, and get the voided copy.
         crate::loyalty::wallet::apple::void_pass(pool.get_ref(), &before);
-        tokio::spawn(async move {
+        crate::db::spawn(async move {
             if let Err(e) = crate::loyalty::wallet::google::expire_object(&before).await {
                 use crate::observability::report::{Failure, report};
                 report(Failure::new("loyalty", "expire_google_object"), &e);

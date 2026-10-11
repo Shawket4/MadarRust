@@ -255,6 +255,167 @@ pub async fn tenant_pool(base: &PgPool, org_id: Uuid) -> PgPool {
         .await
 }
 
+// ── The shared tenant pool ───────────────────────────────────────────────
+//
+// One pool per org kept a warm connection for every org with a till checking
+// in, and grew it to 2–3 under a sale and a pull at once. Postgres pays ~7.5 MB
+// per connection, so memory grew with the number of ACTIVE SHOPS, not with
+// traffic: a 2 vCPU / 8 GB box was OOM-killed at ~320 one-branch orgs while its
+// CPU sat at half its quota (load test 2026-10-11). An OOM kill restarts every
+// backend, so it took down every shop, not the one that tipped it over.
+//
+// The shared pool holds `madar_app` connections for ALL orgs and stamps each
+// one with the caller's org every time it is handed out (`before_acquire` for
+// an idle connection, `after_connect` for a new one — sqlx runs both inline in
+// the future that asked, so they see the request's task-local). A connection
+// handed out with no org in scope is stamped '' and every RLS policy then fails
+// its `''::uuid` cast: no org is an error, never another org's rows.
+//
+// The org lives in a task-local CELL that `tenant_scope` (outermost middleware)
+// installs empty for every request and the `Db` extractor fills from the
+// verified claims. Work spawned from a request must go through [`spawn`], which
+// carries the cell over; a bare `tokio::spawn` would run unscoped and fail
+// closed. Outside a scope (tests that build their own `App`, jobs, binaries)
+// everything falls back to the per-org pools above, unchanged.
+//
+// `MADAR_SHARED_TENANT_POOL=0` switches the shared pool off (rollback switch).
+
+tokio::task_local! {
+    static TENANT: std::cell::Cell<Option<Uuid>>;
+}
+
+fn shared_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        !matches!(
+            std::env::var("MADAR_SHARED_TENANT_POOL").ok().as_deref(),
+            Some("0" | "false" | "off")
+        )
+    })
+}
+
+/// Connections in the shared pool (per database: primary and replica each).
+fn shared_max_connections() -> u32 {
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("DB_TENANT_SHARED_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(40)
+    })
+}
+
+/// The org stamped on connections handed out in this task, if any.
+pub fn current_org() -> Option<Uuid> {
+    TENANT.try_with(|c| c.get()).ok().flatten()
+}
+
+/// Middleware: give every request an empty tenant cell. Must enclose the
+/// handlers (it is the outermost `wrap` in `main`).
+pub async fn tenant_scope(
+    req: actix_web::dev::ServiceRequest,
+    next: actix_web::middleware::Next<impl actix_web::body::MessageBody>,
+) -> Result<actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>, actix_web::Error> {
+    TENANT
+        .scope(std::cell::Cell::new(None), next.call(req))
+        .await
+}
+
+/// Run `fut` in this task's tenant scope, if there is one.
+pub async fn scoped<F: Future>(org: Option<Uuid>, fut: F) -> F::Output {
+    TENANT.scope(std::cell::Cell::new(org), fut).await
+}
+
+/// `tokio::spawn`, carrying the caller's tenant scope into the new task. Use it
+/// for anything spawned from a request that may touch a [`Db`].
+pub fn spawn<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match TENANT.try_with(|c| c.get()) {
+        Ok(org) => tokio::spawn(TENANT.scope(std::cell::Cell::new(org), fut)),
+        Err(_) => tokio::spawn(fut),
+    }
+}
+
+fn shared_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, PgPool>> {
+    static R: OnceLock<std::sync::Mutex<std::collections::HashMap<String, PgPool>>> =
+        OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+async fn stamp(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    let org = current_org().map(|o| o.to_string()).unwrap_or_default();
+    sqlx::query("SELECT set_config('app.org_id', $1, false)")
+        .bind(org)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// The shared `madar_app` pool on `base`'s database.
+fn shared_pool(base: &PgPool) -> PgPool {
+    let opts = base.connect_options().as_ref().clone();
+    let key = db_key(&opts);
+    let mut reg = shared_registry().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = reg.get(&key) {
+        return p.clone();
+    }
+    let app_password = std::env::var("MADAR_APP_DB_PASSWORD")
+        .ok()
+        .filter(|p| !p.trim().is_empty());
+    let login_as_app = app_password.is_some();
+    let opts = match &app_password {
+        Some(pw) => opts.username(APP_ROLE).password(pw),
+        None => opts,
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(shared_max_connections())
+        .min_connections(tenant_min_connections())
+        .idle_timeout(tenant_idle_timeout())
+        .max_lifetime(Duration::from_secs(1800))
+        .after_connect(move |conn, _meta| {
+            Box::pin(async move {
+                if !login_as_app {
+                    sqlx::query("SET ROLE madar_app")
+                        .execute(&mut *conn)
+                        .await?;
+                }
+                stamp(conn).await
+            })
+        })
+        .before_acquire(|conn, _meta| {
+            Box::pin(async move {
+                stamp(conn).await?;
+                Ok(true)
+            })
+        })
+        .connect_lazy_with(opts);
+    reg.insert(key, pool.clone());
+    pool
+}
+
+/// The pool a request for `org` should use: the shared pool when this task is
+/// in a tenant scope that is empty or already `org` (claiming it), else the
+/// org's own pool. A second org inside one request never re-stamps the first.
+async fn pool_for(base: &PgPool, org: Uuid) -> PgPool {
+    if shared_enabled() {
+        let claimed = TENANT.try_with(|c| match c.get() {
+            None => {
+                c.set(Some(org));
+                true
+            }
+            Some(o) => o == org,
+        });
+        if claimed == Ok(true) {
+            return shared_pool(base);
+        }
+    }
+    tenant_pool(base, org).await
+}
+
 /// Tenant-scoped database handle. Extract this instead of
 /// `web::Data<PgPool>` in every JWT-protected handler.
 ///
@@ -275,7 +436,7 @@ impl Db {
 
     /// Build a tenant-scoped handle directly (tests, non-HTTP call sites).
     pub async fn for_org(base: &PgPool, org_id: Uuid) -> Db {
-        Db(tenant_pool(base, org_id).await)
+        Db(pool_for(base, org_id).await)
     }
 
     /// The deliberate RLS bypass path (super admin / cross-tenant jobs).
@@ -320,7 +481,7 @@ impl FromRequest for Db {
                     .get::<crate::staff::principal::StaffPrincipal>()
                     .map(|p| p.org_id);
                 return match staff {
-                    Some(org) => Ok(Db(tenant_pool(base.get_ref(), org).await)),
+                    Some(org) => Ok(Db(pool_for(base.get_ref(), org).await)),
                     None => Err(AppError::Unauthorized("Missing claims".into())),
                 };
             };
@@ -328,7 +489,7 @@ impl FromRequest for Db {
             match claims.org_id() {
                 // Tenant identity comes from the *verified token*, never from
                 // any user-supplied value (path, query, header, body).
-                Some(org) => Ok(Db(tenant_pool(base.get_ref(), org).await)),
+                Some(org) => Ok(Db(pool_for(base.get_ref(), org).await)),
                 // Super admins carry no org: cross-tenant by design.
                 None if claims.role == UserRole::SuperAdmin => Ok(Db::bypass(base.get_ref())),
                 None => Err(AppError::Forbidden(

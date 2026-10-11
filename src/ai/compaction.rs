@@ -182,7 +182,7 @@ pub async fn compact(
 /// summary being rewritten. Failures are reported and the conversation carries
 /// on with a longer verbatim window until the next attempt succeeds.
 pub fn spawn(db: Db, provider: Arc<dyn LlmProvider>, conversation_id: Uuid) {
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         // Its own hub with a cleared scope: this outlives the request that
         // started it and would otherwise land on whichever worker thread picks
         // it up, arriving attributed to an unrelated merchant's request.
