@@ -43,7 +43,8 @@ if [ $# -gt 0 ]; then
   for t in "$@"; do targets+=("--test $t"); done
 else
   # `--lib` first: the inline unit tests still live beside the code they cover.
-  targets=("--lib")
+  # `--bins`: the operator binaries' own tests (src/bin).
+  targets=("--lib" "--bins")
   for f in tests/*.rs; do
     m="$(basename "$f" .rs)"
     # client_seen's binary is killed on exec by XProtect (its fixtures embed
