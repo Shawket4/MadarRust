@@ -63,19 +63,25 @@ problems=()
 
 for t in "${targets[@]}"; do
   printf '%-34s ' "$t"
-  out="$(cargo nextest run $t 2>&1)"
+  # No colour: CI sets CARGO_TERM_COLOR=always, and an escape code in front
+  # of "Summary" hid every suite's result from the grep below.
+  out="$(cargo nextest run --color never $t 2>&1)"
   line="$(printf '%s' "$out" | grep -E '^ +Summary' | tail -1)"
   if [ -z "$line" ]; then
     echo "NO SUMMARY (see below)"
     problems+=("$t: produced no summary")
-    printf '%s\n' "$out" | tail -5
+    printf '%s\n' "$out" | tail -40
   else
     echo "$line"
     p="$(printf '%s' "$line" | sed -nE 's/.* ([0-9]+) tests run: ([0-9]+) passed.*/\2/p')"
     f="$(printf '%s' "$line" | sed -nE 's/.*passed.*, ([0-9]+) failed.*/\1/p')"
     passed=$((passed + ${p:-0}))
     failed=$((failed + ${f:-0}))
-    [ -n "${f:-}" ] && problems+=("$t: $f failed")
+    if [ -n "${f:-}" ]; then
+      problems+=("$t: $f failed")
+      # The failing tests' own output (nextest prints it after the summary).
+      printf '%s\n' "$out" | sed -n '/Summary/,$p'
+    fi
   fi
   sweep
 done
