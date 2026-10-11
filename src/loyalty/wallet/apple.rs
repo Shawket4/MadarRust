@@ -1108,7 +1108,7 @@ pub fn void_pass(pool: &PgPool, member: &MemberRow) {
     }
     let pool = pool.clone();
     let member = member.clone();
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         if let Err(e) = notify_devices(&pool, &member).await {
             use crate::observability::report::{Failure, report};
             report(Failure::new("loyalty", "void_apple_pass"), &e);
@@ -1215,7 +1215,7 @@ pub fn prebuild(pool: &PgPool, member: &MemberRow) {
     }
     let pool = pool.clone();
     let member = member.clone();
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         if super::store::load(&pool, &member).await.is_some() {
             return;
         }

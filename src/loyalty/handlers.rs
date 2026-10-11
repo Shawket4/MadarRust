@@ -695,7 +695,7 @@ pub async fn delete_member(
     // reported, not surfaced: the membership has ended either way.
     wallet::store::invalidate(pool.get_ref(), before.id).await;
     wallet::apple::void_pass(pool.get_ref(), &before);
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         if let Err(e) = wallet::google::expire_object(&before).await {
             use crate::observability::report::{Failure, report};
             report(Failure::new("loyalty", "expire_google_object"), &e);

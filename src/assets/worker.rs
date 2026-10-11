@@ -27,7 +27,7 @@ const STALE_RUNNING: Duration = Duration::from_secs(15 * 60);
 pub fn spawn(pool: PgPool) {
     super::require_secret();
     let store = AssetStore::from_env();
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         loop {
             match run_one(&pool, &store).await {
                 Ok(Some(_)) => continue,

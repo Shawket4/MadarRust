@@ -24,7 +24,7 @@ const KEEP: i64 = 2;
 
 pub fn spawn(pool: PgPool) {
     let store = AssetStore::from_env();
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let mut tick = tokio::time::interval(TICK);
         loop {
             tick.tick().await;

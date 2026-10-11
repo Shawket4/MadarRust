@@ -207,7 +207,7 @@ async fn recipients(pool: &PgPool, org_id: Uuid, branch: Uuid) -> Vec<Device> {
 pub fn new_online_order(pool: &PgPool, hub: &BranchEventHub, order: &DeliveryOrder) {
     let Some(t) = super::transport() else { return };
     let (pool, hub, order) = (pool.clone(), hub.clone(), order.clone());
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let branch = order.branch_id;
         let watching = |d: &Device| d.device_id.is_some_and(|id| hub.is_connected(branch, id));
         let mut devices = recipients(&pool, order.org_id, branch).await;

@@ -45,7 +45,7 @@ pub fn spawn(pool: PgPool) {
         .unwrap_or(DEFAULT_TICK_SECS)
         .max(60);
     tracing::info!("Customer re-point sweep started ({secs}s tick)");
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(secs));
         loop {
             ticker.tick().await;

@@ -41,6 +41,14 @@ services:
       - /var/www/madar-loyalty:/app/shells/loyalty:ro
       - /var/www/madar-order-shop:/app/shells/order:ro
       - /var/www/madar-reservations-shop:/app/shells/book:ro
+    # Every till, browser and Postgres connection is a file descriptor. The
+    # container default soft limit can be 1024, and the backend stopped
+    # accepting connections ("Too many open files") at ~1000 sockets in the
+    # 2026-10-11 load test.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     env_file: .env
     environment:
       MADAR_SHELL_DIR: /app/shells
