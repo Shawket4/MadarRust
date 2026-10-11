@@ -679,6 +679,15 @@ pub async fn replay(
         }
         _ => None,
     };
+    // An ITEM DELETED (or switched off) or a TENDER switched off while the till
+    // was offline: the same story as the dead preset above. The order path
+    // prices and records the sale as rung on a replay; the owner is told here.
+    let retired = match &op {
+        ReplayOp::CreateOrder { request, .. } => {
+            retired_catalogue_of(pool.get_ref(), token_org, request).await?
+        }
+        _ => Vec::new(),
+    };
     // THE SAME limit questions the live routes now ask (`authz::acts`), asked
     // here of the queued op — a void judged at the moment it was rung (the op's
     // own `occurred_at`, never the drain time), a refund at its amount.
@@ -901,6 +910,10 @@ pub async fn replay(
     // rides in the capability cell, which is free text, so the owner's review
     // queue reads "orders.discount.preset:inactive" and knows at a glance that
     // this is a dead rule, not a revoked person.
+    // "orders.create:menu_item_deleted", "orders.create:payment_method_inactive"…
+    for state in retired {
+        flags.push(format!("{}:{state}", crate::authz::Cap::OrdersCreate.key()));
+    }
     if let Some(state) = dead_preset {
         flags.push(format!(
             "{}:{state}",
@@ -1206,6 +1219,52 @@ async fn dead_preset_of(
         Some(false) => Some("inactive"),
         None => Some("missing"),
     })
+}
+
+/// What a queued sale names that has been deleted or switched off since: one
+/// entry per kind (`menu_item_deleted`, `menu_item_inactive`,
+/// `payment_method_inactive`), for the owner's review queue. Empty when the
+/// catalogue the sale was rung against is still live.
+async fn retired_catalogue_of(
+    pool: &PgPool,
+    org_id: Uuid,
+    request: &crate::orders::handlers::CreateOrderRequest,
+) -> Result<Vec<&'static str>, AppError> {
+    let items: Vec<Uuid> = request
+        .items
+        .iter()
+        .filter_map(|i| i.menu_item_id)
+        .collect();
+    let (deleted, inactive): (bool, bool) = sqlx::query_as(
+        "SELECT COALESCE(bool_or(deleted_at IS NOT NULL), false),
+                COALESCE(bool_or(deleted_at IS NULL AND NOT is_active), false)
+           FROM menu_items WHERE org_id = $1 AND id = ANY($2)",
+    )
+    .bind(org_id)
+    .bind(&items)
+    .fetch_one(pool)
+    .await?;
+    let mut methods = vec![request.payment_method.clone()];
+    methods.extend(request.tip_payment_method.clone());
+    let tender_off: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM org_payment_methods
+                        WHERE org_id = $1 AND name = ANY($2) AND NOT is_active)",
+    )
+    .bind(org_id)
+    .bind(&methods)
+    .fetch_one(pool)
+    .await?;
+    let mut out = Vec::new();
+    if deleted {
+        out.push("menu_item_deleted");
+    }
+    if inactive {
+        out.push("menu_item_inactive");
+    }
+    if tender_off {
+        out.push("payment_method_inactive");
+    }
+    Ok(out)
 }
 
 /// Record the accept-and-flag rows for one replayed op (§4.4.5).
