@@ -321,6 +321,21 @@ Publish **after** `tx.commit()`, never inside the transaction.
 - Tests that need their own migrations use a private cluster when another worktree
   shares `:5433` (a missing-version error means the shared template moved).
 
+## Pages this repo serves: the Content-Security-Policy
+The shops' own hosts (`deploy/shop/nginx-wildcard.conf`) and the tenant shell's HTML
+(`/public/tenant-shell`) go out under the PUBLIC pages' CSP. The policy lives in
+MadarDashboard's `deploy/nginx/madar-csp-public.conf`; see "Content-Security-Policy"
+in MadarDashboard's CLAUDE.md for the rules. Here that means:
+- **nginx.** Wherever the wildcard vhost includes `snippets/madar-security-headers.conf`,
+  the next line includes `snippets/madar-csp-public.conf`. In nginx, a location with an
+  `add_header` of its own inherits none of the server's, so a new location without that
+  line serves its pages with no CSP. Never copy the policy into the vhost.
+- **HTML the backend renders** (the tenant shell, legal pages, anything a browser opens):
+  no inline `<script>`, no `on*=` attributes and no `eval`. JSON-LD is fine. Anything it
+  loads comes from the page's own host or an `https:` image, or the policy grows in the
+  same change.
+- **Check:** `node scripts/csp-check.mjs <url>` in MadarDashboard checks a live shop page.
+
 ## Related Projects (Ecosystem)
 - **MadarDashboard**: `/Users/magd/MadarDashboard` — management dashboard. Consumes this
   API via orval-generated hooks; also ships the public ordering + landing bundles.
