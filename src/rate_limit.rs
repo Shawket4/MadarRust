@@ -702,6 +702,13 @@ mod tests {
     #[actix_web::test]
     async fn anonymous_requests_are_keyed_by_address() {
         let _env = env_lock();
+        // A small allowance, so the bucket runs dry long before it can refill:
+        // at the default (400 a minute, one back every 150 ms) a loaded CI
+        // runner served the 400 slower than the refill and the 401st passed.
+        // SAFETY: nextest runs each test in its own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "20");
+        }
         use actix_web::{App, HttpResponse, test, web};
         let app = test::init_service(
             App::new()
@@ -1095,6 +1102,14 @@ mod tests {
     /// RateLimit fields), and the refusal says when to come back.
     #[actix_web::test]
     async fn answers_carry_the_rate_limit_headers() {
+        let _env = env_lock();
+        // A small allowance, so the bucket runs dry long before it can refill:
+        // at the default (400 a minute, one back every 150 ms) a loaded CI
+        // runner served the 400 slower than the refill and the 401st passed.
+        // SAFETY: nextest runs each test in its own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "20");
+        }
         use actix_web::{App, HttpResponse, test, web};
         let app = test::init_service(
             App::new()
@@ -1118,10 +1133,12 @@ mod tests {
             header(first.headers(), "ratelimit-policy").as_deref(),
             Some(format!("\"caller\";q={per_minute};w=60").as_str())
         );
+        // One token spent, back after 60 / per_minute seconds (whole seconds, up).
+        let back = (60.0 / per_minute as f64).ceil() as u64;
         assert_eq!(
             header(first.headers(), "ratelimit").as_deref(),
-            Some(format!("\"caller\";r={};t=1", per_minute - 1).as_str()),
-            "one spent, back within a second"
+            Some(format!("\"caller\";r={};t={back}", per_minute - 1).as_str()),
+            "one spent, and when it is back"
         );
         let second = test::call_service(&app, call()).await;
         assert!(
@@ -1211,6 +1228,13 @@ mod tests {
     #[actix_web::test]
     async fn a_rate_limited_answer_carries_cors_headers() {
         let _env = env_lock();
+        // A small allowance, so the bucket runs dry long before it can refill:
+        // at the default (400 a minute, one back every 150 ms) a loaded CI
+        // runner served the 400 slower than the refill and the 401st passed.
+        // SAFETY: nextest runs each test in its own process; nothing else reads these.
+        unsafe {
+            std::env::set_var("MADAR_RATE_LIMIT_PER_MINUTE", "20");
+        }
         use actix_governor::{Governor, GovernorConfigBuilder};
         use actix_web::{App, HttpResponse, http::StatusCode, test, web};
         let gov = GovernorConfigBuilder::default()
