@@ -75,6 +75,7 @@ macro_rules! app {
                 .configure(madar_rust::users::routes::configure)
                 .configure(madar_rust::kitchen::routes::configure)
                 .configure(madar_rust::push::routes::configure)
+                .configure(madar_rust::devices::routes::configure)
                 .configure(madar_rust::realtime::routes::configure),
         )
         .await
@@ -291,4 +292,52 @@ async fn a_fired_round_pushes_the_branchs_screens_that_are_not_watching(pool: Pg
     madar_rust::push::kitchen::fired(&pool, &w.hub, &elsewhere);
     assert!(fake::wait_done(&madar_rust::push::kitchen::tag(elsewhere.id), WAIT).await);
     assert_eq!(fake::sent_to(idle_fcm).len(), 1);
+}
+
+#[sqlx::test]
+async fn retiring_a_screen_in_the_dashboard_ends_its_kitchen_access_at_once(pool: PgPool) {
+    let w = world(&pool).await;
+    let app = app!(pool, w);
+    let (device, credential) = activate(&app, &pool, &w, "kds").await;
+    let (_, s) = send(&app, session_req(device, &credential)).await;
+    let token = s["token"].as_str().unwrap().to_string();
+    let board = || {
+        test::TestRequest::get()
+            .uri(&format!("/kitchen/orders?branch_id={}", w.branch))
+            .insert_header(("Authorization", format!("Bearer {token}")))
+    };
+    assert_eq!(send(&app, board()).await.0, StatusCode::OK);
+
+    let owner = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO users (id, org_id, name, email, password_hash, role) VALUES ($1,$2,'Owner','o@t.com','h','org_admin')",
+    )
+    .bind(owner)
+    .bind(w.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let owner_token =
+        create_token(&secret(), owner, Some(w.org), UserRole::OrgAdmin, None, 24).unwrap();
+    let (st, b) = send(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/devices/{device}"))
+            .insert_header(("Authorization", format!("Bearer {owner_token}")))
+            .set_json(json!({ "retired": true })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+
+    // The session it already holds reads nothing more...
+    assert_eq!(
+        send(&app, board()).await.0,
+        StatusCode::FORBIDDEN,
+        "retired: no kitchen role"
+    );
+    // ...and it can never mint another one.
+    assert_eq!(
+        send(&app, session_req(device, &credential)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
 }

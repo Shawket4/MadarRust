@@ -257,5 +257,17 @@ pub async fn update_device(
     .bind(body.retired)
     .execute(pool.get_ref())
     .await?;
+    if let Some(retired) = body.retired {
+        // A kitchen screen's principal (POST /auth/device-session) follows its
+        // device: retired, it loses the kitchen role at once (the authz sync
+        // trigger revokes an inactive person's assignments), so its open
+        // session reads and bumps nothing; its next sign-in is refused and the
+        // screen goes back to setup.
+        sqlx::query("UPDATE users SET is_active = $2 WHERE device_id = $1")
+            .bind(*id)
+            .bind(!retired)
+            .execute(pool.get_ref())
+            .await?;
+    }
     Ok(HttpResponse::Ok().json(fetch_device(pool.get_ref(), *id).await?))
 }
