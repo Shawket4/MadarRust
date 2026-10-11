@@ -12,10 +12,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── The headline win: actually run the test suite (previously CI ran none) ──
+  # ── The test gate: every unit test and every integration suite ──────────────
   test:
     name: test + lint
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     services:
       postgres:
         image: postgres:15
@@ -57,14 +58,28 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets --all-features
         continue-on-error: true
-      # Pre-rebrand migrations GRANT to a legacy 'sufrix' role; #[sqlx::test]
-      # re-runs every migration on a fresh DB, so the cluster needs the role.
+      # Pre-rebrand migrations GRANT to a legacy 'sufrix' role (cluster-global;
+      # `madar_app` is created by its own migration).
       - name: Provision legacy 'sufrix' DB role
         run: |
           PGPASSWORD=postgres psql -h localhost -U postgres -d postgres \
             -c "CREATE ROLE sufrix NOLOGIN" || echo "role sufrix already present"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,sqlx-cli
+      # Every #[sqlx::test] database is copied from template1. Migrated once
+      # here, each test's database is born with the schema and sqlx replays
+      # nothing (the same trick as the local test cluster, see CLAUDE.md).
+      - name: Migrate template1
+        run: sqlx migrate run --database-url postgres://postgres:postgres@localhost:5432/template1
+      # EVERY test: the inline unit tests (--lib) and every suite under tests/,
+      # one binary at a time with the throwaway databases swept between them
+      # (scripts/run_tests.sh). Until 2026-10-11 this ran `cargo test --lib`
+      # only — 574 of ~2,200 tests — so a PR's integration suites never ran.
       - name: test (blocking gate)
-        run: cargo test --lib
+        env:
+          MADAR_FAST_TEST_POOLS: "1"
+        run: scripts/run_tests.sh
       # openapi.json is the contract the dashboard and the POS generate their
       # clients from, so it must say what the code says: regenerate and compare.
       - name: openapi.json is up to date

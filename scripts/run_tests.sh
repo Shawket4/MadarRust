@@ -28,13 +28,14 @@ cd "$(dirname "$0")/.."
 export DATABASE_URL="${DATABASE_URL:-postgres://shawket@localhost:5433/madar}"
 export MADAR_FAST_TEST_POOLS=1
 # Sweep the cluster the tests actually run on (a private cluster has its own port).
-PGPORT_TESTS="$(printf '%s' "$DATABASE_URL" | sed -nE 's#.*@[^:/]+:([0-9]+)/.*#\1#p')"
-PGPORT_TESTS="${PGPORT_TESTS:-5433}"
 
+# The maintenance database on the same server, with DATABASE_URL's credentials
+# (CI and Linux boxes need a password; the Mac's trust auth does not mind).
+ADMIN_URL="${DATABASE_URL%/*}/postgres"
 sweep() {
-  psql -h localhost -p "$PGPORT_TESTS" -d postgres -Atc \
+  psql "$ADMIN_URL" -Atc \
     "select 'drop database \"'||datname||'\";' from pg_database where datname like '_sqlx_test%'" \
-    2>/dev/null | psql -h localhost -p "$PGPORT_TESTS" -d postgres -q 2>/dev/null || true
+    2>/dev/null | psql "$ADMIN_URL" -q 2>/dev/null || true
 }
 
 if [ $# -gt 0 ]; then
@@ -49,7 +50,8 @@ else
     # complete browser User-Agent strings, which a signature matches). Rewriting
     # test data to dodge a malware scanner is the owner's call, not this script's
     # — so it is skipped here and named, never silently dropped.
-    [ "$m" = "client_seen" ] && continue
+    # XProtect is macOS only: everywhere else (CI) the suite runs.
+    [ "$m" = "client_seen" ] && [ "$(uname)" = Darwin ] && continue
     targets+=("--test $m")
   done
 fi
