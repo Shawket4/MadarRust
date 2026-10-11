@@ -65,7 +65,7 @@ for t in "${targets[@]}"; do
   printf '%-34s ' "$t"
   # No colour: CI sets CARGO_TERM_COLOR=always, and an escape code in front
   # of "Summary" hid every suite's result from the grep below.
-  out="$(cargo nextest run --color never $t 2>&1)"
+  out="$(cargo nextest run --color never --failure-output final $t 2>&1)"
   line="$(printf '%s' "$out" | grep -E '^ +Summary' | tail -1)"
   if [ -z "$line" ]; then
     echo "NO SUMMARY (see below)"
