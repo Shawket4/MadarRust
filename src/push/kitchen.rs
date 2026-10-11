@@ -138,6 +138,7 @@ pub fn fired(pool: &PgPool, hub: &BranchEventHub, view: &KitchenTicketView) {
             tokio::time::sleep(super::pos::grace()).await;
             targets.retain(|s| !watching(s));
         }
+        tracing::info!(branch = %branch, ticket = %view.id, screens = targets.len(), "kitchen push");
         let batch = targets
             .into_iter()
             .map(|s| {
