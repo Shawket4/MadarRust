@@ -36,7 +36,8 @@
 -- them, so nothing typed by hand survives. Refused when the org has any order:
 -- it is for a test / review org, never a shop that has sold.
 --
--- Run:
+-- Run: scripts/org-setup/seed-mock-cafe-menu.sh asks for the database and the org,
+-- dry-runs, then offers the real run. Or by hand:
 --   psql "$DATABASE_URL" -v org=test1 -v dry_run=1 -f scripts/org-setup/seed-mock-cafe-menu.sql   # roll back
 --   psql "$DATABASE_URL" -v org=test1 -f scripts/org-setup/seed-mock-cafe-menu.sql
 --   psql "$DATABASE_URL" -v org=test1 -v replace=1 -f scripts/org-setup/seed-mock-cafe-menu.sql   # from scratch

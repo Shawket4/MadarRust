@@ -10,6 +10,9 @@ CURRENT old stamp balance carried over as one ledger credit.
         [--org UUID] [--db-url URL] [--ssh HOST [--sudo-user USER]]
         [--dry-run | --apply] [--yes-prod] [--out DIR]
 
+  Run it with NO arguments to be asked for the files and the database: it
+  dry-runs, then offers the real import (backup first on production).
+
   INPUT       export files (*.json), or folders whose *.json are all read. Any
               number of page files and/or one merged file: records are deduped
               by the old `id`, then grouped by canonical phone.
@@ -53,6 +56,7 @@ COPY_MARKER = "-- @@COPY_IMPORT_ROWS@@"
 DROPS_ORG = "27b8f8db-fec2-4909-b9f6-9fffbd860a1a"
 ALLOWED_ORGS = {DROPS_ORG: "Drops"}
 PROD_MARKERS = ("187.124.33.153",)
+PROD_SSH = os.environ.get("MADAR_PROD_SSH", "root@187.124.33.153")
 
 MAX_NAME = 120  # customers::handlers::MAX_NAME
 MAX_PHONE_RAW_LEN = 32  # madar_ids::phone::MAX_PHONE_RAW_LEN
@@ -656,5 +660,39 @@ def main(argv=None) -> int:
     return 0
 
 
+def ask(q: str, default: str = "") -> str:
+    while True:
+        a = input(f"{q}{f' [{default}]' if default else ''}: ").strip() or default
+        if a:
+            return a
+
+
+def wizard() -> int:
+    """No arguments: ask what the flags would say, dry-run, then offer the real import."""
+    base = [os.path.expanduser(ask("Export file or folder (*.json)"))]
+    while more := input("Another one (Enter when done): ").strip():
+        base.append(os.path.expanduser(more))
+    pick = ""
+    while pick not in ("1", "2", "3"):
+        pick = input("Which database? 1) Production  2) Local ($DATABASE_URL)  3) Another connection string: ").strip()
+    if pick == "1":
+        base += ["--ssh", PROD_SSH, "--sudo-user", "postgres", "--db-url", "madar", "--yes-prod"]
+    elif pick == "2":
+        base += ["--db-url", os.environ.get("DATABASE_URL") or "madar"]
+    else:
+        base += ["--db-url", ask("Connection string")]
+    main(base + ["--dry-run"])
+    if input("\nImport them for real? [y/N]: ").strip().lower()[:1] != "y":
+        print("Nothing changed.")
+        return 0
+    if pick == "1":
+        f = f"/root/backups/madar-pre-legacy-loyalty-{dt.datetime.now(dt.timezone.utc):%Y%m%dT%H%M%SZ}.dump"
+        print(f"Backing up production to {f} ...")
+        subprocess.run(["ssh", "-o", "ConnectTimeout=15", PROD_SSH,
+                        f"mkdir -p /root/backups && sudo -u postgres pg_dump -Fc madar > '{f}' && ls -lh '{f}'"],
+                       check=True)
+    return main(base + ["--apply"])
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(wizard() if len(sys.argv) == 1 else main())

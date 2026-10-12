@@ -12,14 +12,18 @@
 #   --no-wait   don't poll the conversion jobs
 # Password comes from --password or $MADAR_PASSWORD, else it is prompted for.
 # Re-running is safe: the backend dedups identical uploads per org.
+# Run it with NO arguments to be asked for everything: it dry-runs, then offers
+# the real upload.
 set -euo pipefail
 
 api="" org="" email="" token="" password="${MADAR_PASSWORD:-}"
 map="drops/menu_images.csv" dry=0 wait=1
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
 die() { echo "error: $*" >&2; exit 1; }
 
+wizard=0
+[[ $# -eq 0 ]] && wizard=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --api) api="${2%/}"; shift 2 ;;
@@ -36,6 +40,35 @@ while [[ $# -gt 0 ]]; do
 done
 
 for bin in curl jq; do command -v "$bin" >/dev/null || die "$bin not found"; done
+
+# No arguments: ask, find the org, then run this script with flags: dry run first.
+if [[ $wizard -eq 1 ]]; then
+  . "$(cd "$(dirname "$0")" && pwd)/lib.sh"
+  ask api "API" "https://api.madar-pos.cloud"
+  ask email "Your email (a super admin, or the org's owner)"
+  ask_secret password "Password"
+  login="$(curl -sS -X POST "$api/auth/login" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg e "$email" --arg p "$password" '{email: $e, password: $p}')")"
+  token="$(jq -r '.token // empty' <<<"$login" 2>/dev/null || true)"
+  [[ -n $token ]] || die "login failed for $email: $login"
+  org="$(jq -r '.user.org_id // empty' <<<"$login")"
+  if [[ -z $org ]]; then # a super admin belongs to no org: pick one
+    orgs="$(curl -sS -H "Authorization: Bearer $token" "$api/orgs")"
+    while :; do
+      ask q "Organization (name, short name or id)"
+      org="$(jq -r --arg q "$q" '[.[] | select(.id == $q or .slug == ($q | ascii_downcase)
+        or (.name | ascii_downcase) == ($q | ascii_downcase))] | if length == 1 then .[0].id else empty end' <<<"$orgs")"
+      [[ -n $org ]] && break
+      echo "  nothing (or more than one) matches \"$q\"" >&2
+    done
+  fi
+  ask map "Image list CSV (madar_item_name,source,image_url)" "$map"
+  args=(--api "$api" --org "$org" --email "$email" --map "$map")
+  MADAR_PASSWORD=$password "$0" "${args[@]}" --dry-run || true
+  echo
+  confirm "Upload them for real?" || { echo "Nothing uploaded."; exit 0; }
+  MADAR_PASSWORD=$password exec "$0" "${args[@]}"
+fi
 [[ -n "$api" && -n "$org" && ( -n "$email" || -n "$token" ) ]] || usage
 [[ -f "$map" ]] || die "missing $map"
 

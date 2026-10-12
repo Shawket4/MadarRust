@@ -2,7 +2,8 @@
 # Reset the Drops org on production back to its setup, in one command.
 #
 #   scripts/org-setup/reset-drops-on-prod.sh            dry run on production: prints exactly what
-#                                     would be deleted, then rolls back
+#                                     would be deleted, rolls back, then asks
+#                                     whether to do it for real
 #   scripts/org-setup/reset-drops-on-prod.sh --apply    full-database backup on the server, then the
 #                                     real reset (you type the org name to confirm)
 #
@@ -31,7 +32,7 @@ apply=0
 case "${1:-}" in
   "") ;;
   --apply) apply=1 ;;
-  -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "unknown argument: $1 (use --apply, or nothing for a dry run)" >&2; exit 1 ;;
 esac
 
@@ -49,8 +50,8 @@ if [[ $apply -eq 0 ]]; then
   ssh -o ConnectTimeout=15 "$host" \
     "chmod 755 '$dir'/import-foodics-menu.sh && cd '$dir' && sudo -u postgres ./import-foodics-menu.sh --org $org --db postgresql:///madar ${flags[*]} --dry-run" </dev/null
   echo
-  echo "Dry run only: nothing changed. Run with --apply to reset for real."
-  exit 0
+  . "$here/lib.sh"
+  confirm "Reset Drops for real (full backup first)?" || { echo "Nothing changed."; exit 0; }
 fi
 
 backup="/root/backups/madar-pre-drops-reset-$stamp.dump"

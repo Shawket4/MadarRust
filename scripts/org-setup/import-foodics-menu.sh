@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Import a Foodics menu export (categories, products, modifier groups + options,
 # product↔group links) into one Madar org by direct SQL. Idempotent; --dry-run rolls back.
+# Run it with NO arguments to be asked for everything (database, org, what to do,
+# folder): it dry-runs, shows the result, then offers the real run (backup first on prod).
 #
 #   scripts/org-setup/import-foodics-menu.sh --org <org-uuid> [--dir drops] [--db URL] [--dry-run]
 #                             [--replace-menu | --reset-org | --reset-activity]
@@ -78,8 +80,10 @@ keep_dawam=off
 do_import=on
 yes=0
 
-usage() { sed -n '2,51p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
+usage() { sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-1}"; }
 
+wizard=0
+[[ $# -eq 0 ]] && wizard=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --org) org="$2"; shift 2 ;;
@@ -105,6 +109,35 @@ done
 die() { echo "error: $*" >&2; exit 1; }
 
 command -v psql >/dev/null || die "psql not found"
+
+# No arguments: ask for everything, dry-run it, then offer the real run.
+if [[ $wizard -eq 1 ]]; then
+  . "$here/lib.sh"
+  pick_db
+  pick_org
+  choose what "What do you want to do?" \
+    "Add a menu from a folder of Foodics CSVs (keeps what is already there)" \
+    "Replace the menu (deletes the menu and every order and ticket that used it)" \
+    "Reset activity (orders, tills, customers, stock; keeps the setup)"
+  case $what in
+    1 | 2)
+      menus="$(for f in */products.csv; do [[ -f $f ]] && printf '%s ' "${f%/products.csv}"; done)"
+      ask dir "Menu folder${menus:+ (here: ${menus% })}"
+      [[ $what == 2 ]] && replace_menu=on
+      ;;
+    3)
+      reset_activity=on do_import=off
+      confirm "Keep Dawam as it is (attendance, payroll, rota)?" && keep_dawam=on
+      confirm "Keep today's stock levels (otherwise they go to 0)?" && keep_stock=on
+      confirm "Also clear devices (every till and staff phone signs in again)?" && reset_devices=on
+      confirm "Also clear the floor (sections and tables)?" && reset_tables=on
+      confirm "Also clear the loyalty setup?" && reset_loyalty=on
+      confirm "Also clear QR short links?" && reset_qr=on
+      ;;
+  esac
+  final=ROLLBACK yes_prod=1
+fi
+
 [[ -n "$db" ]] || die "set DATABASE_URL or pass --db"
 [[ "$org" =~ ^[0-9a-fA-F-]{36}$ ]] || die "--org <uuid> is required"
 modes=0
@@ -175,47 +208,58 @@ if [[ "$reset_activity" == on ]]; then
   if [[ "$keep_stock" == on ]]; then mode+=" — stock levels carried over"; else mode+=" — stock levels go to 0"; fi
 fi
 
-if [[ "$mode" != add && "$final" == COMMIT && $yes -eq 0 ]]; then
-  echo "This permanently DELETES $mode" >&2
-  read -r -p "Type the org name \"$org_name\" to continue: " answer
-  [[ "$answer" == "$org_name" ]] || die "aborted"
-fi
-
-if [[ "$do_import" == on ]]; then
-  echo "Importing $(abs "$dir") into org \"$org_name\" ($org) — ${final}, mode ${mode%%:*}"
-else
-  echo "Org \"$org_name\" ($org) — ${final}, mode ${mode%%:*} (no import)"
-fi
-
-{
-  echo '\set ON_ERROR_STOP on'
-  echo 'BEGIN;'
-  if [[ "$do_import" == on ]]; then
-    ddl stg_categories "$cat_cols"
-    ddl stg_items "$item_cols"
-    ddl stg_addons "$addon_cols"
-    ddl stg_groups "$group_cols"
-    ddl stg_options "$option_cols"
-    ddl stg_optionals "$optional_cols"
-    printf "\\\\copy stg_categories FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/categories.csv")")"
-    printf "\\\\copy stg_items FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/products.csv")")"
-    printf "\\\\copy stg_addons FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/product_modifiers.csv")")"
-    printf "\\\\copy stg_groups FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/modifier_groups.csv")")"
-    printf "\\\\copy stg_options FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/modifier_options.csv")")"
-    if [[ $have_optionals -eq 1 ]]; then
-      printf "\\\\copy stg_optionals FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/product_optionals.csv")")"
-    fi
-    # Keep file order so modifier and option sort follow the export.
-    echo 'ALTER TABLE stg_addons ADD COLUMN ordinal bigserial;'
-    echo 'ALTER TABLE stg_options ADD COLUMN ordinal bigserial;'
+run() {
+  if [[ "$mode" != add && "$final" == COMMIT && $yes -eq 0 ]]; then
+    echo "This permanently DELETES $mode" >&2
+    read -r -p "Type the org name \"$org_name\" to continue: " answer
+    [[ "$answer" == "$org_name" ]] || die "aborted"
   fi
-  cat "$here/import-foodics-menu.sql"
-} | psql "$db" -X -q -v ON_ERROR_STOP=1 -v org="$org" -v final="$final" \
-    -v replace_menu="$replace_menu" -v reset_org="$reset_org" \
-    -v reset_activity="$reset_activity" -v do_import="$do_import" \
-    -v keep_stock="$keep_stock" -v reset_devices="$reset_devices" -v reset_tables="$reset_tables" \
-    -v reset_loyalty="$reset_loyalty" -v reset_qr="$reset_qr" -v keep_dawam="$keep_dawam"
 
-if [[ "$final" == "ROLLBACK" ]]; then
-  echo "Dry run: nothing was written."
+  if [[ "$do_import" == on ]]; then
+    echo "Importing $(abs "$dir") into org \"$org_name\" ($org) — ${final}, mode ${mode%%:*}"
+  else
+    echo "Org \"$org_name\" ($org) — ${final}, mode ${mode%%:*} (no import)"
+  fi
+
+  {
+    echo '\set ON_ERROR_STOP on'
+    echo 'BEGIN;'
+    if [[ "$do_import" == on ]]; then
+      ddl stg_categories "$cat_cols"
+      ddl stg_items "$item_cols"
+      ddl stg_addons "$addon_cols"
+      ddl stg_groups "$group_cols"
+      ddl stg_options "$option_cols"
+      ddl stg_optionals "$optional_cols"
+      printf "\\\\copy stg_categories FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/categories.csv")")"
+      printf "\\\\copy stg_items FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/products.csv")")"
+      printf "\\\\copy stg_addons FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/product_modifiers.csv")")"
+      printf "\\\\copy stg_groups FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/modifier_groups.csv")")"
+      printf "\\\\copy stg_options FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/modifier_options.csv")")"
+      if [[ $have_optionals -eq 1 ]]; then
+        printf "\\\\copy stg_optionals FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(sq "$(abs "$dir/product_optionals.csv")")"
+      fi
+      # Keep file order so modifier and option sort follow the export.
+      echo 'ALTER TABLE stg_addons ADD COLUMN ordinal bigserial;'
+      echo 'ALTER TABLE stg_options ADD COLUMN ordinal bigserial;'
+    fi
+    cat "$here/import-foodics-menu.sql"
+  } | psql "$db" -X -q -v ON_ERROR_STOP=1 -v org="$org" -v final="$final" \
+      -v replace_menu="$replace_menu" -v reset_org="$reset_org" \
+      -v reset_activity="$reset_activity" -v do_import="$do_import" \
+      -v keep_stock="$keep_stock" -v reset_devices="$reset_devices" -v reset_tables="$reset_tables" \
+      -v reset_loyalty="$reset_loyalty" -v reset_qr="$reset_qr" -v keep_dawam="$keep_dawam"
+
+  if [[ "$final" == "ROLLBACK" ]]; then
+    echo "Dry run: nothing was written."
+  fi
+}
+
+run
+if [[ $wizard -eq 1 ]]; then
+  echo
+  confirm "Do it for real on \"$org_name\"?" || { echo "Nothing changed."; exit 0; }
+  [[ $is_prod -eq 1 ]] && backup_prod "import-menu"
+  final=COMMIT
+  run
 fi
