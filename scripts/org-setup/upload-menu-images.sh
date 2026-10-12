@@ -2,7 +2,7 @@
 # Upload menu item images to Madar through the real pipeline
 # (POST /uploads/menu-items/{id} → background WebP conversion → image_group_id).
 #
-#   scripts/upload-menu-images.sh --api URL --org <org-uuid> (--email E [--password P] | --token JWT)
+#   scripts/org-setup/upload-menu-images.sh --api URL --org <org-uuid> (--email E [--password P] | --token JWT)
 #                                 [--map drops/menu_images.csv] [--dry-run] [--no-wait]
 #
 #   --api       base URL the routes hang off, e.g. http://localhost:8080 or

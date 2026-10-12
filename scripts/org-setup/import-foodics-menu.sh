@@ -2,7 +2,7 @@
 # Import a Foodics menu export (categories, products, modifier groups + options,
 # product↔group links) into one Madar org by direct SQL. Idempotent; --dry-run rolls back.
 #
-#   scripts/import-foodics.sh --org <org-uuid> [--dir drops] [--db URL] [--dry-run]
+#   scripts/org-setup/import-foodics-menu.sh --org <org-uuid> [--dir drops] [--db URL] [--dry-run]
 #                             [--replace-menu | --reset-org | --reset-activity]
 #                             [--keep-stock] [--reset-devices] [--reset-tables]
 #                             [--reset-loyalty] [--reset-qr] [--yes] [--yes-prod]
@@ -200,7 +200,7 @@ fi
     echo 'ALTER TABLE stg_addons ADD COLUMN ordinal bigserial;'
     echo 'ALTER TABLE stg_options ADD COLUMN ordinal bigserial;'
   fi
-  cat "$here/import-foodics.sql"
+  cat "$here/import-foodics-menu.sql"
 } | psql "$db" -X -q -v ON_ERROR_STOP=1 -v org="$org" -v final="$final" \
     -v replace_menu="$replace_menu" -v reset_org="$reset_org" \
     -v reset_activity="$reset_activity" -v do_import="$do_import" \

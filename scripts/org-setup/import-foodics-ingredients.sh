@@ -2,10 +2,10 @@
 # Seed an org's INGREDIENT CATALOG (no stock levels) from a cleaned CSV, and
 # wire the milk / coffee-bean swap options to their ingredients.
 #
-#   scripts/import-ingredients.sh --org <org-uuid> [--dir drops_clean] [--db URL] [--dry-run] [--yes-prod]
+#   scripts/org-setup/import-foodics-ingredients.sh --org <org-uuid> [--dir drops_clean] [--db URL] [--dry-run] [--yes-prod]
 #
 # Expects <dir>/ingredients.csv: sku,name,name_ar,unit,category,swap_key
-# (generate it with scripts/clean-foodics-inventory.py).
+# (generate it with scripts/org-setup/clean-foodics-inventory-export.py).
 #
 # Catalog only: no branch_stock, no movements, so every ingredient shows up in
 # the first stocktake at book stock 0 and the count sets reality.
@@ -46,7 +46,7 @@ echo "Seeding ingredients from $(abs "$file") into org \"$org_name\" ($org) — 
   echo 'BEGIN;'
   echo 'CREATE TEMP TABLE stg_ing (sku text, name text, name_ar text, unit text, category text, swap_key text);'
   printf "\\\\copy stg_ing FROM '%s' WITH (FORMAT csv, HEADER true)\n" "$(abs "$file" | sed "s/'/''/g")"
-  cat "$here/import-ingredients.sql"
+  cat "$here/import-foodics-ingredients.sql"
 } | psql "$db" -X -q -v ON_ERROR_STOP=1 -v org="$org" -v final="$final"
 [[ "$final" == "ROLLBACK" ]] && echo "Dry run: nothing was written."
 exit 0

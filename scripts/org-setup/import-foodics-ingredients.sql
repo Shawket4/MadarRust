@@ -3,7 +3,7 @@
 -- 0 everywhere and the first stocktake sets reality (INVENTORY_V2.md: stock
 -- rows are created lazily and on_hand is derived from the ledger).
 --
--- Driven by scripts/import-ingredients.sh, which prepends the \copy and :org.
+-- Driven by scripts/org-setup/import-foodics-ingredients.sh, which prepends the \copy and :org.
 
 SELECT set_config('app.org_id', :'org', true) AS rls_org \gset
 

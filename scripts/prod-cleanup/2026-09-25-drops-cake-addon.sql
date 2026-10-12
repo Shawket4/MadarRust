@@ -56,7 +56,7 @@
 --   now (or a long-press full sync), so tap Sync now on each till after this.
 --
 -- IMPORT: like "Red Bull Type", this group is hand-modelled and NOT in the
---   Foodics import (scripts/import-foodics.sql only mirrors the slot/allowlist
+--   Foodics import (scripts/org-setup/import-foodics-menu.sql only mirrors the slot/allowlist
 --   rule). A plain re-import leaves it alone (the import only inserts what is
 --   missing); --replace-menu / --reset-org purge it with every hand-made group
 --   and recipe, and the id guards below then refuse to guess — re-derive them.

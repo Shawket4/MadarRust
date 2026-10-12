@@ -1,5 +1,5 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- seed_mock_menu.sql — fill a NEW organization's menu with a realistic mock café
+-- seed-mock-cafe-menu.sql — fill a NEW organization's menu with a realistic mock café
 -- ─────────────────────────────────────────────────────────────────────────────
 -- What it creates (all scoped to one org):
 --   suppliers · ingredient categories · ~95 ingredients (cost, supplier, pack,
@@ -37,11 +37,11 @@
 -- it is for a test / review org, never a shop that has sold.
 --
 -- Run:
---   psql "$DATABASE_URL" -v org=test1 -v dry_run=1 -f seed_mock_menu.sql   # roll back
---   psql "$DATABASE_URL" -v org=test1 -f seed_mock_menu.sql
---   psql "$DATABASE_URL" -v org=test1 -v replace=1 -f seed_mock_menu.sql   # from scratch
+--   psql "$DATABASE_URL" -v org=test1 -v dry_run=1 -f scripts/org-setup/seed-mock-cafe-menu.sql   # roll back
+--   psql "$DATABASE_URL" -v org=test1 -f scripts/org-setup/seed-mock-cafe-menu.sql
+--   psql "$DATABASE_URL" -v org=test1 -v replace=1 -f scripts/org-setup/seed-mock-cafe-menu.sql   # from scratch
 -- Production (Postgres on the host, not in docker):
---   sudo -u postgres psql -d madar -v org=<org-uuid> -v dry_run=1 -f seed_mock_menu.sql
+--   sudo -u postgres psql -d madar -v org=<org-uuid> -v dry_run=1 -f scripts/org-setup/seed-mock-cafe-menu.sql
 -- `org` matches the organization name, slug or id (case-insensitive).
 -- Images are not seeded: they go through the asset pipeline, upload them in the dashboard.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -68,7 +68,7 @@ SELECT set_config('seed.org', :'org', true);
 -- ── From scratch: clear what a previous seed (or a person) left ──────────────
 -- pg_temp.purge(table, where) deletes the matching rows after first deleting,
 -- depth-first, every row in any table whose foreign key points at them
--- (the same helper as scripts/import-foodics.sh --replace-menu).
+-- (the same helper as scripts/org-setup/import-foodics-menu.sh --replace-menu).
 CREATE FUNCTION pg_temp.purge(tbl regclass, cond text, path regclass[] DEFAULT '{}')
 RETURNS void LANGUAGE plpgsql AS $fn$
 DECLARE fk record; n bigint;

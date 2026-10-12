@@ -1,4 +1,4 @@
--- Foodics → Madar menu import. Driven by scripts/import-foodics.sh, which
+-- Foodics → Madar menu import. Driven by scripts/org-setup/import-foodics-menu.sh, which
 -- prepends the \copy lines that fill the stg_* tables and sets :org / :final.
 -- Every step is idempotent: re-running over the same org inserts nothing new.
 
@@ -219,7 +219,7 @@ INSERT INTO inventory_movements
    unit_cost, reason, below_zero, source_type, note, created_at)
 SELECT gen_random_uuid(), k.branch_id, k.org_ingredient_id, k.id, 'stock_count', k.on_hand, 0,
        k.cost_per_unit, 'Opening balance after reset', false, 'reset',
-       'Stock level carried over by import-foodics.sh --reset-activity --keep-stock', now()
+       'Stock level carried over by import-foodics-menu.sh --reset-activity --keep-stock', now()
 FROM keep_stock_levels k;
 \echo '== Stock carried over (opening counts) =='
 SELECT count(*) AS items, sum(on_hand) AS total_units FROM keep_stock_levels;
@@ -229,7 +229,7 @@ SELECT count(*) AS items, sum(on_hand) AS total_units FROM keep_stock_levels;
 UPDATE branch_tables SET status = 'free'
 WHERE org_id = :'org'::uuid AND status IS DISTINCT FROM 'free';
 
--- Optional extras on top of the activity (flags; see import-foodics.sh).
+-- Optional extras on top of the activity (flags; see import-foodics-menu.sh).
 \o /dev/null
 \if :reset_devices
 SELECT pg_temp.purge_activity('device_payment_methods');
@@ -263,7 +263,7 @@ SELECT table_name, rows FROM purge_log ORDER BY rows DESC, table_name;
 \if :do_import
 -- ── Categories ────────────────────────────────────────────────────────────
 -- Foodics image URLs are deliberately not copied into image_url: images are
--- uploaded through Madar's asset pipeline (scripts/upload-menu-images.sh) so
+-- uploaded through Madar's asset pipeline (scripts/org-setup/upload-menu-images.sh) so
 -- nothing keeps pointing at Foodics' S3.
 INSERT INTO categories (org_id, name, name_translations)
 SELECT DISTINCT ON (btrim(c.name))

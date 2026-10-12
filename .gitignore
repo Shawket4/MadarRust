@@ -65,3 +65,4 @@ openpgp-revocs.d/
 *firebase-adminsdk*.json
 *service-account*.json
 **/AuthKey_*.p8
+/pachamama/

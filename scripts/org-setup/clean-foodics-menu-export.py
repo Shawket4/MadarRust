@@ -33,7 +33,7 @@ import os
 import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DROPS = os.path.join(os.path.dirname(HERE), "drops")
+DROPS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "drops")
 
 GROUP_COLS = ["id", "reference", "name", "name_localized"]
 OPTION_COLS = ["id", "modifier_reference", "modifier_name", "modifier_name_localized",

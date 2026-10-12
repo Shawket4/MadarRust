@@ -19,7 +19,7 @@ import csv
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DROPS = os.path.join(os.path.dirname(HERE), "drops_clean")
+DROPS = os.path.join(os.path.dirname(os.path.dirname(HERE)), "drops_clean")
 SRC = os.path.join(DROPS, "Inventory Levels Report.csv")
 OUT = os.path.join(DROPS, "ingredients.csv")
 

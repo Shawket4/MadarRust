@@ -1,4 +1,4 @@
--- Legacy loyalty import: one transaction. Driven by import-legacy-loyalty.py,
+-- Legacy loyalty import: one transaction. Driven by import-legacy-loyalty-cards.py,
 -- which validates and dedupes the export, sets :org and :apply, and puts the
 -- COPY of `import_rows` where the marker line below stands.
 --

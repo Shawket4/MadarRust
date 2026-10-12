@@ -6,7 +6,7 @@ Rewards"). Each old customer becomes (or is matched to) ONE Madar customer, keye
 by canonical phone, is enrolled in the org's loyalty programme, and has their
 CURRENT old stamp balance carried over as one ledger credit.
 
-    scripts/import-legacy-loyalty.py INPUT [INPUT ...]
+    scripts/org-setup/import-legacy-loyalty-cards.py INPUT [INPUT ...]
         [--org UUID] [--db-url URL] [--ssh HOST [--sudo-user USER]]
         [--dry-run | --apply] [--yes-prod] [--out DIR]
 
@@ -27,7 +27,7 @@ CURRENT old stamp balance carried over as one ledger credit.
               holds personal data and the repos are public.
 
 What is written, and why it looks like what the app writes, is described in
-import-legacy-loyalty.sql. Nothing is sent to anybody: no pass is pushed from
+import-legacy-loyalty-cards.sql. Nothing is sent to anybody: no pass is pushed from
 here and no message goes out. Cards already in a Madar wallet are marked for
 the backend's own refresh sweep.
 """
@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SQL_FILE = HERE / "import-legacy-loyalty.sql"
+SQL_FILE = HERE / "import-legacy-loyalty-cards.sql"
 COPY_MARKER = "-- @@COPY_IMPORT_ROWS@@"
 
 # The only org this script may write to. The SQL re-checks it.

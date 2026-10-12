@@ -1,4 +1,4 @@
-"""Tests for import-legacy-loyalty.py: the phone rule, reading exports, dedupe
+"""Tests for import-legacy-loyalty-cards.py: the phone rule, reading exports, dedupe
 and grouping. Every person here is invented.
 
     python3 -m unittest scripts/test_import_legacy_loyalty.py      (or pytest)
@@ -11,13 +11,13 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-_spec = importlib.util.spec_from_file_location("legacy_import", HERE / "import-legacy-loyalty.py")
+_spec = importlib.util.spec_from_file_location("legacy_import", HERE / "import-legacy-loyalty-cards.py")
 imp = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = imp  # dataclasses resolve their module by name
 _spec.loader.exec_module(imp)
 
 # The shared rule's vectors live in madar-shared (checked out beside this repo).
-VECTORS = HERE.parent.parent / "madar-shared" / "crates" / "madar-ids" / "vectors" / "phone_vectors.json"
+VECTORS = HERE.parent.parent.parent / "madar-shared" / "crates" / "madar-ids" / "vectors" / "phone_vectors.json"
 
 
 def person(pid, phone, name="Test Person", stamps=0, visits=0, updated="2026-01-02T00:00:00.000Z", **kw):
