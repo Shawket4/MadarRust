@@ -16,11 +16,15 @@ COPY --from=planner /app/recipe.json recipe.json
 # madar-authz (and the other madar-shared crates) are GIT dependencies pinned
 # by tag; cargo-chef carries them in the recipe and `cook` fetches them, so no
 # stub is needed. This layer is only invalidated when Cargo.lock changes.
-RUN cargo chef cook --release --recipe-path recipe.json
+#
+# LTO_MODE=fat (default, CI/prod) or thin (dev — halves link memory). It is set
+# for `cook` AND for the build below, on purpose: Cargo fingerprints the profile,
+# so dependencies cooked under one LTO value are compiled again under another
+# (a deploy compiled all of them twice, ~4 min, until this was the same on both).
+ARG LTO_MODE=fat
+RUN CARGO_PROFILE_RELEASE_LTO=${LTO_MODE} cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
-# LTO_MODE=fat (default, CI/prod) or thin (dev — halves link memory)
-ARG LTO_MODE=fat
 RUN CARGO_PROFILE_RELEASE_LTO=${LTO_MODE} cargo build --release --bin madar-rust
 
 # ── Stage 3: minimal runtime ──────────────────────────────────────────────────
