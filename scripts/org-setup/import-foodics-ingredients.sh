@@ -35,6 +35,7 @@ if [[ $wizard -eq 1 ]]; then
   pick_db
   pick_org
   ask dir "Folder with ingredients.csv" "$dir"
+  [[ -d $dir ]] || dir="$repo/$dir"
   final=ROLLBACK yes_prod=1
 fi
 [[ -n "$db" ]] || die "set DATABASE_URL or pass --db"

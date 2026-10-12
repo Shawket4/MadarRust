@@ -121,8 +121,9 @@ if [[ $wizard -eq 1 ]]; then
     "Reset activity (orders, tills, customers, stock; keeps the setup)"
   case $what in
     1 | 2)
-      menus="$(for f in */products.csv; do [[ -f $f ]] && printf '%s ' "${f%/products.csv}"; done)"
-      ask dir "Menu folder${menus:+ (here: ${menus% })}"
+      menus="$(cd "$repo" && for f in */products.csv; do if [[ -f $f ]]; then printf '%s ' "${f%/products.csv}"; fi; done)"
+      ask dir "Menu folder${menus:+ (in MadarRust: ${menus% })}"
+      [[ -d $dir ]] || dir="$repo/$dir"
       [[ $what == 2 ]] && replace_menu=on
       ;;
     3)

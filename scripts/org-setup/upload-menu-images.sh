@@ -63,6 +63,7 @@ if [[ $wizard -eq 1 ]]; then
     done
   fi
   ask map "Image list CSV (madar_item_name,source,image_url)" "$map"
+  [[ -f $map ]] || map="$repo/$map"
   args=(--api "$api" --org "$org" --email "$email" --map "$map")
   MADAR_PASSWORD=$password "$0" "${args[@]}" --dry-run || true
   echo

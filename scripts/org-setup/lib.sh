@@ -1,6 +1,9 @@
 # Sourced by the org-setup scripts: the questions a script asks when it is run
 # with no arguments. Every answer lands in the variable named first.
 
+# The MadarRust checkout: menu and data folders (drops/, pachamama/) live here,
+# so a folder name answered from any directory is found.
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 prod_ssh="${MADAR_PROD_SSH:-root@187.124.33.153}"
 # Production Postgres over Tailscale; its pg_hba lets the owner's Mac in as madar.
 prod_db="${MADAR_PROD_DB:-postgresql://madar@100.101.100.57:5432/madar}"
