@@ -3215,6 +3215,92 @@ mod it {
     }
 
     #[sqlx::test]
+    async fn the_public_menu_lists_categories_in_the_pos_order(pool: PgPool) {
+        // The dashboard's drag order (display_order), as the till shows it
+        // (madar-catalog `order`), not the alphabet: Desserts, then Coffee
+        // and Tea tied at 1 (C < T), then Breakfast. Alphabetical would be
+        // Breakfast, Coffee, Desserts, Tea.
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        seed_settings(&pool, branch, true, false, 0).await;
+        let mut cat = std::collections::HashMap::new();
+        for (name, ar, pos) in [
+            ("Breakfast", "فطار", 2),
+            ("Coffee", "قهوة", 1),
+            ("Desserts", "حلويات", 0),
+            ("Tea", "شاي", 1),
+        ] {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO categories (id, org_id, name, name_translations, display_order) \
+                 VALUES ($1, $2, $3, jsonb_build_object('ar', $4::text), $5)",
+            )
+            .bind(id)
+            .bind(org)
+            .bind(name)
+            .bind(ar)
+            .bind(pos)
+            .execute(&pool)
+            .await
+            .unwrap();
+            cat.insert(name, id);
+        }
+        // An inactive category is not on the menu wherever it sits.
+        sqlx::query(
+            "INSERT INTO categories (org_id, name, display_order, is_active) VALUES ($1, 'Hidden', -5, false)",
+        )
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Items keep the till's order (`/menu-items`: by name).
+        for name in ["Mocha", "Americano", "Latte"] {
+            sqlx::query(
+                "INSERT INTO menu_items (org_id, category_id, name, base_price, is_active) VALUES ($1,$2,$3,500,true)",
+            )
+            .bind(org)
+            .bind(cat["Coffee"])
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let app = app!(&pool);
+
+        for uri in [
+            format!("/public/branches/{branch}/menu?channel=dine_in&preview=true"),
+            format!("/public/branches/{branch}/menu?channel=in_mall&preview=true"),
+        ] {
+            let (st, b) = send(&app, test::TestRequest::get().uri(&uri)).await;
+            assert_eq!(st, StatusCode::OK, "{uri}: {b}");
+            let got: Vec<(String, i64)> = b["categories"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| {
+                    (
+                        c["id"].as_str().unwrap().to_string(),
+                        c["display_order"].as_i64().unwrap(),
+                    )
+                })
+                .collect();
+            let want: Vec<(String, i64)> =
+                [("Desserts", 0), ("Coffee", 1), ("Tea", 1), ("Breakfast", 2)]
+                    .iter()
+                    .map(|(n, p)| (cat[n].to_string(), *p))
+                    .collect();
+            assert_eq!(got, want, "{uri}");
+            let items: Vec<&str> = b["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(items, ["Americano", "Latte", "Mocha"], "{uri}");
+        }
+    }
+
+    #[sqlx::test]
     async fn the_dine_in_menu_is_a_read_only_preview_for_any_branch(pool: PgPool) {
         let org = seed_org(&pool).await;
         let branch = seed_branch(&pool, org).await;
