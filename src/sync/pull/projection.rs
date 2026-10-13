@@ -405,6 +405,7 @@ pub async fn project(
                                 'service_charge_rate', COALESCE(b.service_charge_rate, o.service_charge_rate), \
                                 'service_charge_taxable', COALESCE(b.service_charge_taxable, o.service_charge_taxable)), \
                         'org_require_table_for_orders', o.require_table_for_orders, \
+                        'plan', o.plan, \
                         'loyalty', (SELECT json_build_object('enabled', l.enabled, 'mode', l.mode, \
                                 'program_name', l.program_name, 'program_name_ar', l.program_name_ar) \
                               FROM loyalty_settings l WHERE l.org_id = b.org_id AND (l.branch_id = b.id OR l.branch_id IS NULL) \
@@ -423,7 +424,8 @@ pub async fn project(
         "device" => {
             by_sql(
                 conn,
-                "SELECT d.id, json_build_object('id', d.id, 'code', d.code, 'label', d.label, 'kind', d.kind) \
+                "SELECT d.id, json_build_object('id', d.id, 'code', d.code, 'label', d.label, 'kind', d.kind, \
+                        'plan_inactive', d.plan_inactive) \
                    FROM devices d WHERE d.id = ANY($1) AND d.retired_at IS NULL",
                 ids,
             )

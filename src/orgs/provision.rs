@@ -204,7 +204,43 @@ pub async fn provision_org(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     crate::auth::guards::require_super_admin(&claims)?;
-    let b = body.into_inner();
+    let done = provision(pool.get_ref(), body.into_inner(), ProvisionOpts::admin()).await?;
+    Ok(HttpResponse::Created().json(done))
+}
+
+/// What differs between an org the super admin makes and one a shop signs up.
+#[derive(Debug, Clone)]
+pub struct ProvisionOpts {
+    pub plan: madar_plan::Plan,
+    /// `admin` | `self` (`organizations.signup_source`).
+    pub signup_source: &'static str,
+    /// The terms version the owner accepted (self-signup only).
+    pub terms_version: Option<String>,
+    /// The owner's verified phone, canonical (self-signup only).
+    pub owner_phone: Option<String>,
+}
+
+impl ProvisionOpts {
+    /// An org the super admin creates: Paid, nothing to record.
+    pub fn admin() -> Self {
+        Self {
+            plan: madar_plan::Plan::Paid,
+            signup_source: "admin",
+            terms_version: None,
+            owner_phone: None,
+        }
+    }
+}
+
+/// Validate and create an organization, its tenders, roles, first branch and
+/// owner, in one transaction. Behind `POST /orgs/provision` (super admin) and
+/// `POST /public/signup` (a shop signing itself up, on the Free plan): the two
+/// differ only in [`ProvisionOpts`].
+pub async fn provision(
+    pool: &sqlx::PgPool,
+    b: ProvisionOrgRequest,
+    opts: ProvisionOpts,
+) -> Result<ProvisionedOrg, AppError> {
 
     let name = b.name.trim().to_string();
     if name.is_empty() {
@@ -233,7 +269,7 @@ pub async fn provision_org(
         .filter(|s| !s.is_empty())
         .unwrap_or("Africa/Cairo")
         .to_string();
-    crate::branches::handlers::validate_timezone(pool.get_ref(), &timezone).await?;
+    crate::branches::handlers::validate_timezone(pool, &timezone).await?;
     let branch_name = b.branch.name.trim().to_string();
     if branch_name.is_empty() {
         return Err(AppError::BadRequest("branch.name is required".into()));
@@ -257,7 +293,7 @@ pub async fn provision_org(
     let slug_taken: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM organizations WHERE slug = $1)")
             .bind(&b.slug)
-            .fetch_one(pool.get_ref())
+            .fetch_one(pool)
             .await?;
     if slug_taken {
         return Err(AppError::Conflict(format!(
@@ -269,7 +305,7 @@ pub async fn provision_org(
         "SELECT EXISTS(SELECT 1 FROM users WHERE lower(email) = $1 AND deleted_at IS NULL)",
     )
     .bind(&email)
-    .fetch_one(pool.get_ref())
+    .fetch_one(pool)
     .await?;
     if email_taken {
         return Err(AppError::Conflict("Email already in use".into()));
@@ -286,12 +322,14 @@ pub async fn provision_org(
         .transpose()
         .map_err(|_| AppError::Internal)?;
 
-    let mut tx = pool.get_ref().begin().await?;
+    let mut tx = pool.begin().await?;
     let org = sqlx::query_as::<_, Org>(
         r#"
-        INSERT INTO organizations (name, slug, currency_code, tax_rate, timezone, modules)
-        VALUES ($1, $2, $3, $4, $5::timezone_name, COALESCE($6, '{pos}'))
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses
+        INSERT INTO organizations (name, slug, currency_code, tax_rate, timezone, modules,
+                                   plan, signup_source, signup_terms_version, signup_terms_accepted_at)
+        VALUES ($1, $2, $3, $4, $5::timezone_name, COALESCE($6, '{pos}'),
+                $7, $8, $9, CASE WHEN $9::text IS NULL THEN NULL ELSE now() END)
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses, plan, signup_source
         "#,
     )
     .bind(&name)
@@ -300,6 +338,9 @@ pub async fn provision_org(
     .bind(tax_rate)
     .bind(&timezone)
     .bind(&b.modules)
+    .bind(opts.plan.as_str())
+    .bind(opts.signup_source)
+    .bind(&opts.terms_version)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -330,8 +371,8 @@ pub async fn provision_org(
     .await?;
 
     let owner_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO users (org_id, name, email, role, password_hash, pin_hash, pin_fingerprint)
-         VALUES ($1, $2, $3, 'org_admin', $4, $5, $6) RETURNING id",
+        "INSERT INTO users (org_id, name, email, role, password_hash, pin_hash, pin_fingerprint, phone)
+         VALUES ($1, $2, $3, 'org_admin', $4, $5, $6, $7) RETURNING id",
     )
     .bind(org.id)
     .bind(&owner_name)
@@ -344,14 +385,15 @@ pub async fn provision_org(
             .as_deref()
             .map(|p| crate::auth::pin_fingerprint::fingerprint(org.id, p)),
     )
+    .bind(&opts.owner_phone)
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
 
-    Ok(HttpResponse::Created().json(ProvisionedOrg {
+    Ok(ProvisionedOrg {
         org,
         branch_id,
         owner_id,
         template: b.template,
-    }))
+    })
 }

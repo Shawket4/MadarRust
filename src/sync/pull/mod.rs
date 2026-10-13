@@ -176,6 +176,22 @@ pub async fn pull(
         ));
     }
     let resp = pull_core(pool.get_ref(), org_id, &body, q.since).await?;
+    // A till the Free plan switched off has now been TOLD (its own device row
+    // came back with `plan_inactive`): from here a new sale it queues is refused
+    // on replay (`plan::replay_verdict`).
+    let device = body
+        .device_id
+        .or_else(|| crate::devices::DeviceHeader::from_request_headers(&req));
+    if let Some(device) = device
+        && resp.data.get("device").is_some_and(|rows| {
+            rows.iter().any(|r| {
+                r.get("id").and_then(|v| v.as_str()) == Some(device.to_string().as_str())
+                    && r.get("plan_inactive").and_then(|v| v.as_bool()) == Some(true)
+            })
+        })
+    {
+        crate::plan::mark_till_told(pool.get_ref(), device).await?;
+    }
     Ok(HttpResponse::Ok().json(resp))
 }
 

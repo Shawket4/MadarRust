@@ -38,12 +38,17 @@ pub struct Device {
     pub retired_at: Option<DateTime<Utc>>,
     /// Another live device at the same branch uses the same code.
     pub code_conflict: bool,
+    /// The Free plan switched this till off (it is not its branch's active
+    /// one): it shows "This till isn't active" instead of the sell screen.
+    /// Always `false` on Paid.
+    #[serde(default)]
+    pub plan_inactive: bool,
 }
 
 pub(crate) const DEVICE_SELECT: &str = "SELECT d.id, d.org_id, d.branch_id, d.code, d.label, d.kind, d.platform, \
     d.app_version, d.first_seen_at, d.last_seen_at, d.retired_at, \
     EXISTS(SELECT 1 FROM devices d2 WHERE d2.branch_id = d.branch_id AND d2.code = d.code \
-           AND d2.id <> d.id AND d2.retired_at IS NULL) AS code_conflict \
+           AND d2.id <> d.id AND d2.retired_at IS NULL) AS code_conflict, d.plan_inactive \
     FROM devices d";
 
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
@@ -146,6 +151,11 @@ pub async fn register_device(
             "kind must be pos, kds or waiter".into(),
         ));
     }
+    // The plan's device limits (the install itself is left out of the count, so
+    // registering the same one again is not a second device). The branch is
+    // locked for the count and the write: one transaction.
+    let mut tx = pool.get_ref().begin().await?;
+    crate::plan::check_activate(&mut tx, org, body.branch_id, &body.kind, Some(body.id)).await?;
     sqlx::query(
         "INSERT INTO devices (id, org_id, branch_id, code, label, kind, platform, app_version) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
@@ -163,8 +173,9 @@ pub async fn register_device(
     .bind(&body.kind)
     .bind(&body.platform)
     .bind(&body.app_version)
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     // The upsert touches nothing when the id already belongs to another org.
     let device = fetch_device(pool.get_ref(), body.id).await?;
     if device.org_id != org {
@@ -224,6 +235,18 @@ pub async fn update_device(
         }
         None => current.code.clone(),
     };
+    // Bringing a retired device back, or moving one to another branch, puts one
+    // more device in that branch: the plan's limits apply as to a new one.
+    let reactivates = body.retired == Some(false) && current.retired_at.is_some();
+    let moves = body.branch_id.is_some() && body.branch_id != current.branch_id;
+    if (reactivates || moves) && body.retired != Some(true) {
+        if let Some(b) = branch {
+            let mut tx = pool.get_ref().begin().await?;
+            crate::plan::check_activate(&mut tx, current.org_id, b, &current.kind, Some(*id))
+                .await?;
+            tx.commit().await?;
+        }
+    }
     if body.code.is_some() || body.branch_id.is_some() {
         let taken: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM devices WHERE branch_id = $1 AND code = $2 AND id <> $3 AND retired_at IS NULL)",

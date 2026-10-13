@@ -210,6 +210,25 @@ pub struct BranchSalesReport {
     pub cash_tips: i64,
     pub top_items: Vec<ItemSales>,
     pub by_category: Vec<CategorySales>,
+    /// The sales split by how the customer takes the order: always both rows,
+    /// `takeaway` (Pickup) then `dine_in`, zero when there were none. Same sold
+    /// set and the same net-of-refunds revenue as `total_revenue`, so the two
+    /// rows add up to it (less delivery orders, which are `takeaway` here as
+    /// they are on the order). On every plan.
+    #[serde(default)]
+    pub by_service_mode: Vec<ServiceModeSales>,
+}
+
+/// Sales of one service mode (`orders.service_mode`).
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
+pub struct ServiceModeSales {
+    /// `takeaway` (Pickup) | `dine_in`.
+    #[schema(example = "takeaway")]
+    pub service_mode: String,
+    /// Sold orders (voided and refunded excluded).
+    pub orders: i64,
+    /// Net of refunds against these orders, like `total_revenue`.
+    pub revenue: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -754,6 +773,47 @@ pub async fn branch_sales(
         }
     }
 
+    let mode_rows = sqlx::query_as::<_, ServiceModeSales>(&format!(
+        r#"
+        SELECT o.service_mode,
+               COUNT(*)::bigint AS orders,
+               COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)), 0)::bigint AS revenue
+        FROM orders o
+        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+        WHERE o.branch_id = ANY($1)
+          AND o.{sold}
+          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        GROUP BY o.service_mode
+        "#,
+        sold = crate::orders::SOLD,
+    ))
+    .bind(&branch_ids)
+    .bind(query.from)
+    .bind(query.to)
+    .fetch_all(pool.get_ref())
+    .await?;
+    // Both modes, always, in a fixed order: a screen should not have to guess
+    // that a missing row means zero.
+    let by_service_mode: Vec<ServiceModeSales> = ["takeaway", "dine_in"]
+        .into_iter()
+        .map(|mode| {
+            mode_rows
+                .iter()
+                .find(|r| r.service_mode == mode)
+                .map(|r| ServiceModeSales {
+                    service_mode: r.service_mode.clone(),
+                    orders: r.orders,
+                    revenue: r.revenue,
+                })
+                .unwrap_or(ServiceModeSales {
+                    service_mode: mode.into(),
+                    orders: 0,
+                    revenue: 0,
+                })
+        })
+        .collect();
+
     Ok(HttpResponse::Ok().json(BranchSalesReport {
         branch_id: *branch_id,
         branch_name,
@@ -777,6 +837,7 @@ pub async fn branch_sales(
         cash_tips: totals.cash_tips,
         top_items,
         by_category,
+        by_service_mode,
     }))
 }
 

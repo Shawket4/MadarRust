@@ -20,6 +20,20 @@ use crate::errors::{AppError, AppErrorResponse};
 use crate::orgs::handlers::extract_claims;
 use crate::permissions::checker::check_permission;
 
+/// The role as `madar_plan::realtime_topics` names it (the work kind the core
+/// derives from a session).
+fn role_name(role: &crate::models::UserRole) -> &'static str {
+    use crate::models::UserRole::*;
+    match role {
+        Kitchen => "kitchen",
+        Waiter => "waiter",
+        Teller => "teller",
+        BranchManager => "branch_manager",
+        OrgAdmin => "org_admin",
+        SuperAdmin => "super_admin",
+    }
+}
+
 #[derive(Deserialize, IntoParams)]
 pub struct StreamQuery {
     pub branch_id: Uuid,
@@ -72,6 +86,7 @@ pub(crate) async fn permitted_topics(
 #[utoipa::path(
     get, path = "/realtime/stream", tag = "realtime", params(StreamQuery),
     responses(
+        (status = 403, description = "plan_no_realtime: the organization's plan holds no realtime stream (Free): poll instead"),
         (status = 200, content_type = "text/event-stream",
          description = "SSE stream. Each event is `event: <type>` (e.g. delivery.updated, \
             ticket.fired, kitchen.item_bumped, booking.created) followed by a `data:` JSON line \
@@ -90,6 +105,21 @@ pub async fn stream(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
+
+    // The plan decides first whether this org's tills hold a stream at all: a
+    // Free till polls (a pull after each sale, and once a minute when idle). An
+    // old app build that still asks is refused here, so it cannot hold one.
+    // `madar_plan::realtime_topics` is the plan's answer (empty on Free); Paid
+    // keeps exactly the permission-filtered set below, unchanged.
+    if let Some(org) = claims.org_id() {
+        let plan = crate::plan::plan_of(pool.get_ref(), org).await?;
+        if madar_plan::realtime_topics(plan, role_name(&claims.role)).is_empty() {
+            return Err(crate::plan::refuse(madar_plan::Refusal::new(
+                madar_plan::Code::NoRealtime,
+                None,
+            )));
+        }
+    }
 
     let topics = permitted_topics(pool.get_ref(), &claims, query.topics.as_deref()).await;
     if topics.is_empty() {

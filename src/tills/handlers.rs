@@ -775,6 +775,8 @@ pub async fn open_till(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "tills", "create").await?;
     require_branch_access(pool.get_ref(), &claims, *branch_id).await?;
+    // A till the Free plan switched off opens no session (`plan_till_inactive`).
+    crate::plan::guard_till_live(pool.get_ref(), body.device_id.or(device.0)).await?;
     let (till, created) = open_till_inner(
         pool.get_ref(),
         hub.as_ref().map(|h| h.get_ref()),

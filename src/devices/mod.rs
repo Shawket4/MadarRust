@@ -194,14 +194,31 @@ pub async fn ensure_registered(
         }
         None => None,
     };
+    // A till first heard of through a replayed op is registered, never refused:
+    // its backlog is money already taken. But on a plan with a till limit it
+    // cannot become a SECOND active till of its branch: it is registered
+    // switched off (`plan_inactive`), so its sales so far are kept and its
+    // next one is refused (`plan_till_inactive`).
+    let inactive = match branch_id {
+        Some(b) => {
+            let plan = crate::plan::plan_of(&mut *conn, org_id).await?;
+            match madar_plan::entitlements(plan).limits.pos_devices_per_branch {
+                Some(max) => crate::plan::device_counts(conn, b, None).await?.pos >= max,
+                None => false,
+            }
+        }
+        None => false,
+    };
     let inserted: Option<(String, Option<String>)> = sqlx::query_as(
-        "INSERT INTO devices (id, org_id, branch_id, code, kind) VALUES ($1, $2, $3, $4, 'pos') \
+        "INSERT INTO devices (id, org_id, branch_id, code, kind, plan_inactive, plan_inactive_at) \
+         VALUES ($1, $2, $3, $4, 'pos', $5, CASE WHEN $5 THEN now() END) \
          ON CONFLICT (id) DO NOTHING RETURNING code, label",
     )
     .bind(device_id)
     .bind(org_id)
     .bind(branch_id)
     .bind(&code)
+    .bind(inactive)
     .fetch_optional(&mut *conn)
     .await?;
     Ok(inserted.map(|(code, label)| DeviceSnapshot { code, label }))

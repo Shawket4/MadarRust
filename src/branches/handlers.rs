@@ -372,6 +372,9 @@ pub async fn create_branch(
     }
 
     let mut tx = pool.get_ref().begin().await?;
+    // The plan's branch limit (Free: one), or `inventory` for a warehouse.
+    crate::plan::check_may_add_branch(&mut tx, body.org_id, body.kind == BranchKind::Warehouse)
+        .await?;
     if body.kind == BranchKind::Warehouse {
         check_warehouse_limit(&mut tx, body.org_id).await?;
     }

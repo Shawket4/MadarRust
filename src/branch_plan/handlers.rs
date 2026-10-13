@@ -672,6 +672,7 @@ pub async fn save_plan(
     }
 
     check_references(&mut tx, org_id, branch_id, &plan).await?;
+    check_slot_limits(&mut tx, org_id, branch_id, &plan).await?;
     remove_sections(&mut tx, branch_id, &plan).await?;
     write_pieces(&mut tx, org_id, branch_id, &plan).await?;
     write_sections(&mut tx, org_id, branch_id, &plan).await?;
@@ -704,6 +705,45 @@ pub async fn save_plan(
         ),
     );
     Ok(HttpResponse::Ok().json(plan_view(pool.get_ref(), branch_id).await?))
+}
+
+/// The plan's device limits, for the slots a save ADDS (a slot the branch
+/// already has, of the same kind, is not new: a downgraded branch can still
+/// save its plan). Each new slot is asked of `madar_plan::may_activate` against
+/// the slots the branch keeps plus the new ones before it.
+pub async fn check_slot_limits(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: Uuid,
+    branch_id: Uuid,
+    plan: &BranchPlan,
+) -> Result<(), AppError> {
+    let existing: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, kind FROM branch_device_slots WHERE branch_id = $1")
+            .bind(branch_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    let org_plan = crate::plan::plan_of(&mut **tx, org_id).await?;
+    let is_new = |d: &crate::branch_plan::PlanDevice| {
+        !existing.iter().any(|(id, kind)| *id == d.id && *kind == d.kind)
+    };
+    let mut counts = madar_plan::DeviceCounts::default();
+    let bump = |kind: &str, counts: &mut madar_plan::DeviceCounts| match crate::plan::device_kind(kind)
+    {
+        Some(madar_plan::DeviceKind::Pos) => counts.pos += 1,
+        Some(madar_plan::DeviceKind::Kds) => counts.kds += 1,
+        Some(madar_plan::DeviceKind::Waiter) => counts.waiter += 1,
+        None => {}
+    };
+    for d in plan.devices.iter().filter(|d| !is_new(d)) {
+        bump(&d.kind, &mut counts);
+    }
+    for d in plan.devices.iter().filter(|d| is_new(d)) {
+        if let Some(kind) = crate::plan::device_kind(&d.kind) {
+            madar_plan::may_activate(org_plan, kind, counts).map_err(crate::plan::refuse)?;
+        }
+        bump(&d.kind, &mut counts);
+    }
+    Ok(())
 }
 
 /// Categories and registered devices named by the plan must be this org's and
