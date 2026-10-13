@@ -159,6 +159,10 @@ pub async fn public_branches(
     pool: web::Data<PgPool>,
     query: web::Query<PublicBranchesQuery>,
 ) -> Result<HttpResponse, AppError> {
+    // Online ordering, and the read-only `browse` menu, are the paid `online`
+    // feature: a Free shop has no such page (404, never 403).
+    crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
+        .await?;
     let rows: Vec<BranchOpenRow> = sqlx::query_as(&format!(
         r#"SELECT {BRANCH_OPEN_SELECT}
            FROM branches b
@@ -462,6 +466,8 @@ pub async fn public_menu(
     query: web::Query<ChannelParam>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
+    crate::plan::public_gate_branch(pool.get_ref(), branch_id, madar_plan::Feature::Online)
+        .await?;
     if query.channel == DINE_IN_PREVIEW {
         if !query.preview.unwrap_or(false) {
             return Err(AppError::BadRequest(
@@ -1474,6 +1480,8 @@ pub async fn delivery_quote(
     query: web::Query<QuoteQuery>,
 ) -> Result<HttpResponse, AppError> {
     let branch_id = path.into_inner();
+    crate::plan::public_gate_branch(pool.get_ref(), branch_id, madar_plan::Feature::Online)
+        .await?;
     validate_channel(&query.channel)?;
     validate_coords(query.lat, query.lng)?;
     let outside = query.channel == CHANNEL_OUTSIDE;
@@ -1599,7 +1607,6 @@ pub struct OtpRequestResponse {
 }
 
 const OTP_TTL_SECONDS: i64 = 300;
-const OTP_MAX_ATTEMPTS: i32 = 5;
 
 fn generate_otp_code() -> String {
     // uuid v4 is CSPRNG-backed; derive 4 digits from its first bytes.
@@ -1624,7 +1631,7 @@ pub async fn otp_request(
     // Per-phone cooldown: one live code per ~60s.
     let recent: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM delivery_otp \
-         WHERE phone = $1 AND consumed_at IS NULL AND created_at > now() - interval '60 seconds')",
+         WHERE phone = $1 AND purpose = 'delivery' AND consumed_at IS NULL AND created_at > now() - interval '60 seconds')",
     )
     .bind(&phone)
     .fetch_one(pool.get_ref())
@@ -1688,77 +1695,8 @@ pub async fn otp_verify(
         return Err(AppError::BadRequest("Incorrect code.".into()));
     }
 
-    // CLAIM the attempt and read the code in ONE statement.
-    //
-    // This used to SELECT the code and the attempt count, compare them in
-    // Rust, and only then UPDATE the counter on a miss. Three statements, and
-    // the window between the first and the last is where the cap lived. Guesses
-    // arriving together all read `attempts` before any of them wrote it, so all
-    // of them passed a check that only one should have — the five-attempt cap
-    // was really "five attempts per round trip", and the only thing bounding a
-    // parallel attacker was the per-IP limiter (three per thirty seconds).
-    //
-    // That matters more than it looks, because the code is FOUR digits. Ten
-    // thousand possibilities, a five-minute life: an attacker spread across
-    // enough addresses to dodge the per-IP limiter could cover the whole space
-    // inside one code's lifetime.
-    //
-    // Incrementing INSIDE the predicate makes the database the arbiter. Exactly
-    // five updates can ever succeed for a row, whoever sends them, from however
-    // many addresses, however simultaneously — the sixth matches no row because
-    // `attempts < $2` is false by then, and returns nothing.
-    //
-    // The successful attempt is counted too. It costs one of the five and is
-    // immediately irrelevant, because a correct code consumes the row.
-    let claimed: Option<(Uuid, String)> = sqlx::query_as(
-        "UPDATE delivery_otp SET attempts = attempts + 1 \
-         WHERE id = ( \
-             SELECT id FROM delivery_otp \
-              WHERE phone = $1 AND consumed_at IS NULL AND expires_at > now() \
-              ORDER BY created_at DESC LIMIT 1 \
-         ) \
-           AND attempts < $2 \
-         RETURNING id, code",
-    )
-    .bind(&phone)
-    .bind(OTP_MAX_ATTEMPTS)
-    .fetch_optional(pool.get_ref())
-    .await?;
-
-    let Some((id, expected)) = claimed else {
-        // Nothing was claimed, for one of two reasons, and they are worth
-        // telling apart: "request a new one" is the right instruction for an
-        // expired code and the wrong one for a code being ground down. This
-        // read races nothing — the cap has already been enforced above.
-        let spent: bool = sqlx::query_scalar(
-            "SELECT EXISTS( \
-                 SELECT 1 FROM delivery_otp \
-                  WHERE phone = $1 AND consumed_at IS NULL AND expires_at > now() \
-                    AND attempts >= $2 \
-             )",
-        )
-        .bind(&phone)
-        .bind(OTP_MAX_ATTEMPTS)
-        .fetch_one(pool.get_ref())
-        .await?;
-        return Err(AppError::BadRequest(if spent {
-            "Too many attempts — request a new code.".into()
-        } else {
-            "No active code — request a new one.".to_string()
-        }));
-    };
-
-    // Constant-time, so a wrong code cannot be narrowed a digit at a time by
-    // timing the reply. Cheap enough not to think about — the reason this is
-    // not bcrypt is in the migration that made the column plain.
-    if !crate::secrets::constant_time_eq(body.code.as_bytes(), expected.as_bytes()) {
-        return Err(AppError::BadRequest("Incorrect code.".into()));
-    }
-
-    sqlx::query("UPDATE delivery_otp SET consumed_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(pool.get_ref())
-        .await?;
+    let id = super::otp::check_code(pool.get_ref(), &phone, &body.code, "delivery").await?;
+    super::otp::consume(pool.get_ref(), id).await?;
 
     let token = whatsapp::issue_device_token(&secret.0, &phone)?;
     Ok(HttpResponse::Ok().json(OtpVerifyResponse {
@@ -1834,6 +1772,8 @@ pub async fn create_delivery_order(
     hub: web::Data<BranchEventHub>,
     body: web::Json<DeliveryOrderInput>,
 ) -> Result<HttpResponse, AppError> {
+    crate::plan::public_gate_branch(pool.get_ref(), body.branch_id, madar_plan::Feature::Online)
+        .await?;
     validate_channel(&body.channel)?;
     // Strict field validation up front (untrusted public client): bound every
     // free-text field, the payment hint, and the coordinates before any DB work.
@@ -2499,6 +2439,8 @@ pub async fn guest_order_history(
     secret: web::Data<JwtSecret>,
     query: web::Query<GuestHistoryQuery>,
 ) -> Result<HttpResponse, AppError> {
+    crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
+        .await?;
     let phone = normalize_phone(&query.phone)?;
 
     // Owner decision: the device token (issued by /public/otp/verify) is
@@ -2615,6 +2557,8 @@ pub async fn guest_past_locations(
     secret: web::Data<JwtSecret>,
     query: web::Query<GuestLocationsQuery>,
 ) -> Result<HttpResponse, AppError> {
+    crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
+        .await?;
     let phone = normalize_phone(&query.phone)?;
 
     // Device token REQUIRED (see guest_order_history).
@@ -2719,6 +2663,8 @@ pub async fn track_delivery_order(
     .fetch_optional(pool.get_ref())
     .await?;
     let tracking = row.ok_or_else(|| AppError::NotFound("Order not found".into()))?;
+    crate::plan::public_gate_org(pool.get_ref(), tracking.org_id, madar_plan::Feature::Online)
+        .await?;
     Ok(HttpResponse::Ok().json(tracking))
 }
 

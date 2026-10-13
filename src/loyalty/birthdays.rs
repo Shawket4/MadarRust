@@ -91,7 +91,9 @@ const DUE_SQL: &str = "
 WITH today AS (
     SELECT o.id AS org_id,
            COALESCE($1::date, (now() AT TIME ZONE o.timezone::text)::date) AS d
-      FROM organizations o WHERE o.deleted_at IS NULL)
+      FROM organizations o WHERE o.deleted_at IS NULL
+       -- Loyalty is the paid `loyalty` feature: a Free org gets no greetings.
+       AND o.plan IS DISTINCT FROM 'free')
 SELECT c.id, c.org_id, c.name, c.locale,
        EXTRACT(YEAR FROM t.d)::int AS year
   FROM loyalty_members_v c

@@ -197,6 +197,11 @@ pub async fn analytics_orders(
         None => 0,
     };
 
+    // A partner pull of order analytics is an integration: the paid `online`
+    // feature (a downgraded org's credential stops answering).
+    crate::plan::require_feature(pool.get_ref(), caller.org_id, madar_plan::Feature::Online)
+        .await?;
+
     // Everything past authentication runs on the org's RLS-scoped pool, so the
     // database itself refuses cross-tenant reads.
     let db = Db::for_org(pool.get_ref(), caller.org_id).await;

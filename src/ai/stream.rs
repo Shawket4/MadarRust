@@ -179,6 +179,9 @@ pub async fn chat_stream(
     // Everything that can fail cheaply fails BEFORE the stream opens, so a bad
     // request is an HTTP error the client can handle rather than an `error`
     // frame inside a 200 it has to parse.
+    if let Some(org) = claims.org_id() {
+        crate::plan::require_feature(db.get_ref(), org, madar_plan::Feature::Basira).await?;
+    }
     let prepared = super::handlers::prepare_turn(&db, &claims, &req, &body, &state).await?;
 
     let (tx, rx) = mpsc::channel::<ChatFrame>(CHANNEL_DEPTH);

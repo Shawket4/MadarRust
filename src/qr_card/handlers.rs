@@ -619,6 +619,7 @@ pub async fn branch_qr(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;
     let (branch_id, org_id) = load_branch_checked(pool.get_ref(), &claims, *id).await?;
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
 
     // When all three in-mall location fields are provided, generate a pre-filled
     // in-mall URL and use a separate dedup key so each location gets its own code.
@@ -709,6 +710,7 @@ pub async fn org_qr(
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;
     let org_id = *id;
     require_same_org(&claims, Some(org_id))?;
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
 
     let shop = shop_origin(pool.get_ref(), org_id).await?;
     let long_url = org_order_url(shop.as_deref(), org_id)?;
@@ -832,6 +834,7 @@ pub async fn org_booking_qr(
     check_permission(pool.get_ref(), &claims, "bookings", "read").await?;
     let org_id = *id;
     require_same_org(&claims, Some(org_id))?;
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Bookings).await?;
 
     // The org card leads to a branch picker, so it needs at least one branch
     // that actually takes bookings — otherwise the picker is empty.
@@ -1098,6 +1101,7 @@ pub async fn delivery_order_qr(
     let (order_id, org_id) =
         row.ok_or_else(|| AppError::NotFound("Delivery order not found".into()))?;
     require_same_org(&claims, Some(org_id))?;
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
 
     let long_url = crate::delivery::whatsapp::tracking_url(order_id).ok_or_else(|| {
         AppError::ServiceUnavailable("PUBLIC_ORDER_BASE_URL not configured".into())
@@ -1279,6 +1283,7 @@ pub async fn org_loyalty_qr(
     check_permission(pool.get_ref(), &claims, "loyalty", "read").await?;
     let org_id = *id;
     require_same_org(&claims, Some(org_id))?;
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Loyalty).await?;
 
     // The org card carries the ORG's programme, so that is the one that has to
     // be switched on. Refusing here beats printing a card that leads to "we run
@@ -1354,6 +1359,7 @@ pub async fn org_links_qr(
         None,
     )
     .await?;
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Branding).await?;
 
     let shop = links_page_origin(pool.get_ref(), org_id).await?;
     let long_url = org_links_url(shop.as_deref(), org_id)?;

@@ -68,6 +68,9 @@ async fn authenticated_member(
     if !crate::secrets::constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
         return Err(AppError::Unauthorized("Bad pass token".into()));
     }
+    // A shop whose plan lacks loyalty has no wallet passes (a downgraded shop's
+    // old passes stop updating: 404, like a pass that never existed).
+    crate::plan::public_gate_org(pool, member.org_id, madar_plan::Feature::Loyalty).await?;
     Ok(member)
 }
 
@@ -160,8 +163,8 @@ pub async fn serials(
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|d| d.with_timezone(&chrono::Utc));
 
-    let rows: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        "SELECT c.id, c.pass_updated_at FROM loyalty_pass_devices d \
+    let rows: Vec<(Uuid, Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        "SELECT c.id, c.org_id, c.pass_updated_at FROM loyalty_pass_devices d \
            JOIN loyalty_customers c ON c.id = d.customer_id \
           WHERE d.device_library_id = $1 \
             AND (c.deleted_at IS NULL OR c.pass_voided_at IS NOT NULL) \
@@ -171,6 +174,30 @@ pub async fn serials(
     .bind(since)
     .fetch_all(pool.get_ref())
     .await?;
+
+    // Passes of a shop whose plan lacks loyalty are not listed (a device holds
+    // a handful of passes, so a lookup per distinct shop is nothing).
+    let mut live_orgs: std::collections::HashMap<Uuid, bool> = Default::default();
+    let mut rows_live = Vec::with_capacity(rows.len());
+    for (id, org, t) in rows {
+        let live = match live_orgs.get(&org) {
+            Some(l) => *l,
+            None => {
+                let l = crate::plan::org_has_feature(
+                    pool.get_ref(),
+                    org,
+                    madar_plan::Feature::Loyalty,
+                )
+                .await?;
+                live_orgs.insert(org, l);
+                l
+            }
+        };
+        if live {
+            rows_live.push((id, t));
+        }
+    }
+    let rows = rows_live;
 
     if rows.is_empty() {
         return Ok(HttpResponse::NoContent().finish());

@@ -41,7 +41,9 @@
 //! coordinate purge (step 4) is a privacy duty and runs for everyone.
 
 /// The SQL test for "this org's Dawam runs": join `organizations o` on it.
-const LIVE_ORG: &str = "o.is_active AND o.deleted_at IS NULL AND 'dawam' = ANY(o.modules)";
+// Dawam is the paid `dawam` feature as well as a module: a Free org's jobs are
+// skipped (`plan::not_free_org_sql`, spelled out because this is a const).
+const LIVE_ORG: &str = "o.is_active AND o.deleted_at IS NULL AND 'dawam' = ANY(o.modules) AND o.plan IS DISTINCT FROM 'free'";
 
 use std::time::Duration;
 
@@ -315,7 +317,7 @@ pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), AppError> {
              SELECT b.org_id, b.id, \
                     (now() AT TIME ZONE COALESCE(b.timezone::text, o.timezone::text)) AS local \
                FROM branches b JOIN organizations o ON o.id = b.org_id \
-              WHERE o.is_active AND o.deleted_at IS NULL AND 'dawam' = ANY(o.modules) \
+              WHERE o.is_active AND o.deleted_at IS NULL AND 'dawam' = ANY(o.modules) AND o.plan IS DISTINCT FROM 'free' \
                 AND b.deleted_at IS NULL \
          ) \
          SELECT b.org_id, b.id, \

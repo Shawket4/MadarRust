@@ -506,6 +506,10 @@ pub async fn chat(
         ));
     }
 
+    // Basira costs money on every request: the paid `basira` feature.
+    if let Some(org) = claims.org_id() {
+        crate::plan::require_feature(db.get_ref(), org, madar_plan::Feature::Basira).await?;
+    }
     let prepared = prepare_turn(&db, &claims, &req, &body, &state).await?;
     let mut log = TurnLog::new(
         &prepared.provider.name(),
