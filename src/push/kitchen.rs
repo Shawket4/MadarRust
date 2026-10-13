@@ -127,7 +127,7 @@ async fn screens(pool: &PgPool, branch: Uuid) -> Vec<Screen> {
 pub fn fired(pool: &PgPool, hub: &BranchEventHub, view: &KitchenTicketView) {
     let Some(t) = super::transport() else { return };
     let (pool, hub, view) = (pool.clone(), hub.clone(), view.clone());
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let branch = view.branch_id;
         let watching = |s: &Screen| {
             hub.is_connected(branch, s.device_id, crate::realtime::event::Topic::Kitchen)
