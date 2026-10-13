@@ -435,6 +435,7 @@ pub async fn list_users(
                       -- attributed to. It has no credentials and belongs in
                       -- no staff list.
                       AND NOT u.is_guest_principal
+                      AND u.device_id IS NULL -- a kitchen screen, not a person
                       AND (
                           u.id = $2
                           OR uba.branch_id IN (
@@ -457,7 +458,7 @@ pub async fn list_users(
                            created_at, updated_at, deleted_at
                     FROM users
                     WHERE org_id = $1 AND deleted_at IS NULL
-                      AND NOT is_guest_principal
+                      AND NOT is_guest_principal AND device_id IS NULL
                     ORDER BY name
                     "#,
                 )
@@ -475,7 +476,7 @@ pub async fn list_users(
                    is_active, last_login_at,
                    created_at, updated_at, deleted_at
             FROM users
-            WHERE deleted_at IS NULL AND NOT is_guest_principal
+            WHERE deleted_at IS NULL AND NOT is_guest_principal AND device_id IS NULL
             ORDER BY name
             "#,
             )

@@ -112,14 +112,21 @@ pub async fn stream(
     let rx = hub.subscribe(query.branch_id);
 
     // Presence for the push fallback: an install whose stream carries new
-    // online orders is "connected" at this branch while the body lives, and
-    // gets no FCM push for them (`push::pos`). The guard moves into the body
-    // stream below, so actix dropping the body — the client closing, an
-    // error, a lagged receiver — deregisters it. A client that names no
-    // install (`X-Madar-Device`) is not tracked.
-    let presence = crate::devices::DeviceHeader::from_request_headers(&req)
-        .filter(|_| topics.contains(&Topic::Delivery))
-        .map(|device| hub.connect(query.branch_id, device));
+    // online orders (`delivery`) or new kitchen work (`kitchen`) is
+    // "connected" for that topic at this branch while the body lives, and
+    // gets no FCM push for it (`push::pos`, `push::kitchen`). The guards move
+    // into the body stream below, so actix dropping the body — the client
+    // closing, an error, a lagged receiver — deregisters them. A client that
+    // names no install (`X-Madar-Device`) is not tracked.
+    let presence: Vec<_> = crate::devices::DeviceHeader::from_request_headers(&req)
+        .map(|device| {
+            [Topic::Delivery, Topic::Kitchen]
+                .into_iter()
+                .filter(|t| topics.contains(t))
+                .map(|t| hub.connect(query.branch_id, device, t))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // A fresh connect seeds from the list endpoints, not from replay. A resume
     // whose gap we cannot fully cover (buffer evicted, or a cursor from before a

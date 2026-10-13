@@ -63,7 +63,7 @@ pub fn set_grace(d: Duration) {
     GRACE_MS.store(d.as_millis() as u64, Ordering::Relaxed);
 }
 
-fn grace() -> Duration {
+pub(super) fn grace() -> Duration {
     Duration::from_millis(GRACE_MS.load(Ordering::Relaxed))
 }
 
@@ -209,7 +209,11 @@ pub fn new_online_order(pool: &PgPool, hub: &BranchEventHub, order: &DeliveryOrd
     let (pool, hub, order) = (pool.clone(), hub.clone(), order.clone());
     crate::db::spawn(async move {
         let branch = order.branch_id;
-        let watching = |d: &Device| d.device_id.is_some_and(|id| hub.is_connected(branch, id));
+        let watching = |d: &Device| {
+            d.device_id.is_some_and(|id| {
+                hub.is_connected(branch, id, crate::realtime::event::Topic::Delivery)
+            })
+        };
         let mut devices = recipients(&pool, order.org_id, branch).await;
         devices.retain(|d| !watching(d));
         if !devices.is_empty() {

@@ -34,6 +34,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                     .wrap(Condition::new(limited, Governor::new(&gov)))
                     .route(web::post().to(crate::devices::activation::activate)),
             )
+            // A kitchen screen's sign-in: its device credential, so it shares
+            // the activation governor.
+            .service(
+                web::resource("/device-session")
+                    .wrap(Condition::new(limited, Governor::new(&gov)))
+                    .route(web::post().to(handlers::device_session)),
+            )
             .service(
                 web::resource("/authz-keys")
                     .route(web::get().to(crate::authz::snapshot::authz_keys)),

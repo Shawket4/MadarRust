@@ -601,6 +601,9 @@ pub(crate) async fn publish_kitchen(
             branch_id,
             BranchEvent::new(Topic::Kitchen, event_type, &view),
         );
+        if event_type == "kitchen.fired" {
+            crate::push::kitchen::fired(executor, hub, &view);
+        }
     }
 }
 

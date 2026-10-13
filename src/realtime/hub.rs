@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::event::BranchEvent;
+use super::event::{BranchEvent, Topic};
 
 /// Per-branch broadcast capacity. A slow client that falls this far behind is
 /// dropped (the stream surfaces `Lagged`, the SSE handler ends the connection,
@@ -58,11 +58,13 @@ pub struct Replay {
     pub server_last_id: u64,
 }
 
-/// Live `/realtime/stream` connections that carry the `delivery` topic, per
-/// (branch, install). A count, not a flag: one install can hold two streams
-/// for a moment (a reconnect racing the old socket's teardown), and it is
-/// connected until the LAST of them goes.
-type Presence = HashMap<(Uuid, Uuid), usize>;
+/// Live `/realtime/stream` connections per (branch, install, topic), for the
+/// topics a push stands in for (`delivery` for tills, `kitchen` for kitchen
+/// screens): a push asks about its own topic, so a till streaming only the
+/// kitchen still gets its online-order push. A count, not a flag: one install
+/// can hold two streams for a moment (a reconnect racing the old socket's
+/// teardown), and it is connected until the LAST of them goes.
+type Presence = HashMap<(Uuid, Uuid, Topic), usize>;
 
 /// Branch-keyed broadcast registry. Cheap to clone (`Arc` inside) so it lives in
 /// `web::Data` and is shared across all actix workers.
@@ -77,7 +79,7 @@ pub struct BranchEventHub {
 /// connection closes, errors or lags out — deregisters the connection.
 pub struct Connection {
     presence: Arc<Mutex<Presence>>,
-    key: (Uuid, Uuid),
+    key: (Uuid, Uuid, Topic),
 }
 
 impl Drop for Connection {
@@ -97,12 +99,12 @@ impl BranchEventHub {
         Self::default()
     }
 
-    /// Record that `device` has a live stream at `branch` which carries new
-    /// online orders (the `delivery` topic). The push fallback
-    /// (`push::pos`) skips such a device: the open app already alerts from the
-    /// `delivery.created` event itself.
-    pub fn connect(&self, branch_id: Uuid, device_id: Uuid) -> Connection {
-        let key = (branch_id, device_id);
+    /// Record that `device` has a live stream at `branch` carrying `topic`.
+    /// The push fallback for that topic (`push::pos` for `delivery`,
+    /// `push::kitchen` for `kitchen`) skips such a device: the open app
+    /// already alerts from the event itself.
+    pub fn connect(&self, branch_id: Uuid, device_id: Uuid, topic: Topic) -> Connection {
+        let key = (branch_id, device_id, topic);
         *self
             .presence
             .lock()
@@ -115,19 +117,19 @@ impl BranchEventHub {
         }
     }
 
-    /// How many live delivery-carrying streams `device` holds at `branch`.
-    pub fn connections(&self, branch_id: Uuid, device_id: Uuid) -> usize {
+    /// How many live streams carrying `topic` `device` holds at `branch`.
+    pub fn connections(&self, branch_id: Uuid, device_id: Uuid, topic: Topic) -> usize {
         self.presence
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(branch_id, device_id))
+            .get(&(branch_id, device_id, topic))
             .copied()
             .unwrap_or(0)
     }
 
-    /// Does `device` hold a live delivery-carrying stream at `branch`?
-    pub fn is_connected(&self, branch_id: Uuid, device_id: Uuid) -> bool {
-        self.connections(branch_id, device_id) > 0
+    /// Does `device` hold a live stream carrying `topic` at `branch`?
+    pub fn is_connected(&self, branch_id: Uuid, device_id: Uuid, topic: Topic) -> bool {
+        self.connections(branch_id, device_id, topic) > 0
     }
 
     /// Subscribe to a branch's bus, creating it on first use.
@@ -262,21 +264,28 @@ mod tests {
     fn a_device_is_connected_until_its_last_stream_closes() {
         let hub = BranchEventHub::new();
         let (branch, other_branch, device) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
-        assert!(!hub.is_connected(branch, device));
-        let first = hub.connect(branch, device);
-        let second = hub.connect(branch, device); // a reconnect racing the old socket
-        assert_eq!(hub.connections(branch, device), 2);
+        assert!(!hub.is_connected(branch, device, Topic::Delivery));
+        let first = hub.connect(branch, device, Topic::Delivery);
+        let second = hub.connect(branch, device, Topic::Delivery); // a reconnect racing the old socket
+        assert_eq!(hub.connections(branch, device, Topic::Delivery), 2);
         assert!(
-            !hub.is_connected(other_branch, device),
+            !hub.is_connected(other_branch, device, Topic::Delivery),
             "a stream at one branch says nothing about another"
         );
         drop(first);
-        assert!(hub.is_connected(branch, device), "one stream is still up");
+        assert!(
+            hub.is_connected(branch, device, Topic::Delivery),
+            "one stream is still up"
+        );
         drop(second);
-        assert!(!hub.is_connected(branch, device));
+        assert!(!hub.is_connected(branch, device, Topic::Delivery));
         // Clones share the registry (the hub lives in web::Data).
-        let _c = hub.clone().connect(branch, device);
-        assert!(hub.is_connected(branch, device));
+        let _c = hub.clone().connect(branch, device, Topic::Delivery);
+        assert!(hub.is_connected(branch, device, Topic::Delivery));
+        assert!(
+            !hub.is_connected(branch, device, Topic::Kitchen),
+            "a delivery stream says nothing about the kitchen"
+        );
     }
 
     #[test]

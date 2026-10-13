@@ -13,7 +13,7 @@ use serde::Serialize;
 
 /// A realtime topic. Each maps to a permission resource; the stream forwards an
 /// event only when the caller subscribed to its topic and may read that resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Topic {
     Delivery,
     Tickets,

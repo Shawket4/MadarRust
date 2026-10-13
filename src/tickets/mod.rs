@@ -908,6 +908,7 @@ pub(crate) async fn publish_fired(
             branch_id,
             BranchEvent::new(Topic::Kitchen, "kitchen.fired", &with_origin(&view, origin)),
         );
+        crate::push::kitchen::fired(pool, hub, &view);
     }
 }
 
