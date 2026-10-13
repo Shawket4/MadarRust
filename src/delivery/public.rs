@@ -366,6 +366,30 @@ pub struct DeliveryMenuCategory {
     pub name_translations: serde_json::Value,
     #[serde(serialize_with = "crate::uploads::handlers::serialize_opt_url")]
     pub image_url: Option<String>,
+    /// The dashboard's drag-and-drop position (lower first). `categories`
+    /// already comes in the POS's order (madar-catalog `order`: this, then
+    /// the English name, then `id`); a page shown in another language
+    /// re-orders by the name it shows (madar-web `category_order`).
+    pub display_order: i32,
+}
+
+/// `categories` in the order the POS shows them (madar-catalog `order`). The
+/// server reads no locale, so a tie breaks on the English name, as a till in
+/// English breaks it.
+fn in_menu_order(categories: Vec<DeliveryMenuCategory>) -> Vec<DeliveryMenuCategory> {
+    use madar_catalog::order::{Category, Translations, category_order};
+    let keys: Vec<Category> = categories
+        .iter()
+        .map(|c| Category {
+            id: c.id.to_string(),
+            name: c.name.clone(),
+            name_translations: Translations::from_value(&c.name_translations),
+            display_order: Some(c.display_order),
+        })
+        .collect();
+    let order = category_order(&keys, "en");
+    let mut slots: Vec<Option<DeliveryMenuCategory>> = categories.into_iter().map(Some).collect();
+    order.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
 #[derive(Serialize, ToSchema)]
@@ -541,27 +565,33 @@ pub(crate) async fn load_public_menu(
         },
     );
 
-    let categories: Vec<DeliveryMenuCategory> =
-        sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>)>(
+    // The POS's order, not the alphabet's: see `in_menu_order`.
+    let categories: Vec<DeliveryMenuCategory> = in_menu_order(
+        sqlx::query_as::<_, (Uuid, String, serde_json::Value, Option<String>, i32)>(
             "SELECT id, name, name_translations, \
-                    COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = categories.image_group_id AND a.variant = 'full' LIMIT 1), image_url) \
+                    COALESCE('asset:' || (SELECT a.hash FROM assets a WHERE a.group_id = categories.image_group_id AND a.variant = 'full' LIMIT 1), image_url), \
+                    display_order \
              FROM categories \
-         WHERE org_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY name",
+         WHERE org_id = $1 AND is_active = true AND deleted_at IS NULL",
         )
         .bind(org_id)
         .fetch_all(pool)
         .await?
         .into_iter()
         .map(
-            |(id, name, name_translations, image_url)| DeliveryMenuCategory {
+            |(id, name, name_translations, image_url, display_order)| DeliveryMenuCategory {
                 id,
                 name,
                 name_translations,
                 image_url: public_image_url(org_id, image_url),
+                display_order,
             },
         )
-        .collect();
+        .collect(),
+    );
 
+    // Items carry no position of their own: the till lists them as
+    // `/menu-items` does (`ORDER BY mi.name`), and so does this.
     #[allow(clippy::type_complexity)]
     let item_rows: Vec<(Uuid, Option<Uuid>, String, serde_json::Value, Option<String>, Option<String>, i32, String)> =
         sqlx::query_as(
