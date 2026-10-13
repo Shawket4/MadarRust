@@ -150,6 +150,8 @@ pub async fn table(pool: web::Data<PgPool>, id: web::Path<Uuid>) -> Result<HttpR
     // id rather than an explanation.
     let (branch_id, org_id, label, branch_name) =
         row.ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
+    // Tables and their QR codes are the paid `floor` feature.
+    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Floor).await?;
 
     let accepting = crate::tills::handlers::branch_has_open_till(pool.get_ref(), branch_id)
         .await
@@ -259,6 +261,7 @@ pub async fn table_menu(
     .await?;
     let (branch_id, org_id) =
         row.ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
+    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Floor).await?;
     let menu =
         crate::delivery::public::load_public_menu(pool.get_ref(), org_id, branch_id, None).await?;
     Ok(HttpResponse::Ok().json(menu))
@@ -296,6 +299,7 @@ pub async fn create_table_order(
     .await?;
     let (branch_id, org_id) =
         row.ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
+    crate::plan::public_gate_org(base.get_ref(), org_id, madar_plan::Feature::Floor).await?;
     // The tenant scope comes from the TABLE — the only thing the customer
     // supplied that the database can vouch for — and every write below runs
     // inside it, so a table id cannot reach another shop's rows.

@@ -124,9 +124,13 @@ pub struct OrderNowContext {
 }
 
 async fn member_by_token(pool: &PgPool, token: &str) -> Result<MemberRow, AppError> {
-    model::find_by_token(pool, token)
+    let member = model::find_by_token(pool, token)
         .await?
-        .ok_or_else(not_found)
+        .ok_or_else(not_found)?;
+    // Ordering from a wallet pass is online ordering: a shop on a plan without
+    // it has no such page.
+    crate::plan::public_gate_org(pool, member.org_id, madar_plan::Feature::Online).await?;
+    Ok(member)
 }
 
 #[derive(sqlx::FromRow)]

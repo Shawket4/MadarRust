@@ -69,6 +69,8 @@ async fn send_reminders(pool: &PgPool) -> Result<(), crate::errors::AppError> {
         "UPDATE bookings b SET reminder_sent_at = now(), updated_at = now() \
          FROM branch_booking_settings s \
          WHERE s.branch_id = b.branch_id AND s.reminder_lead_minutes IS NOT NULL \
+           AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
+                            WHERE fb.id = b.branch_id AND fo.plan = 'free') \
            AND b.status = 'confirmed' AND b.reminder_sent_at IS NULL \
            AND b.starts_at > now() \
            AND b.starts_at <= now() + make_interval(mins => s.reminder_lead_minutes) \
@@ -94,6 +96,8 @@ async fn announce_arrivals(
          FROM (SELECT b2.id, COALESCE(s.hold_minutes, 15) AS hold \
                FROM bookings b2 LEFT JOIN branch_booking_settings s ON s.branch_id = b2.branch_id) h \
          WHERE h.id = b.id AND b.status = 'confirmed' AND b.arriving_notified_at IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
+                            WHERE fb.id = b.branch_id AND fo.plan = 'free') \
            AND b.starts_at - make_interval(mins => h.hold) <= now() \
            AND b.starts_at + interval '30 minutes' > now() \
          RETURNING b.id",
@@ -112,6 +116,8 @@ async fn roll_no_shows(pool: &PgPool, hub: &BranchEventHub) -> Result<(), crate:
          FROM (SELECT b2.id, s.auto_no_show_minutes AS grace \
                FROM bookings b2 LEFT JOIN branch_booking_settings s ON s.branch_id = b2.branch_id) h \
          WHERE h.id = b.id AND b.status = 'confirmed' \
+           AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
+                            WHERE fb.id = b.branch_id AND fo.plan = 'free') \
            AND ((h.grace IS NOT NULL AND b.starts_at + make_interval(mins => h.grace) < now()) \
                 OR (h.grace IS NULL AND b.ends_at < now())) \
          RETURNING b.id",
@@ -146,6 +152,8 @@ async fn complete_finished(
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() \
          WHERE b.status = 'seated' AND b.ends_at + interval '60 minutes' < now() \
+           AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
+                            WHERE fb.id = b.branch_id AND fo.plan = 'free') \
            AND NOT EXISTS (SELECT 1 FROM open_tickets ot \
                            WHERE ot.booking_id = b.id AND ot.status = 'open') \
            AND (NOT EXISTS (SELECT 1 FROM open_tickets ot WHERE ot.booking_id = b.id) \

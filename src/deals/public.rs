@@ -46,6 +46,7 @@ pub async fn branch_cart_quote(
     id: web::Path<Uuid>,
     body: web::Json<PublicCartQuoteRequest>,
 ) -> Result<HttpResponse, AppError> {
+    crate::plan::public_gate_branch(pool.get_ref(), *id, madar_plan::Feature::Online).await?;
     let org_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT org_id FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
@@ -98,6 +99,7 @@ pub async fn table_cart_quote(
     .fetch_optional(pool.get_ref())
     .await?;
     let (branch_id, org_id) = row.ok_or_else(|| AppError::NotFound("Table not found".into()))?;
+    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Floor).await?;
     let lines = cart_lines(&body)?;
     // A table is dine-in: no delivery sub-channel prices.
     let cart = resolve_cart_as(

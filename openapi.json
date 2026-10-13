@@ -29227,6 +29227,26 @@
           "orgs"
         ],
         "operationId": "list_orgs",
+        "parameters": [
+          {
+            "name": "plan",
+            "in": "query",
+            "description": "Only organizations on this plan: `free` | `paid`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "signup_source",
+            "in": "query",
+            "description": "Only organizations created this way: `admin` | `self`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "List of all organizations",
@@ -31123,6 +31143,212 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OnboardingStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/orgs/{id}/plan": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The org's plan, what it allows, and each branch's tills.",
+        "operationId": "get_org_plan",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The plan and its limits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/orgs/{id}/plan/active-till": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Choose which till a branch sells on (Free plan). The chosen till is active,\nevery other POS till of the branch is switched off. The org's owner, or a\nsuper admin; a paid org has no inactive tills (409 `PLAN_NOT_FREE`).",
+        "operationId": "put_active_till",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActiveTillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The plan as now stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanState"
                 }
               }
             }
@@ -36428,6 +36654,196 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/signup": {
+      "post": {
+        "tags": [
+          "signup"
+        ],
+        "summary": "Make a shop on the Free plan.",
+        "description": "400 for a wrong or expired code (or a bad field), 409 `SIGNUP_PHONE_TAKEN` /\n`SIGNUP_EMAIL_TAKEN` when the phone or email already owns an account (sign in\ninstead), 429 from the per-IP governor. A code is spent only by a signup that\nsucceeds: a duplicate email leaves it good for another try (within its five\nattempts).",
+        "operationId": "signup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The shop, and a session for its owner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RATE_LIMITED"
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/signup/otp": {
+      "post": {
+        "tags": [
+          "signup"
+        ],
+        "summary": "Send a code by WhatsApp to prove the owner's phone.",
+        "description": "409 `SIGNUP_PHONE_TAKEN` when a shop already owns the phone; 429 when a code\nwent out in the last minute (`SIGNUP_OTP_COOLDOWN`) or five did in the last\nhour (`SIGNUP_OTP_LIMIT`); the per-IP governor answers 429 `RATE_LIMITED`.",
+        "operationId": "signup_otp",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupOtpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupOtpResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "SIGNUP_OTP_COOLDOWN, SIGNUP_OTP_LIMIT or RATE_LIMITED"
           },
           "500": {
             "description": "Internal server error",
@@ -65559,6 +65975,24 @@
           "revoked"
         ]
       },
+      "ActiveTillRequest": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "device_id"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "device_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The POS till (device) that stays active in the branch."
+          }
+        }
+      },
       "AddRoundRequest": {
         "type": "object",
         "required": [
@@ -68967,6 +69401,13 @@
             "items": {
               "$ref": "#/components/schemas/CategorySales"
             }
+          },
+          "by_service_mode": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServiceModeSales"
+            },
+            "description": "The sales split by how the customer takes the order: always both rows,\n`takeaway` (Pickup) then `dine_in`, zero when there were none. Same sold\nset and the same net-of-refunds revenue as `total_revenue`, so the two\nrows add up to it (less delivery orders, which are `takeaway` here as\nthey are on the order). On every plan."
           },
           "cash_tips": {
             "type": "integer",
@@ -77327,6 +77768,10 @@
             "type": "string",
             "format": "uuid"
           },
+          "plan_inactive": {
+            "type": "boolean",
+            "description": "The Free plan switched this till off (it is not its branch's active\none): it shows \"This till isn't active\" instead of the sell screen.\nAlways `false` on Paid."
+          },
           "platform": {
             "type": [
               "string",
@@ -78026,6 +78471,21 @@
             "type": "string",
             "description": "Human-readable error message.",
             "example": "Something went wrong"
+          },
+          "error_ar": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A plan refusal's message in Arabic; `error` is the English one."
+          },
+          "feature": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A plan refusal's feature (`inventory`, `loyalty`, `online`, `bookings`,\n`floor`, `kitchen`, `dawam`, `branding`, `basira`), when it is about one.",
+            "example": "kitchen"
           },
           "retry_after_seconds": {
             "type": [
@@ -81180,6 +81640,11 @@
               }
             ]
           },
+          "plan": {
+            "type": "string",
+            "description": "The organization's plan: `free` | `paid` (`madar-plan`; an old client that\ndoes not read it behaves as before, and a missing value is `paid`).\nA till also learns it from the sync feed's branch settings.",
+            "example": "paid"
+          },
           "require_table_for_orders": {
             "type": "boolean",
             "description": "Every dine-in sale belongs to a table.\n\nThe till needs this, not just the server: the rule changes what the POS\nputs in front of a teller — the floor becomes the home screen and a sale\nstarts by picking a table — and a refusal AFTER the items are rung up is\nfar too late to be useful."
@@ -82119,6 +82584,11 @@
             "type": "string",
             "description": "Org currency code (e.g. \"EGP\").",
             "example": "EGP"
+          },
+          "plan": {
+            "type": "string",
+            "description": "The organization's plan: `free` | `paid`. Re-read on every `/auth/me`.",
+            "example": "paid"
           },
           "require_table_for_orders": {
             "type": "boolean",
@@ -84476,6 +84946,11 @@
               "null"
             ]
           },
+          "service_mode": {
+            "type": "string",
+            "description": "How the customer takes the order: `takeaway` (Pickup) | `dine_in`. The\ncart's Pickup / Dine in toggle, stored on every order of every plan; a\nsale made on a till that never sent it is `takeaway`. Sales reports split\nby it (`GET /reports/sales` → `by_service_mode`).",
+            "example": "takeaway"
+          },
           "shift_id": {
             "type": "string",
             "format": "uuid",
@@ -85696,7 +86171,9 @@
           "social_links",
           "is_active",
           "modules",
-          "timezone"
+          "timezone",
+          "plan",
+          "signup_source"
         ],
         "properties": {
           "brand_accent": {
@@ -85772,6 +86249,11 @@
             "type": "string",
             "example": "The Rue"
           },
+          "plan": {
+            "type": "string",
+            "description": "`free` | `paid`. What the organization may use (madar-plan): Free is\nPOS only, one branch, one till; Paid is the whole product. Super admin\nchanges it (`PATCH /orgs/{id}`).",
+            "example": "paid"
+          },
           "receipt_footer": {
             "type": [
               "string",
@@ -85791,6 +86273,11 @@
           "service_charge_taxable": {
             "type": "boolean",
             "description": "Whether the service charge is itself taxed."
+          },
+          "signup_source": {
+            "type": "string",
+            "description": "`admin` (the super admin made the org) | `self` (the shop signed up).",
+            "example": "admin"
           },
           "slug": {
             "type": [
@@ -87918,6 +88405,30 @@
           }
         }
       },
+      "PlanBranch": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "name",
+          "tills"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanTill"
+            },
+            "description": "The branch's POS tills, the active one first."
+          }
+        }
+      },
       "PlanCategory": {
         "type": "object",
         "required": [
@@ -88150,6 +88661,110 @@
           "y": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "PlanState": {
+        "type": "object",
+        "required": [
+          "org_id",
+          "plan",
+          "signup_source",
+          "entitlements",
+          "live_branches",
+          "over_branch_limit",
+          "inactive_tills",
+          "branches"
+        ],
+        "properties": {
+          "branch_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The plan's branch limit, `null` for unlimited.",
+            "minimum": 0
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlanBranch"
+            }
+          },
+          "entitlements": {
+            "type": "object",
+            "description": "What the plan allows: `{features: [..], limits: {branches,\npos_devices_per_branch, kds_devices, waiter_devices}, realtime}`\n(madar-plan's `Entitlements`). A limit that is `null` is unlimited."
+          },
+          "inactive_tills": {
+            "type": "integer",
+            "format": "int64",
+            "description": "POS tills the plan has switched off."
+          },
+          "live_branches": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Live selling branches (not deleted, not warehouses)."
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "over_branch_limit": {
+            "type": "boolean",
+            "description": "Past the plan's branch limit (a downgraded org keeps all its branches\nand cannot add one)."
+          },
+          "plan": {
+            "type": "string",
+            "description": "`free` | `paid`.",
+            "example": "free"
+          },
+          "signup_source": {
+            "type": "string",
+            "description": "`admin` | `self`.",
+            "example": "self"
+          }
+        }
+      },
+      "PlanTill": {
+        "type": "object",
+        "required": [
+          "device_id",
+          "code",
+          "last_seen_at",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "`false`: the plan switched this till off (not its branch's active one).\nAlways `true` on Paid."
+          },
+          "code": {
+            "type": "string",
+            "description": "The till's short code on receipts (`T1`)."
+          },
+          "device_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_sale_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the till last rang a sale, if it ever did."
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the till last talked to the server."
           }
         }
       },
@@ -94786,6 +95401,32 @@
           }
         }
       },
+      "ServiceModeSales": {
+        "type": "object",
+        "description": "Sales of one service mode (`orders.service_mode`).",
+        "required": [
+          "service_mode",
+          "orders",
+          "revenue"
+        ],
+        "properties": {
+          "orders": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sold orders (voided and refunded excluded)."
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Net of refunds against these orders, like `total_revenue`."
+          },
+          "service_mode": {
+            "type": "string",
+            "description": "`takeaway` (Pickup) | `dine_in`.",
+            "example": "takeaway"
+          }
+        }
+      },
       "SetAssignmentsRequest": {
         "type": "object",
         "required": [
@@ -95431,6 +96072,119 @@
             "type": "object"
           }
         }
+      },
+      "SignupOtpRequest": {
+        "type": "object",
+        "required": [
+          "phone"
+        ],
+        "properties": {
+          "phone": {
+            "type": "string",
+            "description": "The owner's phone (any common Egyptian spelling; stored canonical).",
+            "example": "01001234567"
+          }
+        }
+      },
+      "SignupOtpResponse": {
+        "type": "object",
+        "required": [
+          "sent",
+          "expires_in_seconds",
+          "resend_after_seconds"
+        ],
+        "properties": {
+          "expires_in_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long the code is good for."
+          },
+          "resend_after_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long before another code may be asked for."
+          },
+          "sent": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SignupRequest": {
+        "type": "object",
+        "required": [
+          "phone",
+          "code",
+          "shop_name",
+          "owner_name",
+          "email",
+          "password",
+          "template",
+          "terms_version"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The six-digit code from WhatsApp.",
+            "example": "483920"
+          },
+          "email": {
+            "type": "string",
+            "example": "owner@therue.com"
+          },
+          "owner_name": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "description": "At least 8 characters."
+          },
+          "phone": {
+            "type": "string",
+            "description": "The phone the code went to.",
+            "example": "01001234567"
+          },
+          "shop_name": {
+            "type": "string",
+            "description": "The shop's name. It names the organization and its first branch.",
+            "example": "The Rue"
+          },
+          "template": {
+            "type": "string",
+            "description": "`cafe` | `restaurant`: the role template the roles start from.",
+            "example": "cafe"
+          },
+          "terms_version": {
+            "type": "string",
+            "description": "The version of the terms the owner accepted (stored with the org).",
+            "example": "2026-10"
+          }
+        }
+      },
+      "SignupResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LoginResponse"
+          },
+          {
+            "type": "object",
+            "required": [
+              "org_id",
+              "branch_id"
+            ],
+            "properties": {
+              "branch_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The first (and, on Free, only) branch."
+              },
+              "org_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ],
+        "description": "A session like `POST /auth/login`'s, for the owner just made, plus the\nids the dashboard lands on."
       },
       "SizeBaseResult": {
         "type": "object",
@@ -100994,6 +101748,14 @@
               "null"
             ]
           },
+          "plan": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`free` | `paid`. Super admin only. Paid -> Free keeps every branch and\nall data, switches the paid features off (the capability ceiling), and\nleaves ONE till per branch active (the most recently used); Free -> Paid\nswitches every till back on. A repeat of the current plan changes nothing.",
+            "example": "free"
+          },
           "receipt_footer": {
             "type": [
               "string",
@@ -102960,7 +103722,11 @@
     },
     {
       "name": "orgs",
-      "description": "Organization CRUD. Super-admin only."
+      "description": "Organization CRUD. Super-admin only. Also the plan (`free` | `paid`): `GET /orgs/{id}/plan`, the owner's choice of active till."
+    },
+    {
+      "name": "signup",
+      "description": "Public self-service signup: a WhatsApp code to prove the phone, then a shop on the Free plan and a session for its owner."
     },
     {
       "name": "public",

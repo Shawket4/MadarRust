@@ -47,6 +47,9 @@ pub async fn booking_branches(
     pool: web::Data<PgPool>,
     query: web::Query<OrgQuery>,
 ) -> Result<HttpResponse, AppError> {
+    // Bookings are the paid `bookings` feature: a Free shop has no such page.
+    crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Bookings)
+        .await?;
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT b.id, b.name, b.code FROM branches b \
          JOIN branch_booking_settings s ON s.branch_id = b.id AND s.enabled \
@@ -103,6 +106,7 @@ pub async fn booking_info(
     pool: web::Data<PgPool>,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
+    crate::plan::public_gate_branch(pool.get_ref(), *id, madar_plan::Feature::Bookings).await?;
     let (branch_name, org_name) = branch_names(pool.get_ref(), *id).await?;
     let s = load_settings(pool.get_ref(), *id).await?;
     let tz = branch_tz(pool.get_ref(), *id).await?;
@@ -154,6 +158,7 @@ async fn public_gate(
     date: NaiveDate,
     party: i32,
 ) -> Result<(super::settings::BookingSettings, chrono_tz::Tz), AppError> {
+    crate::plan::public_gate_branch(pool, branch_id, madar_plan::Feature::Bookings).await?;
     let s = load_settings(pool, branch_id).await?;
     if !s.enabled {
         return Err(AppError::NotFound(
@@ -355,9 +360,11 @@ async fn by_token(pool: &PgPool, token: &str) -> Result<BookingView, AppError> {
     if token.len() != 32 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::NotFound("Booking not found".into()));
     }
-    booking_view_by_token(pool, token)
+    let view = booking_view_by_token(pool, token)
         .await?
-        .ok_or_else(|| AppError::NotFound("Booking not found".into()))
+        .ok_or_else(|| AppError::NotFound("Booking not found".into()))?;
+    crate::plan::public_gate_branch(pool, view.branch_id, madar_plan::Feature::Bookings).await?;
+    Ok(view)
 }
 
 /// A booking, by the manage token from its confirmation link.

@@ -249,6 +249,16 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
     ),
     (
         "POST",
+        "/public/signup/otp",
+        "a shop signing up asks for a WhatsApp code to prove its phone; per-IP governor, one code a minute and five an hour per phone",
+    ),
+    (
+        "POST",
+        "/public/signup",
+        "a shop makes itself on the Free plan, with the WhatsApp code as its proof; per-IP governor, the code allows five attempts",
+    ),
+    (
+        "POST",
         "/public/otp/request",
         "guest phone verification (WhatsApp OTP); rate limited",
     ),

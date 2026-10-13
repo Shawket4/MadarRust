@@ -122,6 +122,7 @@ pub async fn stale_passes(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, AppErr
                                    o.updated_at) \
                       ) AS changed \
                  FROM organizations o WHERE o.deleted_at IS NULL \
+                  AND o.plan IS DISTINCT FROM 'free' \
            ) b ON b.org_id = c.org_id \
           WHERE (c.pass_updated_at IS NULL OR c.pass_updated_at < b.changed \
                  OR (c.pass_updated_at < c.updated_at AND c.deleted_at IS NULL)) \

@@ -30,6 +30,7 @@ pub(crate) use crate::orgs::handlers::extract_claims;
 
 pub mod gateway;
 pub mod jobs;
+pub mod otp;
 pub mod public;
 pub mod routes;
 pub mod settings;

@@ -118,6 +118,16 @@ pub struct LoginResponse {
     /// the device can resume it or show where it is open.
     #[serde(default)]
     pub open_till: Option<crate::tills::handlers::TillBrief>,
+    /// The organization's plan: `free` | `paid` (`madar-plan`; an old client that
+    /// does not read it behaves as before, and a missing value is `paid`).
+    /// A till also learns it from the sync feed's branch settings.
+    #[serde(default = "default_plan")]
+    #[schema(example = "paid")]
+    pub plan: String,
+}
+
+pub(crate) fn default_plan() -> String {
+    "paid".into()
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -141,6 +151,10 @@ pub struct MeResponse {
     /// Org currency code (e.g. "EGP").
     #[schema(example = "EGP")]
     pub currency_code: String,
+    /// The organization's plan: `free` | `paid`. Re-read on every `/auth/me`.
+    #[serde(default = "default_plan")]
+    #[schema(example = "paid")]
+    pub plan: String,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -652,6 +666,15 @@ pub async fn login(
     // and any legacy email+password till login is by a teller/waiter/kitchen user,
     // which still falls inside the gate.
     let via_pin = body.pin.is_some() && body.email.is_none();
+    // A till the Free plan switched off (not its branch's active one) opens no
+    // session: `plan_till_inactive`, and the till shows its "not active" screen.
+    if via_pin {
+        crate::plan::guard_till_live(
+            pool.get_ref(),
+            crate::devices::DeviceHeader::from_request_headers(&http_req),
+        )
+        .await?;
+    }
     let till_session = via_pin
         || matches!(
             user.role,
@@ -734,6 +757,7 @@ pub async fn login(
     let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), user.org_id, branch_id_for_response).await?;
     let tax_rate = tax_policy.tax_rate;
+    let plan = crate::plan::plan_name(pool.get_ref(), user.org_id).await?;
 
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id_for_response;
@@ -761,6 +785,7 @@ pub async fn login(
         require_table_for_orders,
         currency_code,
         open_till,
+        plan,
     }))
 }
 
@@ -831,6 +856,10 @@ pub async fn device_session(
     if !crate::auth::org_status::org_is_allowed(pool.get_ref(), org_id).await? {
         return Err(AppError::OrgSuspended);
     }
+    // A kitchen screen is the `kitchen` feature: an org that dropped to Free
+    // keeps the device row, and the screen is refused here (it goes back to
+    // setup and says "Kitchen screens are on the paid plan").
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Kitchen).await?;
 
     // The screen's principal, made on its first sign-in and kept in step with
     // the device: its name follows the slot, its branch follows the device.
@@ -880,6 +909,7 @@ pub async fn device_session(
     .map_err(|_| AppError::Internal)?;
     let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), Some(org_id), Some(branch_id)).await?;
+    let plan = crate::plan::plan_name(pool.get_ref(), Some(org_id)).await?;
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = Some(branch_id);
     Ok(HttpResponse::Ok().json(LoginResponse {
@@ -890,6 +920,7 @@ pub async fn device_session(
         require_table_for_orders,
         currency_code,
         open_till: None,
+        plan,
     }))
 }
 
@@ -950,6 +981,7 @@ pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, A
     // the path a running till uses to notice a rate it has not seen.
     let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), user.org_id, branch_id).await?;
+    let plan = crate::plan::plan_name(pool.get_ref(), user.org_id).await?;
 
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id;
@@ -960,6 +992,7 @@ pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, A
         tax_policy,
         require_table_for_orders,
         currency_code,
+        plan,
     }))
 }
 
@@ -1097,7 +1130,7 @@ pub async fn permissions(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRe
 /// Branch-first, org-second, and tax-free when the user belongs to neither —
 /// deliberately NOT the old `unwrap_or(0.14)`, which invented Egyptian VAT for
 /// anyone whose org could not be read.
-async fn resolve_tax_context(
+pub(crate) async fn resolve_tax_context(
     pool: &sqlx::PgPool,
     org_id: Option<Uuid>,
     branch_id: Option<Uuid>,

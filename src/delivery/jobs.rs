@@ -56,6 +56,7 @@ pub async fn reject_unaccepted(pool: &PgPool) -> Result<Vec<Rejected>, AppError>
            FROM branch_delivery_settings s
           WHERE s.branch_id = d.branch_id
             AND s.auto_reject_minutes IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM organizations fo WHERE fo.id = d.org_id AND fo.plan = 'free')
             AND d.status = 'received'
             AND d.created_at < now() - make_interval(mins => s.auto_reject_minutes)
           RETURNING d.id, d.branch_id, d.delivery_ref, d.customer_phone",

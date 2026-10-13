@@ -99,7 +99,8 @@ struct Lapsed {
     seq: i16,
 }
 
-async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
+#[doc(hidden)]
+pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     let after = days("LOYALTY_WINBACK_AFTER_DAYS", DEFAULT_AFTER_DAYS);
     let second = days(
         "LOYALTY_WINBACK_SECOND_AFTER_DAYS",
@@ -127,6 +128,8 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
                JOIN loyalty_settings s \
                  ON s.org_id = c.org_id AND s.branch_id IS NULL \
               WHERE s.enabled AND s.winback_enabled \
+                AND NOT EXISTS (SELECT 1 FROM organizations fo \
+                                 WHERE fo.id = c.org_id AND fo.plan = 'free') \
                 AND NOT c.marketing_opt_out \
                 AND c.deleted_at IS NULL), \
          ranked AS ( \

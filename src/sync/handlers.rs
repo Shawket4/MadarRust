@@ -300,6 +300,35 @@ impl ReplayOp {
         }
     }
 
+    /// The install an op names itself (the `X-Madar-Device` header wins when
+    /// present), for the plan's inactive-till rule.
+    fn device_hint(&self) -> Option<Uuid> {
+        match self {
+            ReplayOp::OpenTill {
+                device_id, request, ..
+            } => device_id.or(request.device_id),
+            ReplayOp::CreateOrder {
+                device_id, request, ..
+            } => device_id.or(request.device_id),
+            ReplayOp::CloseTill { device_id, .. }
+            | ReplayOp::CashMovement { device_id, .. }
+            | ReplayOp::SpotReportView { device_id, .. } => *device_id,
+            _ => None,
+        }
+    }
+
+    /// Does this op START selling (a till session, a sale, a table bill)?
+    /// Closing a drawer, a cash movement, a refund or a void settle what
+    /// already happened, and are never refused for the plan.
+    fn starts_selling(&self) -> bool {
+        matches!(
+            self,
+            ReplayOp::OpenTill { .. }
+                | ReplayOp::CreateOrder { .. }
+                | ReplayOp::SettleOpenTicket { .. }
+        )
+    }
+
     /// The variant's name, for a flag row the owner reads.
     fn variant_name(&self) -> &'static str {
         match self {
@@ -747,6 +776,35 @@ pub async fn replay(
                 flags.push(format!("{resource}:{action}"))
             }
             Err(e) => return Err(e),
+        }
+    }
+
+    // A TILL THE FREE PLAN SWITCHED OFF (`devices.plan_inactive`). A queued sale
+    // is money already taken, so the rule loses nothing a till could not have
+    // known (`plan::replay_verdict`): stamped before the flag, or before the till
+    // was told (its first pull after it), the op is accepted (and flagged, once
+    // it is past the flag); only NEW selling stamped after the till was told
+    // is refused with `plan_till_inactive`.
+    {
+        let mut conn = pool.get_ref().acquire().await?;
+        match crate::plan::replay_verdict(
+            &mut conn,
+            header_device.or(op.device_hint()),
+            occurred_at,
+            op.starts_selling(),
+        )
+        .await?
+        {
+            crate::plan::ReplayVerdict::Refuse => {
+                return Err(crate::plan::refuse(madar_plan::Refusal::new(
+                    madar_plan::Code::TillInactive,
+                    None,
+                )));
+            }
+            crate::plan::ReplayVerdict::AcceptFlagged if op.money_moved() => {
+                flags.push("plan:till_inactive".to_string());
+            }
+            _ => {}
         }
     }
 

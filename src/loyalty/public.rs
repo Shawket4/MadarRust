@@ -52,7 +52,28 @@ struct Scope {
     branch_name: Option<String>,
 }
 
+/// A card by its member token, for a PUBLIC page. A shop whose plan lacks
+/// loyalty has no cards to show: 404, like a token that matches nobody.
+async fn public_member(pool: &PgPool, token: &str) -> Result<MemberRow, AppError> {
+    let member = model::find_by_token(pool, token)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+    crate::plan::public_gate_org(pool, member.org_id, madar_plan::Feature::Loyalty).await?;
+    Ok(member)
+}
+
 async fn resolve_scope(
+    pool: &PgPool,
+    branch_id: Option<Uuid>,
+    org_id: Option<Uuid>,
+) -> Result<Scope, AppError> {
+    let scope = resolve_scope_unchecked(pool, branch_id, org_id).await?;
+    // Loyalty is the paid `loyalty` feature: a Free shop has no join page.
+    crate::plan::public_gate_org(pool, scope.org_id, madar_plan::Feature::Loyalty).await?;
+    Ok(scope)
+}
+
+async fn resolve_scope_unchecked(
     pool: &PgPool,
     branch_id: Option<Uuid>,
     org_id: Option<Uuid>,
@@ -289,6 +310,7 @@ pub async fn org_logo_badge(
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, v) = path.into_inner();
+    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Loyalty).await?;
     let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     cached_png_response((org_id, v, 512, 512), "That shop has no logo", move || {
         crate::orgs::branding::logo_badge(&brand, 512)
@@ -302,6 +324,7 @@ pub async fn org_card_banner(
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, v) = path.into_inner();
+    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Loyalty).await?;
     let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     // Google's hero is about 3:1 and much wider than Apple's strip; each wallet
     // gets a crop made for its own slot rather than one shape squeezed into both.
@@ -788,9 +811,7 @@ pub async fn card_orders(
     pool: web::Data<PgPool>,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let member = model::find_by_token(pool.get_ref(), token.as_str())
-        .await?
-        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+    let member = public_member(pool.get_ref(), token.as_str()).await?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -871,9 +892,7 @@ pub async fn set_preferences(
     token: web::Path<String>,
     body: web::Json<CardPreferences>,
 ) -> Result<HttpResponse, AppError> {
-    let member = model::find_by_token(pool.get_ref(), token.as_str())
-        .await?
-        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+    let member = public_member(pool.get_ref(), token.as_str()).await?;
     let locale = match body.locale.as_deref() {
         Some(l) if l.starts_with("ar") => Some("ar"),
         Some(_) => Some("en"),
@@ -906,9 +925,7 @@ pub async fn card(
     pool: web::Data<PgPool>,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let member = model::find_by_token(pool.get_ref(), token.as_str())
-        .await?
-        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+    let member = public_member(pool.get_ref(), token.as_str()).await?;
     // The org default is the right scope here: a customer opening their card at
     // home is not standing in any particular branch.
     let settings = super::settings::load_scope(pool.get_ref(), member.org_id, None)
@@ -965,9 +982,7 @@ pub async fn apple_pass(
     pool: web::Data<PgPool>,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let member = model::find_by_token(pool.get_ref(), token.as_str())
-        .await?
-        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+    let member = public_member(pool.get_ref(), token.as_str()).await?;
     // The same builder the device's own refetch uses, so the pass a customer
     // downloads and the pass their phone later pulls are the same shape — and
     // the same STORE, so both get the bytes that were built after the last
@@ -1013,9 +1028,7 @@ pub async fn card_qr(
 ) -> Result<HttpResponse, AppError> {
     // Resolve first: rendering a QR of an arbitrary string a caller supplied
     // would turn this into an open QR generator for anyone who found the URL.
-    let member = model::find_by_token(pool.get_ref(), token.as_str())
-        .await?
-        .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
+    let member = public_member(pool.get_ref(), token.as_str()).await?;
     let png = crate::qr_card::render_qr_receipt_png(&member.member_token, 8)
         .map_err(|_| AppError::Internal)?;
     Ok(HttpResponse::Ok()

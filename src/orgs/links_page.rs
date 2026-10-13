@@ -636,6 +636,8 @@ pub async fn get_links_page(
     let claims = extract_claims(&req)?;
     require_same_org(&claims, Some(*org_id))?;
     require(pool.get_ref(), &claims, Cap::OrgSettingsRead, None).await?;
+    // The links page is the paid `branding` feature (the shop's own page).
+    crate::plan::require_feature(pool.get_ref(), *org_id, madar_plan::Feature::Branding).await?;
     Ok(HttpResponse::Ok().json(settings_view(pool.get_ref(), *org_id).await?))
 }
 
@@ -661,6 +663,7 @@ pub async fn put_links_page(
     let org_id = *org_id;
     require_same_org(&claims, Some(org_id))?;
     require(pool.get_ref(), &claims, Cap::OrgSettingsEdit, None).await?;
+    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Branding).await?;
     let body = body.into_inner();
 
     let items = validate_items(body.items)?;

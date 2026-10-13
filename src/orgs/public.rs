@@ -123,6 +123,16 @@ pub(crate) fn brand_of(
 /// Shared by every public per-shop surface, so they cannot drift on the one
 /// question that decides whose logo and whose colours a customer sees.
 pub(crate) async fn resolve_org(pool: &PgPool, query: &BrandQuery) -> Result<Uuid, AppError> {
+    let org = resolve_org_unchecked(pool, query).await?;
+    // A shop's own page, links, favicon, subdomain and brand are the paid
+    // `branding` feature (and online ordering, rewards and bookings on top of
+    // it): a Free shop has no such page, so it is 404 here, before anything else
+    // (the web address of a Free shop answers like a shop that never existed).
+    crate::plan::public_gate_org(pool, org, madar_plan::Feature::Branding).await?;
+    Ok(org)
+}
+
+async fn resolve_org_unchecked(pool: &PgPool, query: &BrandQuery) -> Result<Uuid, AppError> {
     match (
         query.org_id,
         query

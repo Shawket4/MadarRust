@@ -7,7 +7,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{Cap, Decision, EffectiveSet, Request, Scope, decide, resolve};
+use super::{Cap, Decision, EffectiveSet, Request, Scope, decide};
 use crate::auth::jwt::Claims;
 use crate::errors::AppError;
 use crate::models::UserRole;
@@ -36,12 +36,7 @@ pub async fn effective_on(
         Some(b) => Scope::Branch(b),
         None => Scope::Anywhere,
     };
-    Ok(resolve(
-        &loaded.principal,
-        scope,
-        chrono::Utc::now().timestamp(),
-        &loaded.policy,
-    ))
+    Ok(loaded.resolve_at(scope, chrono::Utc::now().timestamp()))
 }
 
 /// The caller's effective set; a super admin holds everything.

@@ -29,6 +29,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route("/{id}", web::get().to(handlers::get_org))
             .route("/{id}/modules", web::get().to(handlers::get_org_modules))
+            .route("/{id}/plan", web::get().to(crate::plan::handlers::get_plan))
+            .route(
+                "/{id}/plan/active-till",
+                web::put().to(crate::plan::handlers::put_active_till),
+            )
             .route("/{id}", web::patch().to(handlers::update_org))
             .route("/{id}", web::delete().to(handlers::delete_org))
             .route("/{id}/logo", web::put().to(handlers::upload_org_logo))

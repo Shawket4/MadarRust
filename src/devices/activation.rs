@@ -273,6 +273,13 @@ pub async fn create_code(
         .bind(body.branch_id)
         .fetch_one(pool.get_ref())
         .await?;
+    // The plan's device limits, asked early so the dashboard says so at the
+    // moment of making a code (a Free branch has one till and no kitchen
+    // screen). The activation asks again, authoritatively.
+    {
+        let mut conn = pool.get_ref().acquire().await?;
+        crate::plan::check_activate(&mut conn, org, body.branch_id, &kind, None).await?;
+    }
     // A handful of tries: a collision with another live code is a unique
     // violation, and the space is a hundred million.
     for _ in 0..8 {
@@ -406,6 +413,12 @@ pub async fn activate(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(invalid)?;
+
+    // The plan's device limits, with the branch locked: two tablets entering
+    // two codes together cannot both take the last place. An error here rolls
+    // the claim back, so the code stays free. The install itself is left out of
+    // the count (activating it again is not a second device).
+    crate::plan::check_activate(&mut tx, org_id, branch_id, &kind, Some(body.device_id)).await?;
 
     let device_code = body
         .device_code

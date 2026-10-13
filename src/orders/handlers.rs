@@ -48,7 +48,7 @@ const ORDER_SELECT: &str =
      o.started_by, sb.name AS started_by_name,
      o.discount_kind, o.discount_percent_bps, o.discount_applied_by,
      (SELECT name FROM users WHERE id = o.discount_applied_by) AS discount_applied_by_name,
-     o.discount_approval_id,
+     o.discount_approval_id, o.service_mode,
      (SELECT au.name FROM approvals ap JOIN users au ON au.id = ap.approver_user_id
        WHERE ap.id = o.discount_approval_id) AS discount_approved_by_name
      FROM orders o JOIN users u ON u.id = o.teller_id
@@ -135,6 +135,10 @@ pub struct PaymentLeg {
     /// counts by. Additive; `null` for a leg recorded before the flag existed.
     #[serde(default)]
     pub is_cash: Option<bool>,
+}
+
+fn default_service_mode() -> String {
+    "takeaway".into()
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, ToSchema)]
@@ -290,6 +294,13 @@ pub struct Order {
     #[serde(default)]
     #[sqlx(default)]
     pub verification: Option<String>,
+    /// How the customer takes the order: `takeaway` (Pickup) | `dine_in`. The
+    /// cart's Pickup / Dine in toggle, stored on every order of every plan; a
+    /// sale made on a till that never sent it is `takeaway`. Sales reports split
+    /// by it (`GET /reports/sales` → `by_service_mode`).
+    #[serde(default = "default_service_mode")]
+    #[schema(example = "takeaway")]
+    pub service_mode: String,
     /// Whether this bill's prices included tax, as it was priced. A receipt
     /// says "Prices include VAT" when true. `null` on a read that does not
     /// resolve it. Additive.
@@ -1559,6 +1570,8 @@ pub async fn create_order(
     }
     // A till bound to another device refuses live sales from this one.
     crate::tills::handlers::guard_till_device(pool.get_ref(), body.till_id, header_device).await?;
+    // A till the Free plan switched off sells nothing new (`plan_till_inactive`).
+    crate::plan::guard_till_live(pool.get_ref(), body.device_id).await?;
     let actor = ActingContext::live(&claims)?.scoped(pool.get_ref()).await?;
     // Live only: the method must be in the effective set for branch ∩ person ∩
     // device (replay never rejects on availability — the sale happened).
@@ -2796,7 +2809,8 @@ pub(crate) async fn create_order_inner(
             tax_inclusive, tax_rate_applied, service_charge_rate_applied, service_charge_taxable_applied,
             service_charge_waived_by, (SELECT name FROM users WHERE id = service_charge_waived_by) AS service_charge_waived_by_name,
             service_charge_waived_at, service_charge_waived_amount,
-            started_by, (SELECT name FROM users WHERE id = $41) AS started_by_name
+            started_by, (SELECT name FROM users WHERE id = $41) AS started_by_name,
+            service_mode
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
@@ -4058,7 +4072,8 @@ pub async fn void_order_inner(
                voided_at, void_reason::text, void_note, voided_by,
             price_flagged, price_expected_total, created_at,
             effective_timezone(branch_id) AS timezone,
-            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification"#,
+            device_id, device_code, CASE WHEN device_code IS NOT NULL THEN device_code || '-' || order_number ELSE order_number::text END AS display_number, verification,
+            service_mode"#,
     )
     .bind(order_id)
     .bind(reason)

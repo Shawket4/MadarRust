@@ -81,6 +81,14 @@ pub struct Org {
     /// How many warehouses this org may have; `null` = unlimited. Set by a
     /// super admin (WAREHOUSE_DESIGN.md).
     pub max_warehouses: Option<i32>,
+    /// `free` | `paid`. What the organization may use (madar-plan): Free is
+    /// POS only, one branch, one till; Paid is the whole product. Super admin
+    /// changes it (`PATCH /orgs/{id}`).
+    #[schema(example = "paid")]
+    pub plan: String,
+    /// `admin` (the super admin made the org) | `self` (the shop signed up).
+    #[schema(example = "admin")]
+    pub signup_source: String,
 }
 
 // ── Request types ─────────────────────────────────────────────
@@ -169,6 +177,12 @@ pub struct UpdateOrgRequest {
     )]
     #[schema(nullable, value_type = Option<i32>)]
     pub max_warehouses: Option<Option<i32>>,
+    /// `free` | `paid`. Super admin only. Paid -> Free keeps every branch and
+    /// all data, switches the paid features off (the capability ceiling), and
+    /// leaves ONE till per branch active (the most recently used); Free -> Paid
+    /// switches every till back on. A repeat of the current plan changes nothing.
+    #[schema(example = "free")]
+    pub plan: Option<String>,
 }
 
 impl UpdateOrgRequest {
@@ -194,6 +208,7 @@ impl UpdateOrgRequest {
             custom_branding,
             social_links: _,
             max_warehouses,
+            plan,
         } = self;
         name.is_none()
             && slug.is_none()
@@ -209,6 +224,7 @@ impl UpdateOrgRequest {
             && timezone.is_none()
             && custom_branding.is_none()
             && max_warehouses.is_none()
+            && plan.is_none()
     }
 }
 
@@ -433,7 +449,7 @@ pub async fn create_org(
         VALUES ($1, $2, $3, $4, $5,
                 COALESCE($6, false), COALESCE($7, 0), COALESCE($8, true),
                 COALESCE($9, false), $10, $11::timezone_name, COALESCE($12, '{pos}'))
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses, plan, signup_source
         "#,
     )
     .bind(&name)
@@ -481,29 +497,61 @@ pub async fn create_org(
 
 // ── GET /orgs  (super_admin only) ────────────────────────────
 
+/// Filters for `GET /orgs`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ListOrgsQuery {
+    /// Only organizations on this plan: `free` | `paid`.
+    pub plan: Option<String>,
+    /// Only organizations created this way: `admin` | `self`.
+    pub signup_source: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/orgs",
     tag = "orgs",
+    params(ListOrgsQuery),
     responses(
         (status = 200, description = "List of all organizations", body = Vec<Org>),
         AppErrorResponse,
     ),
     security(("bearer_jwt" = []))
 )]
-pub async fn list_orgs(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
+pub async fn list_orgs(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    q: web::Query<ListOrgsQuery>,
+) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orgs", "read").await?;
     require_super_admin(&claims)?;
+    for (name, v, ok) in [
+        ("plan", q.plan.as_deref(), ["free", "paid"]),
+        ("signup_source", q.signup_source.as_deref(), ["admin", "self"]),
+    ] {
+        if let Some(v) = v
+            && !ok.contains(&v)
+        {
+            return Err(AppError::BadRequest(format!(
+                "{name} must be {} or {}",
+                ok[0], ok[1]
+            )));
+        }
+    }
 
     let orgs = sqlx::query_as::<_, Org>(
         r#"
-        SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses
+        SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses, plan, signup_source
         FROM organizations
         WHERE deleted_at IS NULL
+          AND ($1::text IS NULL OR plan = $1)
+          AND ($2::text IS NULL OR signup_source = $2)
         ORDER BY name
         "#,
     )
+    .bind(&q.plan)
+    .bind(&q.signup_source)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -783,6 +831,15 @@ pub async fn update_org(
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
 
+    let new_plan = match body.plan.as_deref() {
+        None => None,
+        Some("free") => Some(madar_plan::Plan::Free),
+        Some("paid") => Some(madar_plan::Plan::Paid),
+        Some(_) => {
+            return Err(AppError::BadRequest("plan must be free or paid".into()));
+        }
+    };
+
     if let Some(slug) = &body.slug
         && Some(slug) != existing.slug.as_ref()
     {
@@ -870,7 +927,7 @@ pub async fn update_org(
             max_warehouses = CASE WHEN $18 THEN $19 ELSE max_warehouses END,
             updated_at     = NOW()
         WHERE id = $1 AND deleted_at IS NULL
-        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses
+        RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses, plan, signup_source
         "#,
     )
     .bind(*org_id)
@@ -896,6 +953,19 @@ pub async fn update_org(
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
 
+    // The plan, in its own transaction (a downgrade also switches off every
+    // till but each branch's active one). The column's trigger bumps the
+    // org's authz epoch, so permissions and every till's snapshot refresh.
+    let org = match new_plan {
+        Some(plan) => {
+            let mut tx = pool.get_ref().begin().await?;
+            crate::plan::change_plan(&mut tx, *org_id, plan).await?;
+            tx.commit().await?;
+            fetch_org(pool.get_ref(), *org_id).await?
+        }
+        None => org,
+    };
+
     if body.logo_url == Some(None)
         && let Some(old_url) = existing.logo_url
     {
@@ -911,7 +981,7 @@ pub async fn update_org(
     // If this update toggled the active flag, drop the cached org status so the
     // suspension (or reactivation) is enforced on the next request rather than
     // after the cache TTL elapses.
-    if (body.is_active.is_some() || body.modules.is_some())
+    if (body.is_active.is_some() || body.modules.is_some() || new_plan.is_some())
         && let Some(cache) = req.app_data::<web::Data<crate::auth::org_status::OrgStatusCache>>()
     {
         cache.invalidate(*org_id);
@@ -1110,7 +1180,7 @@ pub(crate) fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
 
 async fn fetch_org(pool: &PgPool, id: Uuid) -> Result<Org, AppError> {
     sqlx::query_as::<_, Org>(
-        "SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses
+        "SELECT id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses, plan, signup_source
          FROM organizations
          WHERE id = $1 AND deleted_at IS NULL",
     )
