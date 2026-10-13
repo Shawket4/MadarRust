@@ -67,7 +67,7 @@ impl FromRequest for DeviceHeader {
         let id = Self::from_request_headers(req);
         if let (Some(id), Some(pool)) = (id, req.app_data::<web::Data<PgPool>>()) {
             let pool = pool.get_ref().clone();
-            tokio::spawn(async move {
+            crate::db::spawn(async move {
                 let _ = sqlx::query(
                     "UPDATE devices SET last_seen_at = now() \
                       WHERE id = $1 AND last_seen_at < now() - interval '5 minutes'",

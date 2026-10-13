@@ -76,7 +76,7 @@ pub fn spawn(pool: PgPool) {
         .max(60);
 
     tracing::info!("Loyalty win-back sweep started ({secs}s tick)");
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(secs));
         loop {
             ticker.tick().await;

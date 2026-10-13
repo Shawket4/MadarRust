@@ -1770,7 +1770,13 @@ pub(crate) async fn create_order_inner(
 
     let org_id = actor.org_id;
 
-    validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
+    // A replay's tender may have been switched off since the sale: the money
+    // was taken in it all the same (`sync::handlers` flags it for the owner).
+    if actor.replay {
+        validate_payment_method_existed(pool.get_ref(), org_id, &body.payment_method).await?;
+    } else {
+        validate_payment_method(pool.get_ref(), org_id, &body.payment_method).await?;
+    }
     // Normalised ONCE, here, so everything downstream sees a fraction — live
     // and replayed alike. Only an ad-hoc discount on the request can carry the
     // old convention; one named by `discount_id` is read from the table, which
@@ -1788,7 +1794,11 @@ pub(crate) async fn create_order_inner(
         }
     }
     if let Some(tpm) = &body.tip_payment_method {
-        validate_payment_method(pool.get_ref(), org_id, tpm).await?;
+        if actor.replay {
+            validate_payment_method_existed(pool.get_ref(), org_id, tpm).await?;
+        } else {
+            validate_payment_method(pool.get_ref(), org_id, tpm).await?;
+        }
     }
 
     // Snapshot is_cash for every method now, so a later method rename / is_cash
@@ -2008,7 +2018,9 @@ pub(crate) async fn create_order_inner(
     };
     // Every item and add-on of the order in one batched load; each line is
     // then priced and deducted from it (madar-catalog's rule).
-    let mut catalog = crate::orders::catalog_view::Catalog::new(Some(body.branch_id));
+    // A replay prices what the till sold, even if it was deleted since.
+    let mut catalog = crate::orders::catalog_view::Catalog::new(Some(body.branch_id))
+        .including_retired(actor.replay);
     {
         let (menu_ids, option_ids) = catalog_ids_of(&body.items);
         catalog
@@ -4588,6 +4600,32 @@ where
     } else {
         Err(AppError::BadRequest(format!(
             "Invalid or inactive payment_method: {}",
+            method
+        )))
+    }
+}
+
+/// A replayed sale's tender: one the org has (or had), switched on or not.
+async fn validate_payment_method_existed<'e, E>(
+    pool: E,
+    org_id: Uuid,
+    method: &str,
+) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM org_payment_methods WHERE org_id = $1 AND name = $2)",
+    )
+    .bind(org_id)
+    .bind(method)
+    .fetch_one(pool)
+    .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "Unknown payment_method: {}",
             method
         )))
     }

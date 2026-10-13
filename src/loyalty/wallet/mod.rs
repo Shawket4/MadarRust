@@ -781,7 +781,7 @@ pub fn push_update(pool: &PgPool, customer_id: Uuid) {
         return;
     }
     let pool = pool.clone();
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         if let Err(e) = push_update_inner(&pool, customer_id).await {
             use crate::observability::report::{Failure, report};
             report(Failure::new("loyalty", "push_pass_update"), &e);

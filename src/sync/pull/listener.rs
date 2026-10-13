@@ -66,7 +66,7 @@ pub fn publish(hub: &BranchEventHub, branch: Uuid) {
 }
 
 pub fn spawn(pool: PgPool, hub: BranchEventHub) {
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         loop {
             if let Err(e) = run(&pool, &hub).await {
                 tracing::warn!(error = %e, "sync LISTEN task restarting");

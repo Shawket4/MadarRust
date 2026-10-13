@@ -276,6 +276,9 @@ async fn run() -> std::io::Result<()> {
             .wrap(actix_web::middleware::from_fn(
                 madar_rust::client_seen::record,
             ))
+            // The request's tenant cell for the shared RLS pool (`db.rs`):
+            // just inside Sentry, around every handler.
+            .wrap(actix_web::middleware::from_fn(madar_rust::db::tenant_scope))
             // Outermost middleware (actix runs the LAST `wrap` first), as
             // sentry-actix requires: every downstream handler then runs on this
             // request's Hub, so anything they capture carries the request

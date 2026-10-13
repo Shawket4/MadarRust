@@ -81,7 +81,7 @@ pub async fn gc_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
 
 /// Spawn the background sweeper (once, at startup, when DEMO_MODE is on).
 pub fn spawn(pool: PgPool, interval_secs: u64) {
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(interval_secs.max(30)));
         loop {
             tick.tick().await;

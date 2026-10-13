@@ -28,13 +28,14 @@ cd "$(dirname "$0")/.."
 export DATABASE_URL="${DATABASE_URL:-postgres://shawket@localhost:5433/madar}"
 export MADAR_FAST_TEST_POOLS=1
 # Sweep the cluster the tests actually run on (a private cluster has its own port).
-PGPORT_TESTS="$(printf '%s' "$DATABASE_URL" | sed -nE 's#.*@[^:/]+:([0-9]+)/.*#\1#p')"
-PGPORT_TESTS="${PGPORT_TESTS:-5433}"
 
+# The maintenance database on the same server, with DATABASE_URL's credentials
+# (CI and Linux boxes need a password; the Mac's trust auth does not mind).
+ADMIN_URL="${DATABASE_URL%/*}/postgres"
 sweep() {
-  psql -h localhost -p "$PGPORT_TESTS" -d postgres -Atc \
+  psql "$ADMIN_URL" -Atc \
     "select 'drop database \"'||datname||'\";' from pg_database where datname like '_sqlx_test%'" \
-    2>/dev/null | psql -h localhost -p "$PGPORT_TESTS" -d postgres -q 2>/dev/null || true
+    2>/dev/null | psql "$ADMIN_URL" -q 2>/dev/null || true
 }
 
 if [ $# -gt 0 ]; then
@@ -42,14 +43,16 @@ if [ $# -gt 0 ]; then
   for t in "$@"; do targets+=("--test $t"); done
 else
   # `--lib` first: the inline unit tests still live beside the code they cover.
-  targets=("--lib")
+  # `--bins`: the operator binaries' own tests (src/bin).
+  targets=("--lib" "--bins")
   for f in tests/*.rs; do
     m="$(basename "$f" .rs)"
     # client_seen's binary is killed on exec by XProtect (its fixtures embed
     # complete browser User-Agent strings, which a signature matches). Rewriting
     # test data to dodge a malware scanner is the owner's call, not this script's
     # — so it is skipped here and named, never silently dropped.
-    [ "$m" = "client_seen" ] && continue
+    # XProtect is macOS only: everywhere else (CI) the suite runs.
+    [ "$m" = "client_seen" ] && [ "$(uname)" = Darwin ] && continue
     targets+=("--test $m")
   done
 fi
@@ -60,19 +63,25 @@ problems=()
 
 for t in "${targets[@]}"; do
   printf '%-34s ' "$t"
-  out="$(cargo nextest run $t 2>&1)"
+  # No colour: CI sets CARGO_TERM_COLOR=always, and an escape code in front
+  # of "Summary" hid every suite's result from the grep below.
+  out="$(cargo nextest run --color never --failure-output final $t 2>&1)"
   line="$(printf '%s' "$out" | grep -E '^ +Summary' | tail -1)"
   if [ -z "$line" ]; then
     echo "NO SUMMARY (see below)"
     problems+=("$t: produced no summary")
-    printf '%s\n' "$out" | tail -5
+    printf '%s\n' "$out" | tail -40
   else
     echo "$line"
     p="$(printf '%s' "$line" | sed -nE 's/.* ([0-9]+) tests run: ([0-9]+) passed.*/\2/p')"
     f="$(printf '%s' "$line" | sed -nE 's/.*passed.*, ([0-9]+) failed.*/\1/p')"
     passed=$((passed + ${p:-0}))
     failed=$((failed + ${f:-0}))
-    [ -n "${f:-}" ] && problems+=("$t: $f failed")
+    if [ -n "${f:-}" ]; then
+      problems+=("$t: $f failed")
+      # The failing tests' own output (nextest prints it after the summary).
+      printf '%s\n' "$out" | sed -n '/Summary/,$p'
+    fi
   fi
   sweep
 done

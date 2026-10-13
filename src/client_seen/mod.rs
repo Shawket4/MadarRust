@@ -535,7 +535,7 @@ pub async fn record(
                 legacy_kinds: kinds,
                 path,
             };
-            tokio::spawn(async move {
+            crate::db::spawn(async move {
                 if let Err(e) = upsert(&pool, &sighting).await {
                     tracing::debug!(target: "madar.client_seen", error = %e, "client_seen upsert failed");
                 }

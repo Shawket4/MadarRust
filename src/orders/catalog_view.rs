@@ -122,6 +122,9 @@ impl LoadedOption {
 /// Items and options loaded for one branch.
 pub struct Catalog {
     branch: Option<Uuid>,
+    /// Also load what has been deleted or switched off since (see
+    /// [`Self::including_retired`]).
+    retired: bool,
     items: BTreeMap<Uuid, LoadedItem>,
     options: BTreeMap<Uuid, LoadedOption>,
     /// Option ids asked for that do not exist.
@@ -134,9 +137,20 @@ fn s(id: Uuid) -> String {
 
 impl Catalog {
     /// Prices and overrides as `branch` sells them (`None`: the catalogue's).
+    /// A queued sale's catalogue: also the items deleted and the optional
+    /// extras switched off since. The sale was rung at the till before the
+    /// change reached it; refusing to price it cannot un-take the money, it
+    /// only loses the sale (the till dead-letters a rejected op). Only a
+    /// REPLAY asks for this — a live sale naming a retired item is refused.
+    pub fn including_retired(mut self, yes: bool) -> Self {
+        self.retired = yes;
+        self
+    }
+
     pub fn new(branch: Option<Uuid>) -> Self {
         Self {
             branch,
+            retired: false,
             items: BTreeMap::new(),
             options: BTreeMap::new(),
             missing: HashSet::new(),
@@ -226,10 +240,11 @@ impl Catalog {
                FROM menu_items mi
                LEFT JOIN branch_menu_overrides bmo
                       ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
-              WHERE mi.id = ANY($1) AND mi.deleted_at IS NULL",
+              WHERE mi.id = ANY($1) AND ($3 OR mi.deleted_at IS NULL)",
         )
         .bind(ids)
         .bind(branch)
+        .bind(self.retired)
         .fetch_all(&mut *conn)
         .await?;
         let mut row_of: HashMap<Uuid, (ItemRow, Option<i32>)> = rows
@@ -370,10 +385,11 @@ impl Catalog {
             "SELECT menu_item_id, id, name, price, org_ingredient_id, ingredient_name,
                     ingredient_unit, quantity_used::float8, size_label::text, name_translations
                FROM menu_item_optional_fields
-              WHERE menu_item_id = ANY($1) AND is_active = true
+              WHERE menu_item_id = ANY($1) AND ($2 OR is_active = true)
               ORDER BY menu_item_id, name, id",
         )
         .bind(ids)
+        .bind(self.retired)
         .fetch_all(&mut *conn)
         .await?;
 

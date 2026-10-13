@@ -193,7 +193,7 @@ pub async fn chat_stream(
     // cleared scope for the same reason every other spawned task does: it
     // outlives the request and would otherwise report against whatever context
     // is bound to the worker thread it lands on.
-    tokio::spawn(async move {
+    crate::db::spawn(async move {
         let hub = Arc::new(sentry::Hub::new_from_top(sentry::Hub::current()));
         hub.configure_scope(|scope| {
             scope.clear();

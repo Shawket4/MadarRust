@@ -76183,9 +76183,15 @@
         "required": [
           "id",
           "name",
-          "name_translations"
+          "name_translations",
+          "display_order"
         ],
         "properties": {
+          "display_order": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The dashboard's drag-and-drop position (lower first). `categories`\nalready comes in the POS's order (madar-catalog `order`: this, then\nthe English name, then `id`); a page shown in another language\nre-orders by the name it shows (madar-web `category_order`)."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
