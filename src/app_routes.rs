@@ -27,6 +27,8 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
     .configure(crate::tenant_shell::configure)
     .configure(auth::routes::configure)
     .configure(orgs::routes::configure)
+    // A shop signing itself up on the Free plan (public, WhatsApp-verified).
+    .configure(crate::plan::signup::configure)
     .configure(users::routes::configure)
     .configure(permissions::routes::configure)
     .configure(crate::authz::api::configure)

@@ -306,6 +306,20 @@ pub const ROUTE_LIMITS: &[RouteLimitDef] = &[
         ms_per_request: 3_000,
         guards: "per IP: creating or changing a public booking",
     },
+    RouteLimitDef {
+        area: "SIGNUP",
+        limiter: "OTP",
+        burst: 6,
+        ms_per_request: 30_000,
+        guards: "per IP: the WhatsApp code a shop signing up asks for (a phone also gets one a minute, five an hour)",
+    },
+    RouteLimitDef {
+        area: "SIGNUP",
+        limiter: "CREATE",
+        burst: 6,
+        ms_per_request: 30_000,
+        guards: "per IP: creating a shop (POST /public/signup)",
+    },
 ];
 
 /// A route governor's numbers after the environment.
@@ -984,6 +998,8 @@ mod tests {
             ("DELIVERY", "INTAKE", 10, 6),
             ("BOOKINGS", "BROWSE", 60, 1),
             ("BOOKINGS", "WRITE", 10, 6),
+            ("SIGNUP", "OTP", 3, 60),
+            ("SIGNUP", "CREATE", 3, 60),
         ];
         assert_eq!(before.len(), ROUTE_LIMITS.len(), "every limiter is listed");
         for (area, limiter, burst, secs) in before {
