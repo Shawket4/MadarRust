@@ -62,6 +62,16 @@ pub enum AppError {
         vars: serde_json::Value,
     },
 
+    /// The organization's plan says no (`madar_plan::Refusal`): a feature the
+    /// plan lacks, a branch or device limit, a till that is not its branch's
+    /// active one, a till that may not hold the realtime stream. Always 403;
+    /// the body's `code` is the refusal's (`plan_feature`, `plan_branch_limit`,
+    /// `plan_device_limit`, `plan_no_realtime`, `plan_till_inactive`), with the
+    /// feature it is about and the message in both languages, so every app
+    /// says the same thing.
+    #[error("{}", .0.en())]
+    PlanRefused(madar_plan::Refusal),
+
     #[error("Database error: {0}")]
     Db(sqlx::Error),
 
@@ -115,6 +125,14 @@ pub struct ErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Object>)]
     pub vars: Option<serde_json::Value>,
+    /// A plan refusal's feature (`inventory`, `loyalty`, `online`, `bookings`,
+    /// `floor`, `kitchen`, `dawam`, `branding`, `basira`), when it is about one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "kitchen")]
+    pub feature: Option<String>,
+    /// A plan refusal's message in Arabic; `error` is the English one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_ar: Option<String>,
 }
 
 /// Convert sqlx errors into `AppError`. `RowNotFound` — what `fetch_one` /
@@ -225,6 +243,7 @@ impl AppError {
         match self {
             AppError::OrgSuspended => Some("ORG_SUSPENDED".to_string()),
             AppError::PinThrottled { .. } => Some("PIN_THROTTLED".to_string()),
+            AppError::PlanRefused(r) => Some(r.code.as_str().to_string()),
             AppError::Refused { code, .. }
             | AppError::RefusedWith { code, .. }
             | AppError::Coded { code, .. }
@@ -273,11 +292,20 @@ impl actix_web::ResponseError for AppError {
                 AppError::CodedVars { vars, .. } => Some(vars.clone()),
                 _ => None,
             },
+            feature: match self {
+                AppError::PlanRefused(r) => r.feature.map(|f| f.as_str().to_string()),
+                _ => None,
+            },
+            error_ar: match self {
+                AppError::PlanRefused(r) => Some(r.ar().to_string()),
+                _ => None,
+            },
         };
         match self {
             AppError::Unauthorized(_) => HttpResponse::Unauthorized().json(body),
             AppError::Forbidden(_) => HttpResponse::Forbidden().json(body),
             AppError::OrgSuspended => HttpResponse::Forbidden().json(body),
+            AppError::PlanRefused(_) => HttpResponse::Forbidden().json(body),
             AppError::NotFound(_) => HttpResponse::NotFound().json(body),
             AppError::BadRequest(_) => HttpResponse::BadRequest().json(body),
             AppError::Conflict(_) => HttpResponse::Conflict().json(body),

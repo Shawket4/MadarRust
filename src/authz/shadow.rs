@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use super::{Scope, legacy, resolve};
+use super::{Scope, legacy};
 use crate::errors::AppError;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub async fn new_decision(
         return Ok(None);
     };
     let now = chrono::Utc::now().timestamp();
-    let eff = resolve(&loaded.principal, Scope::Anywhere, now, &loaded.policy);
+    let eff = loaded.resolve_at(Scope::Anywhere, now);
     Ok(Some(legacy::granted(&eff, resource, action)))
 }
 
@@ -140,7 +140,7 @@ pub async fn compare_all(pool: &sqlx::PgPool) -> Result<Vec<Mismatch>, AppError>
         let Some(loaded) = super::load::load(&mut conn, id).await? else {
             continue;
         };
-        let eff = resolve(&loaded.principal, Scope::Anywhere, now, &loaded.policy);
+        let eff = loaded.resolve_at(Scope::Anywhere, now);
         for (r, a) in crate::permissions::permission_cells() {
             let legacy = crate::permissions::checker::check_permission_for_legacy(
                 &mut conn, id, &role, r, a,

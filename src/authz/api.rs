@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use super::guard::{self as g, GuardError};
 use super::{
-    Cap, CapSet, EffectiveSet, Kinds, Limits, RoleKind, Scope, Tier, is_core_for, resolve,
+    Cap, CapSet, EffectiveSet, Kinds, Limits, RoleKind, Scope, Tier, is_core_for,
 };
 use crate::auth::jwt::Claims;
 use crate::errors::{AppError, AppErrorResponse};
@@ -801,7 +801,7 @@ pub async fn user_access(
         .ok_or_else(|| AppError::NotFound("User not found".into()))?;
     let b = q.branch_id.map(|b| b.to_string());
     let now = chrono::Utc::now().timestamp();
-    let eff = resolve(&loaded.principal, scope_of(&b), now, &loaded.policy);
+    let eff = loaded.resolve_at(scope_of(&b), now);
 
     let role_name = |rid: &str| {
         roles
@@ -1247,7 +1247,7 @@ pub async fn explain(
     drop(conn);
     let b = q.branch_id.map(|b| b.to_string());
     let now = chrono::Utc::now().timestamp();
-    let eff = resolve(&loaded.principal, scope_of(&b), now, &loaded.policy);
+    let eff = loaded.resolve_at(scope_of(&b), now);
 
     let mut steps = vec![];
     let p = &loaded.principal;

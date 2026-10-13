@@ -50,6 +50,7 @@ pub mod orgs;
 pub mod payment_methods;
 pub mod permissions;
 pub mod phone;
+pub mod plan;
 pub mod public_api;
 pub mod purchasing;
 pub mod push;
