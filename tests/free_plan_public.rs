@@ -378,10 +378,20 @@ async fn every_public_page_of_a_free_shop_is_a_404_and_a_paid_shop_keeps_them(po
         );
         paid.push(st);
     }
-    // A signed-up Free shop has none of them. The gate is the only difference.
+    // A signed-up Free shop has none of them but a table's QR (the floor is
+    // on Free). The gate is the only difference.
     set_plan(&pool, g.org, "free").await;
     for row in &rows {
         let (st, body) = call(&app, request(row)).await;
+        if row.1.starts_with("/public/tables/") || row.1 == "/public/table-orders" {
+            assert!(
+                !gated(st, &body),
+                "FREE {} {} is the floor, it must exist: {st} {body}",
+                row.0,
+                row.1
+            );
+            continue;
+        }
         assert!(
             gated(st, &body),
             "FREE {} {} must be the gate's 404: {st} {body}",
@@ -1098,7 +1108,7 @@ async fn a_signed_up_owner_names_the_shop_and_adds_the_team(pool: PgPool) {
         assert_eq!(b["code"], "ORG_FIELD_MADAR_ONLY", "says to ask Madar: {b}");
     }
 
-    // The team: every role an owner can give on Free (no waiter: no floor).
+    // The team: every role an owner can give on Free (a waiter too: Free has the floor).
     let mut teller = Uuid::nil();
     for (i, role) in ["teller", "branch_manager", "org_admin"].iter().enumerate() {
         let (st, b) = call(
@@ -1376,23 +1386,22 @@ async fn the_code_is_checked_at_the_code_step_and_its_token_makes_one_shop(pool:
 /// made, and a paid capability is refused AS the plan's (so the dashboard can
 /// say "on the paid plan", not "no permission").
 #[sqlx::test]
-async fn free_refuses_waiters_partner_sharing_and_paid_capabilities_by_plan(pool: PgPool) {
+async fn free_refuses_partner_sharing_and_paid_capabilities_by_plan(pool: PgPool) {
     let app = app!(pool);
     let (token, org) = signup_owner(&app, &pool, "01006665544", "plan@shop.test").await;
     let auth = ("Authorization", format!("Bearer {token}"));
 
-    // A waiter account.
+    // A waiter account is fine: Free has the floor (its devices are refused
+    // at activation, see tests/free_plan.rs).
     let (st, b) = call(
         &app,
         test::TestRequest::post()
             .uri("/users")
             .insert_header(auth.clone())
-            .set_json(json!({"org_id": org, "name": "W", "role": "waiter", "pin": "482913"})),
+            .set_json(json!({"org_id": org, "name": "W", "role": "waiter", "pin": "482917"})),
     )
     .await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
-    assert_eq!(b["code"], "plan_feature", "{b}");
-    assert_eq!(b["feature"], "floor", "{b}");
+    assert_eq!(st, StatusCode::CREATED, "{b}");
 
     // Sharing a payment method with partners: not on create, not on update.
     let (st, b) = call(&app, test::TestRequest::post().uri("/payment-methods").insert_header(auth.clone())
@@ -1464,17 +1473,8 @@ async fn free_refuses_waiters_partner_sharing_and_paid_capabilities_by_plan(pool
     assert_eq!(b["feature"], "inventory", "{b}");
     assert!(b["error_ar"].is_string(), "{b}");
 
-    // Paid: all three are fine.
+    // Paid: the rest are fine too.
     set_plan(&pool, org, "paid").await;
-    let (st, b) = call(
-        &app,
-        test::TestRequest::post()
-            .uri("/users")
-            .insert_header(auth.clone())
-            .set_json(json!({"org_id": org, "name": "W", "role": "waiter", "pin": "482913"})),
-    )
-    .await;
-    assert_eq!(st, StatusCode::CREATED, "{b}");
     let (st, b) = call(
         &app,
         test::TestRequest::put()

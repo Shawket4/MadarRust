@@ -145,8 +145,9 @@ fn default_caps(kind: RoleKind) -> CapSet {
         .union(&core_set(kind))
 }
 
-/// A role the plan has no use for: a waiter works the floor (tables, open
-/// tickets) from a waiter device, and Free has neither. 403 `plan_feature`.
+/// A role the plan has no use for: a waiter works the floor from a waiter
+/// device. Free has the floor, so the role is allowed there (its devices are
+/// refused at activation); a plan without the floor gets 403 `plan_feature`.
 pub fn may_have_kind(plan: madar_plan::Plan, kind: RoleKind) -> Result<(), AppError> {
     if kind == RoleKind::Waiter {
         madar_plan::require(plan, madar_plan::Feature::Floor).map_err(AppError::PlanRefused)?;

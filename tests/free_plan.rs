@@ -207,7 +207,14 @@ async fn the_ceiling_cuts_an_owner_on_free_and_a_plan_change_moves_it_at_once(po
         "a plan change bumps authz_epoch"
     );
     let free = effective(&pool, s.admin, None).await.unwrap();
-    for cap in [Cap::OrdersCreate, Cap::TillOpen, Cap::PosSignIn] {
+    // The floor (tables, open tickets) is on Free.
+    for cap in [
+        Cap::OrdersCreate,
+        Cap::TillOpen,
+        Cap::PosSignIn,
+        Cap::TicketsOpen,
+        Cap::FloorLayoutEdit,
+    ] {
         assert!(free.can(cap), "Free keeps {}", cap.key());
     }
     for cap in [
@@ -217,8 +224,6 @@ async fn the_ceiling_cuts_an_owner_on_free_and_a_plan_change_moves_it_at_once(po
         Cap::PurchasingOrdersCreate,
         Cap::LoyaltyRead,
         Cap::BookingsRead,
-        Cap::TicketsOpen,
-        Cap::FloorLayoutEdit,
         Cap::DeliveryOrdersRead,
         Cap::DeliverySettingsEdit,
         Cap::KitchenBump,
@@ -333,7 +338,9 @@ async fn the_ceiling_is_the_plan_crate_s_for_every_template_and_role(pool: PgPoo
                 got.caps.iter().count() < before.caps.iter().count() || before.caps == want.caps,
                 "the ceiling only ever removes"
             );
-            for f in madar_plan::Feature::all() {
+            for f in madar_plan::Feature::all()
+                .filter(|f| !madar_plan::has_feature(madar_plan::Plan::Free, *f))
+            {
                 for c in f.caps().iter() {
                     assert!(!got.can(c), "{template}: Free holds {} of {f:?}", c.key());
                 }
@@ -496,7 +503,8 @@ async fn a_free_branch_takes_one_till_and_no_kitchen_screen_or_waiter_device(poo
     assert_eq!(st, StatusCode::FORBIDDEN, "{c}");
     assert_eq!(
         (c["code"].as_str(), c["feature"].as_str()),
-        (Some("plan_feature"), Some("floor"))
+        (Some("plan_device_limit"), None),
+        "Free has the floor but no waiter handhelds"
     );
 
     // The first till: a code, then the tablet.
@@ -1369,4 +1377,36 @@ async fn paid_surfaces_that_have_no_capability_are_refused_by_feature(pool: PgPo
         assert_eq!(b["code"], "plan_feature", "{method} {uri}: {b}");
         assert_eq!(b["feature"], *feature, "{method} {uri}: {b}");
     }
+}
+
+/// The floor (tables, open tickets) is on Free: an owner edits the layout and
+/// opens a bill on a table. Only waiter handhelds and kitchen screens are not.
+#[sqlx::test]
+async fn a_free_org_edits_the_floor_and_opens_a_ticket(pool: PgPool) {
+    setup(&pool).await;
+    let s = shop(&pool).await;
+    set_plan(&pool, s.org, "free").await;
+    let app = app!(pool);
+    let t = s.admin_token();
+    let (st, table) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/floor/tables")
+            .set_json(json!({"branch_id": s.branch, "label": "T1", "seats": 4})),
+        Some(&t),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{table}");
+    let (st, tk) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .set_json(json!({
+                "branch_id": s.branch, "table_id": table["id"], "guest_count": 2,
+                "items": [{"menu_item_id": s.burger, "quantity": 1}]
+            })),
+        Some(&t),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{tk}");
 }

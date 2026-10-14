@@ -193,13 +193,10 @@ pub async fn check_activate(
         .bind(branch)
         .fetch_optional(&mut *conn)
         .await?;
-    // A kind the plan lacks outright (Free: kitchen screens, waiter devices) is
-    // refused even for an install that already exists.
-    if let Err(r) = madar_plan::may_activate(plan, kind, DeviceCounts::default())
-        && r.code == madar_plan::Code::Feature
-    {
-        return Err(refuse(r));
-    }
+    // A kind with no places at all (Free: kitchen screens `plan_feature`,
+    // waiter devices `plan_device_limit`) is refused even for an install that
+    // already exists: at zero active devices only a limit of 0 refuses.
+    madar_plan::may_activate(plan, kind, DeviceCounts::default()).map_err(refuse)?;
     // An install that is already a live device of this kind in this branch is
     // not ADDING one: activating it again (a new code after a lost credential,
     // registering on every start) is never refused, whichever of the branch's
