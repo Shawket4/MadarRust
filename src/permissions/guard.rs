@@ -231,6 +231,14 @@ pub async fn require_can_create(
     } else {
         default_caps(kind)
     };
+    // The actor's set is cut to the org's plan, so the new account's must be
+    // too: on Free a teller's paid defaults (inventory, loyalty, floor…) are
+    // never held by anyone, and comparing them would refuse every new account.
+    let plan = match claims.org_id() {
+        Some(org) => crate::plan::plan_of(pool, org).await?,
+        None => madar_plan::Plan::Paid,
+    };
+    let wanted = wanted.intersect(&madar_plan::ceiling(plan));
     let missing = wanted.minus(&actor.caps);
     if !missing.is_empty() {
         return Err(guard_error(g::GuardError::NotDominant {

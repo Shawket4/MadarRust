@@ -74,7 +74,14 @@ pub async fn brand(
     pool: web::Data<PgPool>,
     query: web::Query<BrandQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let org_id = resolve_org(pool.get_ref(), &query).await?;
+    // By id, this is the shop's own dashboard reading its name and logo (and
+    // the default palette on Free): nothing a Free shop lacks. By slug, it is
+    // a web address resolving to a shop, and a Free shop has none (404).
+    let org_id = if query.slug.is_some() {
+        resolve_org(pool.get_ref(), &query).await?
+    } else {
+        resolve_org_unchecked(pool.get_ref(), &query).await?
+    };
     Ok(HttpResponse::Ok().json(public_brand(pool.get_ref(), org_id).await?))
 }
 

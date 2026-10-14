@@ -228,7 +228,6 @@ fn public_requests(g: &Guest) -> Vec<Row> {
         ("GET", format!("/public/order-now/{}", g.member_token), None),
         // the shop's own page
         ("GET", "/public/orgs/brand?slug=rue".into(), None),
-        ("GET", format!("/public/orgs/brand?org_id={org}"), None),
         ("GET", "/public/orgs/links?slug=rue".into(), None),
         ("GET", format!("/public/orgs/favicon?org_id={org}"), None),
         (
@@ -394,6 +393,14 @@ async fn every_public_page_of_a_free_shop_is_a_404_and_a_paid_shop_keeps_them(po
             "404, never a plan refusal: {body}"
         );
     }
+    // By id the brand is the shop's own dashboard reading its name and logo:
+    // a Free shop keeps it (only a web address, by slug, is gone).
+    let (st, body) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/public/orgs/brand?org_id={}", g.org)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "free: its own brand by id: {body}");
     // The wallet's list of passes leaves a Free shop's passes out.
     let (st, _) = call(
         &app,
@@ -1022,4 +1029,167 @@ async fn the_signup_routes_have_a_per_address_limit(pool: PgPool) {
     }
     assert_eq!(created[2], StatusCode::TOO_MANY_REQUESTS, "{created:?}");
     assert_ne!(created[0], StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// The path a shop that signed itself up walks first, as its owner, with no
+/// super admin anywhere: onboarding saves the name and currency, then the team.
+/// Both were refused on the first release (the org update was super-admin
+/// only; the new-account guard compared the owner's Free-cut set against a
+/// role's paid defaults).
+#[sqlx::test]
+async fn a_signed_up_owner_names_the_shop_and_adds_the_team(pool: PgPool) {
+    let app = app!(pool);
+    let phone = "01004445566";
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup/otp")
+            .set_json(json!({"phone": phone})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let code = latest_code(&pool, phone).await;
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup")
+            .set_json(signup_body(phone, &code, "owner@shop.test")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    let token = b["token"].as_str().unwrap().to_string();
+    let org: Uuid = b["org_id"].as_str().unwrap().parse().unwrap();
+    let branch: Uuid = b["branch_id"].as_str().unwrap().parse().unwrap();
+    let owner: Uuid = b["user"]["id"].as_str().unwrap().parse().unwrap();
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // Onboarding's first step: the name and the currency.
+    let (st, b) = call(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{org}"))
+            .insert_header(auth.clone())
+            .set_json(json!({"name": "Bean There", "currency_code": "USD"})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "the owner saves the name and currency: {b}"
+    );
+    assert_eq!(b["name"], "Bean There");
+    assert_eq!(b["currency_code"], "USD");
+
+    // What stays the super admin's: the address, the plan, the modules.
+    for body in [
+        json!({"slug": "bean-there"}),
+        json!({"plan": "paid"}),
+        json!({"modules": ["pos", "inventory"]}),
+    ] {
+        let (st, b) = call(
+            &app,
+            test::TestRequest::patch()
+                .uri(&format!("/orgs/{org}"))
+                .insert_header(auth.clone())
+                .set_json(&body),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{body}: {b}");
+        assert_eq!(b["code"], "ORG_FIELD_MADAR_ONLY", "says to ask Madar: {b}");
+    }
+
+    // The team: every role an owner can give on Free.
+    let mut teller = Uuid::nil();
+    for (i, role) in ["teller", "branch_manager", "waiter", "org_admin"]
+        .iter()
+        .enumerate()
+    {
+        let (st, b) = call(
+            &app,
+            test::TestRequest::post()
+                .uri("/users")
+                .insert_header(auth.clone())
+                .set_json(json!({
+                    "org_id": org, "name": format!("Staff {i}"), "role": role,
+                    "pin": format!("39{i}172"),
+                    "email": format!("staff{i}@shop.test"), "password": "correct horse 2",
+                })),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "the owner adds a {role}: {b}");
+        if *role == "teller" {
+            teller = b["user"]["id"].as_str().unwrap().parse().unwrap();
+        }
+    }
+
+    // ...and moves a person to another role (the Users page's role picker).
+    let (st, roles) = call(
+        &app,
+        test::TestRequest::get()
+            .uri("/authz/roles")
+            .insert_header(auth.clone()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{roles}");
+    let manager = roles
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "branch_manager")
+        .expect("a manager role")["id"]
+        .clone();
+    let (st, b) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/authz/users/{teller}/assignments"))
+            .insert_header(auth.clone())
+            .set_json(json!({"assignments": [{"role_id": manager, "all_branches": true}]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "the owner promotes the teller: {b}");
+
+    // Once the shop has taken an order its currency is the super admin's.
+    let till: Uuid = sqlx::query_scalar(
+        "INSERT INTO tills (branch_id, teller_id, status, opening_cash) VALUES ($1, $2, 'open', 0) RETURNING id",
+    )
+    .bind(branch)
+    .bind(owner)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO orders (branch_id, teller_id, till_id, subtotal, tax_amount, total_amount, status, order_number, payment_method, order_ref) \
+         VALUES ($1, $2, $3, 100, 0, 100, 'completed', 1, 'cash', $4)",
+    )
+    .bind(branch)
+    .bind(owner)
+    .bind(till)
+    .bind(format!("R-{}", Uuid::new_v4()))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, b) = call(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{org}"))
+            .insert_header(auth.clone())
+            .set_json(json!({"currency_code": "EGP"})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::CONFLICT,
+        "no currency change after an order: {b}"
+    );
+    assert_eq!(b["code"], "ORG_CURRENCY_LOCKED", "{b}");
+    // The same currency again, and a new name, are still fine.
+    let (st, b) = call(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{org}"))
+            .insert_header(auth.clone())
+            .set_json(json!({"name": "Bean There Too", "currency_code": "USD"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
 }

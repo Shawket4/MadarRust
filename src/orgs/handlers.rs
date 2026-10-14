@@ -186,15 +186,17 @@ pub struct UpdateOrgRequest {
 }
 
 impl UpdateOrgRequest {
-    /// Only the shop's own brand fields: its links, and clearing its logo.
-    /// Those are the org's own to save (as the links page and the logo upload
-    /// are); everything else is super-admin only. Destructured in full so a new
-    /// field stays super-admin only until someone decides otherwise.
-    fn brand_only(&self) -> bool {
+    /// Only what the shop's own owner may save: its name, its currency (while
+    /// it has no orders: checked in the handler), its links, and clearing its
+    /// logo. Onboarding asks a self-signed-up owner for the name and currency,
+    /// with no super admin in the loop. Everything else is super-admin only.
+    /// Destructured in full so a new field stays super-admin only until someone
+    /// decides otherwise.
+    fn owner_editable(&self) -> bool {
         let Self {
-            name,
+            name: _,
             slug,
-            currency_code,
+            currency_code: _,
             tax_rate,
             tax_inclusive,
             service_charge_rate,
@@ -210,9 +212,7 @@ impl UpdateOrgRequest {
             max_warehouses,
             plan,
         } = self;
-        name.is_none()
-            && slug.is_none()
-            && currency_code.is_none()
+        slug.is_none()
             && tax_rate.is_none()
             && tax_inclusive.is_none()
             && service_charge_rate.is_none()
@@ -528,7 +528,11 @@ pub async fn list_orgs(
     require_super_admin(&claims)?;
     for (name, v, ok) in [
         ("plan", q.plan.as_deref(), ["free", "paid"]),
-        ("signup_source", q.signup_source.as_deref(), ["admin", "self"]),
+        (
+            "signup_source",
+            q.signup_source.as_deref(),
+            ["admin", "self"],
+        ),
     ] {
         if let Some(v) = v
             && !ok.contains(&v)
@@ -823,13 +827,48 @@ pub async fn update_org(
     let claims = extract_claims(&req)?;
     // `orgs:update` is the org settings capability (`org.settings.edit`).
     check_permission(pool.get_ref(), &claims, "orgs", "update").await?;
-    if body.brand_only() {
+    if body.owner_editable() {
         require_same_org(&claims, Some(*org_id))?;
+    } else if claims.role != crate::models::UserRole::SuperAdmin && claims.org_id() == Some(*org_id)
+    {
+        // The shop's own owner asking for what only Madar changes (the web
+        // address, tax, modules, the plan…): say who to ask, not just "no".
+        return Err(AppError::Coded {
+            status: 403,
+            code: "ORG_FIELD_MADAR_ONLY",
+            reason:
+                "Only Madar can change this setting. Contact Madar and we'll change it for you."
+                    .into(),
+        });
     } else {
         require_super_admin(&claims)?;
     }
 
     let existing = fetch_org(pool.get_ref(), *org_id).await?;
+
+    // A currency change re-reads every amount already recorded, so the owner
+    // may set it only before the first order; after that it is the super
+    // admin's call.
+    if claims.role != crate::models::UserRole::SuperAdmin
+        && body
+            .currency_code
+            .as_deref()
+            .is_some_and(|c| c != existing.currency_code)
+    {
+        let has_orders: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM orders o JOIN branches b ON b.id = o.branch_id WHERE b.org_id = $1)")
+                .bind(*org_id)
+                .fetch_one(pool.get_ref())
+                .await?;
+        if has_orders {
+            return Err(AppError::Coded {
+                status: 409,
+                code: "ORG_CURRENCY_LOCKED",
+                reason: "The currency can't change once the shop has taken orders. Contact Madar to change it."
+                    .into(),
+            });
+        }
+    }
 
     let new_plan = match body.plan.as_deref() {
         None => None,

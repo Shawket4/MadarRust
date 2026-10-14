@@ -917,8 +917,9 @@ async fn an_owner_saves_their_own_brand_links_and_nothing_else(pool: PgPool) {
     assert_eq!(resp.status(), 403);
 
     // Any other field, alone or riding with the links: refused, nothing saved.
+    // (The name and, before the first order, the currency are the owner's own
+    // since self-signup: onboarding asks for them. `free_plan_public.rs`.)
     for body in [
-        serde_json::json!({"name": "Renamed"}),
         serde_json::json!({"custom_branding": true}),
         serde_json::json!({"tax_rate": 0.1, "social_links": {"instagram": "https://instagram.com/x"}}),
     ] {
