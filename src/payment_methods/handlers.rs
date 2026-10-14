@@ -190,6 +190,11 @@ pub async fn update_payment_method(
     if body.visible_in_integrations.is_some_and(|v| v != shared) {
         crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
     }
+    // The Talabat tenders are a delivery channel, the paid `online` feature:
+    // seeded inactive for every shop, and on Free they stay that way.
+    if body.is_active == Some(true) && is_delivery_channel(&old_name) {
+        crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
+    }
 
     let mut update_translations = None;
     if let Some(ref mut tr) = body.label_translations {
@@ -359,4 +364,9 @@ fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
         .get::<Claims>()
         .cloned()
         .ok_or_else(|| AppError::Unauthorized("Missing claims".into()))
+}
+
+/// A tender that only a delivery channel takes (the seeded Talabat pair).
+pub fn is_delivery_channel(name: &str) -> bool {
+    name.starts_with("talabat_")
 }

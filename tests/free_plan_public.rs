@@ -1422,6 +1422,26 @@ async fn free_refuses_waiters_partner_sharing_and_paid_capabilities_by_plan(pool
     assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
     assert_eq!(b["code"], "plan_feature", "{b}");
 
+    // The Talabat tenders stay off on Free (a delivery channel).
+    let talabat: String = sqlx::query_scalar(
+        "SELECT id::text FROM org_payment_methods WHERE org_id = $1 AND name = 'talabat_online'",
+    )
+    .bind(org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let (st, b) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/payment-methods/{talabat}"))
+            .insert_header(auth.clone())
+            .set_json(json!({"is_active": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+    assert_eq!(b["code"], "plan_feature", "{b}");
+    assert_eq!(b["feature"], "online", "{b}");
+
     // A paid capability (inventory) refused as the plan's, not as "no permission".
     let (st, b) = call(
         &app,
@@ -1455,6 +1475,15 @@ async fn free_refuses_waiters_partner_sharing_and_paid_capabilities_by_plan(pool
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{b}");
+    let (st, b) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/payment-methods/{talabat}"))
+            .insert_header(auth.clone())
+            .set_json(json!({"is_active": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "paid turns Talabat on: {b}");
     let (st, b) = call(
         &app,
         test::TestRequest::get()
