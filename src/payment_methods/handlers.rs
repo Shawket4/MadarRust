@@ -110,7 +110,8 @@ pub async fn create_payment_method(
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
     // Sharing with partners is the paid `online` feature: on Free a method
     // keeps the default (it reaches no partner anyway) and may not be set.
-    if body.visible_in_integrations == Some(false) {
+    // So is a delivery channel's own tender.
+    if body.visible_in_integrations == Some(false) || is_delivery_channel(&body.name) {
         crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
     }
 
@@ -313,6 +314,17 @@ pub async fn activate_payment_method(
     let org_id = claims
         .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
+
+    // A delivery channel's tender stays off on Free (see update).
+    let name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM org_payment_methods WHERE id = $1 AND org_id = $2")
+            .bind(*id)
+            .bind(org_id)
+            .fetch_optional(pool.get_ref())
+            .await?;
+    if name.as_deref().is_some_and(is_delivery_channel) {
+        crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
+    }
 
     let method = sqlx::query_as::<_, OrgPaymentMethod>(
         "UPDATE org_payment_methods SET is_active = true WHERE id = $1 AND org_id = $2 RETURNING *",

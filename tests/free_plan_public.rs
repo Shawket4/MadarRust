@@ -1441,6 +1441,15 @@ async fn free_refuses_waiters_partner_sharing_and_paid_capabilities_by_plan(pool
     assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
     assert_eq!(b["code"], "plan_feature", "{b}");
     assert_eq!(b["feature"], "online", "{b}");
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri(&format!("/payment-methods/{talabat}/activate"))
+            .insert_header(auth.clone()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "the activate switch too: {b}");
+    assert_eq!(b["code"], "plan_feature", "{b}");
 
     // A paid capability (inventory) refused as the plan's, not as "no permission".
     let (st, b) = call(
