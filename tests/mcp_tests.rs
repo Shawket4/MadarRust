@@ -251,8 +251,17 @@ async fn about_madar(pool: PgPool) {
     let app = app!(pool);
     let r = tool(&app, "about_madar", json!({})).await;
     let plans = r["structuredContent"]["plans"].as_array().unwrap();
-    assert_eq!(plans.len(), 2);
+    assert_eq!(plans.len(), 3);
     assert_eq!(plans[0]["monthly_egp_per_branch"], 3000);
+    let free = &plans[2];
+    assert_eq!(
+        (free["name"].as_str(), free["monthly_egp"].as_i64()),
+        (Some("Madar Free"), Some(0))
+    );
+    assert!(free["included"].to_string().contains("open tickets"));
+    assert!(!free["not_included"].to_string().contains("floor"));
+    assert!(r["structuredContent"]["links"]["free_plan"].is_string());
+    assert!(r["structuredContent"]["links"]["signup"].is_string());
     assert!(r["structuredContent"]["contact"]["email"].is_string());
 }
 

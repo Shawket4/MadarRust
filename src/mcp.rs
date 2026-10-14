@@ -73,7 +73,7 @@ fn tools() -> Value {
         {
             "name": "about_madar",
             "title": "About Madar POS",
-            "description": "What Madar POS is, its plans and monthly prices per branch, and how to reach sales.",
+            "description": "What Madar POS is, its plans (including the free one) and monthly prices per branch, and how to reach sales.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": read_only,
         },
@@ -214,8 +214,8 @@ async fn call(pool: &web::Data<PgPool>, name: &str, args: &Value) -> Result<Valu
             }
             Ok(v)
         }
-        // ponytail: plans, prices and contact are copied from the marketing site
-        // (site/src/i18n/en.ts pricing, site/src/lib/site.ts); change them together.
+        // ponytail: plans (Free included), prices, links and contact are copied from the
+        // marketing site (site/src/i18n/en.ts pricing, site/src/lib/site.ts); change them together.
         "about_madar" => Ok(about()),
         other => Err(ToolError(format!("no tool named \"{other}\""))),
     }
@@ -228,12 +228,23 @@ fn about() -> Value {
         "plans": [
             { "name": "Essential Café", "monthly_egp_per_branch": 3000 },
             { "name": "Advanced Operation", "monthly_egp_per_branch": 3500 },
+            {
+                "name": "Madar Free",
+                "monthly_egp": 0,
+                "monthly_egp_per_branch": 0,
+                "branches": 1,
+                "tills": 1,
+                "included": ["POS", "reports", "the floor: tables, floor plan, open tickets"],
+                "not_included": ["inventory and recipes", "online ordering", "loyalty", "bookings", "kitchen screens", "waiter handhelds", "Dawam", "branding"],
+            },
         ],
         "first_month": "free",
         "contact": { "whatsapp": "https://wa.me/201211116899", "phone": "+201211116899", "email": "shawket.4@icloud.com" },
         "links": {
             "site": "https://get.madar-pos.cloud/",
             "pricing": "https://get.madar-pos.cloud/en/pricing/",
+            "free_plan": "https://get.madar-pos.cloud/free/",
+            "signup": "https://madar-pos.cloud/signup?lang=en",
             "contact": "https://get.madar-pos.cloud/en/contact/",
             "developers": "https://get.madar-pos.cloud/en/developers/",
         },
@@ -251,7 +262,7 @@ fn resources() -> Value {
             "uri": "madar://about",
             "name": "about",
             "title": "About Madar POS",
-            "description": "What Madar POS is, its plans and monthly prices per branch, and how to reach sales (the same answer as the about_madar tool).",
+            "description": "What Madar POS is, its plans (including the free one) and monthly prices per branch, and how to reach sales (the same answer as the about_madar tool).",
             "mimeType": "application/json",
         },
         {
