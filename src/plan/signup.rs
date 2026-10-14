@@ -4,7 +4,10 @@
 //! - `POST /public/signup/otp` sends a six-digit code to the phone (the same
 //!   WhatsApp gateway and `delivery_otp` store as every other phone proof, with
 //!   its own purpose, `signup`).
-//! - `POST /public/signup` checks the code and creates the organization with
+//! - `POST /public/signup/verify` checks the code ON THE SERVER, at the code
+//!   step (a wrong code is refused there, before the shop's details are asked
+//!   for), and answers with a signup token good for 30 minutes.
+//! - `POST /public/signup` takes that token and creates the organization with
 //!   `orgs::provision::provision` (the call `POST /orgs/provision` makes), as
 //!   `plan = free`, `signup_source = self`, modules `{pos}`, and answers with a
 //!   session in the shape `POST /auth/login` returns, so the dashboard signs
@@ -40,6 +43,8 @@ const COOLDOWN_SECONDS: i64 = 60;
 /// At most this many codes to one phone per hour.
 const MAX_CODES_PER_HOUR: i64 = 5;
 const PURPOSE: &str = "signup";
+/// How long a verified phone stays good for finishing the signup.
+const PROOF_TTL_MINUTES: i64 = 30;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SignupOtpRequest {
@@ -156,12 +161,18 @@ pub async fn otp_request(
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SignupRequest {
-    /// The phone the code went to.
+    /// The token `POST /public/signup/verify` answered with: the proof that the
+    /// owner holds the phone. The phone is the one it was issued for.
+    #[serde(default)]
+    pub signup_token: Option<String>,
+    /// Deprecated, for the dashboard build before the verify step: the phone
+    /// and code checked here instead of by `/public/signup/verify`.
+    #[serde(default)]
     #[schema(example = "01001234567")]
-    pub phone: String,
-    /// The six-digit code from WhatsApp.
+    pub phone: Option<String>,
+    #[serde(default)]
     #[schema(example = "483920")]
-    pub code: String,
+    pub code: Option<String>,
     /// The shop's name. It names the organization and its first branch.
     #[schema(example = "The Rue")]
     pub shop_name: String,
@@ -176,6 +187,23 @@ pub struct SignupRequest {
     /// The version of the terms the owner accepted (stored with the org).
     #[schema(example = "2026-10")]
     pub terms_version: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SignupVerifyRequest {
+    #[schema(example = "01001234567")]
+    pub phone: String,
+    /// The six-digit code from WhatsApp.
+    #[schema(example = "483920")]
+    pub code: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SignupVerifyResponse {
+    /// Send it with `POST /public/signup`. Single use.
+    pub signup_token: String,
+    /// How long it is good for.
+    pub expires_in_seconds: i64,
 }
 
 /// A session like `POST /auth/login`'s, for the owner just made, plus the
@@ -214,6 +242,90 @@ fn auto_slug(name: &str) -> String {
     format!("{base}-{tail}")
 }
 
+/// The server's answer to a code: refused with a stable `code` the signup page
+/// words in its own language.
+fn code_refusal(e: AppError) -> AppError {
+    match e {
+        AppError::BadRequest(m) => {
+            let code = if m.starts_with("Too many") {
+                "SIGNUP_CODE_LOCKED"
+            } else if m.starts_with("No active") {
+                "SIGNUP_CODE_EXPIRED"
+            } else {
+                "SIGNUP_CODE_WRONG"
+            };
+            AppError::Coded {
+                status: 400,
+                code,
+                reason: m,
+            }
+        }
+        other => other,
+    }
+}
+
+fn proof_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A token nobody can guess: 256 bits from the OS RNG (two v4 uuids).
+fn new_proof() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+/// Check the code at the code step.
+///
+/// The server compares it (constant time, five attempts per code across every
+/// caller) and, when it is right, answers with a signup token for
+/// `POST /public/signup`. 400 `SIGNUP_CODE_WRONG` / `SIGNUP_CODE_EXPIRED` /
+/// `SIGNUP_CODE_LOCKED`; 409 `SIGNUP_PHONE_TAKEN` when the phone already owns
+/// a shop (said only to someone who proved it).
+#[utoipa::path(post, path = "/public/signup/verify", tag = "signup",
+    operation_id = "signup_verify", request_body = SignupVerifyRequest,
+    responses(
+        (status = 200, description = "The code is right", body = SignupVerifyResponse),
+        (status = 400, description = "SIGNUP_CODE_WRONG, SIGNUP_CODE_EXPIRED or SIGNUP_CODE_LOCKED"),
+        (status = 409, description = "SIGNUP_PHONE_TAKEN: sign in instead"),
+        (status = 429, description = "RATE_LIMITED"),
+        AppErrorResponse))]
+pub async fn verify(
+    pool: web::Data<PgPool>,
+    body: web::Json<SignupVerifyRequest>,
+) -> Result<HttpResponse, AppError> {
+    let phone = normalize_phone(&body.phone)?;
+    let code = body.code.trim();
+    if code.is_empty()
+        || code.len() > crate::delivery::MAX_OTP_CODE_LEN
+        || !code.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(code_refusal(AppError::BadRequest("Incorrect code.".into())));
+    }
+    let otp = crate::delivery::otp::check_code(pool.get_ref(), &phone, code, PURPOSE)
+        .await
+        .map_err(code_refusal)?;
+    if phone_has_a_shop(pool.get_ref(), &phone).await? {
+        return Err(phone_taken_error());
+    }
+    // A new token each time the right code is sent: an earlier one stops working.
+    let token = new_proof();
+    sqlx::query(
+        "UPDATE delivery_otp SET verified_at = now(), proof_hash = $2
+          WHERE id = $1 AND consumed_at IS NULL",
+    )
+    .bind(otp)
+    .bind(proof_hash(&token))
+    .execute(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(SignupVerifyResponse {
+        signup_token: token,
+        expires_in_seconds: PROOF_TTL_MINUTES * 60,
+    }))
+}
+
 /// Make a shop on the Free plan.
 ///
 /// 400 for a wrong or expired code (or a bad field), 409 `SIGNUP_PHONE_TAKEN` /
@@ -234,8 +346,7 @@ pub async fn signup(
     body: web::Json<SignupRequest>,
 ) -> Result<HttpResponse, AppError> {
     let b = body.into_inner();
-    // Fields first: a typo costs no attempt at the code.
-    let phone = normalize_phone(&b.phone)?;
+    // Fields first: a typo costs nothing.
     let shop_name = b.shop_name.trim().to_string();
     if shop_name.chars().count() < 2 || shop_name.chars().count() > 80 {
         return Err(AppError::BadRequest(
@@ -268,15 +379,47 @@ pub async fn signup(
             "terms_version is required: the terms must be accepted".into(),
         ));
     }
-    if b.code.is_empty()
-        || b.code.len() > crate::delivery::MAX_OTP_CODE_LEN
-        || !b.code.chars().all(|c| c.is_ascii_digit())
-    {
-        return Err(AppError::BadRequest("Incorrect code.".into()));
-    }
-
-    // The phone proof. A wrong code is a 400 and costs an attempt.
-    let otp = crate::delivery::otp::check_code(pool.get_ref(), &phone, &b.code, PURPOSE).await?;
+    // The phone proof: the verify step's token (the phone is the one it was
+    // issued for), or, from a dashboard build before that step, the code itself.
+    let (otp, phone) = match (b.signup_token.as_deref(), b.code.as_deref()) {
+        (Some(token), _) => {
+            let row: Option<(Uuid, String)> = sqlx::query_as(
+                "SELECT id, phone FROM delivery_otp
+                  WHERE purpose = $1 AND proof_hash = $2 AND consumed_at IS NULL
+                    AND verified_at > now() - make_interval(mins => $3)",
+            )
+            .bind(PURPOSE)
+            .bind(proof_hash(token.trim()))
+            .bind(PROOF_TTL_MINUTES as i32)
+            .fetch_optional(pool.get_ref())
+            .await?;
+            let (id, phone) = row.ok_or_else(|| AppError::Coded {
+                status: 400,
+                code: "SIGNUP_TOKEN_EXPIRED",
+                reason: "Your phone check has expired. Verify your number again.".into(),
+            })?;
+            (id, phone)
+        }
+        (None, Some(code)) => {
+            let phone = normalize_phone(b.phone.as_deref().unwrap_or_default())?;
+            let code = code.trim();
+            if code.is_empty()
+                || code.len() > crate::delivery::MAX_OTP_CODE_LEN
+                || !code.chars().all(|c| c.is_ascii_digit())
+            {
+                return Err(code_refusal(AppError::BadRequest("Incorrect code.".into())));
+            }
+            let otp = crate::delivery::otp::check_code(pool.get_ref(), &phone, code, PURPOSE)
+                .await
+                .map_err(code_refusal)?;
+            (otp, phone)
+        }
+        (None, None) => {
+            return Err(AppError::BadRequest(
+                "signup_token is required: verify the phone first".into(),
+            ));
+        }
+    };
 
     // Already an account? Said only to someone who proved the phone.
     if phone_has_a_shop(pool.get_ref(), &phone).await? {
@@ -426,12 +569,18 @@ async fn make_shop(
 /// `/public/signup/*`, each with its own per-IP governor.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     let otp_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "SIGNUP", "OTP");
+    let verify_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "SIGNUP", "VERIFY");
     let create_gov = crate::rate_limit::route_governor(PeerIpOrLocalhost, "SIGNUP", "CREATE");
     let limited = rate_limiting_enabled();
     cfg.service(
         web::resource("/public/signup/otp")
             .wrap(Condition::new(limited, Governor::new(&otp_gov)))
             .route(web::post().to(otp_request)),
+    )
+    .service(
+        web::resource("/public/signup/verify")
+            .wrap(Condition::new(limited, Governor::new(&verify_gov)))
+            .route(web::post().to(verify)),
     )
     .service(
         web::resource("/public/signup")

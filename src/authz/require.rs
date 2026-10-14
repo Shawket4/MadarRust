@@ -76,7 +76,7 @@ pub async fn require(
     if can(pool, claims, cap, branch).await? {
         Ok(())
     } else {
-        Err(denied(cap))
+        Err(denial(pool, claims.user_id(), cap).await)
     }
 }
 
@@ -90,7 +90,7 @@ pub async fn require_for(
     if effective(pool, user_id, branch).await?.can(cap) {
         Ok(())
     } else {
-        Err(denied(cap))
+        Err(denial(pool, user_id, cap).await)
     }
 }
 
@@ -126,6 +126,19 @@ pub async fn settle(
             reason: "This is above your limit too — it waits for someone with a higher one.".into(),
         },
     })
+}
+
+/// Why `user_id` may not use `cap`: the plan's refusal when the plan is what
+/// removed it, else the ordinary [`denied`].
+pub async fn denial(pool: &PgPool, user_id: Uuid, cap: Cap) -> AppError {
+    let plan = match pool.acquire().await {
+        Ok(mut conn) => match super::load::load(&mut conn, user_id).await {
+            Ok(Some(l)) => l.plan,
+            _ => return denied(cap),
+        },
+        Err(_) => return denied(cap),
+    };
+    crate::plan::refusal_for(plan, cap).unwrap_or_else(|| denied(cap))
 }
 
 pub fn denied(cap: Cap) -> AppError {

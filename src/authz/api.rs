@@ -1102,6 +1102,7 @@ pub async fn set_assignments(
             .find(|r| r.id == a.role_id)
             .ok_or_else(|| AppError::BadRequest("Unknown role".into()))?;
         let kind = RoleKind::parse(&role.kind).ok_or(AppError::Internal)?;
+        crate::permissions::guard::may_have_kind(plan, kind)?;
         g::may_give_kind(&actor, kind).map_err(guard_err)?;
         let caps = if kind == RoleKind::OrgAdmin {
             super::owner_set()

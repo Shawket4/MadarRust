@@ -38,6 +38,17 @@ pub fn refuse(r: Refusal) -> AppError {
     AppError::PlanRefused(r)
 }
 
+/// When `cap` is refused because the plan removes it, the plan's own refusal
+/// (403 `plan_feature` naming the feature, in both languages) instead of a bare
+/// "no permission": the person can do nothing about the latter, and the
+/// former says the feature exists and how to get it.
+pub fn refusal_for(plan: Plan, cap: crate::authz::Cap) -> Option<AppError> {
+    let f = madar_plan::Feature::all().find(|f| f.caps().contains(cap))?;
+    madar_plan::require(plan, f)
+        .err()
+        .map(AppError::PlanRefused)
+}
+
 /// The organization's plan. A missing row, or a value this server does not
 /// know, is Paid: never lock a paying shop out.
 pub async fn plan_of<'e, E>(ex: E, org: Uuid) -> Result<Plan, AppError>
