@@ -108,6 +108,11 @@ pub async fn create_payment_method(
     let org_id = claims
         .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
+    // Sharing with partners is the paid `online` feature: on Free a method
+    // keeps the default (it reaches no partner anyway) and may not be set.
+    if body.visible_in_integrations == Some(false) {
+        crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
+    }
 
     ensure_translations(&mut body.label_translations)
         .await
@@ -170,17 +175,21 @@ pub async fn update_payment_method(
 
     // Verify ownership. The current name comes back too: historical rows
     // reference a method by NAME, so a rename has to carry them along.
-    let existing: Option<(serde_json::Value, String)> = sqlx::query_as(
-        "SELECT label_translations, name FROM org_payment_methods WHERE id = $1 AND org_id = $2",
+    let existing: Option<(serde_json::Value, String, bool)> = sqlx::query_as(
+        "SELECT label_translations, name, visible_in_integrations FROM org_payment_methods WHERE id = $1 AND org_id = $2",
     )
     .bind(*id)
     .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?;
 
-    let Some((_, old_name)) = existing else {
+    let Some((_, old_name, shared)) = existing else {
         return Err(AppError::NotFound("Payment method not found".into()));
     };
+    // Sharing with partners is the paid `online` feature (see create).
+    if body.visible_in_integrations.is_some_and(|v| v != shared) {
+        crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
+    }
 
     let mut update_translations = None;
     if let Some(ref mut tr) = body.label_translations {

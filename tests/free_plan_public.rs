@@ -773,7 +773,7 @@ async fn a_wrong_code_a_spent_attempt_budget_and_a_borrowed_code_make_no_shop(po
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "attempt {i}: {b}");
-        assert_eq!(b["error"], "Bad request: Incorrect code.");
+        assert_eq!(b["code"], "SIGNUP_CODE_WRONG", "{b}");
     }
     // The code allowed five tries; the right one is no good now.
     let (st, b) = call(
@@ -1098,12 +1098,9 @@ async fn a_signed_up_owner_names_the_shop_and_adds_the_team(pool: PgPool) {
         assert_eq!(b["code"], "ORG_FIELD_MADAR_ONLY", "says to ask Madar: {b}");
     }
 
-    // The team: every role an owner can give on Free.
+    // The team: every role an owner can give on Free (no waiter: no floor).
     let mut teller = Uuid::nil();
-    for (i, role) in ["teller", "branch_manager", "waiter", "org_admin"]
-        .iter()
-        .enumerate()
-    {
+    for (i, role) in ["teller", "branch_manager", "org_admin"].iter().enumerate() {
         let (st, b) = call(
             &app,
             test::TestRequest::post()
@@ -1189,6 +1186,280 @@ async fn a_signed_up_owner_names_the_shop_and_adds_the_team(pool: PgPool) {
             .uri(&format!("/orgs/{org}"))
             .insert_header(auth.clone())
             .set_json(json!({"name": "Bean There Too", "currency_code": "USD"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+}
+
+async fn signup_owner<S, B>(app: &S, pool: &PgPool, phone: &str, email: &str) -> (String, Uuid)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+    B: actix_web::body::MessageBody,
+{
+    let (st, b) = call(
+        app,
+        test::TestRequest::post()
+            .uri("/public/signup/otp")
+            .set_json(json!({"phone": phone})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let code = latest_code(pool, phone).await;
+    let (st, b) = call(
+        app,
+        test::TestRequest::post()
+            .uri("/public/signup/verify")
+            .set_json(json!({"phone": phone, "code": code})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let token = b["signup_token"].as_str().unwrap().to_string();
+    let mut body = signup_body(phone, "", email);
+    let o = body.as_object_mut().unwrap();
+    o.remove("phone");
+    o.remove("code");
+    o.insert("signup_token".into(), json!(token));
+    let (st, b) = call(
+        app,
+        test::TestRequest::post()
+            .uri("/public/signup")
+            .set_json(body),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    (
+        b["token"].as_str().unwrap().to_string(),
+        b["org_id"].as_str().unwrap().parse().unwrap(),
+    )
+}
+
+/// The code is checked by the SERVER at the code step: a wrong code never gets
+/// past it, a right one gives a single-use token, and only that token makes
+/// the shop (the phone is the token's, not the body's).
+#[sqlx::test]
+async fn the_code_is_checked_at_the_code_step_and_its_token_makes_one_shop(pool: PgPool) {
+    let app = app!(pool);
+    let phone = "01007778899";
+    let (st, _) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup/otp")
+            .set_json(json!({"phone": phone})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let code = latest_code(&pool, phone).await;
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+
+    // A wrong code: refused right there, with a code the page words.
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup/verify")
+            .set_json(json!({"phone": phone, "code": wrong})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["code"], "SIGNUP_CODE_WRONG", "{b}");
+    assert!(b.get("signup_token").is_none());
+
+    // The right one: a token, and nothing made yet.
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup/verify")
+            .set_json(json!({"phone": phone, "code": code})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let token = b["signup_token"].as_str().unwrap().to_string();
+    assert!(token.len() >= 64, "unguessable: {token}");
+    assert_eq!(b["expires_in_seconds"], 1800);
+    let n: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM organizations WHERE signup_source = 'self'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(n, 0, "verifying makes no shop");
+    // Only the token's hash is kept.
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT proof_hash FROM delivery_otp WHERE purpose = 'signup' AND verified_at IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(stored.is_some_and(|h| h != token && h.len() == 64));
+
+    let body = |t: &str| {
+        let mut v = signup_body("01000000000", "", "tok@shop.test");
+        let o = v.as_object_mut().unwrap();
+        o.remove("code");
+        o.insert("signup_token".into(), json!(t));
+        v
+    };
+    // A made-up token: refused.
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup")
+            .set_json(body("deadbeef")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["code"], "SIGNUP_TOKEN_EXPIRED");
+
+    // The real one makes the shop, on the TOKEN's phone (the body's is ignored).
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup")
+            .set_json(body(&token)),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    assert_eq!(
+        b["user"]["phone"],
+        madar_rust::phone::canonical(phone).unwrap()
+    );
+
+    // Once: the same token again makes nothing.
+    let mut again = body(&token);
+    again["email"] = json!("tok2@shop.test");
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup")
+            .set_json(again),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["code"], "SIGNUP_TOKEN_EXPIRED");
+
+    // A token older than 30 minutes is spent too.
+    let (st, _) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup/otp")
+            .set_json(json!({"phone": "01007778800"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let code = latest_code(&pool, "01007778800").await;
+    let (_, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup/verify")
+            .set_json(json!({"phone": "01007778800", "code": code})),
+    )
+    .await;
+    let old = b["signup_token"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE delivery_otp SET verified_at = now() - interval '31 minutes' WHERE verified_at IS NOT NULL AND consumed_at IS NULL")
+        .execute(&pool).await.unwrap();
+    let mut late = body(&old);
+    late["email"] = json!("late@shop.test");
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/public/signup")
+            .set_json(late),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+    assert_eq!(b["code"], "SIGNUP_TOKEN_EXPIRED");
+}
+
+/// What Free has no use for is refused by the server however the request is
+/// made, and a paid capability is refused AS the plan's (so the dashboard can
+/// say "on the paid plan", not "no permission").
+#[sqlx::test]
+async fn free_refuses_waiters_partner_sharing_and_paid_capabilities_by_plan(pool: PgPool) {
+    let app = app!(pool);
+    let (token, org) = signup_owner(&app, &pool, "01006665544", "plan@shop.test").await;
+    let auth = ("Authorization", format!("Bearer {token}"));
+
+    // A waiter account.
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/users")
+            .insert_header(auth.clone())
+            .set_json(json!({"org_id": org, "name": "W", "role": "waiter", "pin": "482913"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+    assert_eq!(b["code"], "plan_feature", "{b}");
+    assert_eq!(b["feature"], "floor", "{b}");
+
+    // Sharing a payment method with partners: not on create, not on update.
+    let (st, b) = call(&app, test::TestRequest::post().uri("/payment-methods").insert_header(auth.clone())
+        .set_json(json!({"name": "wallet", "label_translations": {"en": "Wallet", "ar": "محفظة"}, "color": "#0f766e", "icon": "wallet", "is_cash": false, "visible_in_integrations": false}))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+    assert_eq!(b["code"], "plan_feature", "{b}");
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/payment-methods")
+            .insert_header(auth.clone())
+            .set_json(
+                json!({"name": "wallet", "label_translations": {"en": "Wallet", "ar": "محفظة"}, "color": "#0f766e", "icon": "wallet", "is_cash": false}),
+            ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "a method itself is fine: {b}");
+    let id = b["id"].as_str().unwrap().to_string();
+    let (st, b) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/payment-methods/{id}"))
+            .insert_header(auth.clone())
+            .set_json(json!({"visible_in_integrations": false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+    assert_eq!(b["code"], "plan_feature", "{b}");
+
+    // A paid capability (inventory) refused as the plan's, not as "no permission".
+    let (st, b) = call(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/inventory/orgs/{org}/categories"))
+            .insert_header(auth.clone()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{b}");
+    assert_eq!(b["code"], "plan_feature", "{b}");
+    assert_eq!(b["feature"], "inventory", "{b}");
+    assert!(b["error_ar"].is_string(), "{b}");
+
+    // Paid: all three are fine.
+    set_plan(&pool, org, "paid").await;
+    let (st, b) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/users")
+            .insert_header(auth.clone())
+            .set_json(json!({"org_id": org, "name": "W", "role": "waiter", "pin": "482913"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{b}");
+    let (st, b) = call(
+        &app,
+        test::TestRequest::put()
+            .uri(&format!("/payment-methods/{id}"))
+            .insert_header(auth.clone())
+            .set_json(json!({"visible_in_integrations": false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let (st, b) = call(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/inventory/orgs/{org}/categories"))
+            .insert_header(auth.clone()),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{b}");

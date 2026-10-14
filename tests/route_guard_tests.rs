@@ -254,8 +254,13 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
     ),
     (
         "POST",
+        "/public/signup/verify",
+        "a shop signing up has its WhatsApp code checked at the code step; per-IP governor, the code allows five attempts",
+    ),
+    (
+        "POST",
         "/public/signup",
-        "a shop makes itself on the Free plan, with the WhatsApp code as its proof; per-IP governor, the code allows five attempts",
+        "a shop makes itself on the Free plan, with the verify step's single-use token as its proof; per-IP governor",
     ),
     (
         "POST",

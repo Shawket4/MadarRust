@@ -315,6 +315,13 @@ pub const ROUTE_LIMITS: &[RouteLimitDef] = &[
     },
     RouteLimitDef {
         area: "SIGNUP",
+        limiter: "VERIFY",
+        burst: 10,
+        ms_per_request: 6_000,
+        guards: "per IP: checking a signup code (POST /public/signup/verify; a code also allows five tries)",
+    },
+    RouteLimitDef {
+        area: "SIGNUP",
         limiter: "CREATE",
         burst: 6,
         ms_per_request: 30_000,
@@ -999,6 +1006,7 @@ mod tests {
             ("BOOKINGS", "BROWSE", 60, 1),
             ("BOOKINGS", "WRITE", 10, 6),
             ("SIGNUP", "OTP", 3, 60),
+            ("SIGNUP", "VERIFY", 5, 12),
             ("SIGNUP", "CREATE", 3, 60),
         ];
         assert_eq!(before.len(), ROUTE_LIMITS.len(), "every limiter is listed");

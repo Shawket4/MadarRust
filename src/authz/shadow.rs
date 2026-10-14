@@ -49,6 +49,19 @@ pub async fn new_decision(
     Ok(Some(legacy::granted(&eff, resource, action)))
 }
 
+/// The plan's refusal when the cell's capability is one the person's plan
+/// removes (`crate::plan::refusal_for`).
+async fn plan_denial(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    resource: &str,
+    action: &str,
+) -> Option<AppError> {
+    let cap = super::Cap::from_legacy(resource, action)?;
+    let plan = super::load::load(conn, user_id).await.ok()??.plan;
+    crate::plan::refusal_for(plan, cap)
+}
+
 fn deny(resource: &str, action: &str) -> AppError {
     AppError::Forbidden(format!("Permission denied: {action} {resource}"))
 }
@@ -99,7 +112,9 @@ pub async fn observe_in(
     match mode {
         Mode::Enforce => match new {
             Ok(Some(true)) => Ok(()),
-            Ok(Some(false)) => Err(deny(resource, action)),
+            Ok(Some(false)) => Err(plan_denial(conn, user_id, resource, action)
+                .await
+                .unwrap_or_else(|| deny(resource, action))),
             // No user row (service tokens): keep today's answer.
             Ok(None) => legacy_result,
             Err(e) => Err(e),

@@ -145,6 +145,15 @@ fn default_caps(kind: RoleKind) -> CapSet {
         .union(&core_set(kind))
 }
 
+/// A role the plan has no use for: a waiter works the floor (tables, open
+/// tickets) from a waiter device, and Free has neither. 403 `plan_feature`.
+pub fn may_have_kind(plan: madar_plan::Plan, kind: RoleKind) -> Result<(), AppError> {
+    if kind == RoleKind::Waiter {
+        madar_plan::require(plan, madar_plan::Feature::Floor).map_err(AppError::PlanRefused)?;
+    }
+    Ok(())
+}
+
 fn kind_of(role: &UserRole) -> RoleKind {
     match role {
         UserRole::SuperAdmin | UserRole::OrgAdmin => RoleKind::OrgAdmin,
@@ -224,6 +233,11 @@ pub async fn require_can_create(
     }
     let actor = crate::authz::require::effective_for_claims(pool, claims, None).await?;
     let kind = kind_of(role);
+    let plan = match claims.org_id() {
+        Some(org) => crate::plan::plan_of(pool, org).await?,
+        None => madar_plan::Plan::Paid,
+    };
+    may_have_kind(plan, kind)?;
     // Owners create anyone; everyone else only a role strictly below their own.
     g::may_give_kind(&actor, kind).map_err(guard_error)?;
     let wanted = if kind == RoleKind::OrgAdmin {
@@ -234,10 +248,6 @@ pub async fn require_can_create(
     // The actor's set is cut to the org's plan, so the new account's must be
     // too: on Free a teller's paid defaults (inventory, loyalty, floor…) are
     // never held by anyone, and comparing them would refuse every new account.
-    let plan = match claims.org_id() {
-        Some(org) => crate::plan::plan_of(pool, org).await?,
-        None => madar_plan::Plan::Paid,
-    };
     let wanted = wanted.intersect(&madar_plan::ceiling(plan));
     let missing = wanted.minus(&actor.caps);
     if !missing.is_empty() {

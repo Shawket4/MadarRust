@@ -36858,6 +36858,101 @@
         }
       }
     },
+    "/public/signup/verify": {
+      "post": {
+        "tags": [
+          "signup"
+        ],
+        "summary": "Check the code at the code step.",
+        "description": "The server compares it (constant time, five attempts per code across every\ncaller) and, when it is right, answers with a signup token for\n`POST /public/signup`. 400 `SIGNUP_CODE_WRONG` / `SIGNUP_CODE_EXPIRED` /\n`SIGNUP_CODE_LOCKED`; 409 `SIGNUP_PHONE_TAKEN` when the phone already owns\na shop (said only to someone who proved it).",
+        "operationId": "signup_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The code is right",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignupVerifyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "RATE_LIMITED"
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/public/table-orders": {
       "post": {
         "tags": [
@@ -96112,8 +96207,6 @@
       "SignupRequest": {
         "type": "object",
         "required": [
-          "phone",
-          "code",
           "shop_name",
           "owner_name",
           "email",
@@ -96123,8 +96216,10 @@
         ],
         "properties": {
           "code": {
-            "type": "string",
-            "description": "The six-digit code from WhatsApp.",
+            "type": [
+              "string",
+              "null"
+            ],
             "example": "483920"
           },
           "email": {
@@ -96139,14 +96234,24 @@
             "description": "At least 8 characters."
           },
           "phone": {
-            "type": "string",
-            "description": "The phone the code went to.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Deprecated, for the dashboard build before the verify step: the phone\nand code checked here instead of by `/public/signup/verify`.",
             "example": "01001234567"
           },
           "shop_name": {
             "type": "string",
             "description": "The shop's name. It names the organization and its first branch.",
             "example": "The Rue"
+          },
+          "signup_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The token `POST /public/signup/verify` answered with: the proof that the\nowner holds the phone. The phone is the one it was issued for."
           },
           "template": {
             "type": "string",
@@ -96185,6 +96290,42 @@
           }
         ],
         "description": "A session like `POST /auth/login`'s, for the owner just made, plus the\nids the dashboard lands on."
+      },
+      "SignupVerifyRequest": {
+        "type": "object",
+        "required": [
+          "phone",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The six-digit code from WhatsApp.",
+            "example": "483920"
+          },
+          "phone": {
+            "type": "string",
+            "example": "01001234567"
+          }
+        }
+      },
+      "SignupVerifyResponse": {
+        "type": "object",
+        "required": [
+          "signup_token",
+          "expires_in_seconds"
+        ],
+        "properties": {
+          "expires_in_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long it is good for."
+          },
+          "signup_token": {
+            "type": "string",
+            "description": "Send it with `POST /public/signup`. Single use."
+          }
+        }
       },
       "SizeBaseResult": {
         "type": "object",
