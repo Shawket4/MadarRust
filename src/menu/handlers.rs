@@ -912,23 +912,19 @@ pub async fn list_menu_items(
     // menu from this endpoint and cannot sell a combo, so `kind=combo` rows are
     // left out for it. Part of the cache key: two clients, two bodies.
     let sells_combos = crate::client_seen::sells_combos(req.headers());
-    // The org's `catalog_revision` is part of the key: every catalog write the
-    // triggers see (items, sizes, options, recipes, prices, ingredients,
-    // combos, deals) bumps it, so a cached body never outlives the catalog it
-    // was built from, whichever path wrote it. One indexed read, against the
-    // ~1,000 statements a `full=true` body costs.
-    let revision: i64 = match &cache {
-        Some(c) if c.enabled() => sqlx::query_scalar!(
-            "SELECT revision FROM catalog_revision WHERE org_id = $1",
-            query.org_id
-        )
-        .fetch_optional(pool.get_ref())
-        .await?
-        .unwrap_or(0),
-        _ => 0,
+    // Everything the body depends on besides the query is in the key
+    // (`menu::cache::fingerprint`; the full list is in cache.rs), so the next
+    // read after any write is fresh. Off on a non-prod-shaped database.
+    let fingerprint = match &cache {
+        Some(c) if c.usable(pool.get_ref()).await => {
+            Some(crate::menu::cache::fingerprint(pool.get_ref(), query.org_id).await?)
+        }
+        _ => None,
     };
+    let cache = cache.filter(|_| fingerprint.is_some());
     let variant = format!(
-        "menu|r{revision}|{}|{}|{}|{}",
+        "menu|{}|{}|{}|{}|{}",
+        fingerprint.as_deref().unwrap_or(""),
         query.category_id.map(|c| c.to_string()).unwrap_or_default(),
         query.branch_id.map(|b| b.to_string()).unwrap_or_default(),
         query.full.unwrap_or(false),

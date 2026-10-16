@@ -78,10 +78,13 @@ async fn seed(pool: &PgPool, label: &str) -> Seed {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO order_item_addons (order_item_id, addon_name, unit_price, quantity, line_total)
-         VALUES ($1, 'Oat', 20, 1, 20)",
+        "WITH a AS (INSERT INTO addon_items (org_id, name, type, default_price)
+                    VALUES ($2, 'Oat', 'milk_type', 20) RETURNING id)
+         INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
+         SELECT $1, a.id, 'Oat', 20, 1, 20 FROM a",
     )
     .bind(item)
+    .bind(org)
     .execute(pool)
     .await
     .unwrap();
@@ -234,7 +237,7 @@ async fn an_unknown_movement_source_type_is_refused(pool: PgPool) {
         async move {
             sqlx::query(
                 "INSERT INTO inventory_movements (branch_id, org_ingredient_id, type, quantity, source_type)
-                 VALUES ($1, $2, 'adjustment', 1, $3)",
+                 VALUES ($1, $2, 'adjustment_add', 1, $3)",
             )
             .bind(s.branch)
             .bind(ing)
@@ -295,7 +298,7 @@ async fn sales_daily_recompute_is_idempotent_and_matches_the_ledger(pool: PgPool
     .unwrap();
     assert_eq!(pay, (1, 300));
     // A void moves the day out of the sums, not out of the count.
-    sqlx::query("UPDATE orders SET status = 'voided', voided_at = now(), void_reason = 'mistake' WHERE id = $1")
+    sqlx::query("UPDATE orders SET status = 'voided', voided_at = now(), void_reason = 'wrong_order', voided_by = teller_id WHERE id = $1")
         .bind(s.order)
         .execute(&pool)
         .await
@@ -352,8 +355,14 @@ fn concurrent_index_names_are_read_from_no_transaction_files() {
     // Every no-transaction migration in the tree names exactly one index.
     for m in madar_rust::MIGRATOR.iter().filter(|m| m.no_tx) {
         assert!(name(&m.sql).is_some(), "{} names no CONCURRENTLY index", m.version);
+        let code: String = m
+            .sql
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(
-            m.sql.matches(';').count(),
+            code.matches(';').count(),
             1,
             "{}: a -- no-transaction file must hold exactly one statement",
             m.version
