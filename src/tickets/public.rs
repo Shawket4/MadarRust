@@ -196,12 +196,15 @@ async fn live_bill(pool: &PgPool, table_id: Uuid) -> Result<Option<PublicTableBi
     // then fired time), so the customer's list reads in the order they ordered.
     let mut rounds: Vec<PublicTableRound> = Vec::new();
     for it in &view.items {
-        let name = it
-            .line
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
+        // The relational columns (DB Phase 5.1); `line` only for a line the
+        // column trigger has not seen (none after the migration's backfill).
+        let name = it.item_name.clone().unwrap_or_else(|| {
+            it.line
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        });
         let entry = match rounds.last_mut() {
             Some(r) if r.number == it.round_number => r,
             _ => {
@@ -215,12 +218,13 @@ async fn live_bill(pool: &PgPool, table_id: Uuid) -> Result<Option<PublicTableBi
         };
         entry.items.push(PublicTableLine {
             name,
-            quantity: it
-                .line
-                .get("quantity")
-                .or_else(|| it.line.get("qty"))
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(1) as i32,
+            quantity: it.quantity.unwrap_or_else(|| {
+                it.line
+                    .get("quantity")
+                    .or_else(|| it.line.get("qty"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(1) as i32
+            }),
             line_total: it.line_total,
             voided: it.voided,
         });
