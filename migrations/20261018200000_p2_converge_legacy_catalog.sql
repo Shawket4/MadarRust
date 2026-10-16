@@ -344,3 +344,21 @@ BEGIN
     END IF;
 END
 $v$;
+
+-- prod's views all run as the invoker (so the tenant's RLS applies through
+-- them); item_sizes, created by an earlier migration, did not on a fresh
+-- database. A no-op where it is already set.
+DO $inv$
+DECLARE v text;
+BEGIN
+    FOREACH v IN ARRAY ARRAY[
+        'item_sizes', 'addon_item_ingredients', 'addon_items', 'branch_addon_overrides',
+        'branch_channel_addon_overrides', 'branch_channel_menu_overrides', 'branch_menu_overrides',
+        'branch_menu_size_overrides', 'menu_item_addon_slots', 'menu_item_allowed_addons',
+        'menu_item_optional_fields', 'menu_item_recipes'] LOOP
+        IF (SELECT relkind FROM pg_class WHERE oid = to_regclass('public.' || v)) = 'v' THEN
+            EXECUTE format('ALTER VIEW public.%I SET (security_invoker = true)', v);
+        END IF;
+    END LOOP;
+END
+$inv$;

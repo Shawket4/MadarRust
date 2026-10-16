@@ -60,7 +60,7 @@ async fn shop(pool: &PgPool, label: &str) -> Shop {
               VALUES ('{branch}', 'Near', 1000, 10);
          -- channel scope: no branch, the org comes from the size it prices
          INSERT INTO menu_price_overrides (scope, channel, target_type, target_id, price)
-              VALUES ('channel', 'talabat', 'menu_item_size', '{size}', 120);",
+              VALUES ('channel', 'outside', 'menu_item_size', '{size}', 120);",
         org = s.org,
         teller = s.teller,
         branch = s.branch,

@@ -63,6 +63,9 @@ DECLARE
     r   text;
     acc text[] := '{}';
 BEGIN
+    -- A session with row_security = off (pg_dump style, some test harnesses)
+    -- would get an error instead of the tenant's rows.
+    PERFORM set_config('row_security', 'on', true);
     FOR o IN SELECT id FROM organizations ORDER BY id LOOP
         PERFORM set_config('app.org_id', o::text, true);
         EXECUTE 'SET LOCAL ROLE madar_app';

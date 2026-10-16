@@ -50,6 +50,7 @@ BEGIN
         keyx := coalesce(keyx, '(to_jsonb(x) - ''org_id'')::text');
         q := format('SELECT count(*), md5(coalesce(string_agg(k, '','' ORDER BY k), '''')) '
                     '  FROM (SELECT %s AS k FROM public.%I x) s', keyx, t.relname);
+        PERFORM set_config('row_security', 'on', true);
         FOREACH o IN ARRAY orgs LOOP
             PERFORM set_config('app.org_id', o::text, true);
             EXECUTE 'SET LOCAL ROLE madar_app';
