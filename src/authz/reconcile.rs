@@ -471,7 +471,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
                 listed: person.listed.into_iter().collect(),
                 overrides: by_user.remove(&person.id).unwrap_or_default(),
             };
-            let grants = grants_cache
+            let grants = *grants_cache
                 .entry(person.role.clone())
                 .or_insert_with(|| {
                     let (template, stored) = templates
@@ -479,8 +479,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
                         .cloned()
                         .unwrap_or((None, CapSet::EMPTY));
                     role_grants(kind, template.as_deref(), &stored, &role_permissions)
-                })
-                .clone();
+                });
             let loaded = super::load::load(&mut conn, person.id).await?;
             for at in &scopes {
                 let old = old_effective(&legacy, &grants, plan, *at);
