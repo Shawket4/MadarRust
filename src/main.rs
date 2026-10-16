@@ -117,6 +117,7 @@ async fn run() -> std::io::Result<()> {
         panic!("permission registry drift: {e}");
     }
     tracing::info!(mode = ?*madar_rust::authz::shadow::MODE, "permissions model");
+    madar_rust::authz::shadow::spawn_flusher(pool.clone());
 
     let pool = web::Data::new(pool);
     // Read pool handed to the /reports scope only (see configure call below).

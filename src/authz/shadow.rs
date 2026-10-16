@@ -8,8 +8,9 @@
 //!
 //! A failure to compute the new decision never fails a request in `shadow`.
 
-use std::sync::LazyLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -34,6 +35,122 @@ pub static MODE: LazyLock<Mode> =
 /// Divergences seen since start (exported for observability).
 pub static DIVERGENCES: AtomicU64 = AtomicU64::new(0);
 
+/// One disagreement, as `authz_shadow_disagreements` keys it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Key {
+    day: chrono::NaiveDate,
+    org_id: Option<Uuid>,
+    user_id: Uuid,
+    resource: String,
+    action: String,
+    legacy: bool,
+    new: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    hits: i64,
+    first: chrono::DateTime<chrono::Utc>,
+    last: chrono::DateTime<chrono::Utc>,
+}
+
+/// Disagreements not yet written. Bounded: past [`PENDING_CAP`] distinct keys a
+/// new key is only counted in [`DIVERGENCES`] (a storm must not grow memory).
+static PENDING: LazyLock<Mutex<HashMap<Key, Seen>>> = LazyLock::new(Default::default);
+const PENDING_CAP: usize = 50_000;
+const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn record(org_id: Option<Uuid>, user_id: Uuid, resource: &str, action: &str, legacy: bool, new: bool) {
+    let now = chrono::Utc::now();
+    let key = Key {
+        day: now.date_naive(),
+        org_id,
+        user_id,
+        resource: resource.to_string(),
+        action: action.to_string(),
+        legacy,
+        new,
+    };
+    let Ok(mut m) = PENDING.lock() else { return };
+    if let Some(s) = m.get_mut(&key) {
+        s.hits += 1;
+        s.last = now;
+    } else if m.len() < PENDING_CAP {
+        m.insert(key, Seen { hits: 1, first: now, last: now });
+    }
+}
+
+/// Write the pending disagreements (adding to today's rows). Returns how many
+/// distinct rows were written. On a failure the batch is put back, so a hit is
+/// never lost to a database blip.
+pub async fn flush(pool: &sqlx::PgPool) -> Result<usize, sqlx::Error> {
+    let batch: Vec<(Key, Seen)> = match PENDING.lock() {
+        Ok(mut m) => m.drain().collect(),
+        Err(_) => return Ok(0),
+    };
+    if batch.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut failed = None;
+    for (k, s) in &batch {
+        if let Err(e) = sqlx::query!(
+            "INSERT INTO authz_shadow_disagreements
+                 (day, org_id, user_id, resource, action, legacy, new, hits, first_seen, last_seen)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (day, user_id, resource, action, legacy, new) DO UPDATE
+                SET hits = authz_shadow_disagreements.hits + EXCLUDED.hits,
+                    last_seen = GREATEST(authz_shadow_disagreements.last_seen, EXCLUDED.last_seen),
+                    org_id = COALESCE(authz_shadow_disagreements.org_id, EXCLUDED.org_id)",
+            k.day,
+            k.org_id,
+            k.user_id,
+            k.resource,
+            k.action,
+            k.legacy,
+            k.new,
+            s.hits,
+            s.first,
+            s.last,
+        )
+        .execute(&mut *tx)
+        .await
+        {
+            failed = Some(e);
+            break;
+        }
+    }
+    let result = match failed {
+        None => tx.commit().await,
+        Some(e) => Err(e),
+    };
+    if let Err(e) = result {
+        if let Ok(mut m) = PENDING.lock() {
+            for (k, s) in batch {
+                let row = m.entry(k).or_insert(Seen { hits: 0, ..s });
+                row.hits += s.hits;
+                row.first = row.first.min(s.first);
+                row.last = row.last.max(s.last);
+            }
+        }
+        return Err(e);
+    }
+    Ok(batch.len())
+}
+
+/// Flush the counter once a minute, for the life of the process.
+pub fn spawn_flusher(pool: sqlx::PgPool) {
+    crate::db::spawn(async move {
+        let mut tick = tokio::time::interval(FLUSH_EVERY);
+        loop {
+            tick.tick().await;
+            if let Err(e) = flush(&pool).await {
+                tracing::warn!(target: "madar.authz.shadow", error = %e, "disagreement counter flush failed");
+            }
+        }
+    });
+}
+
 /// The new model's answer for a legacy cell.
 pub async fn new_decision(
     conn: &mut PgConnection,
@@ -47,6 +164,21 @@ pub async fn new_decision(
     let now = chrono::Utc::now().timestamp();
     let eff = loaded.resolve_at(Scope::Anywhere, now);
     Ok(Some(legacy::granted(&eff, resource, action)))
+}
+
+/// [`new_decision`] with the person's org, for the counter.
+async fn new_decision_in_org(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    resource: &str,
+    action: &str,
+) -> Result<Option<(bool, Option<Uuid>)>, AppError> {
+    let Some(loaded) = super::load::load(conn, user_id).await? else {
+        return Ok(None);
+    };
+    let now = chrono::Utc::now().timestamp();
+    let eff = loaded.resolve_at(Scope::Anywhere, now);
+    Ok(Some((legacy::granted(&eff, resource, action), loaded.org_id)))
 }
 
 /// The plan's refusal when the cell's capability is one the person's plan
@@ -94,10 +226,16 @@ pub async fn observe_in(
     if mode == Mode::Legacy {
         return legacy_result;
     }
-    let new = new_decision(conn, user_id, resource, action).await;
+    let new = new_decision_in_org(conn, user_id, resource, action).await;
+    let (new, org_id) = match new {
+        Ok(Some((n, org))) => (Ok(Some(n)), org),
+        Ok(None) => (Ok(None), None),
+        Err(e) => (Err(e), None),
+    };
     match (&new, mode) {
         (Ok(Some(n)), _) if *n != legacy_ok => {
             DIVERGENCES.fetch_add(1, Ordering::Relaxed);
+            record(org_id, user_id, resource, action, legacy_ok, *n);
             tracing::warn!(
                 target: "madar.authz.shadow",
                 %user_id, resource, action, legacy = legacy_ok, new = *n,
