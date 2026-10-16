@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH b AS (\n               SELECT DISTINCT branch_id FROM orders WHERE created_at > now() - interval '4 days'\n               UNION\n               SELECT DISTINCT branch_id FROM order_refunds WHERE issued_at > now() - interval '4 days'\n           ), d AS (\n               SELECT b.branch_id,\n                      ((now() AT TIME ZONE effective_timezone(b.branch_id))::date - k) AS day\n                 FROM b CROSS JOIN generate_series(1, 2) k\n           )\n           SELECT count(sales_daily_recompute(d.branch_id, d.day)) AS \"n!\" FROM d",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0c9798f3b031341a0a0696321fb7eb535b0f99ab3dd20f09813fa0bd40498986"
+}
