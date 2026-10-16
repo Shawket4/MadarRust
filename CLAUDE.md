@@ -268,6 +268,15 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   every `client_seen::legacy_hit`, plus `compat_usage::count_internal` at each
   server read of a compat view. A shim with 0 hits for 30 days is a removal
   candidate.
+- **Sales reports read closed days from rollups** (Phase 2.6, `src/reports/sales.rs`):
+  `/reports/branches/{id}/sales`, the daily/monthly timeseries and the org
+  comparison add up `sales_daily_sold*` for whole closed, covered, clean days and
+  compute the rest live (`sales_daily_plan`). Any write to a closed day marks the
+  SALE's day dirty by trigger (orders, order_items, order_payments, order_refunds,
+  order_item_addons), so it is read live until the worker recomputes it. A new
+  figure in one of these reports needs a column in the rollup, its recompute, and
+  a run of `report-rollup-reconcile`; a new table whose rows change those figures
+  needs the dirty trigger. Verify on a copy: `scripts/verify_report_rollups.sh <db>`.
 - **Checks to run on a prod copy:** `scripts/db_reconcile.sql` (per-org counts
   and sums, diff before/after: must be empty), `scripts/db_phase1_check.sql`
   (prints only problems), `scripts/explain_hot_paths.sql` (plan timings),

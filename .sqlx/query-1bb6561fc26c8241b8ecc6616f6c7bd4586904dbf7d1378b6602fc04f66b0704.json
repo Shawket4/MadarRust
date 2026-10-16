@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT b.id, effective_timezone(b.id) AS \"tz!\", c.since AS \"since?\", c.through AS \"through?\"\n                 FROM branches b LEFT JOIN sales_daily_coverage c ON c.branch_id = b.id\n                WHERE b.org_id = $1 AND b.deleted_at IS NULL ORDER BY b.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "tz!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "since?",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 3,
+        "name": "through?",
+        "type_info": "Date"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "1bb6561fc26c8241b8ecc6616f6c7bd4586904dbf7d1378b6602fc04f66b0704"
+}

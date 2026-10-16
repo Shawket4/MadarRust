@@ -1,0 +1,78 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            b.id   AS branch_id,\n            b.name AS branch_name,\n            COUNT(DISTINCT o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS \"total_orders!\",\n            COUNT(DISTINCT o.id) FILTER (WHERE o.status  = 'voided')::bigint AS \"voided_orders!\",\n            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))\n                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_revenue!\",\n            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"gross_sales!\",\n            COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"refunded_amount!\",\n            COALESCE((\n              SELECT json_object_agg(method, rev) FROM (\n                SELECT op.method, SUM(op.amount)::bigint AS rev\n                FROM order_payments op\n                JOIN orders o2 ON o2.id = op.order_id\n                WHERE o2.branch_id = b.id AND o2.status NOT IN ('voided', 'refunded')\n                  AND ($2::timestamptz IS NULL OR o2.created_at >= $2)\n                  AND ($3::timestamptz IS NULL OR o2.created_at <= $3)\n                GROUP BY op.method\n              ) sub\n            ), '{}'::json) AS \"revenue_by_method!: serde_json::Value\",\n            COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_tips!\",\n            COALESCE(SUM(o.tip_amount) FILTER (\n                WHERE o.status NOT IN ('voided', 'refunded')\n                  AND COALESCE(o.tip_is_cash,\n                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')\n            ), 0)::bigint AS \"cash_tips!\"\n        FROM branches b\n        LEFT JOIN orders o          ON o.branch_id = b.id\n          AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n          AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id\n        WHERE b.org_id = $1 AND b.deleted_at IS NULL\n        GROUP BY b.id, b.name\n        -- Ties by name, then id: before, equal revenue came back in plan order.\n        ORDER BY 5 DESC, b.name, b.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "voided_orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "total_revenue!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "gross_sales!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "refunded_amount!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "revenue_by_method!: serde_json::Value",
+        "type_info": "Json"
+      },
+      {
+        "ordinal": 8,
+        "name": "total_tips!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "cash_tips!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f5774aadb88783ddafcfda28054197ad67a04399ff353dcec11a27d3caf12989"
+}
