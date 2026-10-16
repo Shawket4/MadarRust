@@ -1116,17 +1116,8 @@ pub async fn apply_snapshot(
     .bind(ctx.branch_id)
     .fetch_one(&mut **tx)
     .await?;
-    let ref_seq: i32 = sqlx::query_scalar(
-        "INSERT INTO order_ref_counters (branch_id, business_date, last_seq)
-         VALUES ($1, $2, 1)
-         ON CONFLICT (branch_id, business_date)
-         DO UPDATE SET last_seq = order_ref_counters.last_seq + 1
-         RETURNING last_seq",
-    )
-    .bind(ctx.branch_id)
-    .bind(biz_date)
-    .fetch_one(&mut **tx)
-    .await?;
+    let ref_seq =
+        crate::refs::next(&mut **tx, crate::refs::Scope::Order, ctx.branch_id, biz_date).await?;
     let order_ref = format!(
         "{}-{}-{:04}",
         branch_code,

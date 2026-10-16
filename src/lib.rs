@@ -59,6 +59,7 @@ pub mod purchasing;
 pub mod push;
 pub mod qr_card;
 pub mod rate_limit;
+pub mod refs;
 pub mod realtime;
 pub mod recipes;
 pub mod refunds;

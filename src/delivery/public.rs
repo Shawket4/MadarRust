@@ -2215,15 +2215,8 @@ pub async fn create_delivery_order(
     .bind(body.branch_id)
     .fetch_one(&mut *tx)
     .await?;
-    let seq: i32 = sqlx::query_scalar(
-        "INSERT INTO delivery_ref_counters (branch_id, business_date, last_seq) VALUES ($1, $2, 1) \
-         ON CONFLICT (branch_id, business_date) DO UPDATE SET last_seq = delivery_ref_counters.last_seq + 1 \
-         RETURNING last_seq",
-    )
-    .bind(body.branch_id)
-    .bind(biz_date)
-    .fetch_one(&mut *tx)
-    .await?;
+    let seq =
+        crate::refs::next(&mut *tx, crate::refs::Scope::Delivery, body.branch_id, biz_date).await?;
     let delivery_ref = format!(
         "D-{}-{}-{:04}",
         branch_code,
