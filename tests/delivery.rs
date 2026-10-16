@@ -787,6 +787,81 @@ mod it {
         assert_eq!(b["delivery_fee"], 300);
     }
 
+    /// The "Require GPS location" toggle end to end, through the API the
+    /// dashboard and the ordering page use: the settings PUT persists it, the
+    /// public branch list reports it, and intake follows it both ways. An order
+    /// with no coordinates is accepted while it is off and refused once it is
+    /// back on; shop, floor and unit stay required either way.
+    #[sqlx::test]
+    async fn in_mall_require_location_toggle_end_to_end(pool: PgPool) {
+        perms(&pool).await;
+        let org = seed_org(&pool).await;
+        let branch = seed_branch(&pool, org).await;
+        let admin = seed_user(&pool, org, "org_admin").await;
+        let teller = seed_user(&pool, org, "teller").await;
+        let token = admin_token(admin, org);
+        seed_shift(&pool, branch, teller).await;
+        let item = seed_item(&pool, org, 500).await;
+        seed_recipe(&pool, org, branch, item, 20.0, 1000.0).await;
+        let app = app!(&pool);
+
+        let put = |required: bool| {
+            auth(test::TestRequest::put().uri("/delivery/settings"), &token).set_json(json!({
+                "branch_id": branch, "in_mall_enabled": true, "outside_enabled": false,
+                "in_mall_fee": 300, "prep_time_minutes": 20, "otp_required": false,
+                "in_mall_require_location": required
+            }))
+        };
+        let public_flag = |b: &Value| -> Value {
+            b.as_array()
+                .and_then(|a| a.iter().find(|r| r["id"] == json!(branch)))
+                .map(|r| r["in_mall_require_location"].clone())
+                .unwrap_or(Value::Null)
+        };
+        let order = |unit: Option<&str>| {
+            let mut body = intake_body(
+                branch,
+                "in_mall",
+                json!([{ "menu_item_id": item, "quantity": 1 }]),
+            );
+            body["customer_lat"] = json!(null);
+            body["customer_lng"] = json!(null);
+            body["unit_number"] = json!(unit);
+            test::TestRequest::post()
+                .uri("/public/delivery-orders")
+                .set_json(&body)
+        };
+
+        // Off.
+        let (st, s) = send(&app, put(false)).await;
+        assert_eq!(st, StatusCode::OK, "{s}");
+        assert_eq!(s["in_mall_require_location"], false);
+        let (_, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}")),
+        )
+        .await;
+        assert_eq!(public_flag(&b), json!(false), "{b}");
+        let (st, o) = send(&app, order(Some("B4"))).await;
+        assert_eq!(st, StatusCode::CREATED, "{o}");
+        assert_eq!(o["delivery_fee"], 300);
+        let (st, o) = send(&app, order(None)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "unit is still required: {o}");
+
+        // Back on.
+        let (st, s) = send(&app, put(true)).await;
+        assert_eq!(st, StatusCode::OK, "{s}");
+        assert_eq!(s["in_mall_require_location"], true);
+        let (_, b) = send(
+            &app,
+            test::TestRequest::get().uri(&format!("/public/branches?org_id={org}")),
+        )
+        .await;
+        assert_eq!(public_flag(&b), json!(true), "{b}");
+        let (st, o) = send(&app, order(Some("B4"))).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{o}");
+    }
+
     // ── Strict field validation (untrusted public surface) ──
 
     /// A quantity far above the cap is rejected (and never reaches the
