@@ -119,10 +119,18 @@ if diff <(filter < "$out/reconcile_before.tsv") <(filter < "$out/reconcile_after
 else
   echo "!! reconcile differs (see $out/reconcile.diff)"; fail=1
 fi
-if diff "$out/visible_before.tsv" "$out/visible_after.tsv" > "$out/visible.diff"; then
-  echo "OK visible rows per org: identical ($(wc -l < "$out/visible_after.tsv") org x table)"
+# Tables the phase CREATES have no "before": compare the tables that existed,
+# and list the new ones (with what each org sees in them) for the record.
+cut -f2 "$out/visible_before.tsv" | sort -u > "$out/tables_before.txt"
+awk -F'\t' 'NR==FNR { t[$1]; next } ($2 in t)' "$out/tables_before.txt" "$out/visible_after.tsv" > "$out/visible_after_existing.tsv"
+awk -F'\t' 'NR==FNR { t[$1]; next } !($2 in t)' "$out/tables_before.txt" "$out/visible_after.tsv" > "$out/visible_new_tables.tsv"
+if diff "$out/visible_before.tsv" "$out/visible_after_existing.tsv" > "$out/visible.diff"; then
+  echo "OK visible rows per org: identical ($(wc -l < "$out/visible_before.tsv") org x table)"
 else
   echo "!! visible rows changed (see $out/visible.diff)"; fail=1
+fi
+if [ -s "$out/visible_new_tables.tsv" ]; then
+  echo "   new RLS tables: $(cut -f2 "$out/visible_new_tables.tsv" | sort -u | tr '\n' ' ')(per-org rows in visible_new_tables.tsv)"
 fi
 paste "$out/plans_before.tsv" "$out/plans_after.tsv" \
   | awk -F'\t' '{ r = ($3 > 0) ? $6 / $3 : 1;
