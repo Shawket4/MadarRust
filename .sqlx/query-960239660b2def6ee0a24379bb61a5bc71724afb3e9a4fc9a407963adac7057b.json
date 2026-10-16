@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attendance_records SET check_out_at = $4, check_out_method = 'auto', worked_minutes = $2, overtime_minutes = 0, early_leave_minutes = 0, status = $3, edit_reason = COALESCE(edit_reason, 'Auto-closed: no checkout recorded'), updated_at = now() WHERE id = $1 AND check_out_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "960239660b2def6ee0a24379bb61a5bc71724afb3e9a4fc9a407963adac7057b"
+}

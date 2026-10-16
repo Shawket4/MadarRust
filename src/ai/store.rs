@@ -112,14 +112,14 @@ pub async fn create(
     locale: &str,
     first_question: &str,
 ) -> Result<Uuid, AppError> {
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO ai_conversations (org_id, user_id, title, locale) \
          VALUES ($1, $2, $3, $4) RETURNING id",
+        org_id,
+        user_id,
+        title_from(first_question),
+        locale,
     )
-    .bind(org_id)
-    .bind(user_id)
-    .bind(title_from(first_question))
-    .bind(locale)
     .fetch_one(db.get_ref())
     .await?;
     Ok(id)
@@ -131,12 +131,12 @@ pub async fn create(
 /// the id is opaque, and distinguishing "not yours" from "does not exist" would
 /// confirm the existence of chats the caller may not read.
 pub async fn ensure_owned(db: &Db, id: Uuid, user_id: Uuid) -> Result<(), AppError> {
-    let exists: Option<Uuid> = sqlx::query_scalar(
+    let exists: Option<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM ai_conversations \
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+        id,
+        user_id,
     )
-    .bind(id)
-    .bind(user_id)
     .fetch_optional(db.get_ref())
     .await?;
     exists
@@ -346,15 +346,15 @@ pub async fn commit_summary(
     through_seq: i32,
     expected_through: i32,
 ) -> Result<bool, AppError> {
-    let affected = sqlx::query(
+    let affected = sqlx::query!(
         "UPDATE ai_conversations SET summary = $2, summarized_through_seq = $3, \
              updated_at = now() \
          WHERE id = $1 AND summarized_through_seq = $4",
+        conversation_id,
+        summary,
+        through_seq,
+        expected_through,
     )
-    .bind(conversation_id)
-    .bind(summary)
-    .bind(through_seq)
-    .bind(expected_through)
     .execute(db.get_ref())
     .await?
     .rows_affected();
@@ -448,13 +448,13 @@ pub async fn rename(
     if title.is_empty() {
         return Err(AppError::BadRequest("title cannot be empty".into()));
     }
-    let affected = sqlx::query(
+    let affected = sqlx::query!(
         "UPDATE ai_conversations SET title = $3, updated_at = now() \
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+        conversation_id,
+        user_id,
+        title_from(title),
     )
-    .bind(conversation_id)
-    .bind(user_id)
-    .bind(title_from(title))
     .execute(db.get_ref())
     .await?
     .rows_affected();
@@ -466,12 +466,12 @@ pub async fn rename(
 
 /// Soft-delete a conversation.
 pub async fn delete(db: &Db, conversation_id: Uuid, user_id: Uuid) -> Result<(), AppError> {
-    let affected = sqlx::query(
+    let affected = sqlx::query!(
         "UPDATE ai_conversations SET deleted_at = now(), updated_at = now() \
          WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+        conversation_id,
+        user_id,
     )
-    .bind(conversation_id)
-    .bind(user_id)
     .execute(db.get_ref())
     .await?
     .rows_affected();

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT authz_bump_epoch($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "authz_bump_epoch",
+        "type_info": "Void"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7949df0622542827b23cec7a197a003581a46012280e9d2174d2c4798825811f"
+}

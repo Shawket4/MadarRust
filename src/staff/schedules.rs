@@ -563,14 +563,14 @@ pub async fn my_schedule(
     .fetch_optional(pool.get_ref())
     .await?;
     // A week is shown once it is published at any of the person's branches.
-    let published: BTreeSet<NaiveDate> = sqlx::query_scalar(
+    let published: BTreeSet<NaiveDate> = sqlx::query_scalar!(
         "SELECT DISTINCT p.week_start FROM staff_week_publications p \
            JOIN employee_branches eb ON eb.branch_id = p.branch_id \
           WHERE eb.employee_id = $1 AND p.week_start BETWEEN $2 AND $3",
+        employee_id,
+        crate::staff::dawam::week_start(query.from),
+        query.to,
     )
-    .bind(employee_id)
-    .bind(crate::staff::dawam::week_start(query.from))
-    .bind(query.to)
     .fetch_all(pool.get_ref())
     .await?
     .into_iter()
@@ -779,20 +779,22 @@ async fn write_day_times(
     id: Uuid,
     times: &[DayTime],
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM work_shift_day_times WHERE work_shift_id = $1")
-        .bind(id)
+    sqlx::query!(
+        "DELETE FROM work_shift_day_times WHERE work_shift_id = $1",
+        id,
+    )
         .execute(&mut *conn)
         .await?;
     for t in times {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO work_shift_day_times (work_shift_id, org_id, day_of_week, start_time, end_time) \
              VALUES ($1, $2, $3, $4, $5)",
+            id,
+            org_id,
+            t.day_of_week,
+            t.start_time,
+            t.end_time,
         )
-        .bind(id)
-        .bind(org_id)
-        .bind(t.day_of_week)
-        .bind(t.start_time)
-        .bind(t.end_time)
         .execute(&mut *conn)
         .await?;
     }
@@ -1101,8 +1103,10 @@ pub async fn delete_work_shift(
     if assigned > 0 {
         // Coded with its figures, for the client's own wording (AT-13, E2E
         // B-ROTA-2); a conflict with the roster, like SHIFT_DAYS_IN_USE.
-        let name: String = sqlx::query_scalar("SELECT name FROM work_shifts WHERE id = $1")
-            .bind(*id)
+        let name: String = sqlx::query_scalar!(
+            "SELECT name FROM work_shifts WHERE id = $1",
+            *id,
+        )
             .fetch_one(pool.get_ref())
             .await?;
         return Err(AppError::CodedVars {
@@ -1116,9 +1120,11 @@ pub async fn delete_work_shift(
         });
     }
 
-    let deleted = sqlx::query("DELETE FROM work_shifts WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    let deleted = sqlx::query!(
+        "DELETE FROM work_shifts WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(pool.get_ref())
         .await?
         .rows_affected();
@@ -1306,9 +1312,11 @@ pub async fn delete_assignment(
     let org_id = scope_org(&req, &claims)?;
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrScheduleEdit).await?;
     let owner: Uuid =
-        sqlx::query_scalar("SELECT employee_id FROM staff_schedules WHERE id = $1 AND org_id = $2")
-            .bind(*id)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT employee_id FROM staff_schedules WHERE id = $1 AND org_id = $2",
+            *id,
+            org_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| {
@@ -1323,9 +1331,11 @@ pub async fn delete_assignment(
         Some((a, b)) => days::snapshot(&mut tx, &[owner], a, b).await?,
         None => Default::default(),
     };
-    let deleted = sqlx::query("DELETE FROM staff_schedules WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    let deleted = sqlx::query!(
+        "DELETE FROM staff_schedules WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -1419,11 +1429,11 @@ async fn authorize_blocks(
     blocks: &[Block],
 ) -> Result<(), AppError> {
     let ids: Vec<Uuid> = blocks.iter().map(|b| b.work_shift_id).collect();
-    let branches: Vec<Option<Uuid>> = sqlx::query_scalar(
+    let branches: Vec<Option<Uuid>> = sqlx::query_scalar!(
         "SELECT DISTINCT branch_id FROM work_shifts WHERE id = ANY($1) AND org_id = $2",
+        &ids,
+        org_id,
     )
-    .bind(&ids)
-    .bind(org_id)
     .fetch_all(pool)
     .await?;
     for b in branches {
@@ -1866,9 +1876,11 @@ pub async fn delete_override(
     access::require_for(pool.get_ref(), &claims, Cap::HrScheduleEdit, &subject).await?;
 
     let mut tx = pool.get_ref().begin().await?;
-    let deleted = sqlx::query("DELETE FROM staff_schedule_overrides WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    let deleted = sqlx::query!(
+        "DELETE FROM staff_schedule_overrides WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -1920,8 +1932,10 @@ pub async fn get_scheduled_day(
 /// from, e.g. a manager's team view spanning every branch.
 pub(crate) async fn org_timezone(pool: &PgPool, org_id: Uuid) -> Result<String, AppError> {
     let tz: Option<String> =
-        sqlx::query_scalar("SELECT timezone::text FROM organizations WHERE id = $1")
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT timezone::text FROM organizations WHERE id = $1",
+            org_id,
+        )
             .fetch_optional(pool)
             .await?
             .flatten();
@@ -1966,9 +1980,11 @@ pub(crate) async fn employee_timezone(
 /// The branch a work shift belongs to (`None` = an org-wide template).
 async fn shift_branch(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<Option<Uuid>, AppError> {
     let row: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT branch_id FROM work_shifts WHERE id = $1 AND org_id = $2")
-            .bind(id)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT branch_id FROM work_shifts WHERE id = $1 AND org_id = $2",
+            id,
+            org_id,
+        )
             .fetch_optional(pool)
             .await?;
     row.ok_or_else(|| crate::staff::coded(404, "SHIFT_NOT_FOUND", "Work shift not found"))

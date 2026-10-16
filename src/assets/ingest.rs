@@ -989,16 +989,16 @@ pub async fn ingest_bytes(
         .iter()
         .find(|(_, v)| v.variant == "full" || v.variant == "animation")
     {
-        let candidates: Vec<Uuid> = sqlx::query_scalar(
+        let candidates: Vec<Uuid> = sqlx::query_scalar!(
             "SELECT DISTINCT a.group_id FROM assets a JOIN asset_groups g ON g.id = a.group_id \
              WHERE a.org_id IS NOT DISTINCT FROM $1 AND a.hash = $2 AND a.variant = $3 AND a.encoder = $4 \
                AND g.profile = $5",
+            org_id,
+            hash,
+            v.variant,
+            &encoder,
+            profile,
         )
-        .bind(org_id)
-        .bind(hash)
-        .bind(v.variant)
-        .bind(&encoder)
-        .bind(profile)
         .fetch_all(pool)
         .await?;
         let mut ours: Vec<(&str, &str)> = hashed
@@ -1143,41 +1143,41 @@ async fn store_group_tx(
     for (key, _, _) in files {
         super::lock_file_key(&mut tx, key).await?;
     }
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO asset_groups (id, org_id, kind, source_hash, encoder, profile, label) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        g.group_id,
+        g.org_id,
+        g.kind,
+        g.source_hash,
+        g.encoder,
+        g.profile,
+        g.label,
     )
-    .bind(g.group_id)
-    .bind(g.org_id)
-    .bind(g.kind)
-    .bind(g.source_hash)
-    .bind(g.encoder)
-    .bind(g.profile)
-    .bind(g.label)
     .execute(&mut *tx)
     .await?;
     for (hash, v) in hashed {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO assets (org_id, hash, group_id, encoder, encoder_settings, kind, variant, ext, \
                                  content_type, bytes, width, height, has_alpha, source_hash, source_kind, label, created_by) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+            g.org_id,
+            hash,
+            g.group_id,
+            g.encoder,
+            &v.settings,
+            g.kind,
+            v.variant,
+            v.ext,
+            v.content_type,
+            v.bytes.len() as i64,
+            v.width,
+            v.height,
+            v.has_alpha,
+            g.source_hash,
+            g.source_kind.as_str(),
+            g.label,
+            g.actor,
         )
-        .bind(g.org_id)
-        .bind(hash)
-        .bind(g.group_id)
-        .bind(g.encoder)
-        .bind(&v.settings)
-        .bind(g.kind)
-        .bind(v.variant)
-        .bind(v.ext)
-        .bind(v.content_type)
-        .bind(v.bytes.len() as i64)
-        .bind(v.width)
-        .bind(v.height)
-        .bind(v.has_alpha)
-        .bind(g.source_hash)
-        .bind(g.source_kind.as_str())
-        .bind(g.label)
-        .bind(g.actor)
         .execute(&mut *tx)
         .await?;
     }
@@ -1226,16 +1226,16 @@ async fn find_group_by_source(
     encoder: &str,
     profile: &str,
 ) -> Result<Option<IngestOutcome>, AppError> {
-    let gid: Option<Uuid> = sqlx::query_scalar(
+    let gid: Option<Uuid> = sqlx::query_scalar!(
         "SELECT g.id FROM asset_groups g WHERE g.org_id IS NOT DISTINCT FROM $1 AND g.source_hash = $2 \
            AND g.encoder = $3 AND g.profile = $4 \
            AND EXISTS (SELECT 1 FROM assets a WHERE a.group_id = g.id) \
          ORDER BY g.created_at LIMIT 1",
+        org_id,
+        source_hash,
+        encoder,
+        profile,
     )
-    .bind(org_id)
-    .bind(source_hash)
-    .bind(encoder)
-    .bind(profile)
     .fetch_optional(pool)
     .await?;
     let Some(group_id) = gid else { return Ok(None) };
@@ -1327,8 +1327,10 @@ pub async fn attach(
         .org_id
         .ok_or_else(|| AppError::BadRequest("image assets belong to an org".into()))?;
     let row_org: Option<Uuid> = if slot.table == "organizations" {
-        sqlx::query_scalar("SELECT id FROM organizations WHERE id = $1")
-            .bind(target.id)
+        sqlx::query_scalar!(
+            "SELECT id FROM organizations WHERE id = $1",
+            target.id,
+        )
             .fetch_optional(&mut *conn)
             .await?
     } else {
@@ -1370,13 +1372,13 @@ pub async fn attach(
         if minted {
             let rel = synthesized_legacy_rel(org_id, slot.legacy_dir, outcome.group_id);
             let url = format!("{}/{}", uploads_base(), rel);
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO asset_legacy_paths (legacy_path, org_id, asset_id) VALUES ($1,$2,$3) \
                  ON CONFLICT (legacy_path) DO UPDATE SET asset_id = EXCLUDED.asset_id",
+                &rel,
+                org_id,
+                full.id,
             )
-            .bind(&rel)
-            .bind(org_id)
-            .bind(full.id)
             .execute(&mut *conn)
             .await?;
             let extra = if slot.legacy_col == Some("logo_url") {
@@ -1431,12 +1433,12 @@ pub async fn mark_org_bundles_dirty(
     conn: &mut sqlx::PgConnection,
     org_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO asset_bundle_dirty (branch_id, dirty_since) \
          SELECT id, now() FROM branches WHERE org_id = $1 \
          ON CONFLICT (branch_id) DO UPDATE SET dirty_since = now()",
+        org_id,
     )
-    .bind(org_id)
     .execute(&mut *conn)
     .await?;
     Ok(())

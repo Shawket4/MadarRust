@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE loyalty_reward_items SET cost_currency = $3 WHERE org_id = $1 AND COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid) = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid) AND cost_currency <> $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cbd1bf46149cdfad85e29cc77db5e9d76530344ca0ab39dcc701c326536b4770"
+}

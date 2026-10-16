@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE loyalty_token_aliases SET customer_id = $2, was_customer_id = COALESCE(was_customer_id, $1) WHERE customer_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "76474f0aa4c3c3408d905fe3661c3a63af90ed7fae2dcfd42e10eb57b33d17ee"
+}

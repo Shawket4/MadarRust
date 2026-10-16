@@ -561,9 +561,11 @@ pub async fn combine(
         return Err(AppError::Conflict("Please try again".into()));
     }
     // The merge filed that number as one they USED to have; it is current now.
-    sqlx::query("DELETE FROM customer_phone_history WHERE customer_id = $1 AND phone_key = $2")
-        .bind(member.id)
-        .bind(&new_key)
+    sqlx::query!(
+        "DELETE FROM customer_phone_history WHERE customer_id = $1 AND phone_key = $2",
+        member.id,
+        &new_key,
+    )
         .execute(&mut *tx)
         .await?;
     if let Some(name) = body.name.as_deref().filter(|n| !n.trim().is_empty()) {

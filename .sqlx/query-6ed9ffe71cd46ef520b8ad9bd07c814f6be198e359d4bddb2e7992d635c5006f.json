@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_swaps SET status = $2, decided_by = $3 WHERE id = $1 AND status = 'pending' RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6ed9ffe71cd46ef520b8ad9bd07c814f6be198e359d4bddb2e7992d635c5006f"
+}

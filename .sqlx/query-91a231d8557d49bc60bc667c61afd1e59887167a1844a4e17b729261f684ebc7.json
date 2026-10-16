@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM delivery_zones WHERE id = $1 AND branch_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "91a231d8557d49bc60bc667c61afd1e59887167a1844a4e17b729261f684ebc7"
+}

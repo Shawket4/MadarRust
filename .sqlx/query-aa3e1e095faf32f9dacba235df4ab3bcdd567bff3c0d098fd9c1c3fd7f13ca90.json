@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM loyalty_token_aliases WHERE customer_id = ANY($1) OR was_customer_id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aa3e1e095faf32f9dacba235df4ab3bcdd567bff3c0d098fd9c1c3fd7f13ca90"
+}

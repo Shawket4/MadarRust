@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE loyalty_customers SET pass_notice = $2, pass_notice_at = now(), pass_notice_seen_at = NULL, pass_notice_fallback = $3, pass_updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "54eb946703ea3ab673cac1359ad3652eb6f543c489b5d9ff47da38a139f74451"
+}

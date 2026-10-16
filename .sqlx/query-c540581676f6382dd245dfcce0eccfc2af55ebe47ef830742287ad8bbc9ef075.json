@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM loyalty_pass_cache WHERE built_at < now() - interval '1 hour'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c540581676f6382dd245dfcce0eccfc2af55ebe47ef830742287ad8bbc9ef075"
+}

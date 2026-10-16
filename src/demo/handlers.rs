@@ -83,28 +83,28 @@ pub async fn create_session(
 
     let mut tx = pool.begin().await?;
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO organizations \
          (id, name, slug, currency_code, tax_rate, timezone, is_active, is_demo, demo_expires_at, onboarding_completed_at) \
          VALUES ($1, $2, $3, 'EGP', 0.14, 'Africa/Cairo', true, true, $4, $5)",
+        org_id,
+        "Demo Café",
+        &slug,
+        expires_at,
+        onboarding_at,
     )
-    .bind(org_id)
-    .bind("Demo Café")
-    .bind(&slug)
-    .bind(expires_at)
-    .bind(onboarding_at)
     .execute(&mut *tx)
     .await?;
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO users (id, org_id, name, email, password_hash, role, is_active) \
          VALUES ($1, $2, $3, $4, $5, 'org_admin'::user_role, true)",
+        user_id,
+        org_id,
+        "Demo Owner",
+        &email,
+        DEMO_PASSWORD_HASH,
     )
-    .bind(user_id)
-    .bind(org_id)
-    .bind("Demo Owner")
-    .bind(&email)
-    .bind(DEMO_PASSWORD_HASH)
     .execute(&mut *tx)
     .await?;
 

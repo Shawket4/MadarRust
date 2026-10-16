@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO combo_channel_settings (org_id, sell_pos, sell_qr, sell_online, sell_delivery) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (org_id) DO UPDATE SET sell_pos = EXCLUDED.sell_pos, sell_qr = EXCLUDED.sell_qr, sell_online = EXCLUDED.sell_online, sell_delivery = EXCLUDED.sell_delivery, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd92f7613fdee2351e861aa5b64b9f34a8ee6f01d487ec8fee9354db2c19bcb8"
+}

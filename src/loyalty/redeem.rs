@@ -364,23 +364,23 @@ pub async fn record(
         return Err(AppError::Conflict(why));
     }
     for line in &plan.lines {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO loyalty_transactions \
                 (org_id, customer_id, branch_id, kind, currency, points, order_id, \
                  order_line_index, reward_menu_item_id, created_by, source, order_item_id) \
              VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9,'redemption',$10) \
              ON CONFLICT DO NOTHING",
+            org_id,
+            member.id,
+            branch_id,
+            &line.currency,
+            -line.cost,
+            order_id,
+            line.item_index as i32,
+            line.menu_item_id,
+            created_by,
+            item_ids.get(line.item_index).copied(),
         )
-        .bind(org_id)
-        .bind(member.id)
-        .bind(branch_id)
-        .bind(&line.currency)
-        .bind(-line.cost)
-        .bind(order_id)
-        .bind(line.item_index as i32)
-        .bind(line.menu_item_id)
-        .bind(created_by)
-        .bind(item_ids.get(line.item_index).copied())
         .execute(&mut **tx)
         .await?;
     }

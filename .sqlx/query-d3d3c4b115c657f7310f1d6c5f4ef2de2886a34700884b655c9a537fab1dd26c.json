@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM combo_channel_branch_overrides WHERE branch_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d3d3c4b115c657f7310f1d6c5f4ef2de2886a34700884b655c9a537fab1dd26c"
+}

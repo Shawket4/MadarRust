@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id <> $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "902771f215cd702b9cbeae84150d789c11321987083b5790b4dd0edb4a254b5d"
+}

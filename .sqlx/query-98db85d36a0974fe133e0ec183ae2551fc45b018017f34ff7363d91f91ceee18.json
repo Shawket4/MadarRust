@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO assets (org_id, hash, group_id, encoder, encoder_settings, kind, variant, ext, content_type, bytes, width, height, has_alpha, source_hash, source_kind, label, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "98db85d36a0974fe133e0ec183ae2551fc45b018017f34ff7363d91f91ceee18"
+}

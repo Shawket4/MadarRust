@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO expense_advances (org_id, employee_id, branch_id, amount_piastres, purpose, via, handed_by, given_on) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Text",
+        "Text",
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d6f54337a616d347949ea5801c2d183723888bc52c7d680b27ed4b109a3cd747"
+}

@@ -1,0 +1,39 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO attendance_records (\n            org_id, employee_id, branch_id, work_shift_id, business_date, status,\n            scheduled_start_at, scheduled_end_at,\n            check_in_at, check_in_method, check_out_at, check_out_method,\n            late_minutes, early_leave_minutes, overtime_minutes, worked_minutes,\n            is_manual, notes, edit_reason, created_by, edited_by, status_overridden\n        ) VALUES (\n            $1, $2, $3, $4, $5, $6, $7, $8,\n            $9, CASE WHEN $9::timestamptz IS NULL THEN NULL ELSE 'manual' END,\n            $10, CASE WHEN $10::timestamptz IS NULL THEN NULL ELSE 'manual' END,\n            $11, $12, $13, $14, TRUE, $15, $16, $17, $17, $18\n        )\n        ON CONFLICT (employee_id, business_date,\n                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL\n        DO NOTHING\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "24ee4cea8f1076ba7e93518900a6d67d5187f246e41cc1e70c94e014bac95cf5"
+}

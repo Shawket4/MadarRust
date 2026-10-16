@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pin_attempts SET blocked_until = now() + make_interval(secs => $3)\n                  WHERE kind = $1 AND key = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c2dc3aac8920e418099efbf628eca0430eb717e75ba6b7b73b5217b109faf682"
+}

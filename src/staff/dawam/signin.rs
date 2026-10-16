@@ -190,13 +190,13 @@ pub async fn otp_request(
     if accounts.is_empty() {
         // Known but not active (suspended or terminated): say so, and send
         // nothing (minor default M13).
-        let status: Option<String> = sqlx::query_scalar(
+        let status: Option<String> = sqlx::query_scalar!(
             "SELECT e.employment_status FROM employees e \
                JOIN organizations o ON o.id = e.org_id \
               WHERE e.phone_key = $1 AND e.app_access AND 'dawam' = ANY(o.modules) \
               ORDER BY e.updated_at DESC LIMIT 1",
+            &phone,
         )
-        .bind(&phone)
         .fetch_optional(pool.get_ref())
         .await?;
         if let Some(status) = status {
@@ -248,17 +248,19 @@ pub async fn otp_request(
         .and_then(|r| r.code_for(&phone))
         .map(str::to_owned);
     let code = review_code.clone().unwrap_or_else(six_digits);
-    sqlx::query("DELETE FROM staff_otp WHERE phone = $1")
-        .bind(&phone)
+    sqlx::query!(
+        "DELETE FROM staff_otp WHERE phone = $1",
+        &phone,
+    )
         .execute(pool.get_ref())
         .await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_otp (phone, code, expires_at) \
          VALUES ($1, $2, now() + ($3 || ' seconds')::interval)",
+        &phone,
+        &code,
+        OTP_TTL_SECONDS.to_string(),
     )
-    .bind(&phone)
-    .bind(&code)
-    .bind(OTP_TTL_SECONDS.to_string())
     .execute(pool.get_ref())
     .await?;
     if review_code.is_some() {
@@ -374,8 +376,10 @@ pub async fn otp_verify(
     }
 
     // Deleted on use (RO-2).
-    sqlx::query("DELETE FROM staff_otp WHERE id = $1")
-        .bind(otp_id)
+    sqlx::query!(
+        "DELETE FROM staff_otp WHERE id = $1",
+        otp_id,
+    )
         .execute(pool)
         .await?;
 
@@ -393,22 +397,22 @@ pub async fn otp_verify(
     .bind(account.employee_id)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_devices SET revoked_at = now() \
           WHERE employee_id = $1 AND revoked_at IS NULL",
+        account.employee_id,
     )
-    .bind(account.employee_id)
     .execute(&mut *tx)
     .await?;
-    let device_id: Uuid = sqlx::query_scalar(
+    let device_id: Uuid = sqlx::query_scalar!(
         "INSERT INTO staff_devices (org_id, employee_id, token_hash, platform, model) \
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        account.org_id,
+        account.employee_id,
+        hash_token(&device_token),
+        body.platform.as_deref().unwrap_or(""),
+        body.model.as_deref().unwrap_or(""),
     )
-    .bind(account.org_id)
-    .bind(account.employee_id)
-    .bind(hash_token(&device_token))
-    .bind(body.platform.as_deref().unwrap_or(""))
-    .bind(body.model.as_deref().unwrap_or(""))
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -424,13 +428,13 @@ pub async fn otp_verify(
             .await?
             .first()
             .copied();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind) \
              VALUES ($1, $2, $3, 'new_phone')",
+            account.org_id,
+            account.employee_id,
+            branch,
         )
-        .bind(account.org_id)
-        .bind(account.employee_id)
-        .bind(branch)
         .execute(pool)
         .await?;
         notify_managers(
@@ -453,8 +457,10 @@ pub async fn otp_verify(
         device_id,
     )?;
     if let Some(user) = account.user_id {
-        sqlx::query("UPDATE users SET last_login_at = now() WHERE id = $1")
-            .bind(user)
+        sqlx::query!(
+            "UPDATE users SET last_login_at = now() WHERE id = $1",
+            user,
+        )
             .execute(pool)
             .await?;
     }

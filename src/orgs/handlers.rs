@@ -622,10 +622,10 @@ pub async fn get_org_modules(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     require_same_org(&claims, Some(*org_id))?;
-    let modules: Vec<String> = sqlx::query_scalar(
+    let modules: Vec<String> = sqlx::query_scalar!(
         "SELECT modules FROM organizations WHERE id = $1 AND deleted_at IS NULL",
+        *org_id,
     )
-    .bind(*org_id)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
@@ -699,11 +699,11 @@ pub async fn offline_auth_bundle(
     require_same_org(&claims, Some(*org_id))?;
     let device_id = crate::devices::DeviceHeader::from_request_headers(&req);
     let device_branch: Option<Uuid> = match device_id {
-        Some(id) => sqlx::query_scalar(
+        Some(id) => sqlx::query_scalar!(
             "SELECT branch_id FROM devices WHERE id = $1 AND org_id = $2 AND retired_at IS NULL",
+            id,
+            *org_id,
         )
-        .bind(id)
-        .bind(*org_id)
         .fetch_optional(pool.get_ref())
         .await?
         .flatten(),
@@ -1188,10 +1188,10 @@ pub async fn delete_org(
     check_permission(pool.get_ref(), &claims, "orgs", "delete").await?;
     require_super_admin(&claims)?;
 
-    let rows_affected = sqlx::query(
-        "UPDATE organizations SET deleted_at = NOW(), is_active = false WHERE id = $1 AND deleted_at IS NULL"
+    let rows_affected = sqlx::query!(
+        "UPDATE organizations SET deleted_at = NOW(), is_active = false WHERE id = $1 AND deleted_at IS NULL",
+        *org_id,
     )
-    .bind(*org_id)
     .execute(pool.get_ref())
     .await?
     .rows_affected();
@@ -1322,7 +1322,7 @@ pub(crate) async fn seed_payment_methods(
     // main's newer, deployed rule seeds the Talabat tenders INACTIVE rather than
     // not at all, and keeps `talabat_cash` as cash (see the SQL comment). That
     // supersedes this branch's earlier "do not seed Talabat" change.
-    sqlx::query(
+    sqlx::query!(
         r#"
         -- The Talabat tenders are seeded INACTIVE: a shop with no Talabat
         -- integration would otherwise carry two tenders nobody can use and two
@@ -1337,9 +1337,9 @@ pub(crate) async fn seed_payment_methods(
             ($1, 'digital_wallet', '{"en": "Digital Wallet", "ar": "محفظة رقمية"}', '#8B5CF6', 'wallet', false, true),
             ($1, 'talabat_online', '{"en": "Talabat Online", "ar": "طلبات أونلاين"}', '#EF4444', 'delivery', false, false),
             ($1, 'talabat_cash', '{"en": "Talabat Cash", "ar": "طلبات كاش"}', '#F97316', 'delivery', true, false)
-        "#
+        "#,
+        org,
     )
-    .bind(org)
     .execute(&mut *conn)
     .await?;
     Ok(())

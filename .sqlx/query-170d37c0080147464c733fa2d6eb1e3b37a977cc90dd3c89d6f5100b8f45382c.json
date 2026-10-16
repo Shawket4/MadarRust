@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE asset_jobs SET status = 'queued', updated_at = now() WHERE status = 'running' AND updated_at < now() - make_interval(secs => $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "170d37c0080147464c733fa2d6eb1e3b37a977cc90dd3c89d6f5100b8f45382c"
+}

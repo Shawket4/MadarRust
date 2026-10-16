@@ -329,10 +329,10 @@ async fn put_list(
                 .await?
             }
             Owner::User => {
-                sqlx::query_scalar(
+                sqlx::query_scalar!(
                     "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
+                    org_id,
                 )
-                .bind(org_id)
                 .fetch_all(pool.get_ref())
                 .await?
             }
@@ -400,8 +400,10 @@ pub async fn replace_list(
 
     let mut tx = pool.begin().await?;
     // Serialize concurrent PUTs for the same owner.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
-        .bind(format!("pm-availability:{owner_id}"))
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtext($1::text))",
+        format!("pm-availability:{owner_id}"),
+    )
         .execute(&mut *tx)
         .await?;
     sqlx::query(&format!(

@@ -92,17 +92,17 @@ pub async fn save(pool: &PgPool, member: &MemberRow, bytes: &[u8]) {
         return;
     }
     let order_now = super::order_now_for(pool, member).await;
-    let res = sqlx::query(
+    let res = sqlx::query!(
         "INSERT INTO loyalty_pass_cache (customer_id, org_id, kind, bytes, fingerprint, built_at) \
          VALUES ($1, $2, 'apple', $3, $4, now()) \
          ON CONFLICT (customer_id) DO UPDATE \
             SET bytes = EXCLUDED.bytes, fingerprint = EXCLUDED.fingerprint, \
                 built_at = EXCLUDED.built_at, org_id = EXCLUDED.org_id",
+        member.id,
+        member.org_id,
+        bytes,
+        fingerprint(member, order_now.as_deref()),
     )
-    .bind(member.id)
-    .bind(member.org_id)
-    .bind(bytes)
-    .bind(fingerprint(member, order_now.as_deref()))
     .execute(pool)
     .await;
     if let Err(e) = res {
@@ -122,8 +122,10 @@ pub async fn save(pool: &PgPool, member: &MemberRow, bytes: &[u8]) {
 /// remembers to tell the devices automatically drops the stale bytes too, and
 /// one that forgets was already broken for a different reason.
 pub async fn invalidate(pool: &PgPool, customer_id: Uuid) {
-    let _ = sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
-        .bind(customer_id)
+    let _ = sqlx::query!(
+        "DELETE FROM loyalty_pass_cache WHERE customer_id = $1",
+        customer_id,
+    )
         .execute(pool)
         .await;
 }
@@ -136,8 +138,10 @@ pub async fn invalidate(pool: &PgPool, customer_id: Uuid) {
 /// — purging here would hand back a pass rebuilt around stale strips, which is
 /// slower AND no fresher.
 pub async fn purge_org(pool: &PgPool, org_id: Uuid) {
-    let _ = sqlx::query("DELETE FROM loyalty_pass_cache WHERE org_id = $1")
-        .bind(org_id)
+    let _ = sqlx::query!(
+        "DELETE FROM loyalty_pass_cache WHERE org_id = $1",
+        org_id,
+    )
         .execute(pool)
         .await;
 }
@@ -150,7 +154,7 @@ pub async fn purge_org(pool: &PgPool, org_id: Uuid) {
 /// hour, which is the only set the cache can serve anyway.
 pub async fn sweep(pool: &PgPool) -> Result<u64, AppError> {
     let done =
-        sqlx::query("DELETE FROM loyalty_pass_cache WHERE built_at < now() - interval '1 hour'")
+        sqlx::query!("DELETE FROM loyalty_pass_cache WHERE built_at < now() - interval '1 hour'")
             .execute(pool)
             .await?;
     Ok(done.rows_affected())

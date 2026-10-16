@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET last_seen_at = now() WHERE id = $1 AND last_seen_at < now() - interval '5 minutes'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d4e7deafa828666843e08bc8070be95bfd7bc179ac91b5e9d3c3d7b41a364227"
+}

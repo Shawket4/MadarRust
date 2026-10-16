@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT eb.branch_id FROM employee_branches eb JOIN branches b ON b.id = eb.branch_id AND b.deleted_at IS NULL WHERE eb.employee_id = $1 ORDER BY eb.assigned_at, eb.branch_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9efefab0ca1f2c41188d989f6c685bb0d8c5d00d22ebc1b1271d10df81346280"
+}

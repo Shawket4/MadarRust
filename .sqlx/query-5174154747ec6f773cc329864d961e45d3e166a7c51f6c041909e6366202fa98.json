@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT label FROM branch_tables WHERE branch_id = $1 AND id = ANY($2) ORDER BY lower(label)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "label",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5174154747ec6f773cc329864d961e45d3e166a7c51f6c041909e6366202fa98"
+}

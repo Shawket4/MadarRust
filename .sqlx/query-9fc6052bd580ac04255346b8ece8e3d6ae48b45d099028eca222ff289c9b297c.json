@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE delivery_orders SET address_id = $2 WHERE address_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9fc6052bd580ac04255346b8ece8e3d6ae48b45d099028eca222ff289c9b297c"
+}

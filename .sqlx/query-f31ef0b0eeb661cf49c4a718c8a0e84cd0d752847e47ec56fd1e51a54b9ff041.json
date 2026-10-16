@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT CEIL(EXTRACT(EPOCH FROM (blocked_until - now())))::bigint\n               FROM pin_attempts\n              WHERE kind = $1 AND key = $2 AND blocked_until > now()",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ceil",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f31ef0b0eeb661cf49c4a718c8a0e84cd0d752847e47ec56fd1e51a54b9ff041"
+}

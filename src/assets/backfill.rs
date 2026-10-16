@@ -158,7 +158,7 @@ async fn discover(pool: &PgPool, opts: &BackfillOptions) -> Result<Vec<Item>, Ap
         && let Some(dir) = &opts.step_animations_dir
     {
         let slugs: Vec<String> =
-            sqlx::query_scalar("SELECT slug FROM recipe_step_presets ORDER BY slug")
+            sqlx::query_scalar!("SELECT slug FROM recipe_step_presets ORDER BY slug")
                 .fetch_all(pool)
                 .await?;
         for slug in slugs {
@@ -401,16 +401,16 @@ async fn verify_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppEr
         };
         let group_id: Uuid = r.get("group_id");
         let mark = |status: &'static str, err: Option<String>| {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE asset_backfill_items SET status = $4, last_error = $5, run_id = $6, updated_at = now() \
                  WHERE source_table = $1 AND source_id = $2 AND source_field = $3",
+                item.table,
+                item.id.clone(),
+                item.field,
+                status,
+                err,
+                opts.run_id,
             )
-            .bind(item.table)
-            .bind(item.id.clone())
-            .bind(item.field)
-            .bind(status)
-            .bind(err)
-            .bind(opts.run_id)
         };
         if let Err(e) = verify_group(pool, &opts.store, item.org_id, group_id).await {
             mark("failed", Some(e)).execute(pool).await?;

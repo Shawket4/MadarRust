@@ -51,11 +51,11 @@ pub enum JobResult {
 /// Claim and process at most one job. `Ok(None)` when nothing is due.
 pub async fn run_one(pool: &PgPool, store: &AssetStore) -> Result<Option<JobResult>, AppError> {
     // Recover jobs orphaned by a crash.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE asset_jobs SET status = 'queued', updated_at = now() \
          WHERE status = 'running' AND updated_at < now() - make_interval(secs => $1)",
+        STALE_RUNNING.as_secs() as f64,
     )
-    .bind(STALE_RUNNING.as_secs() as f64)
     .execute(pool)
     .await?;
 
@@ -93,11 +93,11 @@ pub async fn run_one(pool: &PgPool, store: &AssetStore) -> Result<Option<JobResu
                 AppError::BadRequest(_) | AppError::NotFound(_) | AppError::Forbidden(_)
             );
             if attempts >= MAX_ATTEMPTS || permanent {
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE asset_jobs SET status = 'failed', last_error = $2, updated_at = now() WHERE id = $1",
+                    id,
+                    &msg,
                 )
-                .bind(id)
-                .bind(&msg)
                 .execute(pool)
                 .await?;
                 if let Some(p) = &staged {
@@ -108,11 +108,11 @@ pub async fn run_one(pool: &PgPool, store: &AssetStore) -> Result<Option<JobResu
             } else {
                 // Backoff: claimable again once updated_at (set to now() by
                 // the table trigger) is 30 s × attempts in the past.
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE asset_jobs SET status = 'queued', last_error = $2 WHERE id = $1",
+                    id,
+                    &msg,
                 )
-                .bind(id)
-                .bind(&msg)
                 .execute(pool)
                 .await?;
                 Ok(Some(JobResult::Retry(id)))
@@ -182,11 +182,11 @@ async fn process(
     if !superseded {
         attach(&mut tx, &target, &outcome).await?;
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE asset_jobs SET status = 'done', result_group_id = $2, last_error = NULL, updated_at = now() WHERE id = $1",
+        id,
+        pos_id,
     )
-    .bind(id)
-    .bind(pos_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -227,15 +227,15 @@ async fn post_attach_logo(
     };
     let palette = crate::orgs::branding::palette_from_image(&img);
     let is_mark = crate::orgs::branding::is_mark(&img);
-    let _ = sqlx::query(
+    let _ = sqlx::query!(
         "UPDATE organizations SET brand_background = $2, brand_foreground = $3, brand_accent = $4, \
                 brand_logo_is_mark = $5, updated_at = now() WHERE id = $1",
+        org_id,
+        palette.as_ref().map(|p| p.background.clone()),
+        palette.as_ref().map(|p| p.foreground.clone()),
+        palette.as_ref().map(|p| p.accent.clone()),
+        is_mark,
     )
-    .bind(org_id)
-    .bind(palette.as_ref().map(|p| p.background.clone()))
-    .bind(palette.as_ref().map(|p| p.foreground.clone()))
-    .bind(palette.as_ref().map(|p| p.accent.clone()))
-    .bind(is_mark)
     .execute(pool)
     .await;
 }

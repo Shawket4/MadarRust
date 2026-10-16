@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT b.name FROM branch_booking_settings s JOIN branches b ON b.id = s.branch_id WHERE b.org_id = $1 AND b.is_active AND b.deleted_at IS NULL AND s.enabled ORDER BY b.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d959515a820fb1f7859108a75966fb4a6bd7328416ed2dcaf5c5a5be5302892a"
+}

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO order_deals (org_id, order_id, deal_rule_id, deal_name, name_translations, times, discount, discount_server) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Int2",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "63640eb9ce89e242fec9c68ca8a177c010c6341155c075c389a9177665fdc2db"
+}

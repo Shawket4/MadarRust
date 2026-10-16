@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ws.branch_id FROM work_shifts ws JOIN employee_branches eb ON eb.branch_id = ws.branch_id AND eb.employee_id = $2 WHERE ws.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "1c7507b8d92e4e0e234a3c2a525b7076b4f7abc386f9e3669f07b0cc97767547"
+}

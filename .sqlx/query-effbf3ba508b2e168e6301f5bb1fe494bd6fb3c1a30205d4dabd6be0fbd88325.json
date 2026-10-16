@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET pin_fingerprint = $1 WHERE id = $2\n                   AND (pin_fingerprint IS NULL OR pin_fingerprint <> $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "effbf3ba508b2e168e6301f5bb1fe494bd6fb3c1a30205d4dabd6be0fbd88325"
+}

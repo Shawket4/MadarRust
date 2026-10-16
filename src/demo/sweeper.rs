@@ -62,7 +62,7 @@ pub async fn purge_org(pool: &PgPool, org_id: Uuid) -> Result<(), sqlx::Error> {
 /// Find and purge every demo org past its TTL. Returns how many were removed.
 /// Per-org failures are logged and skipped (the org is retried next sweep).
 pub async fn gc_expired(pool: &PgPool) -> Result<u64, sqlx::Error> {
-    let expired: Vec<Uuid> = sqlx::query_scalar(
+    let expired: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM organizations \
          WHERE is_demo AND demo_expires_at IS NOT NULL AND demo_expires_at < now()",
     )

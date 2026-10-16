@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE table_transfer_requests SET status = 'fulfilled', fulfilled_table_id = $2, resolved_at = now(), updated_at = now() WHERE id = $1 AND status = 'waiting'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b991a2bc4beebcb42ee71be08fe1275764b31a76ff5f78ec7adc9ceabd7af8c2"
+}

@@ -32,8 +32,10 @@ pub(crate) async fn mark_tracking_off(
     branch_id: Uuid,
     record_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query("UPDATE attendance_records SET tracking_off = true WHERE id = $1")
-        .bind(record_id)
+    sqlx::query!(
+        "UPDATE attendance_records SET tracking_off = true WHERE id = $1",
+        record_id,
+    )
         .execute(pool)
         .await?;
     raise_flag(
@@ -372,24 +374,24 @@ pub async fn ping(
     .bind(now)
     .fetch_all(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO attendance_pings (org_id, employee_id, attendance_record_id, at, latitude, \
             longitude, accuracy_meters, distance_meters, inside, is_mock, battery_percent, \
             time_unverified) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        org_id,
+        employee_id,
+        record_id,
+        now,
+        body.latitude,
+        body.longitude,
+        body.accuracy_meters,
+        distance,
+        inside,
+        body.is_mock.unwrap_or(false),
+        body.battery_percent,
+        stamped.unverified,
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(record_id)
-    .bind(now)
-    .bind(body.latitude)
-    .bind(body.longitude)
-    .bind(body.accuracy_meters)
-    .bind(distance)
-    .bind(inside)
-    .bind(body.is_mock.unwrap_or(false))
-    .bind(body.battery_percent)
-    .bind(stamped.unverified)
     .execute(pool)
     .await?;
 
@@ -407,12 +409,12 @@ pub async fn ping(
             .iter()
             .any(|(a, b)| *a - slack <= now && now <= *b + slack);
         if !covered {
-            let since: Option<DateTime<Utc>> = sqlx::query_scalar(
+            let since: Option<DateTime<Utc>> = sqlx::query_scalar!(
                 "SELECT MAX(resolved_at) FROM attendance_flags \
                   WHERE attendance_record_id = $1 AND kind = 'left_mid_shift' \
                     AND resolution IS NOT NULL",
+                record_id,
             )
-            .bind(record_id)
             .fetch_one(pool)
             .await?;
             let trail: Vec<(DateTime<Utc>, bool)> = sqlx::query_as(
@@ -478,11 +480,11 @@ pub async fn ping(
     // be in the background (CL-12).
     let charge_phone = body.battery_percent.is_some_and(|b| b <= LOW_BATTERY);
     if charge_phone && body.offline.is_none() {
-        let first = sqlx::query(
+        let first = sqlx::query!(
             "UPDATE attendance_records SET low_battery_warned_at = now() \
               WHERE id = $1 AND low_battery_warned_at IS NULL",
+            record_id,
         )
-        .bind(record_id)
         .execute(pool)
         .await?
         .rows_affected()
@@ -788,8 +790,10 @@ pub async fn resolve_flag(
     } else {
         let date: Option<NaiveDate> = match record_id {
             Some(r) => {
-                sqlx::query_scalar("SELECT business_date FROM attendance_records WHERE id = $1")
-                    .bind(r)
+                sqlx::query_scalar!(
+                    "SELECT business_date FROM attendance_records WHERE id = $1",
+                    r,
+                )
                     .fetch_optional(pool)
                     .await?
             }
@@ -895,13 +899,13 @@ async fn settle_flag(
         };
     }
     let mut tx = pool.begin().await?;
-    let won = sqlx::query(
+    let won = sqlx::query!(
         "UPDATE attendance_flags SET resolution = $2, resolved_by = $3, resolved_at = now() \
           WHERE id = $1 AND resolution IS NULL",
+        id,
+        resolution,
+        by,
     )
-    .bind(id)
-    .bind(resolution)
-    .bind(by)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -931,26 +935,28 @@ async fn settle_flag(
         // it collided with the one automatic row per record and source — a
         // second flag on the same shift could not be deducted (409), and the
         // rules' recompute of that record deleted an unpaid excuse made here.
-        let deduction_id: Uuid = sqlx::query_scalar(
+        let deduction_id: Uuid = sqlx::query_scalar!(
             "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, \
                 effective_date, source, attendance_record_id, created_by, status, reason_code) \
              VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, NULL, $7, $8, $9) \
              RETURNING id",
+            org_id,
+            employee_id,
+            amount,
+            reason,
+            date,
+            source,
+            by,
+            line_status,
+            reason_code,
         )
-        .bind(org_id)
-        .bind(employee_id)
-        .bind(amount)
-        .bind(reason)
-        .bind(date)
-        .bind(source)
-        .bind(by)
-        .bind(line_status)
-        .bind(reason_code)
         .fetch_one(&mut *tx)
         .await?;
-        sqlx::query("UPDATE attendance_flags SET deduction_id = $2 WHERE id = $1")
-            .bind(id)
-            .bind(deduction_id)
+        sqlx::query!(
+            "UPDATE attendance_flags SET deduction_id = $2 WHERE id = $1",
+            id,
+            deduction_id,
+        )
             .execute(&mut *tx)
             .await?;
         // A money act: who, when, why (AD-9, AT-10, D8) — written with the
@@ -1177,27 +1183,27 @@ pub async fn open_cover(
             "Clock out of your own shift first.",
         ));
     }
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, business_date, \
             status, scheduled_start_at, scheduled_end_at, check_in_at, check_in_latitude, \
             check_in_longitude, check_in_distance_meters, check_in_method, covered_employee_id, \
             cover_status, created_by) \
          VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, $13, $8, $9, $10, 'cover', $11, \
             'pending', $12) RETURNING id",
+        org_id,
+        employee_id,
+        shift.branch_id,
+        shift.work_shift_id,
+        shift.business_date,
+        shift.scheduled_start_at,
+        shift.scheduled_end_at,
+        body.latitude,
+        body.longitude,
+        distance,
+        body.employee_id,
+        me.user_id,
+        stamped.at,
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(shift.branch_id)
-    .bind(shift.work_shift_id)
-    .bind(shift.business_date)
-    .bind(shift.scheduled_start_at)
-    .bind(shift.scheduled_end_at)
-    .bind(body.latitude)
-    .bind(body.longitude)
-    .bind(distance)
-    .bind(body.employee_id)
-    .bind(me.user_id)
-    .bind(stamped.at)
     .fetch_one(pool)
     .await?;
     if stamped.unverified {
@@ -1222,14 +1228,14 @@ pub async fn open_cover(
         body.is_mock,
     )
     .await?;
-    let _ = sqlx::query(
+    let _ = sqlx::query!(
         "INSERT INTO attendance_flags (org_id, employee_id, branch_id, attendance_record_id, kind) \
          VALUES ($1, $2, $3, $4, 'cover')",
+        org_id,
+        employee_id,
+        shift.branch_id,
+        id,
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(shift.branch_id)
-    .bind(id)
     .execute(pool)
     .await?;
     let name = employee_name(pool, employee_id).await;
@@ -1300,21 +1306,23 @@ async fn decide_cover_record(
     }
     let status = if approve { "confirmed" } else { "rejected" };
     // One decision only: a second confirm (or a race) finds nothing pending.
-    let decided = sqlx::query(
+    let decided = sqlx::query!(
         "UPDATE attendance_records SET cover_status = $2, edited_by = $3 \
           WHERE id = $1 AND cover_status = 'pending'",
+        id,
+        status,
+        by,
     )
-    .bind(id)
-    .bind(status)
-    .bind(by)
     .execute(pool)
     .await?
     .rows_affected();
     if decided == 0 {
         // Decided by someone else since it was read (a race).
         let now: Option<String> =
-            sqlx::query_scalar("SELECT cover_status FROM attendance_records WHERE id = $1")
-                .bind(id)
+            sqlx::query_scalar!(
+                "SELECT cover_status FROM attendance_records WHERE id = $1",
+                id,
+            )
                 .fetch_one(pool)
                 .await?;
         return Err(super::already_decided(&now.unwrap_or_default()));
@@ -1334,13 +1342,13 @@ async fn decide_cover_record(
     )
     .await?;
     // The flag says what was decided (CV-3).
-    sqlx::query(
+    sqlx::query!(
         "UPDATE attendance_flags SET resolution = $3, resolved_by = $2, resolved_at = now() \
           WHERE attendance_record_id = $1 AND kind = 'cover' AND resolution IS NULL",
+        id,
+        by,
+        status,
     )
-    .bind(id)
-    .bind(by)
-    .bind(status)
     .execute(pool)
     .await?;
     notify(
@@ -1462,13 +1470,13 @@ pub async fn decide_overtime(
     // the audit row (D8) is written with it, so only the winner records and
     // tells.
     let mut tx = pool.begin().await?;
-    let won = sqlx::query(
+    let won = sqlx::query!(
         "UPDATE attendance_records SET overtime_status = $2, edited_by = $3 \
           WHERE id = $1 AND overtime_status = 'pending'",
+        *id,
+        if body.approve { "approved" } else { "rejected" },
+        by,
     )
-    .bind(*id)
-    .bind(if body.approve { "approved" } else { "rejected" })
-    .bind(by)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -1476,8 +1484,10 @@ pub async fn decide_overtime(
         // Decided by someone else since it was read: they told the person.
         drop(tx);
         let now: Option<String> =
-            sqlx::query_scalar("SELECT overtime_status FROM attendance_records WHERE id = $1")
-                .bind(*id)
+            sqlx::query_scalar!(
+                "SELECT overtime_status FROM attendance_records WHERE id = $1",
+                *id,
+            )
                 .fetch_one(pool)
                 .await?;
         return Err(super::already_decided(&now.unwrap_or_default()));
@@ -1642,13 +1652,13 @@ async fn shift_branch_at(
     let Some(shift) = shift else {
         return Ok(None);
     };
-    Ok(sqlx::query_scalar::<_, Option<Uuid>>(
+    Ok(sqlx::query_scalar!(
         "SELECT ws.branch_id FROM work_shifts ws \
            JOIN employee_branches eb ON eb.branch_id = ws.branch_id AND eb.employee_id = $2 \
           WHERE ws.id = $1",
+        shift.work_shift_id,
+        employee_id,
     )
-    .bind(shift.work_shift_id)
-    .bind(employee_id)
     .fetch_optional(pool)
     .await?
     .flatten())
@@ -1685,15 +1695,15 @@ pub(crate) async fn punch(
         Some((id, record_branch, _, _)) => {
             // No payroll check: a punch always works (see attendance::check_in).
             // The out-reason beside the in-reason, never over it (BC-1).
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE attendance_records SET check_out_at = $5, check_out_method = $4, \
                         check_out_reason = $2, edited_by = $3 WHERE id = $1",
+                id,
+                reason,
+                by,
+                method,
+                at,
             )
-            .bind(id)
-            .bind(reason)
-            .bind(by)
-            .bind(method)
-            .bind(at)
             .execute(pool)
             .await?;
             (id, false, record_branch)
@@ -1713,7 +1723,7 @@ pub(crate) async fn punch(
                 shift.as_ref().map(|s| s.work_shift_id),
             )
             .await?;
-            let id = sqlx::query_scalar(
+            let id = sqlx::query_scalar!(
                 "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                     business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, \
                     check_in_method, is_manual, punch_reason, created_by) \
@@ -1721,19 +1731,19 @@ pub(crate) async fn punch(
                  ON CONFLICT (employee_id, business_date, \
                     COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL \
                  DO NOTHING RETURNING id",
+                org_id,
+                employee_id,
+                branch,
+                shift.as_ref().map(|s| s.work_shift_id),
+                business_date,
+                shift.as_ref().map(|s| s.scheduled_start_at),
+                shift.as_ref().map(|s| s.scheduled_end_at),
+                reason,
+                by,
+                method,
+                method == "manager",
+                at,
             )
-            .bind(org_id)
-            .bind(employee_id)
-            .bind(branch)
-            .bind(shift.as_ref().map(|s| s.work_shift_id))
-            .bind(business_date)
-            .bind(shift.as_ref().map(|s| s.scheduled_start_at))
-            .bind(shift.as_ref().map(|s| s.scheduled_end_at))
-            .bind(reason)
-            .bind(by)
-            .bind(method)
-            .bind(method == "manager")
-            .bind(at)
             .fetch_optional(pool)
             .await?
             .ok_or_else(|| crate::staff::coded(409, "SHIFT_ALREADY_WORKED", "They already worked that shift today."))?;
@@ -1921,9 +1931,11 @@ pub async fn till_punch(
     .await;
     // The PIN names a till user; the punch is for the employee linked to them.
     let employee: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
-            .bind(holder.id)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT id FROM employees WHERE user_id = $1 AND org_id = $2",
+            holder.id,
+            org_id,
+        )
             .fetch_optional(pool)
             .await?;
     let Some(employee_id) = employee else {

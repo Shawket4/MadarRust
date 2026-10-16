@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT o.plan FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "plan",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b48457c117072075d0cc9060f232233b6b623ac90aa28c11a50e78aa4680116d"
+}

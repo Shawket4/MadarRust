@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attendance_settings\n               (org_id, late_deduction_tiers, absence_deduction_days,\n                default_overtime_multiplier, working_days_per_month,\n                require_geofence, excused_time_paid_default)\n           VALUES ($1,\n               '[{\"from_minutes\":1,  \"to_minutes\":15,   \"kind\":\"minutes\",     \"value\":15},\n                 {\"from_minutes\":16, \"to_minutes\":30,   \"kind\":\"minutes\",     \"value\":60},\n                 {\"from_minutes\":31, \"to_minutes\":120,  \"kind\":\"day_fraction\",\"value\":0.5},\n                 {\"from_minutes\":121,\"to_minutes\":null, \"kind\":\"day_fraction\",\"value\":1}]'::jsonb,\n               1.00, 1.50, 30.00, TRUE, TRUE)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d429c29ce93a0c948aaac5faa242a81ed13ca7128661549a04f8e48efafc5322"
+}

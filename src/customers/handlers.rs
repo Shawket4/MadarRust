@@ -284,12 +284,12 @@ pub(crate) async fn live_with_phone(
     org: Uuid,
     key: &str,
 ) -> Result<Option<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT id FROM customers WHERE org_id = $1 AND phone_key = $2
             AND merged_into IS NULL AND erased_at IS NULL",
+        org,
+        key,
     )
-    .bind(org)
-    .bind(key)
     .fetch_optional(&mut *conn)
     .await?)
 }
@@ -374,8 +374,10 @@ async fn insert_row(
         if inserted.is_some() {
             return Ok(Landed::Inserted);
         }
-        let prior: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM customers WHERE id = $1")
-            .bind(c.id)
+        let prior: Option<Uuid> = sqlx::query_scalar!(
+            "SELECT org_id FROM customers WHERE id = $1",
+            c.id,
+        )
             .fetch_optional(&mut *conn)
             .await?;
         match prior {
@@ -461,9 +463,11 @@ pub async fn resolve_or_create(
         Landed::Inserted => Ok((c.id, Outcome::Created)),
         Landed::IdExists => {
             // A replay of a create we already stored: whoever that id is now.
-            let live: Option<Uuid> = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
-                .bind(org)
-                .bind(c.id)
+            let live: Option<Uuid> = sqlx::query_scalar!(
+                "SELECT customers_resolve($1, $2)",
+                org,
+                c.id,
+            )
                 .fetch_one(&mut *tx)
                 .await?;
             Ok((live.unwrap_or(c.id), Outcome::Matched))
@@ -492,8 +496,10 @@ pub async fn insert_customer(
     let id = body.id.unwrap_or_else(Uuid::new_v4);
     // Before validating: a replay of a stored create is a success even if the
     // same body would no longer pass.
-    let prior: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM customers WHERE id = $1")
-        .bind(id)
+    let prior: Option<Uuid> = sqlx::query_scalar!(
+        "SELECT org_id FROM customers WHERE id = $1",
+        id,
+    )
         .fetch_optional(&mut *conn)
         .await?;
     match prior {
@@ -541,9 +547,11 @@ pub async fn attach_to_order(
 ) -> Result<Option<Uuid>, AppError> {
     let resolved: Option<Uuid> = match customer_id {
         Some(c) => {
-            sqlx::query_scalar("SELECT customers_resolve($1, $2)")
-                .bind(org)
-                .bind(c)
+            sqlx::query_scalar!(
+                "SELECT customers_resolve($1, $2)",
+                org,
+                c,
+            )
                 .fetch_one(&mut *conn)
                 .await?
         }
@@ -552,13 +560,13 @@ pub async fn attach_to_order(
     if customer_id.is_some() && resolved.is_none() {
         return Ok(None);
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE orders o SET customer_id = $2 FROM branches b
           WHERE o.id = $1 AND b.id = o.branch_id AND b.org_id = $3",
+        order_id,
+        resolved,
+        org,
     )
-    .bind(order_id)
-    .bind(resolved)
-    .bind(org)
     .execute(&mut *conn)
     .await?;
     Ok(resolved)
@@ -650,9 +658,11 @@ pub async fn list_customer_bookings(
     let claims = claims_of(&req)?;
     let org = org_of(&req, &claims)?;
     require(pool.get_ref(), &claims, Cap::CustomersView, None).await?;
-    let id: Uuid = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
-        .bind(org)
-        .bind(path.into_inner())
+    let id: Uuid = sqlx::query_scalar!(
+        "SELECT customers_resolve($1, $2)",
+        org,
+        path.into_inner(),
+    )
         .fetch_one(pool.get_ref())
         .await
         .ok()
@@ -671,9 +681,11 @@ pub async fn list_customer_bookings(
 
 async fn detail(pool: &sqlx::PgPool, org: Uuid, asked: Uuid) -> Result<CustomerDetail, AppError> {
     let mut conn = pool.acquire().await?;
-    let id: Uuid = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
-        .bind(org)
-        .bind(asked)
+    let id: Uuid = sqlx::query_scalar!(
+        "SELECT customers_resolve($1, $2)",
+        org,
+        asked,
+    )
         .fetch_one(&mut *conn)
         .await
         .ok()
@@ -682,11 +694,11 @@ async fn detail(pool: &sqlx::PgPool, org: Uuid, asked: Uuid) -> Result<CustomerD
     let customer = fetch_live(&mut conn, org, id)
         .await?
         .ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
-    let merged_from: Vec<Uuid> = sqlx::query_scalar(
+    let merged_from: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM customers WHERE org_id = $1 AND merged_into = $2 ORDER BY merged_at",
+        org,
+        id,
     )
-    .bind(org)
-    .bind(id)
     .fetch_all(&mut *conn)
     .await?;
     let recent_orders: Vec<CustomerOrder> = sqlx::query_as::<
@@ -889,16 +901,16 @@ async fn remember_phone(
     reason: &str,
     by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO customer_phone_history (org_id, customer_id, phone, phone_key, reason, replaced_by)
          VALUES ($1, $2, $3, $4, $5, $6)",
+        org,
+        customer,
+        phone,
+        key,
+        reason,
+        by,
     )
-    .bind(org)
-    .bind(customer)
-    .bind(phone)
-    .bind(key)
-    .bind(reason)
-    .bind(by)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -965,11 +977,11 @@ pub async fn merge_inner(
     // Lock both rows in id order so two opposite merges cannot cross.
     let mut ids = [from, into];
     ids.sort();
-    sqlx::query(
+    sqlx::query!(
         "SELECT id FROM customers WHERE id = ANY($1) AND org_id = $2 ORDER BY id FOR UPDATE",
+        &ids[..],
+        org,
     )
-    .bind(&ids[..])
-    .bind(org)
     .fetch_all(&mut *tx)
     .await?;
     let a = fetch_live(tx, org, from)
@@ -1005,13 +1017,13 @@ pub async fn merge_inner(
         (None, y) => y.clone(),
     };
     // Marked merged FIRST: that frees the duplicate's phone for the survivor.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE customers SET merged_into = $2, merged_at = now(), updated_at = now()
           WHERE id = $1 AND org_id = $3",
+        from,
+        into,
+        org,
     )
-    .bind(from)
-    .bind(into)
-    .bind(org)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -1045,24 +1057,28 @@ pub async fn merge_inner(
     {
         remember_phone(tx, org, into, p, a_key.as_deref(), "merge", actor).await?;
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE customer_phone_history SET customer_id = $2 WHERE customer_id = $1 AND org_id = $3",
+        from,
+        into,
+        org,
     )
-    .bind(from)
-    .bind(into)
-    .bind(org)
     .execute(&mut *tx)
     .await?;
     // Earlier merges into the duplicate now point at the kept customer too.
-    sqlx::query("UPDATE customers SET merged_into = $2 WHERE merged_into = $1 AND org_id = $3")
-        .bind(from)
-        .bind(into)
-        .bind(org)
+    sqlx::query!(
+        "UPDATE customers SET merged_into = $2 WHERE merged_into = $1 AND org_id = $3",
+        from,
+        into,
+        org,
+    )
         .execute(&mut *tx)
         .await?;
-    sqlx::query("UPDATE orders SET customer_id = $2 WHERE customer_id = $1")
-        .bind(from)
-        .bind(into)
+    sqlx::query!(
+        "UPDATE orders SET customer_id = $2 WHERE customer_id = $1",
+        from,
+        into,
+    )
         .execute(&mut *tx)
         .await?;
     // Everything else that names the duplicate (design §2.7). The snapshots on
@@ -1134,41 +1150,47 @@ pub(crate) async fn repoint_addresses(
         .await?;
         match twin {
             Some(keep) => {
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE customer_addresses SET use_count = use_count + $2,
                             last_used_at = GREATEST(last_used_at, $3) WHERE id = $1",
+                    keep,
+                    uses,
+                    used_at,
                 )
-                .bind(keep)
-                .bind(uses)
-                .bind(used_at)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query("UPDATE delivery_orders SET address_id = $2 WHERE address_id = $1")
-                    .bind(id)
-                    .bind(keep)
+                sqlx::query!(
+                    "UPDATE delivery_orders SET address_id = $2 WHERE address_id = $1",
+                    id,
+                    keep,
+                )
                     .execute(&mut *tx)
                     .await?;
-                sqlx::query("DELETE FROM customer_addresses WHERE id = $1")
-                    .bind(id)
+                sqlx::query!(
+                    "DELETE FROM customer_addresses WHERE id = $1",
+                    id,
+                )
                     .execute(&mut *tx)
                     .await?;
             }
             None => {
-                sqlx::query("UPDATE customer_addresses SET customer_id = $2 WHERE id = $1")
-                    .bind(id)
-                    .bind(into)
+                sqlx::query!(
+                    "UPDATE customer_addresses SET customer_id = $2 WHERE id = $1",
+                    id,
+                    into,
+                )
                     .execute(&mut *tx)
                     .await?;
             }
         }
     }
     // Erased rows carry no text; they simply follow.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE customer_addresses SET customer_id = $2 WHERE customer_id = $1 AND org_id = $3",
+        from,
+        into,
+        org,
     )
-    .bind(from)
-    .bind(into)
-    .bind(org)
     .execute(&mut *tx)
     .await?;
     Ok(())
@@ -1215,12 +1237,12 @@ pub async fn erase_inner(
     org: Uuid,
     id: Uuid,
 ) -> Result<Option<Vec<crate::loyalty::model::MemberRow>>, AppError> {
-    let live: Option<Uuid> = sqlx::query_scalar(
+    let live: Option<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM customers WHERE id = $1 AND org_id = $2
             AND erased_at IS NULL AND merged_into IS NULL FOR UPDATE",
+        id,
+        org,
     )
-    .bind(id)
-    .bind(org)
     .fetch_optional(&mut *tx)
     .await?;
     if live.is_none() {
@@ -1259,41 +1281,43 @@ pub async fn erase_inner(
     // the device has collected the voided copy or the grace runs out
     // (`loyalty::model::purge_erased_pass`) — otherwise the phone would show
     // an erased person's last balance and barcode for ever.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now()
           WHERE m.id = ANY($1) AND m.org_id = $2
             AND NOT EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)",
+        &chain[..],
+        org,
     )
-    .bind(&chain[..])
-    .bind(org)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)")
-        .bind(&chain[..])
+    sqlx::query!(
+        "DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)",
+        &chain[..],
+    )
         .execute(&mut *tx)
         .await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM loyalty_token_aliases WHERE customer_id = ANY($1) OR was_customer_id = ANY($1)",
+        &chain[..],
     )
-    .bind(&chain[..])
     .execute(&mut *tx)
     .await?;
 
     // The person — and the rows merged into them, which still carry what each
     // duplicate was called.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE customers SET name = '', phone = NULL, phone_key = NULL, notes = NULL,
                 birth_month = NULL, birth_day = NULL, marketing_opt_out = true,
                 erased_at = COALESCE(erased_at, now()), updated_at = now()
           WHERE id = ANY($1) AND org_id = $2",
+        &chain[..],
+        org,
     )
-    .bind(&chain[..])
-    .bind(org)
     .execute(&mut *tx)
     .await?;
 
     // What was typed on their rows. Status, money, items and timestamps stay.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE orders o SET customer_name = NULL,
                 notes = CASE WHEN o.delivery_order_id IS NOT NULL THEN NULL ELSE o.notes END
            FROM branches b
@@ -1301,56 +1325,60 @@ pub async fn erase_inner(
             AND (o.customer_id = ANY($1)
                  OR o.delivery_order_id IN (SELECT d.id FROM delivery_orders d
                                              WHERE d.customer_id = ANY($1) AND d.org_id = $2))",
+        &chain[..],
+        org,
     )
-    .bind(&chain[..])
-    .bind(org)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE delivery_orders SET customer_name = '', customer_phone = '',
                 place_name = NULL, floor = NULL, unit_number = NULL, landmark = NULL,
                 address_line = NULL, delivery_notes = NULL,
                 customer_lat = NULL, customer_lng = NULL, updated_at = now()
           WHERE customer_id = ANY($1) AND org_id = $2",
+        &chain[..],
+        org,
     )
-    .bind(&chain[..])
-    .bind(org)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE bookings SET guest_name = '', guest_phone = '', notes = NULL, updated_at = now()
           WHERE customer_id = ANY($1) AND org_id = $2",
+        &chain[..],
+        org,
     )
-    .bind(&chain[..])
-    .bind(org)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE open_tickets SET customer_name = NULL, updated_at = now()
           WHERE customer_id = ANY($1) AND org_id = $2",
+        &chain[..],
+        org,
     )
-    .bind(&chain[..])
-    .bind(org)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE customer_addresses SET label = NULL, place_name = NULL, floor = NULL,
                 unit_number = NULL, landmark = NULL, address_line = NULL, delivery_notes = NULL,
                 lat = NULL, lng = NULL, norm_key = '', erased_at = COALESCE(erased_at, now())
           WHERE customer_id = ANY($1) AND org_id = $2",
+        &chain[..],
+        org,
     )
-    .bind(&chain[..])
-    .bind(org)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM customer_phone_history WHERE customer_id = ANY($1) AND org_id = $2")
-        .bind(&chain[..])
-        .bind(org)
+    sqlx::query!(
+        "DELETE FROM customer_phone_history WHERE customer_id = ANY($1) AND org_id = $2",
+        &chain[..],
+        org,
+    )
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM customer_identity_audit WHERE customer_id = ANY($1) AND org_id = $2")
-        .bind(&chain[..])
-        .bind(org)
+    sqlx::query!(
+        "DELETE FROM customer_identity_audit WHERE customer_id = ANY($1) AND org_id = $2",
+        &chain[..],
+        org,
+    )
         .execute(&mut *tx)
         .await?;
     if !phones.is_empty() {
@@ -1472,22 +1500,22 @@ pub async fn save_address(
     if a.channel == crate::delivery::CHANNEL_PICKUP {
         return Ok(None);
     }
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT customer_address_upsert($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())",
+        org,
+        customer,
+        a.branch_id,
+        a.channel,
+        a.place_name,
+        a.floor,
+        a.unit_number,
+        a.landmark,
+        a.address_line,
+        a.delivery_notes,
+        a.lat,
+        a.lng,
+        a.zone_id,
     )
-    .bind(org)
-    .bind(customer)
-    .bind(a.branch_id)
-    .bind(a.channel)
-    .bind(a.place_name)
-    .bind(a.floor)
-    .bind(a.unit_number)
-    .bind(a.landmark)
-    .bind(a.address_line)
-    .bind(a.delivery_notes)
-    .bind(a.lat)
-    .bind(a.lng)
-    .bind(a.zone_id)
     .fetch_one(&mut *tx)
     .await?)
 }
@@ -1505,9 +1533,11 @@ pub async fn list_customer_addresses(
     let org = org_of(&req, &claims)?;
     require(pool.get_ref(), &claims, Cap::CustomersAddressesView, None).await?;
     let mut conn = pool.get_ref().acquire().await?;
-    let id: Uuid = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
-        .bind(org)
-        .bind(path.into_inner())
+    let id: Uuid = sqlx::query_scalar!(
+        "SELECT customers_resolve($1, $2)",
+        org,
+        path.into_inner(),
+    )
         .fetch_one(&mut *conn)
         .await
         .ok()
@@ -1539,17 +1569,17 @@ pub async fn audit_identity(
         IdentityActor::CustomerSelf => ("customer", None),
         IdentityActor::Staff(u) => ("staff", Some(u)),
     };
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO customer_identity_audit (org_id, customer_id, kind, actor_kind, actor_user, old_value, new_value)
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        org,
+        customer,
+        kind,
+        actor_kind,
+        actor_user,
+        old,
+        new,
     )
-    .bind(org)
-    .bind(customer)
-    .bind(kind)
-    .bind(actor_kind)
-    .bind(actor_user)
-    .bind(old)
-    .bind(new)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -1581,22 +1611,24 @@ pub async fn rename(
     actor: IdentityActor,
 ) -> Result<(), AppError> {
     let name = clean_name(new_name)?;
-    let old: Option<String> = sqlx::query_scalar(
+    let old: Option<String> = sqlx::query_scalar!(
         "SELECT name FROM customers WHERE id = $1 AND org_id = $2
             AND merged_into IS NULL AND erased_at IS NULL FOR UPDATE",
+        customer,
+        org,
     )
-    .bind(customer)
-    .bind(org)
     .fetch_optional(&mut *tx)
     .await?;
     let old = old.ok_or_else(|| AppError::NotFound("Customer not found".into()))?;
     if old == name {
         return Ok(());
     }
-    sqlx::query("UPDATE customers SET name = $3, updated_at = now() WHERE id = $1 AND org_id = $2")
-        .bind(customer)
-        .bind(org)
-        .bind(&name)
+    sqlx::query!(
+        "UPDATE customers SET name = $3, updated_at = now() WHERE id = $1 AND org_id = $2",
+        customer,
+        org,
+        &name,
+    )
         .execute(&mut *tx)
         .await?;
     audit_identity(tx, org, customer, "name", actor, Some(&old), Some(&name)).await

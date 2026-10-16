@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM payroll_deductions WHERE attendance_record_id = $1 AND source = $2 AND waived_at IS NULL AND overridden_at IS NULL AND created_by IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f45ff3c028634e8d10c0d4568f0ea3caf4ac9106284602375f4739eaf5f01c68"
+}

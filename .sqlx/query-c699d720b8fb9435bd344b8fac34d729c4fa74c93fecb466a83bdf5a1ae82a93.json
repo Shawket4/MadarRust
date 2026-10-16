@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customers SET name = '', phone = NULL, phone_key = NULL, notes = NULL,\n                birth_month = NULL, birth_day = NULL, marketing_opt_out = true,\n                erased_at = COALESCE(erased_at, now()), updated_at = now()\n          WHERE id = ANY($1) AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c699d720b8fb9435bd344b8fac34d729c4fa74c93fecb466a83bdf5a1ae82a93"
+}

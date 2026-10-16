@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE orders o SET customer_id = $2 FROM branches b\n          WHERE o.id = $1 AND b.id = o.branch_id AND b.org_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8a032e7656e45490ec4312fc93f0c2fda7dd7aa0a0d91774c9e8267b5397fd95"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM kitchen_station_printers WHERE station_id IN\n            (SELECT id FROM kitchen_stations WHERE branch_id = $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d25f8cacab660e37fc672a5632d68ac7e15d8f58a1d0187f4980956b41f5fcb2"
+}

@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_drinks (id, org_id, branch_id, till_id, order_id, menu_item_id, item_name, size_label, quantity, note, business_date, allowance_at_record, used_before, overspent, overspent_on_replay, cost_minor, recorded_by, device_id, recorded_at, comp_minor, extras_minor, comp_minor_reported) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Date",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Bool",
+        "Int4",
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e82bb49150c2c34cc216c13664cff67ec9584bedff446d675fa7eec7dbfe8da7"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customer_addresses SET use_count = use_count + $2,\n                            last_used_at = GREATEST(last_used_at, $3) WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "94e7bf83046aad2b379379ec68b5f1d41a90e5ef5bcb65e7c48d689b3cdcf617"
+}

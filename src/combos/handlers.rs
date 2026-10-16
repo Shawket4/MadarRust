@@ -185,11 +185,11 @@ async fn validate(conn: &mut PgConnection, org: Uuid, body: &ComboWrite) -> Resu
         .iter()
         .flat_map(|s| s.choices.iter().filter_map(|c| c.category_id))
         .collect();
-    let known_cats: HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+    let known_cats: HashSet<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM categories WHERE org_id = $1 AND id = ANY($2) AND deleted_at IS NULL",
+        org,
+        &cats,
     )
-    .bind(org)
-    .bind(&cats)
     .fetch_all(&mut *conn)
     .await?
     .into_iter()
@@ -282,8 +282,10 @@ async fn write_children(
     body: &ComboWrite,
 ) -> Result<(), AppError> {
     let existing: HashSet<Uuid> =
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM combo_slots WHERE combo_item_id = $1")
-            .bind(id)
+        sqlx::query_scalar!(
+            "SELECT id FROM combo_slots WHERE combo_item_id = $1",
+            id,
+        )
             .fetch_all(&mut *conn)
             .await?
             .into_iter()
@@ -298,14 +300,16 @@ async fn write_children(
     if !gone.is_empty() {
         // An item's "make it a meal" pointing at a deleted slot is unlinked
         // first (the FK's SET NULL alone would trip the meal guard).
-        sqlx::query(
+        sqlx::query!(
             "UPDATE menu_items SET meal_combo_id = NULL, meal_slot_id = NULL WHERE meal_slot_id = ANY($1)",
+            &gone,
         )
-        .bind(&gone)
         .execute(&mut *conn)
         .await?;
-        sqlx::query("DELETE FROM combo_slots WHERE id = ANY($1)")
-            .bind(&gone)
+        sqlx::query!(
+            "DELETE FROM combo_slots WHERE id = ANY($1)",
+            &gone,
+        )
             .execute(&mut *conn)
             .await?;
     }
@@ -314,15 +318,15 @@ async fn write_children(
         write_choices(&mut *conn, org, slot_id, s).await?;
     }
     // A meal link whose slot no longer admits its item is dropped.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE menu_items mi SET meal_combo_id = NULL, meal_slot_id = NULL \
           WHERE mi.meal_combo_id = $1 \
             AND NOT EXISTS (SELECT 1 FROM combo_slot_choices c \
                              WHERE c.slot_id = mi.meal_slot_id \
                                AND (c.menu_item_id = mi.id \
                                     OR (c.menu_item_id IS NULL AND c.category_id = mi.category_id)))",
+        id,
     )
-    .bind(id)
     .execute(&mut *conn)
     .await?;
     write_windows(&mut *conn, org, "combo_item_id", id, &body.windows).await
@@ -346,37 +350,37 @@ async fn write_slot(
     kept: &HashSet<Uuid>,
 ) -> Result<Uuid, AppError> {
     if let Some(sid) = s.id.filter(|i| kept.contains(i)) {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE combo_slots SET name = $2, name_translations = $3, sort = $4, min_picks = $5, \
                     max_picks = $6, default_item_id = $7, default_size_label = $8, updated_at = now() \
               WHERE id = $1",
+            sid,
+            s.name.trim(),
+            slot_translations(s),
+            s.sort,
+            s.min,
+            s.max,
+            s.default_item_id,
+            s.default_size_label.as_deref(),
         )
-        .bind(sid)
-        .bind(s.name.trim())
-        .bind(slot_translations(s))
-        .bind(s.sort)
-        .bind(s.min)
-        .bind(s.max)
-        .bind(s.default_item_id)
-        .bind(s.default_size_label.as_deref())
         .execute(&mut *conn)
         .await?;
         Ok(sid)
     } else {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "INSERT INTO combo_slots (org_id, combo_item_id, name, name_translations, sort, min_picks, \
                                       max_picks, default_item_id, default_size_label) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+            org,
+            combo,
+            s.name.trim(),
+            slot_translations(s),
+            s.sort,
+            s.min,
+            s.max,
+            s.default_item_id,
+            s.default_size_label.as_deref(),
         )
-        .bind(org)
-        .bind(combo)
-        .bind(s.name.trim())
-        .bind(slot_translations(s))
-        .bind(s.sort)
-        .bind(s.min)
-        .bind(s.max)
-        .bind(s.default_item_id)
-        .bind(s.default_size_label.as_deref())
         .fetch_one(&mut *conn)
         .await?)
     }
@@ -389,8 +393,10 @@ async fn write_choices(
     s: &ComboSlotWrite,
 ) -> Result<(), AppError> {
     let existing: HashSet<Uuid> =
-        sqlx::query_scalar::<_, Uuid>("SELECT id FROM combo_slot_choices WHERE slot_id = $1")
-            .bind(slot)
+        sqlx::query_scalar!(
+            "SELECT id FROM combo_slot_choices WHERE slot_id = $1",
+            slot,
+        )
             .fetch_all(&mut *conn)
             .await?
             .into_iter()
@@ -402,55 +408,59 @@ async fn write_choices(
         .filter(|i| existing.contains(i))
         .collect();
     let gone: Vec<Uuid> = existing.difference(&kept).copied().collect();
-    sqlx::query("DELETE FROM combo_slot_choices WHERE id = ANY($1)")
-        .bind(&gone)
+    sqlx::query!(
+        "DELETE FROM combo_slot_choices WHERE id = ANY($1)",
+        &gone,
+    )
         .execute(&mut *conn)
         .await?;
     for c in &s.choices {
         let cid: Uuid = if let Some(cid) = c.id.filter(|i| kept.contains(i)) {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE combo_slot_choices SET menu_item_id = $2, category_id = $3, surcharge = $4, \
                         included_size_label = $5, sort = $6 WHERE id = $1",
+                cid,
+                c.menu_item_id,
+                c.category_id,
+                c.surcharge,
+                c.included_size_label.as_deref(),
+                c.sort,
             )
-            .bind(cid)
-            .bind(c.menu_item_id)
-            .bind(c.category_id)
-            .bind(c.surcharge)
-            .bind(c.included_size_label.as_deref())
-            .bind(c.sort)
             .execute(&mut *conn)
             .await?;
             cid
         } else {
-            sqlx::query_scalar(
+            sqlx::query_scalar!(
                 "INSERT INTO combo_slot_choices (org_id, slot_id, menu_item_id, category_id, surcharge, \
                                                  included_size_label, sort) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+                org,
+                slot,
+                c.menu_item_id,
+                c.category_id,
+                c.surcharge,
+                c.included_size_label.as_deref(),
+                c.sort,
             )
-            .bind(org)
-            .bind(slot)
-            .bind(c.menu_item_id)
-            .bind(c.category_id)
-            .bind(c.surcharge)
-            .bind(c.included_size_label.as_deref())
-            .bind(c.sort)
             .fetch_one(&mut *conn)
             .await?
         };
-        sqlx::query("DELETE FROM combo_choice_size_surcharges WHERE choice_id = $1")
-            .bind(cid)
+        sqlx::query!(
+            "DELETE FROM combo_choice_size_surcharges WHERE choice_id = $1",
+            cid,
+        )
             .execute(&mut *conn)
             .await?;
         for z in &c.size_surcharges {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO combo_choice_size_surcharges (choice_id, org_id, size_label, surcharge) \
                  VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (choice_id, size_label) DO UPDATE SET surcharge = EXCLUDED.surcharge",
+                cid,
+                org,
+                &z.size_label,
+                z.surcharge,
             )
-            .bind(cid)
-            .bind(org)
-            .bind(&z.size_label)
-            .bind(z.surcharge)
             .execute(&mut *conn)
             .await?;
         }
@@ -602,31 +612,33 @@ pub async fn create_combo(
     let org = claims_org(&claims)?;
     let mut tx = pool.begin().await?;
     validate(&mut tx, org, &body).await?;
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO menu_items (org_id, category_id, name, name_translations, description, \
                                  description_translations, base_price, is_active, kind) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'combo') RETURNING id",
+        org,
+        body.category_id,
+        body.name.trim(),
+        &body.name_translations,
+        body.description.as_deref(),
+        &body.description_translations,
+        body.price,
+        body.is_active,
     )
-    .bind(org)
-    .bind(body.category_id)
-    .bind(body.name.trim())
-    .bind(&body.name_translations)
-    .bind(body.description.as_deref())
-    .bind(&body.description_translations)
-    .bind(body.price)
-    .bind(body.is_active)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE menu_item_sizes SET price = $2 WHERE menu_item_id = $1 AND label = 'one_size'",
+        id,
+        body.price,
     )
-    .bind(id)
-    .bind(body.price)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO menu_item_combos (menu_item_id, org_id) VALUES ($1, $2)")
-        .bind(id)
-        .bind(org)
+    sqlx::query!(
+        "INSERT INTO menu_item_combos (menu_item_id, org_id) VALUES ($1, $2)",
+        id,
+        org,
+    )
         .execute(&mut *tx)
         .await?;
     write_children(&mut tx, org, id, &body).await?;
@@ -680,13 +692,13 @@ pub async fn update_combo(
     let org = claims_org(&claims)?;
     let id = *id;
     let mut tx = pool.begin().await?;
-    let found: Option<Uuid> = sqlx::query_scalar(
+    let found: Option<Uuid> = sqlx::query_scalar!(
         "SELECT mi.id FROM menu_items mi JOIN menu_item_combos c ON c.menu_item_id = mi.id \
           WHERE mi.id = $1 AND mi.org_id = $2 AND mi.kind = 'combo' AND mi.deleted_at IS NULL \
           FOR UPDATE OF mi",
+        id,
+        org,
     )
-    .bind(id)
-    .bind(org)
     .fetch_optional(&mut *tx)
     .await?;
     if found.is_none() {
@@ -717,8 +729,10 @@ pub async fn update_combo(
     .bind(body.price)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE menu_item_combos SET updated_at = now() WHERE menu_item_id = $1")
-        .bind(id)
+    sqlx::query!(
+        "UPDATE menu_item_combos SET updated_at = now() WHERE menu_item_id = $1",
+        id,
+    )
         .execute(&mut *tx)
         .await?;
     write_children(&mut tx, org, id, &body).await?;
@@ -860,12 +874,12 @@ pub async fn put_meal(
             ));
         }
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE menu_items SET meal_combo_id = $2, meal_slot_id = $3, updated_at = now() WHERE id = $1",
+        id,
+        link.combo_id,
+        link.slot_id,
     )
-    .bind(id)
-    .bind(link.combo_id)
-    .bind(link.slot_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -978,17 +992,17 @@ async fn write_org_channels(
     org: Uuid,
     c: ChannelToggles,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO combo_channel_settings (org_id, sell_pos, sell_qr, sell_online, sell_delivery) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (org_id) DO UPDATE SET sell_pos = EXCLUDED.sell_pos, sell_qr = EXCLUDED.sell_qr, \
                 sell_online = EXCLUDED.sell_online, sell_delivery = EXCLUDED.sell_delivery, updated_at = now()",
+        org,
+        c.pos,
+        c.qr,
+        c.online,
+        c.delivery,
     )
-    .bind(org)
-    .bind(c.pos)
-    .bind(c.qr)
-    .bind(c.online)
-    .bind(c.delivery)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -1038,25 +1052,27 @@ pub async fn put_branch_channels(
     branch_of_org(&mut conn, org, *branch_id).await?;
     let o = *body;
     if o.pos.is_none() && o.qr.is_none() && o.online.is_none() && o.delivery.is_none() {
-        sqlx::query("DELETE FROM combo_channel_branch_overrides WHERE branch_id = $1")
-            .bind(*branch_id)
+        sqlx::query!(
+            "DELETE FROM combo_channel_branch_overrides WHERE branch_id = $1",
+            *branch_id,
+        )
             .execute(&mut *conn)
             .await?;
     } else {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO combo_channel_branch_overrides \
                     (branch_id, org_id, sell_pos, sell_qr, sell_online, sell_delivery) \
              VALUES ($1, $2, $3, $4, $5, $6) \
              ON CONFLICT (branch_id) DO UPDATE SET sell_pos = EXCLUDED.sell_pos, \
                     sell_qr = EXCLUDED.sell_qr, sell_online = EXCLUDED.sell_online, \
                     sell_delivery = EXCLUDED.sell_delivery, updated_at = now()",
+            *branch_id,
+            org,
+            o.pos,
+            o.qr,
+            o.online,
+            o.delivery,
         )
-        .bind(*branch_id)
-        .bind(org)
-        .bind(o.pos)
-        .bind(o.qr)
-        .bind(o.online)
-        .bind(o.delivery)
         .execute(&mut *conn)
         .await?;
     }
@@ -1089,8 +1105,10 @@ pub async fn delete_branch_channels(
     let org = claims_org(&claims)?;
     let mut conn = pool.acquire().await?;
     branch_of_org(&mut conn, org, *branch_id).await?;
-    sqlx::query("DELETE FROM combo_channel_branch_overrides WHERE branch_id = $1")
-        .bind(*branch_id)
+    sqlx::query!(
+        "DELETE FROM combo_channel_branch_overrides WHERE branch_id = $1",
+        *branch_id,
+    )
         .execute(&mut *conn)
         .await?;
     invalidate(&cache, org);

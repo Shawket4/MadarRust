@@ -250,11 +250,11 @@ pub(crate) async fn check_session(
         ));
     }
     // Seen: at most a write a minute, not one per request.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_devices SET last_seen_at = now() \
           WHERE id = $1 AND last_seen_at < now() - INTERVAL '1 minute'",
+        device_id,
     )
-    .bind(device_id)
     .execute(pool)
     .await?;
     let user = live.user_id.filter(|_| live.user_ok);

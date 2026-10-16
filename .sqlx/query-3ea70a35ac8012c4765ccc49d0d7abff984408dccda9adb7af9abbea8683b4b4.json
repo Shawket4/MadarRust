@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE push_devices SET revoked_at = now() WHERE user_id IS NOT DISTINCT FROM $1 AND employee_id IS NOT DISTINCT FROM $2 AND app = $3 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3ea70a35ac8012c4765ccc49d0d7abff984408dccda9adb7af9abbea8683b4b4"
+}

@@ -558,12 +558,12 @@ pub async fn finalize_stocktake(
     type Counted = (Uuid, String, f64, f64, Option<i64>, Option<String>);
     let mut counted: Vec<Counted> = Vec::with_capacity(items.len());
     for (ing_id, name, counted_qty, unit_cost, reason) in items {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand) VALUES ($1, $2, 0) \
              ON CONFLICT (branch_id, org_ingredient_id) DO NOTHING",
+            header.branch_id,
+            ing_id,
         )
-        .bind(header.branch_id)
-        .bind(ing_id)
         .execute(&mut *tx)
         .await?;
         let book: f64 = sqlx::query_scalar(
@@ -626,21 +626,21 @@ pub async fn finalize_stocktake(
             .await?;
         }
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE branch_stock SET last_counted_at = now() \
              WHERE branch_id = $1 AND org_ingredient_id = $2",
+            header.branch_id,
+            ing_id,
         )
-        .bind(header.branch_id)
-        .bind(ing_id)
         .execute(&mut *tx)
         .await?;
     }
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE stocktakes SET status = 'finalized', finalized_by = $2, finalized_at = now() WHERE id = $1",
+        *id,
+        claims.user_id(),
     )
-    .bind(*id)
-    .bind(claims.user_id())
     .execute(&mut *tx)
     .await?;
 
@@ -680,8 +680,10 @@ pub async fn cancel_stocktake(
         ));
     }
 
-    sqlx::query("UPDATE stocktakes SET status = 'cancelled' WHERE id = $1")
-        .bind(*id)
+    sqlx::query!(
+        "UPDATE stocktakes SET status = 'cancelled' WHERE id = $1",
+        *id,
+    )
         .execute(pool.get_ref())
         .await?;
 

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO ticket_ref_counters (branch_id, business_date, last_seq) VALUES ($1, $2, 1) ON CONFLICT (branch_id, business_date) DO UPDATE SET last_seq = ticket_ref_counters.last_seq + 1 RETURNING last_seq",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_seq",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0168b3b8f77c71fdab29402379fd9454c00760f509fe6e808524d2c5007af773"
+}

@@ -28,20 +28,22 @@ pub async fn seed_full(
 ) -> Result<(), AppError> {
     // ── Branch + the admin's assignment to it ───────────────────────────────
     let branch_id = Uuid::new_v4();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO branches (id, org_id, name, address, timezone, is_active) \
          VALUES ($1, $2, $3, $4, 'Africa/Cairo', true)",
+        branch_id,
+        org_id,
+        "Downtown",
+        "12 Tahrir St, Cairo",
     )
-    .bind(branch_id)
-    .bind(org_id)
-    .bind("Downtown")
-    .bind("12 Tahrir St, Cairo")
     .execute(&mut *conn)
     .await?;
 
-    sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
-        .bind(admin_id)
-        .bind(branch_id)
+    sqlx::query!(
+        "INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)",
+        admin_id,
+        branch_id,
+    )
         .execute(&mut *conn)
         .await?;
 
@@ -91,10 +93,12 @@ pub async fn seed_full(
     let mut cat_ids = Vec::with_capacity(cat_names.len());
     for name in cat_names.iter() {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, $3)")
-            .bind(id)
-            .bind(org_id)
-            .bind(name)
+        sqlx::query!(
+            "INSERT INTO categories (id, org_id, name) VALUES ($1, $2, $3)",
+            id,
+            org_id,
+            name,
+        )
             .execute(&mut *conn)
             .await?;
         cat_ids.push(id);
@@ -145,15 +149,15 @@ pub async fn seed_full(
         std::collections::HashMap::new();
     for it in items.iter() {
         let id = Uuid::new_v4();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO menu_items (id, org_id, category_id, name, base_price) \
              VALUES ($1, $2, $3, $4, $5)",
+            id,
+            org_id,
+            cat_ids[it.cat],
+            it.name,
+            it.base,
         )
-        .bind(id)
-        .bind(org_id)
-        .bind(cat_ids[it.cat])
-        .bind(it.name)
-        .bind(it.base)
         .execute(&mut *conn)
         .await?;
         for (sort, (label, price)) in it.sizes.iter().enumerate() {
@@ -266,15 +270,15 @@ pub async fn seed_full(
         .execute(&mut *conn)
         .await?;
         for (name, price, sort) in options.iter() {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO modifier_options (id, group_id, name, price, sort, legacy_source) \
                  VALUES ($1, $2, $3, $4, $5, 'addon')",
+                Uuid::new_v4(),
+                group_id,
+                name,
+                price,
+                sort,
             )
-            .bind(Uuid::new_v4())
-            .bind(group_id)
-            .bind(name)
-            .bind(price)
-            .bind(sort)
             .execute(&mut *conn)
             .await?;
         }
@@ -282,35 +286,35 @@ pub async fn seed_full(
         // modifiers in the new clients; old clients see the same options through
         // the shim's flat addon catalog.
         for item_id in item_ids.iter().take(4) {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) \
                  VALUES ($1, $2, $3)",
+                item_id,
+                group_id,
+                gsort as i32,
             )
-            .bind(item_id)
-            .bind(group_id)
-            .bind(gsort as i32)
             .execute(&mut *conn)
             .await?;
         }
     }
     // Seed the org's catalog revision so new clients can revision-gate syncs.
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO catalog_revision (org_id, revision) VALUES ($1, 1) \
          ON CONFLICT (org_id) DO NOTHING",
+        org_id,
     )
-    .bind(org_id)
     .execute(&mut *conn)
     .await?;
 
     // ── An open shift (teller = the demo admin) ─────────────────────────────
     let shift_id = Uuid::new_v4();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) \
          VALUES ($1, $2, $3, 'open'::till_status, 50000, now())",
+        shift_id,
+        branch_id,
+        admin_id,
     )
-    .bind(shift_id)
-    .bind(branch_id)
-    .bind(admin_id)
     .execute(&mut *conn)
     .await?;
 
@@ -335,37 +339,37 @@ pub async fn seed_full(
         // (the POS mints it from order_ref_counters). Derive a unique one from the
         // per-order UUID so concurrent demo orgs never collide.
         let order_ref = format!("DMO-{}", order_id.simple());
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO orders \
              (id, branch_id, till_id, teller_id, order_number, status, payment_method, \
               subtotal, tax_amount, total_amount, created_at, order_ref) \
              VALUES ($1, $2, $3, $4, $5, 'completed'::order_status, 'Cash', $6, $7, $8, $9, $10)",
+            order_id,
+            branch_id,
+            shift_id,
+            admin_id,
+            (n as i32) + 1,
+            subtotal,
+            tax,
+            total,
+            created,
+            order_ref,
         )
-        .bind(order_id)
-        .bind(branch_id)
-        .bind(shift_id)
-        .bind(admin_id)
-        .bind((n as i32) + 1)
-        .bind(subtotal)
-        .bind(tax)
-        .bind(total)
-        .bind(created)
-        .bind(order_ref)
         .execute(&mut *conn)
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO order_items \
              (id, order_id, menu_item_id, item_name, size_label, unit_price, quantity, line_total) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            Uuid::new_v4(),
+            order_id,
+            item_ids[*it],
+            items[*it].name,
+            size,
+            price,
+            qty,
+            subtotal,
         )
-        .bind(Uuid::new_v4())
-        .bind(order_id)
-        .bind(item_ids[*it])
-        .bind(items[*it].name)
-        .bind(size)
-        .bind(price)
-        .bind(qty)
-        .bind(subtotal)
         .execute(&mut *conn)
         .await?;
     }

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kitchen_ticket_items SET bumped_at = now(), bumped_by = $2 WHERE id = $1 AND bumped_at IS NULL AND voided_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4edbfb516f9235588aeea6dad7a41dbf0d9a4607ef1cd31000aa6770fa4be811"
+}

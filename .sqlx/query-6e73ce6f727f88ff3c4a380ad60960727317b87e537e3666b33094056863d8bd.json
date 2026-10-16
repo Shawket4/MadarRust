@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO category_station_routes (branch_id, category_id, station_id) VALUES ($1, $2, $3) ON CONFLICT (branch_id, category_id) DO UPDATE SET station_id = EXCLUDED.station_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6e73ce6f727f88ff3c4a380ad60960727317b87e537e3666b33094056863d8bd"
+}

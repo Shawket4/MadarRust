@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM staff_pool_settings WHERE org_id = $1 AND branch_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3d1a2c707cc17382da486abd2663cf6c8a557c33108d6b6ae477f2d2c4094bad"
+}

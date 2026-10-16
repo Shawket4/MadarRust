@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM branch_device_slots WHERE branch_id = $1 AND NOT (id = ANY($2))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "042e2cc025a6d2b0892eb6abcf1638fbe981eea3f88273776c41995e6d3969c5"
+}

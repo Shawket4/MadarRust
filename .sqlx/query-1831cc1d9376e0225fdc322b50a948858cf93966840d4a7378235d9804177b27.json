@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.id FROM asset_groups g WHERE g.org_id IS NOT DISTINCT FROM $1 AND g.source_hash = $2 AND g.encoder = $3 AND g.profile = $4 AND EXISTS (SELECT 1 FROM assets a WHERE a.group_id = g.id) ORDER BY g.created_at LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1831cc1d9376e0225fdc322b50a948858cf93966840d4a7378235d9804177b27"
+}

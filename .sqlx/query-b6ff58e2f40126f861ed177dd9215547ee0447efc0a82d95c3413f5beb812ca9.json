@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (org_id, name, role, is_active, is_guest_principal) VALUES ($1, 'Scanned', 'waiter'::user_role, false, true) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b6ff58e2f40126f861ed177dd9215547ee0447efc0a82d95c3413f5beb812ca9"
+}

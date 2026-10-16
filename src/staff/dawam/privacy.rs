@@ -35,8 +35,10 @@ pub async fn accepted_at(
     device_id: Uuid,
 ) -> Result<Option<DateTime<Utc>>, AppError> {
     Ok(
-        sqlx::query_scalar("SELECT privacy_accepted_at FROM staff_devices WHERE id = $1")
-            .bind(device_id)
+        sqlx::query_scalar!(
+            "SELECT privacy_accepted_at FROM staff_devices WHERE id = $1",
+            device_id,
+        )
             .fetch_optional(pool)
             .await?
             .flatten(),
@@ -89,42 +91,42 @@ pub async fn wipe_period_coordinates(
     to: NaiveDate,
 ) -> Result<u64, AppError> {
     let mut tx = pool.begin().await?;
-    let records = sqlx::query(
+    let records = sqlx::query!(
         "UPDATE attendance_records SET \
              check_in_latitude = NULL, check_in_longitude = NULL, \
              check_out_latitude = NULL, check_out_longitude = NULL, updated_at = now() \
           WHERE org_id = $1 AND business_date BETWEEN $2 AND $3 \
             AND (check_in_latitude IS NOT NULL OR check_in_longitude IS NOT NULL \
                  OR check_out_latitude IS NOT NULL OR check_out_longitude IS NOT NULL)",
+        org_id,
+        from,
+        to,
     )
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
     .execute(&mut *tx)
     .await?
     .rows_affected();
     // A ping belongs to the month of the record it was taken on.
-    let pings = sqlx::query(
+    let pings = sqlx::query!(
         "UPDATE attendance_pings p SET latitude = NULL, longitude = NULL \
            FROM attendance_records a \
           WHERE a.id = p.attendance_record_id AND a.org_id = $1 \
             AND a.business_date BETWEEN $2 AND $3 \
             AND (p.latitude IS NOT NULL OR p.longitude IS NOT NULL)",
+        org_id,
+        from,
+        to,
     )
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    sqlx::query(
+    sqlx::query!(
         "UPDATE payroll_periods SET coordinates_wiped_at = now() \
           WHERE org_id = $1 AND start_date = $2 AND end_date = $3 \
             AND status IN ('generated', 'paid', 'closed')",
+        org_id,
+        from,
+        to,
     )
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

@@ -74,14 +74,15 @@ pub async fn list_payment_methods(
         .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
-    let rows = sqlx::query_as::<_, OrgPaymentMethod>(
+    let rows = sqlx::query_as!(
+        OrgPaymentMethod,
         "SELECT id, org_id, name, label_translations, color, icon, is_cash, is_active,
                 visible_in_integrations, created_at, updated_at
          FROM org_payment_methods
          WHERE org_id = $1
          ORDER BY created_at ASC",
+        org_id,
     )
-    .bind(org_id)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -122,22 +123,23 @@ pub async fn create_payment_method(
     let translations_json =
         serde_json::to_value(&body.label_translations).map_err(|_| AppError::Internal)?;
 
-    let method = sqlx::query_as::<_, OrgPaymentMethod>(
+    let method = sqlx::query_as!(
+        OrgPaymentMethod,
         r#"
         INSERT INTO org_payment_methods
         (org_id, name, label_translations, color, icon, is_cash, is_active, visible_in_integrations)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, visible_in_integrations, created_at, updated_at
-        "#
+        "#,
+        org_id,
+        &body.name,
+        translations_json,
+        &body.color,
+        &body.icon,
+        body.is_cash,
+        body.is_active.unwrap_or(true),
+        body.visible_in_integrations.unwrap_or(true),
     )
-    .bind(org_id)
-    .bind(&body.name)
-    .bind(translations_json)
-    .bind(&body.color)
-    .bind(&body.icon)
-    .bind(body.is_cash)
-    .bind(body.is_active.unwrap_or(true))
-    .bind(body.visible_in_integrations.unwrap_or(true))
     .fetch_one(pool.get_ref())
     .await
     .map_err(|e| {
@@ -255,14 +257,14 @@ pub async fn update_payment_method(
     // time (migration 20260614010000) precisely so that flipping the flag today
     // cannot restate what was in the drawer last month.
     if method.name != old_name {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE order_payments op SET method = $1
              FROM orders o JOIN branches b ON b.id = o.branch_id
              WHERE op.order_id = o.id AND b.org_id = $2 AND op.method = $3",
+            &method.name,
+            org_id,
+            &old_name,
         )
-        .bind(&method.name)
-        .bind(org_id)
-        .bind(&old_name)
         .execute(&mut *tx)
         .await?;
 
@@ -317,20 +319,23 @@ pub async fn activate_payment_method(
 
     // A delivery channel's tender stays off on Free (see update).
     let name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM org_payment_methods WHERE id = $1 AND org_id = $2")
-            .bind(*id)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT name FROM org_payment_methods WHERE id = $1 AND org_id = $2",
+            *id,
+            org_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?;
     if name.as_deref().is_some_and(is_delivery_channel) {
         crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Online).await?;
     }
 
-    let method = sqlx::query_as::<_, OrgPaymentMethod>(
+    let method = sqlx::query_as!(
+        OrgPaymentMethod,
         "UPDATE org_payment_methods SET is_active = true WHERE id = $1 AND org_id = $2 RETURNING *",
+        *id,
+        org_id,
     )
-    .bind(*id)
-    .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Payment method not found".into()))?;
@@ -359,11 +364,12 @@ pub async fn deactivate_payment_method(
         .scope_org(crate::auth::middleware::header_org_id(&req))
         .ok_or_else(|| AppError::Forbidden("No org id".into()))?;
 
-    let method = sqlx::query_as::<_, OrgPaymentMethod>(
-        "UPDATE org_payment_methods SET is_active = false WHERE id = $1 AND org_id = $2 RETURNING *"
+    let method = sqlx::query_as!(
+        OrgPaymentMethod,
+        "UPDATE org_payment_methods SET is_active = false WHERE id = $1 AND org_id = $2 RETURNING *",
+        *id,
+        org_id,
     )
-    .bind(*id)
-    .bind(org_id)
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Payment method not found".into()))?;

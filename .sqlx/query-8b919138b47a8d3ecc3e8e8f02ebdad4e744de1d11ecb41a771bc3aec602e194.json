@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT MAX(p.week_start) FROM staff_week_publications p WHERE p.branch_id IN (SELECT branch_id FROM employee_branches WHERE employee_id = ANY($1)) AND p.week_start >= CURRENT_DATE - 8",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max",
+        "type_info": "Date"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8b919138b47a8d3ecc3e8e8f02ebdad4e744de1d11ecb41a771bc3aec602e194"
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO modifier_options (id, group_id, name, price, sort, legacy_source) VALUES ($1, $2, $3, $4, $5, 'addon')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4891b0d446e0242627bb680dad3bf054d9bfaaff03965ac66312b1a8fa352eef"
+}

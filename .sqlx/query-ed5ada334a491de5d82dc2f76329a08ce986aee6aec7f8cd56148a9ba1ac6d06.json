@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE delivery_orders SET status = 'delivered', delivered_at = now(), order_id = $2, payment_method = $3, updated_at = now() WHERE id = $1 AND order_id IS NULL AND status NOT IN ('delivered', 'cancelled', 'rejected')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ed5ada334a491de5d82dc2f76329a08ce986aee6aec7f8cd56148a9ba1ac6d06"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM customer_phone_history WHERE customer_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a3fff9ce98c266837363cae638f124d3bd12ef357e85eff16f446bed2bfc3d79"
+}

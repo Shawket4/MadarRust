@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_suggestion_cache (org_id, branch_id, week_start, payload) VALUES ($1, $2, $3, $4) ON CONFLICT (branch_id, week_start) DO UPDATE SET payload = EXCLUDED.payload, computed_at = now(), stale = false",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bbe858caa740db31facdc8901e25b3764544c19403f8e6bcdbe54419c730510b"
+}

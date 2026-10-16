@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO organizations (name, slug, timezone, onboarding_completed_at, modules) VALUES ($1, $2, 'Africa/Cairo'::timezone_name, now(), '{pos,dawam}') RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "928f38308d581b4de05848aa210353a09e93eaa57287aef2c59603aab5cdd73f"
+}

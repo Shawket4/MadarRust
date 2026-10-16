@@ -172,15 +172,15 @@ async fn nudge(pool: &PgPool, m: &Lapsed) -> Result<(), AppError> {
 
     // Claim it FIRST. A lost race means someone else is sending this one, and
     // doing nothing is the correct response to that.
-    let claimed = sqlx::query(
+    let claimed = sqlx::query!(
         "INSERT INTO loyalty_winbacks (customer_id, org_id, since, seq, reward_amount) \
          VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING",
+        m.id,
+        m.org_id,
+        m.since,
+        m.seq,
+        settings.winback_reward_amount,
     )
-    .bind(m.id)
-    .bind(m.org_id)
-    .bind(m.since)
-    .bind(m.seq)
-    .bind(settings.winback_reward_amount)
     .execute(pool)
     .await?
     .rows_affected();
@@ -344,48 +344,48 @@ mod tests {
     /// opted out is not found at all.
     #[sqlx::test]
     async fn a_lapsed_member_is_nudged_once_and_an_opted_out_one_never(pool: PgPool) {
-        let org: Uuid = sqlx::query_scalar(
+        let org: Uuid = sqlx::query_scalar!(
             "INSERT INTO organizations (name, slug) VALUES ('Rue','rue') RETURNING id",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        let branch: Uuid = sqlx::query_scalar(
+        let branch: Uuid = sqlx::query_scalar!(
             "INSERT INTO branches (org_id, name) VALUES ($1,'Maadi') RETURNING id",
+            org,
         )
-        .bind(org)
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO loyalty_settings (org_id, enabled, program_name, mode, \
                  earn_piastres_per_point, default_reward_cost, winback_enabled, \
                  winback_reward_amount) \
              VALUES ($1, true, 'Rue Rewards', 'points', 1000, 100, true, 5)",
+            org,
         )
-        .bind(org)
         .execute(&pool)
         .await
         .unwrap();
 
         let member = async |phone: &str, token: &str, opted_out: bool| -> Uuid {
             // The person, then the card under the same id.
-            let id: Uuid = sqlx::query_scalar(
+            let id: Uuid = sqlx::query_scalar!(
                 "INSERT INTO customers (org_id, name, phone, phone_key, source, marketing_opt_out) \
                  VALUES ($1, 'Ali', $2, phone_canonical($2), 'loyalty', $3) RETURNING id",
+                org,
+                phone,
+                opted_out,
             )
-            .bind(org)
-            .bind(phone)
-            .bind(opted_out)
             .fetch_one(&pool)
             .await
             .unwrap();
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO loyalty_customers (id, org_id, member_token) VALUES ($1, $2, $3)",
+                id,
+                org,
+                token,
             )
-            .bind(id)
-            .bind(org)
-            .bind(token)
             .execute(&pool)
             .await
             .unwrap();
@@ -393,14 +393,14 @@ mod tests {
             // well inside the sixty-day one. An `adjust` rather than an `earn`
             // because the ledger now insists an earn names its sale, and the
             // sweep counts ANY movement as a sighting.
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, \
                      currency, points, source, created_at) \
                  VALUES ($1,$2,$3,'adjust','points',1,'manual', now() - interval '10 days')",
+                org,
+                id,
+                branch,
             )
-            .bind(org)
-            .bind(id)
-            .bind(branch)
             .execute(&pool)
             .await
             .unwrap();

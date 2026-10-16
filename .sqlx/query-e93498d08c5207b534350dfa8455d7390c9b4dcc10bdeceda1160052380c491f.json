@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO loyalty_earning_items (org_id, branch_id, menu_item_id, sort_order) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e93498d08c5207b534350dfa8455d7390c9b4dcc10bdeceda1160052380c491f"
+}

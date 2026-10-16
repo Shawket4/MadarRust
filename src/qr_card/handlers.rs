@@ -771,8 +771,10 @@ pub async fn branch_booking_qr(
     // bookings". The settings row defaults `enabled` to false, so this is the
     // normal state of a branch nobody has turned bookings on for.
     let enabled: Option<bool> =
-        sqlx::query_scalar("SELECT enabled FROM branch_booking_settings WHERE branch_id = $1")
-            .bind(branch_id)
+        sqlx::query_scalar!(
+            "SELECT enabled FROM branch_booking_settings WHERE branch_id = $1",
+            branch_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?;
     if enabled != Some(true) {
@@ -903,14 +905,15 @@ pub async fn create_table(
     check_permission(pool.get_ref(), &claims, "branches", "update").await?;
     let (branch_id, org_id) = load_branch_checked(pool.get_ref(), &claims, *id).await?;
 
-    let table = sqlx::query_as::<_, BranchTable>(
+    let table = sqlx::query_as!(
+        BranchTable,
         "INSERT INTO branch_tables (org_id, branch_id, label)
          VALUES ($1, $2, $3)
          RETURNING id, org_id, branch_id, label, is_active, created_at, updated_at",
+        org_id,
+        branch_id,
+        &body.label,
     )
-    .bind(org_id)
-    .bind(branch_id)
-    .bind(&body.label)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -939,13 +942,14 @@ pub async fn list_tables(
     check_permission(pool.get_ref(), &claims, "branches", "read").await?;
     let (branch_id, _) = load_branch_checked(pool.get_ref(), &claims, *id).await?;
 
-    let tables = sqlx::query_as::<_, BranchTable>(
+    let tables = sqlx::query_as!(
+        BranchTable,
         "SELECT id, org_id, branch_id, label, is_active, created_at, updated_at
          FROM branch_tables
          WHERE branch_id = $1
          ORDER BY label",
+        branch_id,
     )
-    .bind(branch_id)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -988,8 +992,10 @@ pub async fn delete_table(
         return Err(AppError::NotFound("Table not found".into()));
     }
 
-    sqlx::query("DELETE FROM branch_tables WHERE id = $1")
-        .bind(path.tid)
+    sqlx::query!(
+        "DELETE FROM branch_tables WHERE id = $1",
+        path.tid,
+    )
         .execute(pool.get_ref())
         .await?;
 
@@ -1235,13 +1241,14 @@ pub async fn list_marketing_links(
         .org_id()
         .ok_or_else(|| AppError::Forbidden("Org context required".into()))?;
 
-    let links = sqlx::query_as::<_, MarketingLink>(
+    let links = sqlx::query_as!(
+        MarketingLink,
         "SELECT id, kind, target_ref, long_url, short_code, short_url, label, created_at
          FROM qr_short_links
          WHERE org_id = $1 AND kind = 'marketing'
          ORDER BY created_at DESC",
+        org_id,
     )
-    .bind(org_id)
     .fetch_all(pool.get_ref())
     .await?;
 

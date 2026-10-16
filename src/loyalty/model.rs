@@ -355,22 +355,22 @@ pub async fn award_for_order(
             trimmed
         }
     };
-    let inserted = sqlx::query(
+    let inserted = sqlx::query!(
         "INSERT INTO loyalty_transactions \
             (org_id, customer_id, branch_id, kind, currency, points, order_id, basis_piastres, \
              rate_piastres_per_point, created_by, source) \
          VALUES ($1,$2,$3,'earn',$4,$5,$6,$7,$8,$9,'sale') \
          ON CONFLICT DO NOTHING",
+        org_id,
+        customer_id,
+        branch_id,
+        rule.mode.as_str(),
+        points,
+        order_id,
+        earn::basis_piastres(amounts, rule),
+        rule.piastres_per_point,
+        created_by,
     )
-    .bind(org_id)
-    .bind(customer_id)
-    .bind(branch_id)
-    .bind(rule.mode.as_str())
-    .bind(points)
-    .bind(order_id)
-    .bind(earn::basis_piastres(amounts, rule))
-    .bind(rule.piastres_per_point)
-    .bind(created_by)
     .execute(&mut **tx)
     .await?;
     // Zero rows means this order had already earned — a replay, not a failure.
@@ -415,19 +415,19 @@ pub async fn adjust(
             member.balance_in(mode)
         )));
     }
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO loyalty_transactions \
             (org_id, customer_id, branch_id, kind, currency, points, note, created_by, source) \
          VALUES ($1,$2,$3,'adjust',$4,$5,$6,$7,$8)",
+        member.org_id,
+        member.id,
+        branch_id,
+        mode.as_str(),
+        points,
+        note,
+        created_by,
+        source.as_str(),
     )
-    .bind(member.org_id)
-    .bind(member.id)
-    .bind(branch_id)
-    .bind(mode.as_str())
-    .bind(points)
-    .bind(note)
-    .bind(created_by)
-    .bind(source.as_str())
     .execute(pool)
     .await?;
     let fresh = find_by_id(pool, member.id)
@@ -540,10 +540,10 @@ pub async fn forget_in(
 ) -> Result<Option<MemberRow>, AppError> {
     // Locked, so two admins forgetting the same member — or a sweep messaging
     // them at the same moment — serialise on the row.
-    let locked: Option<Uuid> = sqlx::query_scalar(
+    let locked: Option<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        member_id,
     )
-    .bind(member_id)
     .fetch_optional(&mut *tx)
     .await?;
     if locked.is_none() {
@@ -566,7 +566,7 @@ pub async fn forget_in(
     .bind(member_id)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE loyalty_customers \
             SET deleted_at = now(), \
                 member_token = $2, \
@@ -577,35 +577,41 @@ pub async fn forget_in(
                 pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
                 updated_at = now() \
           WHERE id = $1",
+        member_id,
+        super::mint_member_token(),
+        has_devices,
     )
-    .bind(member_id)
-    .bind(super::mint_member_token())
-    .bind(has_devices)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE customers \
             SET name = '', phone = NULL, phone_key = NULL, notes = NULL, \
                 birth_month = NULL, birth_day = NULL, marketing_opt_out = true, \
                 erased_at = now(), updated_at = now() \
           WHERE id = $1 AND erased_at IS NULL",
+        member_id,
     )
-    .bind(member_id)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM customer_phone_history WHERE customer_id = $1")
-        .bind(member_id)
+    sqlx::query!(
+        "DELETE FROM customer_phone_history WHERE customer_id = $1",
+        member_id,
+    )
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM loyalty_token_aliases WHERE customer_id = $1")
-        .bind(member_id)
+    sqlx::query!(
+        "DELETE FROM loyalty_token_aliases WHERE customer_id = $1",
+        member_id,
+    )
         .execute(&mut *tx)
         .await?;
     // (`loyalty_pass_devices` is NOT dropped here — see `has_devices` above.)
     // The pre-built pass has their name baked into it. In the transaction, so
     // there is no moment at which the person is erased and the bytes are not.
-    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
-        .bind(member_id)
+    sqlx::query!(
+        "DELETE FROM loyalty_pass_cache WHERE customer_id = $1",
+        member_id,
+    )
         .execute(&mut *tx)
         .await?;
     Ok(Some(before))
@@ -622,19 +628,21 @@ pub const ERASED_PASS_GRACE_HOURS: i32 = 48;
 /// card — a merge loser or a leaver keeps being served voided.
 pub async fn purge_erased_pass(pool: &PgPool, member_id: Uuid) -> Result<bool, AppError> {
     let mut tx = pool.begin().await?;
-    let hit = sqlx::query(
+    let hit = sqlx::query!(
         "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now() \
           WHERE m.id = $1 AND m.deleted_at IS NOT NULL \
             AND EXISTS (SELECT 1 FROM customers c WHERE c.id = m.id AND c.erased_at IS NOT NULL)",
+        member_id,
     )
-    .bind(member_id)
     .execute(&mut *tx)
     .await?
     .rows_affected()
         > 0;
     if hit {
-        sqlx::query("DELETE FROM loyalty_pass_devices WHERE customer_id = $1")
-            .bind(member_id)
+        sqlx::query!(
+            "DELETE FROM loyalty_pass_devices WHERE customer_id = $1",
+            member_id,
+        )
             .execute(&mut *tx)
             .await?;
     }
@@ -645,15 +653,15 @@ pub async fn purge_erased_pass(pool: &PgPool, member_id: Uuid) -> Result<bool, A
 /// Erased cards whose device never came back within the grace: purge them
 /// anyway. Bounded per call; returns how many were purged.
 pub async fn purge_stale_erased_passes(pool: &PgPool) -> Result<usize, AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT m.id FROM loyalty_customers m JOIN customers c ON c.id = m.id \
           WHERE c.erased_at IS NOT NULL AND m.deleted_at IS NOT NULL \
             AND (m.apple_auth_token IS NOT NULL \
                  OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)) \
             AND c.erased_at < now() - make_interval(hours => $1) \
           LIMIT 500",
+        ERASED_PASS_GRACE_HOURS,
     )
-    .bind(ERASED_PASS_GRACE_HOURS)
     .fetch_all(pool)
     .await?;
     let mut n = 0;
@@ -689,10 +697,10 @@ pub async fn purge_stale_erased_passes(pool: &PgPool) -> Result<usize, AppError>
 /// Returns the row as it was, for the caller's wallet calls after commit.
 pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, AppError> {
     let mut tx = pool.begin().await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
+    let locked: Option<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        member_id,
     )
-    .bind(member_id)
     .fetch_optional(&mut *tx)
     .await?;
     if locked.is_none() {
@@ -701,7 +709,7 @@ pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, 
     let Some(before) = find_by_id(&mut *tx, member_id).await? else {
         return Ok(None);
     };
-    sqlx::query(
+    sqlx::query!(
         "UPDATE loyalty_customers \
             SET deleted_at = now(), pass_voided_at = now(), pass_updated_at = now(), \
                 member_token = $2, \
@@ -709,17 +717,21 @@ pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, 
                 pass_notice_wallets = NULL, pass_notice_fallback = NULL, \
                 updated_at = now() \
           WHERE id = $1",
+        member_id,
+        super::mint_member_token(),
     )
-    .bind(member_id)
-    .bind(super::mint_member_token())
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM loyalty_token_aliases WHERE customer_id = $1")
-        .bind(member_id)
+    sqlx::query!(
+        "DELETE FROM loyalty_token_aliases WHERE customer_id = $1",
+        member_id,
+    )
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = $1")
-        .bind(member_id)
+    sqlx::query!(
+        "DELETE FROM loyalty_pass_cache WHERE customer_id = $1",
+        member_id,
+    )
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -758,7 +770,7 @@ pub async fn enrol(
     customer_id: Uuid,
     joined_branch_id: Option<Uuid>,
 ) -> Result<bool, AppError> {
-    let done = sqlx::query(
+    let done = sqlx::query!(
         "INSERT INTO loyalty_customers (id, org_id, member_token, joined_branch_id, apple_auth_token) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (id) DO UPDATE \
@@ -769,17 +781,12 @@ pub async fn enrol(
                 enrolled_at = now(), updated_at = now() \
           WHERE loyalty_customers.deleted_at IS NOT NULL \
             AND loyalty_customers.org_id = EXCLUDED.org_id",
+        customer_id,
+        org_id,
+        super::mint_member_token(),
+        joined_branch_id,
+        super::mint_member_token(),
     )
-    .bind(customer_id)
-    .bind(org_id)
-    .bind(super::mint_member_token())
-    // Reporting only, and honestly null for an org-wide code: we do not know
-    // where they were, and a membership belongs to the shop rather than to a
-    // branch.
-    .bind(joined_branch_id)
-    // Apple authenticates pass updates with this; minted now so a pass issued
-    // later needs no second write.
-    .bind(super::mint_member_token())
     .execute(&mut *conn)
     .await?;
     Ok(done.rows_affected() == 1)
@@ -807,11 +814,11 @@ pub async fn merge_memberships(
 ) -> Result<MemberRow, AppError> {
     let mut ids = [loser_id, survivor_id];
     ids.sort();
-    sqlx::query(
+    sqlx::query!(
         "SELECT id FROM loyalty_customers WHERE id = ANY($1) AND org_id = $2 ORDER BY id FOR UPDATE",
+        &ids[..],
+        org_id,
     )
-    .bind(&ids[..])
-    .bind(org_id)
     .fetch_all(&mut *conn)
     .await?;
     let loser = find_by_id(&mut *conn, loser_id)
@@ -856,18 +863,18 @@ pub async fn merge_memberships(
                 (loser_id, -delta, survivor_id),
                 (survivor_id, delta, loser_id),
             ] {
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO loyalty_transactions \
                         (org_id, customer_id, branch_id, kind, currency, points, note, created_by, source) \
                      VALUES ($1,$2,$3,'adjust',$4,$5,$6,$7,'merge')",
+                    org_id,
+                    member,
+                    branch,
+                    mode.as_str(),
+                    points,
+                    format!("Merged with member {other}"),
+                    actor,
                 )
-                .bind(org_id)
-                .bind(member)
-                .bind(branch)
-                .bind(mode.as_str())
-                .bind(points)
-                .bind(format!("Merged with member {other}"))
-                .bind(actor)
                 .execute(&mut *conn)
                 .await?;
             }
@@ -889,30 +896,32 @@ pub async fn merge_memberships(
     .execute(&mut *conn)
     .await?;
     // Cards that already pointed at the loser (an earlier merge) follow it.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE loyalty_token_aliases SET customer_id = $2, was_customer_id = COALESCE(was_customer_id, $1) \
           WHERE customer_id = $1",
+        loser_id,
+        survivor_id,
     )
-    .bind(loser_id)
-    .bind(survivor_id)
     .execute(&mut *conn)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO loyalty_token_aliases (member_token, org_id, customer_id, was_customer_id) \
          VALUES ($1, $2, $3, $4) \
          ON CONFLICT (member_token) DO UPDATE \
             SET customer_id = EXCLUDED.customer_id, expires_at = EXCLUDED.expires_at",
+        &loser.member_token,
+        org_id,
+        survivor_id,
+        loser_id,
     )
-    .bind(&loser.member_token)
-    .bind(org_id)
-    .bind(survivor_id)
-    .bind(loser_id)
     .execute(&mut *conn)
     .await?;
     // Both pre-built passes are wrong now: the loser's is a retired card with
     // its name on it, the survivor's shows the balance before the transfer.
-    sqlx::query("DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)")
-        .bind(&[loser_id, survivor_id][..])
+    sqlx::query!(
+        "DELETE FROM loyalty_pass_cache WHERE customer_id = ANY($1)",
+        &[loser_id, survivor_id][..],
+    )
         .execute(&mut *conn)
         .await?;
     Ok(loser)

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE delivery_otp SET verified_at = now(), proof_hash = $2\n          WHERE id = $1 AND consumed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "89b5cd2cc0a754a376c7df9c2865795209e97d25ea546465eac6fe00d35e05d4"
+}

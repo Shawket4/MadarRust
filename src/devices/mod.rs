@@ -68,11 +68,11 @@ impl FromRequest for DeviceHeader {
         if let (Some(id), Some(pool)) = (id, req.app_data::<web::Data<PgPool>>()) {
             let pool = pool.get_ref().clone();
             crate::db::spawn(async move {
-                let _ = sqlx::query(
+                let _ = sqlx::query!(
                     "UPDATE devices SET last_seen_at = now() \
                       WHERE id = $1 AND last_seen_at < now() - interval '5 minutes'",
+                    id,
                 )
-                .bind(id)
                 .execute(&pool)
                 .await;
             });
@@ -186,9 +186,11 @@ pub async fn ensure_registered(
         .unwrap_or_else(|| fallback_code(device_id));
     let branch_id = match branch_id {
         Some(b) => {
-            sqlx::query_scalar::<_, Uuid>("SELECT id FROM branches WHERE id = $1 AND org_id = $2")
-                .bind(b)
-                .bind(org_id)
+            sqlx::query_scalar!(
+                "SELECT id FROM branches WHERE id = $1 AND org_id = $2",
+                b,
+                org_id,
+            )
                 .fetch_optional(&mut *conn)
                 .await?
         }

@@ -82,21 +82,21 @@ pub async fn subject(pool: &PgPool, org_id: Uuid, employee_id: Uuid) -> Result<S
 
 /// The branches an employee works at, oldest assignment first.
 pub async fn branches_of(pool: &PgPool, employee_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT eb.branch_id FROM employee_branches eb \
            JOIN branches b ON b.id = eb.branch_id AND b.deleted_at IS NULL \
           WHERE eb.employee_id = $1 ORDER BY eb.assigned_at, eb.branch_id",
+        employee_id,
     )
-    .bind(employee_id)
     .fetch_all(pool)
     .await?)
 }
 
 async fn live_branches(pool: &PgPool, org_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL ORDER BY created_at, id",
+        org_id,
     )
-    .bind(org_id)
     .fetch_all(pool)
     .await?)
 }
@@ -200,8 +200,10 @@ pub async fn require_at(
     branch: Uuid,
 ) -> Result<(), AppError> {
     let in_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(branch)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+            branch,
+        )
             .fetch_optional(pool)
             .await?;
     match in_org {

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stocktakes SET status = 'cancelled' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "461fdc9afc9c4ba356f73a8110bf76bac18d5ba05bdfef6c290d5fe42163ff39"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kitchen_stations SET deleted_at = now(), is_default = false, updated_at = now()\n          WHERE branch_id = $1 AND deleted_at IS NULL AND is_active AND NOT (id = ANY($2))\n          RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0bb6ce0a01cb99345c0a3c70e155609e852e1e4372e6461d749916e0b18e1c0d"
+}

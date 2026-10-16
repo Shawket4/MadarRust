@@ -269,18 +269,18 @@ pub(crate) async fn record_line(
         }
         // Already counted off the allowance when it was first recorded: only
         // the money and the order are attached. The pool is not touched.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE staff_drinks SET order_id = COALESCE(order_id, $2), comp_minor = $3, \
                     extras_minor = $4, comp_minor_reported = $5, \
                     cost_minor = COALESCE(cost_minor, $6), updated_at = now() \
               WHERE id = $1",
+            line.drink.id,
+            order_id,
+            line.server.line_comp,
+            extras_minor,
+            line.reported,
+            cost_minor,
         )
-        .bind(line.drink.id)
-        .bind(order_id)
-        .bind(line.server.line_comp)
-        .bind(extras_minor)
-        .bind(line.reported)
-        .bind(cost_minor)
         .execute(&mut **tx)
         .await?;
         return Ok(RecordedLine {
@@ -317,36 +317,36 @@ pub(crate) async fn record_line(
     } else {
         NO_NOTE
     };
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_drinks \
            (id, org_id, branch_id, till_id, order_id, menu_item_id, item_name, size_label, \
             quantity, note, business_date, allowance_at_record, used_before, overspent, \
             overspent_on_replay, cost_minor, recorded_by, device_id, recorded_at, \
             comp_minor, extras_minor, comp_minor_reported) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+        line.drink.id,
+        org_id,
+        branch_id,
+        till_id,
+        order_id,
+        menu_item_id,
+        item_name,
+        size_label,
+        quantity,
+        note,
+        ctx.day,
+        ctx.allowance,
+        used,
+        overspent,
+        overspent_on_replay,
+        cost_minor,
+        actor,
+        device_id,
+        recorded_at,
+        line.server.line_comp,
+        extras_minor,
+        line.reported,
     )
-    .bind(line.drink.id)
-    .bind(org_id)
-    .bind(branch_id)
-    .bind(till_id)
-    .bind(order_id)
-    .bind(menu_item_id)
-    .bind(item_name)
-    .bind(size_label)
-    .bind(quantity)
-    .bind(note)
-    .bind(ctx.day)
-    .bind(ctx.allowance)
-    .bind(used)
-    .bind(overspent)
-    .bind(overspent_on_replay)
-    .bind(cost_minor)
-    .bind(actor)
-    .bind(device_id)
-    .bind(recorded_at)
-    .bind(line.server.line_comp)
-    .bind(extras_minor)
-    .bind(line.reported)
     .execute(&mut **tx)
     .await?;
 

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, effective_from, branch_id) SELECT $1, $2, w.id, $4, $5, CASE WHEN w.branch_id IS NULL AND EXISTS ( SELECT 1 FROM employee_branches eb WHERE eb.employee_id = $2 AND eb.branch_id = $6) THEN $6 END FROM work_shifts w WHERE w.id = $3 AND w.org_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int2",
+        "Date",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0d536e1e59ed5c18dbcc82183dfa667a1746fa495ebcb0cdeff204d0680a2422"
+}

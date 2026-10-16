@@ -257,8 +257,10 @@ async fn public_view(pool: &PgPool, view: BookingView) -> Result<PublicBookingVi
     let (branch_name, _) = branch_names(pool, view.branch_id).await?;
     let s = load_settings(pool, view.branch_id).await?;
     let tz = branch_tz(pool, view.branch_id).await?;
-    let token: String = sqlx::query_scalar("SELECT manage_token FROM bookings WHERE id = $1")
-        .bind(view.id)
+    let token: String = sqlx::query_scalar!(
+        "SELECT manage_token FROM bookings WHERE id = $1",
+        view.id,
+    )
         .fetch_one(pool)
         .await?;
     let can_modify = view.status == "confirmed"

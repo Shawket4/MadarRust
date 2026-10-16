@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE combo_slots SET name = $2, name_translations = $3, sort = $4, min_picks = $5, max_picks = $6, default_item_id = $7, default_size_label = $8, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Int4",
+        "Int2",
+        "Int2",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e10cc5b8cb1090b83d5cd0cfe4bcdb1471a642d289e7af097fc93bf128ef7645"
+}

@@ -148,8 +148,10 @@ pub async fn notify(pool: &PgPool, view: &BookingView, kind: Kind) {
 
 async fn manage_url_for(pool: &PgPool, id: Uuid) -> Option<String> {
     let token: Option<String> =
-        sqlx::query_scalar("SELECT manage_token FROM bookings WHERE id = $1")
-            .bind(id)
+        sqlx::query_scalar!(
+            "SELECT manage_token FROM bookings WHERE id = $1",
+            id,
+        )
             .fetch_optional(pool)
             .await
             .ok()

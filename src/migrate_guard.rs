@@ -44,7 +44,7 @@ pub async fn drop_invalid_pending_indexes(
     pool: &PgPool,
     migrator: &Migrator,
 ) -> Result<Vec<String>, sqlx::Error> {
-    let applied: Vec<i64> = match sqlx::query_scalar::<_, i64>(
+    let applied: Vec<i64> = match sqlx::query_scalar!(
         "SELECT version FROM _sqlx_migrations WHERE success",
     )
     .fetch_all(pool)

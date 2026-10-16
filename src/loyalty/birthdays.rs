@@ -136,14 +136,14 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
 
     // Claim the greeting FIRST. A lost race here means someone else is sending
     // it, and doing nothing is the correct response to that.
-    let claimed = sqlx::query(
+    let claimed = sqlx::query!(
         "INSERT INTO loyalty_birthday_greetings (customer_id, org_id, year, reward_amount) \
          VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+        m.id,
+        m.org_id,
+        m.year,
+        settings.birthday_reward_amount,
     )
-    .bind(m.id)
-    .bind(m.org_id)
-    .bind(m.year)
-    .bind(settings.birthday_reward_amount)
     .execute(pool)
     .await?
     .rows_affected();

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM deal_rule_branch_overrides WHERE deal_rule_id = $1 AND branch_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c187d40eda7ba876d4a1705efbbd29ee46ef1e72b9803280bd3a127e4da5507f"
+}

@@ -58,22 +58,26 @@ mod tests {
     async fn the_shared_vectors_hold_in_sql(pool: sqlx::PgPool) {
         let (valid, invalid) = vectors();
         for (raw, want) in valid {
-            let got: Option<String> = sqlx::query_scalar("SELECT phone_canonical($1)")
-                .bind(&raw)
+            let got: Option<String> = sqlx::query_scalar!(
+                "SELECT phone_canonical($1)",
+                &raw,
+            )
                 .fetch_one(&pool)
                 .await
                 .unwrap();
             assert_eq!(got.as_deref(), Some(want.as_str()), "{raw:?}");
         }
         for raw in invalid {
-            let got: Option<String> = sqlx::query_scalar("SELECT phone_canonical($1)")
-                .bind(&raw)
+            let got: Option<String> = sqlx::query_scalar!(
+                "SELECT phone_canonical($1)",
+                &raw,
+            )
                 .fetch_one(&pool)
                 .await
                 .unwrap();
             assert_eq!(got, None, "{raw:?}");
         }
-        let null: Option<String> = sqlx::query_scalar("SELECT phone_canonical(NULL)")
+        let null: Option<String> = sqlx::query_scalar!("SELECT phone_canonical(NULL)")
             .fetch_one(&pool)
             .await
             .unwrap();

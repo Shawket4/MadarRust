@@ -126,8 +126,10 @@ pub(crate) async fn branch_timezone(pool: &PgPool, branch_id: Uuid) -> Result<St
 /// Resolve a branch's org (and confirm it is live). Mirrors
 /// `reservations::resolve_branch_org`.
 pub(crate) async fn resolve_branch_org(pool: &PgPool, branch_id: Uuid) -> Result<Uuid, AppError> {
-    sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-        .bind(branch_id)
+    sqlx::query_scalar!(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+        branch_id,
+    )
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Branch not found".into()))

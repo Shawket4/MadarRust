@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings SET status = 'no_show', no_show_at = now(), updated_at = now() WHERE id = $1 AND status = 'confirmed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "12e56fb57ee28e4cc3a41e633e878310f754a3616d2be35a276b9ee918f79382"
+}

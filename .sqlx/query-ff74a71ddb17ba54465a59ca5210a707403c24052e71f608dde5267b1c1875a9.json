@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO asset_groups (id, org_id, kind, source_hash, encoder, profile, label) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ff74a71ddb17ba54465a59ca5210a707403c24052e71f608dde5267b1c1875a9"
+}

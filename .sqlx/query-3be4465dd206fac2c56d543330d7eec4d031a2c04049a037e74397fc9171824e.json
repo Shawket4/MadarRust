@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings b SET reminder_sent_at = now(), updated_at = now() FROM branch_booking_settings s WHERE s.branch_id = b.branch_id AND s.reminder_lead_minutes IS NOT NULL AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id WHERE fb.id = b.branch_id AND fo.plan = 'free') AND b.status = 'confirmed' AND b.reminder_sent_at IS NULL AND b.starts_at > now() AND b.starts_at <= now() + make_interval(mins => s.reminder_lead_minutes) AND b.created_at < b.starts_at - make_interval(mins => s.reminder_lead_minutes) RETURNING b.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3be4465dd206fac2c56d543330d7eec4d031a2c04049a037e74397fc9171824e"
+}

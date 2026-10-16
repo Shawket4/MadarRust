@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tills (id, branch_id, teller_id, status, opening_cash, opened_at) VALUES ($1, $2, $3, 'open'::till_status, 50000, now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e0be9e55eec16268e087ff4672de03b9e06d6f844f243c0ab61f969ac9bfd6ad"
+}

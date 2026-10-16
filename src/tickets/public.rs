@@ -175,11 +175,11 @@ pub async fn table(pool: web::Data<PgPool>, id: web::Path<Uuid>) -> Result<HttpR
 /// the teller collects are the same number from the same place, not two
 /// arithmetics that agree until a rate changes.
 async fn live_bill(pool: &PgPool, table_id: Uuid) -> Result<Option<PublicTableBill>, AppError> {
-    let Some(ticket_id) = sqlx::query_scalar::<_, Uuid>(
+    let Some(ticket_id) = sqlx::query_scalar!(
         "SELECT id FROM open_tickets WHERE table_id = $1 AND status = 'open' \
          ORDER BY opened_at DESC LIMIT 1",
+        table_id,
     )
-    .bind(table_id)
     .fetch_optional(pool)
     .await?
     else {
@@ -355,11 +355,11 @@ pub async fn create_table_order(
     };
 
     // Joining a meal in progress, or starting one.
-    let live: Option<Uuid> = sqlx::query_scalar(
+    let live: Option<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM open_tickets WHERE table_id = $1 AND status = 'open' \
          ORDER BY opened_at DESC LIMIT 1",
+        body.table_id,
     )
-    .bind(body.table_id)
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -368,11 +368,11 @@ pub async fn create_table_order(
             // The first person at the table to give a phone is who the bill is
             // for; somebody joining later does not take it over.
             if let Some(c) = customer_id {
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE open_tickets SET customer_id = $2 WHERE id = $1 AND customer_id IS NULL",
+                    ticket_id,
+                    c,
                 )
-                .bind(ticket_id)
-                .bind(c)
                 .execute(pool.get_ref())
                 .await?;
             }
@@ -431,13 +431,13 @@ pub async fn create_table_order(
             // that is the branch we are in — so the live one now is the one
             // just opened. `opened_via IS NULL` keeps it to the row that has
             // not been stamped, so a retry cannot relabel somebody else's.
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE open_tickets SET opened_via = 'qr_table', \
                         customer_id = COALESCE(customer_id, $2) \
                   WHERE table_id = $1 AND status = 'open' AND opened_via IS NULL",
+                body.table_id,
+                customer_id,
             )
-            .bind(body.table_id)
-            .bind(customer_id)
             .execute(pool.get_ref())
             .await?;
             Ok(resp)
@@ -451,26 +451,26 @@ pub async fn create_table_order(
 /// two people scan two tables in the same second: the loser's insert does
 /// nothing and it reads back the winner's.
 async fn guest_principal(pool: &PgPool, org_id: Uuid) -> Result<Uuid, AppError> {
-    if let Some(id) = sqlx::query_scalar::<_, Uuid>(
+    if let Some(id) = sqlx::query_scalar!(
         "SELECT id FROM users WHERE org_id = $1 AND is_guest_principal AND deleted_at IS NULL",
+        org_id,
     )
-    .bind(org_id)
     .fetch_optional(pool)
     .await?
     {
         return Ok(id);
     }
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO users (org_id, name, role, is_active, is_guest_principal) \
          VALUES ($1, 'Scanned', 'waiter'::user_role, false, true) ON CONFLICT DO NOTHING",
+        org_id,
     )
-    .bind(org_id)
     .execute(pool)
     .await?;
-    sqlx::query_scalar::<_, Uuid>(
+    sqlx::query_scalar!(
         "SELECT id FROM users WHERE org_id = $1 AND is_guest_principal AND deleted_at IS NULL",
+        org_id,
     )
-    .bind(org_id)
     .fetch_optional(pool)
     .await?
     .ok_or(AppError::Internal)

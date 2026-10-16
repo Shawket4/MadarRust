@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT branch_id FROM devices WHERE id = $1 AND org_id = $2 AND retired_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5e1bf28b4e6a5145d50234c5f4d4be32c633876be8b5bcf08a0a8b8fffcb5d70"
+}

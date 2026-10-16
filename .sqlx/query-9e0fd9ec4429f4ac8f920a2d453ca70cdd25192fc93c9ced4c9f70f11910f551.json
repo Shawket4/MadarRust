@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_suggestion_events (org_id, branch_id, suggestion, employee_id, on_date, accepted, decided_by, work_shift_id, source) SELECT $1, b, $2, $3, $4, true, $5, $6, 'manual' FROM ( SELECT COALESCE(ws.branch_id, ( SELECT eb.branch_id FROM employee_branches eb WHERE eb.employee_id = $3 ORDER BY eb.assigned_at LIMIT 1)) AS b FROM work_shifts ws WHERE ws.id = $6 AND ws.org_id = $1) x WHERE b IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Date",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9e0fd9ec4429f4ac8f920a2d453ca70cdd25192fc93c9ced4c9f70f11910f551"
+}

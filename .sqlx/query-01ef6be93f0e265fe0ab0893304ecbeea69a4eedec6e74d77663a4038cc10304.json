@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE loyalty_customers SET pass_notice = NULL, pass_notice_at = NULL, pass_notice_fallback = NULL, pass_notice_wallets = NULL WHERE id = $1 AND pass_notice_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "01ef6be93f0e265fe0ab0893304ecbeea69a4eedec6e74d77663a4038cc10304"
+}

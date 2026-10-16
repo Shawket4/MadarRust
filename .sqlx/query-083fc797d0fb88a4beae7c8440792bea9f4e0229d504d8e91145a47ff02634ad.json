@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT p.week_start FROM staff_week_publications p JOIN employee_branches eb ON eb.branch_id = p.branch_id WHERE eb.employee_id = $1 AND p.week_start BETWEEN $2 AND $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "week_start",
+        "type_info": "Date"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "083fc797d0fb88a4beae7c8440792bea9f4e0229d504d8e91145a47ff02634ad"
+}

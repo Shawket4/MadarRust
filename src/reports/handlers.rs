@@ -2613,7 +2613,7 @@ pub async fn branch_po_lead_time(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let overall_avg_days: Option<f64> = sqlx::query_scalar(
+    let overall_avg_days: Option<f64> = sqlx::query_scalar!(
         r#"
         SELECT AVG(EXTRACT(EPOCH FROM (po.received_at - po.created_at)) / 86400.0)::float8
         FROM purchase_orders po
@@ -2621,10 +2621,10 @@ pub async fn branch_po_lead_time(
           AND ($2::timestamptz IS NULL OR po.received_at >= $2)
           AND ($3::timestamptz IS NULL OR po.received_at <= $3)
         "#,
+        &branch_ids,
+        query.from,
+        query.to,
     )
-    .bind(&branch_ids)
-    .bind(query.from)
-    .bind(query.to)
     .fetch_one(pool.get_ref())
     .await?;
 
@@ -2980,8 +2980,10 @@ pub(crate) async fn resolve_report_branches(
     let org = report_scope_org(claims, req)
         .ok_or_else(|| AppError::Forbidden("No organization in scope".into()))?;
     let mut ids: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL")
-            .bind(org)
+        sqlx::query_scalar!(
+            "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
+            org,
+        )
             .fetch_all(pool)
             .await?;
     // "All branches" means all the branches THIS caller works at. Before
@@ -3130,8 +3132,10 @@ pub async fn org_tax_report(
     let scope = super::legal::guard(&req, pool.get_ref(), *org_id).await?;
 
     let org_tax_rate: sqlx::types::BigDecimal =
-        sqlx::query_scalar("SELECT tax_rate FROM organizations WHERE id = $1")
-            .bind(*org_id)
+        sqlx::query_scalar!(
+            "SELECT tax_rate FROM organizations WHERE id = $1",
+            *org_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Organization not found".into()))?;

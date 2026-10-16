@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customers SET locale = $2, birth_month = CASE WHEN birth_month IS NULL THEN $3 ELSE birth_month END, birth_day = CASE WHEN birth_month IS NULL THEN $4 ELSE birth_day END, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int2",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b71c354138ac5f77135b9ad31abbdefd3bf9eb793be93033f15b1a0f932ae0bb"
+}

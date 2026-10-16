@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings SET party_size = $2, starts_at = $3, ends_at = $4, section_id = $5, guest_name = COALESCE($6, guest_name), guest_phone = COALESCE($7, guest_phone), notes = CASE WHEN $8 THEN $9 ELSE notes END, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2",
+        "Timestamptz",
+        "Timestamptz",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd6a4f80582464961b4fa9f33b9ca204eb3bf545a63060f98a4a6b3f96ba491a"
+}

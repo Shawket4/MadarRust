@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings SET guest_name = '', guest_phone = '', notes = NULL, updated_at = now()\n          WHERE customer_id = ANY($1) AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "df1021c852f0dee31c9799e085383429447c53c88f054aee14019fc18a1ca4ee"
+}

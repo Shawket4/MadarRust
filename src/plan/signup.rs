@@ -137,14 +137,14 @@ pub async fn otp_request(
         });
     }
     let code = new_code();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO delivery_otp (phone, code, purpose, expires_at)
          VALUES ($1, $2, $3, now() + make_interval(secs => $4))",
+        &phone,
+        &code,
+        PURPOSE,
+        CODE_TTL_SECONDS as f64,
     )
-    .bind(&phone)
-    .bind(&code)
-    .bind(PURPOSE)
-    .bind(CODE_TTL_SECONDS as f64)
     .execute(pool.get_ref())
     .await?;
     whatsapp::send_message(
@@ -312,12 +312,12 @@ pub async fn verify(
     }
     // A new token each time the right code is sent: an earlier one stops working.
     let token = new_proof();
-    sqlx::query(
+    sqlx::query!(
         "UPDATE delivery_otp SET verified_at = now(), proof_hash = $2
           WHERE id = $1 AND consumed_at IS NULL",
+        otp,
+        proof_hash(&token),
     )
-    .bind(otp)
-    .bind(proof_hash(&token))
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(SignupVerifyResponse {
@@ -437,10 +437,10 @@ pub async fn signup(
 
     // Spend the code at once, so two requests carrying it cannot both create a
     // shop; a failure below gives it back.
-    let spent = sqlx::query(
+    let spent = sqlx::query!(
         "UPDATE delivery_otp SET consumed_at = now() WHERE id = $1 AND consumed_at IS NULL",
+        otp,
     )
-    .bind(otp)
     .execute(pool.get_ref())
     .await?
     .rows_affected();
@@ -464,8 +464,10 @@ pub async fn signup(
     let done = match made {
         Ok(d) => d,
         Err(e) => {
-            let _ = sqlx::query("UPDATE delivery_otp SET consumed_at = NULL WHERE id = $1")
-                .bind(otp)
+            let _ = sqlx::query!(
+                "UPDATE delivery_otp SET consumed_at = NULL WHERE id = $1",
+                otp,
+            )
                 .execute(pool.get_ref())
                 .await;
             // A unique violation on the email is the race the check above
@@ -494,8 +496,10 @@ pub async fn signup(
     .await?;
     let token = create_token(&secret, user.id, user.org_id, UserRole::OrgAdmin, None, 24)
         .map_err(|_| AppError::Internal)?;
-    sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
-        .bind(user.id)
+    sqlx::query!(
+        "UPDATE users SET last_login_at = NOW() WHERE id = $1",
+        user.id,
+    )
         .execute(pool.get_ref())
         .await?;
     let (tax_policy, currency_code, require_table_for_orders) =

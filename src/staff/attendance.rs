@@ -1232,9 +1232,11 @@ pub async fn delete_branch_rules(
         *branch_id,
     )
     .await?;
-    sqlx::query("DELETE FROM attendance_settings WHERE org_id = $1 AND branch_id = $2")
-        .bind(org_id)
-        .bind(*branch_id)
+    sqlx::query!(
+        "DELETE FROM attendance_settings WHERE org_id = $1 AND branch_id = $2",
+        org_id,
+        *branch_id,
+    )
         .execute(pool.get_ref())
         .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -1917,7 +1919,7 @@ pub async fn check_in(
         &adjustments,
     );
 
-    let inserted = sqlx::query_scalar::<_, Uuid>(
+    let inserted = sqlx::query_scalar!(
         r#"
         INSERT INTO attendance_records (
             org_id, employee_id, branch_id, work_shift_id, business_date, status,
@@ -1931,22 +1933,22 @@ pub async fn check_in(
         DO NOTHING
         RETURNING id
         "#,
+        org_id,
+        employee_id,
+        body.branch_id,
+        shift.as_ref().map(|s| s.work_shift_id),
+        business_date,
+        derived.status.as_str(),
+        shift.as_ref().map(|s| s.scheduled_start_at),
+        shift.as_ref().map(|s| s.scheduled_end_at),
+        now,
+        body.latitude,
+        body.longitude,
+        distance,
+        derived.late_minutes as i32,
+        if stamped.offline { "offline" } else { "mobile_gps" },
+        me.user_id,
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(body.branch_id)
-    .bind(shift.as_ref().map(|s| s.work_shift_id))
-    .bind(business_date)
-    .bind(derived.status.as_str())
-    .bind(shift.as_ref().map(|s| s.scheduled_start_at))
-    .bind(shift.as_ref().map(|s| s.scheduled_end_at))
-    .bind(now)
-    .bind(body.latitude)
-    .bind(body.longitude)
-    .bind(distance)
-    .bind(derived.late_minutes as i32)
-    .bind(if stamped.offline { "offline" } else { "mobile_gps" })
-    .bind(me.user_id)
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -2011,15 +2013,15 @@ pub(crate) async fn refuse_if_covered(
     let Some(shift) = work_shift_id else {
         return Ok(());
     };
-    let coverer: Option<String> = sqlx::query_scalar(
+    let coverer: Option<String> = sqlx::query_scalar!(
         "SELECT e.name FROM attendance_records a JOIN employees e ON e.id = a.employee_id \
           WHERE a.covered_employee_id = $1 AND a.business_date = $2 AND a.work_shift_id = $3 \
             AND a.employee_id <> $1 AND a.cover_status IN ('pending', 'confirmed') \
           ORDER BY a.created_at LIMIT 1",
+        employee_id,
+        business_date,
+        shift,
     )
-    .bind(employee_id)
-    .bind(business_date)
-    .bind(shift)
     .fetch_optional(pool)
     .await?;
     match coverer {
@@ -2196,29 +2198,29 @@ pub async fn check_out(
         &adjustments,
     );
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE attendance_records SET \
             check_out_at = $2, check_out_latitude = $3, check_out_longitude = $4, \
             check_out_distance_meters = $5, check_out_method = $11, \
             status = $6, late_minutes = $7, early_leave_minutes = $8, \
             overtime_minutes = $9, worked_minutes = $10, updated_at = now() \
           WHERE id = $1",
-    )
-    .bind(open.id)
-    .bind(now)
-    .bind(body.latitude)
-    .bind(body.longitude)
-    .bind(distance)
-    .bind(derived.status.as_str())
-    .bind(derived.late_minutes as i32)
-    .bind(derived.early_leave_minutes as i32)
-    .bind(derived.overtime_minutes as i32)
-    .bind(derived.worked_minutes as i32)
-    .bind(if stamped.offline {
+        open.id,
+        now,
+        body.latitude,
+        body.longitude,
+        distance,
+        derived.status.as_str(),
+        derived.late_minutes as i32,
+        derived.early_leave_minutes as i32,
+        derived.overtime_minutes as i32,
+        derived.worked_minutes as i32,
+        if stamped.offline {
         "offline"
     } else {
         "mobile_gps"
-    })
+    },
+    )
     .execute(pool.get_ref())
     .await?;
     settle_cover(pool.get_ref(), open.id).await?;
@@ -2262,12 +2264,12 @@ pub async fn check_out(
 /// record's figures (a no-op for anything but a cover); a status set by hand
 /// sticks (AT-7). E2E B-TEAM-5.
 pub(crate) async fn settle_cover(pool: &PgPool, record_id: Uuid) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE attendance_records SET late_minutes = 0, early_leave_minutes = 0, \
                 status = CASE WHEN status_overridden THEN status ELSE 'present' END \
           WHERE id = $1 AND covered_employee_id IS NOT NULL",
+        record_id,
     )
-    .bind(record_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -2393,8 +2395,10 @@ pub async fn my_today(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppEr
 
     let branch_name: Option<String> = match branch_id {
         Some(id) => {
-            sqlx::query_scalar("SELECT name FROM branches WHERE id = $1")
-                .bind(id)
+            sqlx::query_scalar!(
+                "SELECT name FROM branches WHERE id = $1",
+                id,
+            )
                 .fetch_optional(pool.get_ref())
                 .await?
         }
@@ -2438,8 +2442,10 @@ async fn resolve_my_branch(
 
     if let Some(shift) = scheduled.first() {
         let branch: Option<Uuid> =
-            sqlx::query_scalar("SELECT branch_id FROM work_shifts WHERE id = $1")
-                .bind(shift.work_shift_id)
+            sqlx::query_scalar!(
+                "SELECT branch_id FROM work_shifts WHERE id = $1",
+                shift.work_shift_id,
+            )
                 .fetch_optional(pool)
                 .await?
                 .flatten();
@@ -2982,7 +2988,7 @@ pub async fn create_manual_record(
         None => derived.status,
     };
 
-    let inserted = sqlx::query_scalar::<_, Uuid>(
+    let inserted = sqlx::query_scalar!(
         r#"
         INSERT INTO attendance_records (
             org_id, employee_id, branch_id, work_shift_id, business_date, status,
@@ -3001,31 +3007,28 @@ pub async fn create_manual_record(
         DO NOTHING
         RETURNING id
         "#,
-    )
-    .bind(org_id)
-    .bind(body.employee_id)
-    .bind(body.branch_id)
-    .bind(body.work_shift_id)
-    .bind(body.business_date)
-    .bind(status.as_str())
-    .bind(shift.as_ref().map(|s| s.scheduled_start_at))
-    .bind(shift.as_ref().map(|s| s.scheduled_end_at))
-    .bind(body.check_in_at)
-    .bind(body.check_out_at)
-    .bind(derived.late_minutes as i32)
-    .bind(derived.early_leave_minutes as i32)
-    .bind(derived.overtime_minutes as i32)
-    .bind(derived.worked_minutes as i32)
-    .bind(
+        org_id,
+        body.employee_id,
+        body.branch_id,
+        body.work_shift_id,
+        body.business_date,
+        status.as_str(),
+        shift.as_ref().map(|s| s.scheduled_start_at),
+        shift.as_ref().map(|s| s.scheduled_end_at),
+        body.check_in_at,
+        body.check_out_at,
+        derived.late_minutes as i32,
+        derived.early_leave_minutes as i32,
+        derived.overtime_minutes as i32,
+        derived.worked_minutes as i32,
         body.notes
             .as_deref()
             .map(str::trim)
             .filter(|n| !n.is_empty()),
+        reason,
+        claims.user_id_safe().ok(),
+        body.status.is_some(),
     )
-    .bind(reason)
-    .bind(claims.user_id_safe().ok())
-    // A status set by hand sticks (AT-7).
-    .bind(body.status.is_some())
     .fetch_optional(pool.get_ref())
     .await?;
 
@@ -3255,7 +3258,7 @@ async fn rederive(
         None => (None, None, None, false),
     };
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE attendance_records SET \
             check_in_method = CASE \
                 WHEN $15::text IS NOT NULL AND $3::timestamptz IS NOT NULL \
@@ -3274,22 +3277,22 @@ async fn rederive(
             edited_by = CASE WHEN $14 THEN $12 ELSE edited_by END, \
             updated_at = now() \
           WHERE id = $1 AND org_id = $2",
+        record_id,
+        org_id,
+        check_in_at,
+        check_out_at,
+        status.as_str(),
+        derived.late_minutes as i32,
+        derived.early_leave_minutes as i32,
+        derived.overtime_minutes as i32,
+        derived.worked_minutes as i32,
+        notes.map(str::trim).filter(|n| !n.is_empty()),
+        reason,
+        editor,
+        overridden,
+        touched,
+        method,
     )
-    .bind(record_id)
-    .bind(org_id)
-    .bind(check_in_at)
-    .bind(check_out_at)
-    .bind(status.as_str())
-    .bind(derived.late_minutes as i32)
-    .bind(derived.early_leave_minutes as i32)
-    .bind(derived.overtime_minutes as i32)
-    .bind(derived.worked_minutes as i32)
-    .bind(notes.map(str::trim).filter(|n| !n.is_empty()))
-    .bind(reason)
-    .bind(editor)
-    .bind(overridden)
-    .bind(touched)
-    .bind(method)
     .execute(pool)
     .await?;
 
@@ -3348,7 +3351,7 @@ pub async fn delete_record(
     let mut tx = pool.begin().await?;
     // AT-7: the absence sweep never writes back a day a manager deleted.
     if existing.covered_employee_id.is_none() {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO attendance_tombstones \
                  (org_id, employee_id, business_date, work_shift_id, deleted_by, reason) \
              VALUES ($1, $2, $3, $4, $5, $6) \
@@ -3356,13 +3359,11 @@ pub async fn delete_record(
                           COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
              DO UPDATE SET deleted_by = EXCLUDED.deleted_by, reason = EXCLUDED.reason, \
                            created_at = now()",
-        )
-        .bind(org_id)
-        .bind(existing.employee_id)
-        .bind(existing.business_date)
-        .bind(existing.work_shift_id)
-        .bind(claims.user_id_safe().ok())
-        .bind(
+            org_id,
+            existing.employee_id,
+            existing.business_date,
+            existing.work_shift_id,
+            claims.user_id_safe().ok(),
             query
                 .reason
                 .as_deref()
@@ -3372,9 +3373,11 @@ pub async fn delete_record(
         .execute(&mut *tx)
         .await?;
     }
-    let deleted = sqlx::query("DELETE FROM attendance_records WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    let deleted = sqlx::query!(
+        "DELETE FROM attendance_records WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(&mut *tx)
         .await?
         .rows_affected();

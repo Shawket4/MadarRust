@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attendance_flags (org_id, employee_id, branch_id, kind) VALUES ($1, $2, $3, 'new_phone')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a73f7d0b91608acac7bea3d6b123d52d29bcdadec2a6c6acc086d43c7cf67d36"
+}

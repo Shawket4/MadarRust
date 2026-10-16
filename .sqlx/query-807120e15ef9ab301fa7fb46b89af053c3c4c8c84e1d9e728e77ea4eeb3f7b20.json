@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_requests SET attendance_record_id = $2, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "807120e15ef9ab301fa7fb46b89af053c3c4c8c84e1d9e728e77ea4eeb3f7b20"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attendance_records SET check_in_method = CASE WHEN $15::text IS NOT NULL AND $3::timestamptz IS NOT NULL AND $3::timestamptz IS DISTINCT FROM check_in_at THEN $15 ELSE COALESCE(check_in_method, CASE WHEN $3::timestamptz IS NULL THEN NULL ELSE 'manual' END) END, check_out_method = CASE WHEN $15::text IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz IS DISTINCT FROM check_out_at THEN $15 ELSE COALESCE(check_out_method, CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE 'manual' END) END, check_in_at  = $3, check_out_at = $4, status = $5, late_minutes = $6, early_leave_minutes = $7, overtime_minutes = $8, worked_minutes = $9, status_overridden = $13, notes = COALESCE($10, notes), edit_reason = CASE WHEN $14 THEN $11 ELSE edit_reason END, edited_by = CASE WHEN $14 THEN $12 ELSE edited_by END, updated_at = now() WHERE id = $1 AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Uuid",
+        "Bool",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fcdf8b4bc0e885b8cc4b30517ea4c43b0480854b0a23c12922ec546fe484b34a"
+}

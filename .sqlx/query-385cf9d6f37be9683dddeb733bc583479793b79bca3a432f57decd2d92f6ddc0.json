@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO asset_legacy_paths (legacy_path, org_id, asset_id) VALUES ($1,$2,$3) ON CONFLICT (legacy_path) DO UPDATE SET asset_id = EXCLUDED.asset_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "385cf9d6f37be9683dddeb733bc583479793b79bca3a432f57decd2d92f6ddc0"
+}

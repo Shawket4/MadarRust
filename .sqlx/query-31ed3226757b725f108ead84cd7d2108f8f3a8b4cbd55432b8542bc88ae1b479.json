@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT a.group_id FROM assets a JOIN asset_groups g ON g.id = a.group_id WHERE a.org_id IS NOT DISTINCT FROM $1 AND a.hash = $2 AND a.variant = $3 AND a.encoder = $4 AND g.profile = $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "31ed3226757b725f108ead84cd7d2108f8f3a8b4cbd55432b8542bc88ae1b479"
+}

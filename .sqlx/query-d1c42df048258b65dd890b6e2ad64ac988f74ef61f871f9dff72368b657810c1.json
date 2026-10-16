@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE table_occupancies SET ended_at = now(), ended_by = $2, ended_till_id = $3, end_reason = $4, needs_bussing = $5, updated_at = now() WHERE id = $1 AND ended_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d1c42df048258b65dd890b6e2ad64ac988f74ef61f871f9dff72368b657810c1"
+}

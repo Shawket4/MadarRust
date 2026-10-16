@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO salary_advances (org_id, employee_id, amount_piastres, installments, monthly_installment_piastres, remaining_piastres, reason, status, decided_by, decided_at) VALUES ($1, $2, $3, $4, $5, $3, $6, 'approved', $7, now()) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Int4",
+        "Int8",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e6ae262fb0293f586b0867252e44d5ca3cc537534b30cccd77ac11782094e38d"
+}

@@ -80,8 +80,10 @@ async fn require_transfer_branch_access(
     id: Uuid,
 ) -> Result<Uuid, AppError> {
     let branch_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT branch_id FROM table_transfer_requests WHERE id = $1")
-            .bind(id)
+        sqlx::query_scalar!(
+            "SELECT branch_id FROM table_transfer_requests WHERE id = $1",
+            id,
+        )
             .fetch_optional(pool)
             .await?;
     let branch_id =
@@ -92,8 +94,10 @@ async fn require_transfer_branch_access(
 
 /// The live branch org (also confirms the branch exists and isn't deleted).
 async fn branch_org(pool: &sqlx::PgPool, branch_id: Uuid) -> Result<Uuid, AppError> {
-    sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-        .bind(branch_id)
+    sqlx::query_scalar!(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+        branch_id,
+    )
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Branch not found".into()))
@@ -279,8 +283,10 @@ pub(crate) async fn clear_table_inner(
 ) -> Result<HttpResponse, AppError> {
     let branch_id = match branch_id {
         Some(b) => b,
-        None => sqlx::query_scalar("SELECT branch_id FROM branch_tables WHERE id = $1")
-            .bind(table_id)
+        None => sqlx::query_scalar!(
+            "SELECT branch_id FROM branch_tables WHERE id = $1",
+            table_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Table not found".into()))?,
@@ -425,8 +431,10 @@ pub(crate) async fn hold_table_inner(
 ) -> Result<HttpResponse, AppError> {
     let branch_id = match branch_id {
         Some(b) => b,
-        None => sqlx::query_scalar("SELECT branch_id FROM branch_tables WHERE id = $1")
-            .bind(table_id)
+        None => sqlx::query_scalar!(
+            "SELECT branch_id FROM branch_tables WHERE id = $1",
+            table_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Table not found".into()))?,
@@ -450,12 +458,12 @@ pub(crate) async fn hold_table_inner(
     // Re-holding our own table with a corrected count (the host miscounted, a
     // straggler arrived) updates the covers rather than being dropped.
     if !taken.landed && party_size.is_some() {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE table_occupancies SET party_size = $2, updated_at = now() \
               WHERE table_id = $1 AND ended_at IS NULL AND held_by = 'party'",
+            table_id,
+            party_size,
         )
-        .bind(table_id)
-        .bind(party_size)
         .execute(&mut *tx)
         .await?;
     }
@@ -522,8 +530,10 @@ pub(crate) async fn release_table_inner(
 ) -> Result<HttpResponse, AppError> {
     let branch_id = match branch_id {
         Some(b) => b,
-        None => sqlx::query_scalar("SELECT branch_id FROM branch_tables WHERE id = $1")
-            .bind(table_id)
+        None => sqlx::query_scalar!(
+            "SELECT branch_id FROM branch_tables WHERE id = $1",
+            table_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Table not found".into()))?,
@@ -567,15 +577,15 @@ pub async fn list_floor_transfers(
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
 
     let server_time = Utc::now();
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM table_transfer_requests \
          WHERE branch_id = $1 \
            AND (($2::timestamptz IS NULL AND status = 'waiting') \
                 OR ($2 IS NOT NULL AND updated_at > $2)) \
          ORDER BY created_at LIMIT 500",
+        query.branch_id,
+        query.since,
     )
-    .bind(query.branch_id)
-    .bind(query.since)
     .fetch_all(pool.get_ref())
     .await?;
     let mut transfers = Vec::with_capacity(ids.len());
@@ -677,12 +687,12 @@ pub(crate) async fn create_transfer_inner(
     .await?
     .ok_or_else(|| AppError::NotFound("Order not found".into()))?;
 
-    let waiting: Option<Uuid> = sqlx::query_scalar(
+    let waiting: Option<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM table_transfer_requests \
          WHERE occupant_kind = $1 AND occupant_id = $2 AND status = 'waiting'",
+        &body.occupant_kind,
+        body.occupant_id,
     )
-    .bind(&body.occupant_kind)
-    .bind(body.occupant_id)
     .fetch_optional(pool.get_ref())
     .await?;
     if waiting.is_some() {
@@ -760,12 +770,12 @@ pub(crate) async fn cancel_transfer_inner(
             ));
         }
         _ => {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE table_transfer_requests \
                  SET status = 'cancelled', resolved_at = now(), updated_at = now() \
                  WHERE id = $1 AND status = 'waiting'",
+                id,
             )
-            .bind(id)
             .execute(pool.get_ref())
             .await?;
             if let Some(hub) = hub {
@@ -870,8 +880,10 @@ pub(crate) async fn fulfill_transfer_inner(
 
     // The ticket must still be live.
     let live: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM open_tickets WHERE id = $1 AND status = 'open'")
-            .bind(occupant_id)
+        sqlx::query_scalar!(
+            "SELECT id FROM open_tickets WHERE id = $1 AND status = 'open'",
+            occupant_id,
+        )
             .fetch_optional(&mut *tx)
             .await?;
     if live.is_none() {
@@ -901,10 +913,10 @@ pub(crate) async fn fulfill_transfer_inner(
     }
 
     // The old table (if any) frees up; the party lands on the new one.
-    let old_table: Option<Uuid> = sqlx::query_scalar(
+    let old_table: Option<Uuid> = sqlx::query_scalar!(
         "SELECT table_id FROM table_occupancies WHERE open_ticket_id = $1 AND ended_at IS NULL",
+        occupant_id,
     )
-    .bind(occupant_id)
     .fetch_optional(&mut *tx)
     .await?;
     let hand = Hand::of(&mut *tx, actor.teller_id, branch_id).await?;
@@ -926,13 +938,13 @@ pub(crate) async fn fulfill_transfer_inner(
     // `autofulfill_transfers` inside `relocate_ticket` resolves this request when
     // the wish matches; a section wish landing on a table WITHOUT a section
     // (edge: table moved out of the section since) still needs the explicit stamp.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE table_transfer_requests \
          SET status = 'fulfilled', fulfilled_table_id = $2, resolved_at = now(), updated_at = now() \
          WHERE id = $1 AND status = 'waiting'",
+        id,
+        body.table_id,
     )
-    .bind(id)
-    .bind(body.table_id)
     .execute(&mut *tx)
     .await?;
     events.transfers.push(id);

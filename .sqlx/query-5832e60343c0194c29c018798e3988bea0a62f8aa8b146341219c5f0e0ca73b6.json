@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO booking_tables (booking_id, table_id) VALUES ($1, $2) ON CONFLICT ON CONSTRAINT booking_tables_no_overlap DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5832e60343c0194c29c018798e3988bea0a62f8aa8b146341219c5f0e0ca73b6"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organizations\n         SET onboarding_completed_at = COALESCE(onboarding_completed_at, now())\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b2632d0a1a7917b632dbe98c659ea403fb878431a955028e95ed223e9d6b3034"
+}

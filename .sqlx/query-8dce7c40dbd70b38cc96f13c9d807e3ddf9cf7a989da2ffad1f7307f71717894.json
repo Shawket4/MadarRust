@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, effective_from) VALUES ($1, $2, $3, $4, CURRENT_DATE - 60)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8dce7c40dbd70b38cc96f13c9d807e3ddf9cf7a989da2ffad1f7307f71717894"
+}

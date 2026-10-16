@@ -421,8 +421,10 @@ async fn require_same_org_as_target(
     }
 
     let target_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL")
-            .bind(user_id)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM users WHERE id = $1 AND deleted_at IS NULL",
+            user_id,
+        )
             .fetch_optional(pool)
             .await?
             .flatten();

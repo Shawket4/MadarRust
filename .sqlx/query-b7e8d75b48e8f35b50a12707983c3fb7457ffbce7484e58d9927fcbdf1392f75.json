@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (org_id, name, email, password_hash, role) VALUES ($1, 'Demo Admin', 'admin@demo.madar', $2, 'org_admin') RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b7e8d75b48e8f35b50a12707983c3fb7457ffbce7484e58d9927fcbdf1392f75"
+}

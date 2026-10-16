@@ -126,8 +126,10 @@ pub async fn create_station(
         return Err(AppError::BadRequest("Station name is required".into()));
     }
     let org_id: Uuid =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(body.branch_id)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+            body.branch_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -135,11 +137,11 @@ pub async fn create_station(
     let is_default = body.is_default.unwrap_or(false);
     let mut tx = pool.get_ref().begin().await?;
     if is_default {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE kitchen_stations SET is_default = false, updated_at = now() \
              WHERE branch_id = $1 AND is_default AND deleted_at IS NULL",
+            body.branch_id,
         )
-        .bind(body.branch_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -188,12 +190,12 @@ pub async fn update_station(
 
     let mut tx = pool.get_ref().begin().await?;
     if body.is_default == Some(true) {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE kitchen_stations SET is_default = false, updated_at = now() \
              WHERE branch_id = $1 AND is_default AND deleted_at IS NULL AND id <> $2",
+            existing.branch_id,
+            *id,
         )
-        .bind(existing.branch_id)
-        .bind(*id)
         .execute(&mut *tx)
         .await?;
     }
@@ -238,10 +240,10 @@ pub async fn delete_station(
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "delete").await?;
     let existing = fetch_station(pool.get_ref(), *id).await?;
     require_branch_access(pool.get_ref(), &claims, existing.branch_id).await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE kitchen_stations SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+        *id,
     )
-    .bind(*id)
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -277,16 +279,18 @@ pub async fn list_routes(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "read").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-    let categories = sqlx::query_as::<_, CategoryRoute>(
+    let categories = sqlx::query_as!(
+        CategoryRoute,
         "SELECT category_id, station_id FROM category_station_routes WHERE branch_id = $1",
+        query.branch_id,
     )
-    .bind(query.branch_id)
     .fetch_all(pool.get_ref())
     .await?;
-    let items = sqlx::query_as::<_, ItemRoute>(
+    let items = sqlx::query_as!(
+        ItemRoute,
         "SELECT menu_item_id, station_id FROM menu_item_station_routes WHERE branch_id = $1",
+        query.branch_id,
     )
-    .bind(query.branch_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(StationRoutes { categories, items }))
@@ -310,14 +314,14 @@ pub async fn put_category_route(
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
     require_station_in_branch(pool.get_ref(), body.station_id, body.branch_id).await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO category_station_routes (branch_id, category_id, station_id) \
          VALUES ($1, $2, $3) \
          ON CONFLICT (branch_id, category_id) DO UPDATE SET station_id = EXCLUDED.station_id",
+        body.branch_id,
+        body.category_id,
+        body.station_id,
     )
-    .bind(body.branch_id)
-    .bind(body.category_id)
-    .bind(body.station_id)
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -340,9 +344,11 @@ pub async fn delete_category_route(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "update").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-    sqlx::query("DELETE FROM category_station_routes WHERE branch_id = $1 AND category_id = $2")
-        .bind(query.branch_id)
-        .bind(query.category_id)
+    sqlx::query!(
+        "DELETE FROM category_station_routes WHERE branch_id = $1 AND category_id = $2",
+        query.branch_id,
+        query.category_id,
+    )
         .execute(pool.get_ref())
         .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -366,14 +372,14 @@ pub async fn put_item_route(
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "update").await?;
     require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
     require_station_in_branch(pool.get_ref(), body.station_id, body.branch_id).await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO menu_item_station_routes (branch_id, menu_item_id, station_id) \
          VALUES ($1, $2, $3) \
          ON CONFLICT (branch_id, menu_item_id) DO UPDATE SET station_id = EXCLUDED.station_id",
+        body.branch_id,
+        body.menu_item_id,
+        body.station_id,
     )
-    .bind(body.branch_id)
-    .bind(body.menu_item_id)
-    .bind(body.station_id)
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -396,9 +402,11 @@ pub async fn delete_item_route(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "update").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-    sqlx::query("DELETE FROM menu_item_station_routes WHERE branch_id = $1 AND menu_item_id = $2")
-        .bind(query.branch_id)
-        .bind(query.menu_item_id)
+    sqlx::query!(
+        "DELETE FROM menu_item_station_routes WHERE branch_id = $1 AND menu_item_id = $2",
+        query.branch_id,
+        query.menu_item_id,
+    )
         .execute(pool.get_ref())
         .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -447,8 +455,10 @@ pub async fn get_routing_mode(
     check_permission(pool.get_ref(), &claims, "kitchen_stations", "read").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
     let mode: Option<String> =
-        sqlx::query_scalar("SELECT kitchen_routing_mode::text FROM branches WHERE id = $1")
-            .bind(query.branch_id)
+        sqlx::query_scalar!(
+            "SELECT kitchen_routing_mode::text FROM branches WHERE id = $1",
+            query.branch_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .flatten();

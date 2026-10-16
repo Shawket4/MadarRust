@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM table_transfer_requests WHERE branch_id = $1 AND (($2::timestamptz IS NULL AND status = 'waiting') OR ($2 IS NOT NULL AND updated_at > $2)) ORDER BY created_at LIMIT 500",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1dfadb9c8ece0e3e1a0e9e4ddb46b031c0e61eae2120c7cbbaf28a62e4c1f28f"
+}

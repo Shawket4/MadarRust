@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT customer_address_upsert($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "customer_address_upsert",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Float8",
+        "Float8",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "34c0e1e4bec479c6b39693446c13fa405c82a7a7af01b325f3d23929a64d1354"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_open_shifts SET status = 'cancelled', decided_by = $2 WHERE id = $1 AND status IN ('open', 'claimed') RETURNING claimed_by",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "claimed_by",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "1c2e4808c80388c981e2a787e4cfcff5f4a59431ea5791eef065390074811324"
+}

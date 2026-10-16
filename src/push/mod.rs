@@ -65,17 +65,17 @@ pub(crate) async fn register(
     let (user_id, employee_id) = who.cols();
     let mut tx = pool.begin().await?;
     if let Some(device) = device_id {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE push_devices SET revoked_at = now() \
               WHERE device_id = $1 AND app = $2 AND token <> $3 AND revoked_at IS NULL",
+            device,
+            app,
+            token,
         )
-        .bind(device)
-        .bind(app)
-        .bind(token)
         .execute(&mut *tx)
         .await?;
     }
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO push_devices (org_id, user_id, employee_id, app, token, locale, platform, device_id) \
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
           ON CONFLICT (token) WHERE revoked_at IS NULL DO UPDATE SET \
@@ -83,15 +83,15 @@ pub(crate) async fn register(
             employee_id = EXCLUDED.employee_id, app = EXCLUDED.app, \
             locale = EXCLUDED.locale, platform = EXCLUDED.platform, \
             device_id = EXCLUDED.device_id, last_seen_at = now()",
+        org_id,
+        user_id,
+        employee_id,
+        app,
+        token,
+        locale,
+        platform,
+        device_id,
     )
-    .bind(org_id)
-    .bind(user_id)
-    .bind(employee_id)
-    .bind(app)
-    .bind(token)
-    .bind(locale)
-    .bind(platform)
-    .bind(device_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -107,15 +107,15 @@ pub(crate) async fn unregister(
     token: &str,
 ) -> Result<(), AppError> {
     let (user_id, employee_id) = who.cols();
-    sqlx::query(
+    sqlx::query!(
         "UPDATE push_devices SET revoked_at = now() \
           WHERE token = $1 AND user_id IS NOT DISTINCT FROM $2 \
             AND employee_id IS NOT DISTINCT FROM $3 AND app = $4 AND revoked_at IS NULL",
+        token,
+        user_id,
+        employee_id,
+        app,
     )
-    .bind(token)
-    .bind(user_id)
-    .bind(employee_id)
-    .bind(app)
     .execute(pool)
     .await?;
     Ok(())
@@ -125,14 +125,14 @@ pub(crate) async fn unregister(
 /// force-revoked, e.g. Dawam's RO-4/RO-10).
 pub(crate) async fn revoke_all(pool: &PgPool, who: Recipient, app: &str) -> Result<(), AppError> {
     let (user_id, employee_id) = who.cols();
-    sqlx::query(
+    sqlx::query!(
         "UPDATE push_devices SET revoked_at = now() \
           WHERE user_id IS NOT DISTINCT FROM $1 AND employee_id IS NOT DISTINCT FROM $2 \
             AND app = $3 AND revoked_at IS NULL",
+        user_id,
+        employee_id,
+        app,
     )
-    .bind(user_id)
-    .bind(employee_id)
-    .bind(app)
     .execute(pool)
     .await?;
     Ok(())
@@ -482,11 +482,11 @@ async fn deliver(pool: &PgPool, t: Transport, batch: Vec<(String, Value)>) {
         }
         match reply {
             Some((s, body)) if token_is_dead(s, &body) => {
-                if let Err(e) = sqlx::query(
+                if let Err(e) = sqlx::query!(
                     "UPDATE push_devices SET revoked_at = now() \
                       WHERE token = $1 AND revoked_at IS NULL",
+                    &token,
                 )
-                .bind(&token)
                 .execute(pool)
                 .await
                 {

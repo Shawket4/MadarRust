@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE order_payments op SET method = $1\n             FROM orders o JOIN branches b ON b.id = o.branch_id\n             WHERE op.order_id = o.id AND b.org_id = $2 AND op.method = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "179bc6aea0334772b3d4148f31a9a8a22316bebd084153684585df2db1780982"
+}

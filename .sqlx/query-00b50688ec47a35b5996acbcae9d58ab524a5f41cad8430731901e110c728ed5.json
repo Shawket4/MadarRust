@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, kind, target_ref, long_url, short_code, short_url, label, created_at\n         FROM qr_short_links\n         WHERE org_id = $1 AND kind = 'marketing'\n         ORDER BY created_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "target_ref",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "long_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "short_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "short_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "00b50688ec47a35b5996acbcae9d58ab524a5f41cad8430731901e110c728ed5"
+}

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_schedule_overrides SET start_time = $4, end_time = $5, created_by = $6 WHERE employee_id = $1 AND on_date = $2 AND work_shift_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date",
+        "Uuid",
+        "Time",
+        "Time",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2f90395e4aea21a05d90e398511d9aa935e494faf68f9a566c7fef1fabacd521"
+}

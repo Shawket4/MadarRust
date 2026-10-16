@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT name FROM customers WHERE id = $1 AND org_id = $2\n            AND merged_into IS NULL AND erased_at IS NULL FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6c08f5aed04da676d631a35e1fceff8baecbc1d787c1d070a853e98adc66fc59"
+}

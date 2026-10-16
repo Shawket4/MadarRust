@@ -185,7 +185,7 @@ pub async fn run(
     let (positional_sql, order) = rewrite_named(&query.sql);
 
     let mut tx = db.begin().await.map_err(ExecError::Db)?;
-    sqlx::query("SET TRANSACTION READ ONLY")
+    sqlx::query!("SET TRANSACTION READ ONLY")
         .execute(&mut *tx)
         .await
         .map_err(ExecError::Db)?;

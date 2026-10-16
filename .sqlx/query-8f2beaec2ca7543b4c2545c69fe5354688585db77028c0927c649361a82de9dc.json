@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, end_date, from_time, to_time, is_half_day, leave_half, work_shift_id, title, location, attendance_record_id, reason, window_from, window_to) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, FALSE), $9, $10, $11, $12, $13, $14, $15, $16) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Date",
+        "Date",
+        "Time",
+        "Time",
+        "Bool",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Timestamp",
+        "Timestamp"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8f2beaec2ca7543b4c2545c69fe5354688585db77028c0927c649361a82de9dc"
+}

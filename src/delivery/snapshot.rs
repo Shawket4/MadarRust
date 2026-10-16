@@ -928,24 +928,24 @@ async fn resolve_size_price(
     size: &str,
     effective_base: i32,
 ) -> Result<i32, AppError> {
-    let catalog: Option<Option<i32>> = sqlx::query_scalar(
+    let catalog: Option<Option<i32>> = sqlx::query_scalar!(
         "SELECT price_override FROM item_sizes \
          WHERE menu_item_id = $1 AND label::text = $2 AND is_active = true",
+        menu_item_id,
+        size,
     )
-    .bind(menu_item_id)
-    .bind(size)
     .fetch_optional(pool)
     .await?;
     let Some(catalog_override) = catalog else {
         return Err(AppError::BadRequest(format!("Unknown size '{size}'")));
     };
-    let branch_size: Option<i32> = sqlx::query_scalar(
+    let branch_size: Option<i32> = sqlx::query_scalar!(
         "SELECT price_override FROM branch_menu_size_overrides \
          WHERE branch_id = $1 AND menu_item_id = $2 AND size_label::text = $3",
+        branch_id,
+        menu_item_id,
+        size,
     )
-    .bind(branch_id)
-    .bind(menu_item_id)
-    .bind(size)
     .fetch_optional(pool)
     .await?;
     Ok(branch_size.or(catalog_override).unwrap_or(effective_base))

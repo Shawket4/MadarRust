@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM deal_rule_items WHERE deal_rule_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b331ad8ce7213c9630b4b1bddd9f7ad1523ba57bafac396171e0af5fbaff2b88"
+}

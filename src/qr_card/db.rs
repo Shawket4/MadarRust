@@ -45,15 +45,16 @@ pub async fn get_or_create_short_link(
     // Fast path: already in DB — but only reuse if the long_url still matches.
     // A format change (e.g. path segment vs query param) must produce a fresh
     // Shlink entry; stale rows are deleted so the slow path recreates them.
-    if let Some(row) = sqlx::query_as::<_, ShortLinkRow>(
+    if let Some(row) = sqlx::query_as!(
+        ShortLinkRow,
         "SELECT id, org_id, branch_id, kind, target_ref, long_url,
                 short_code, short_url, label, created_at
          FROM qr_short_links
          WHERE org_id = $1 AND kind = $2 AND target_ref = $3",
+        org_id,
+        kind,
+        target_ref,
     )
-    .bind(org_id)
-    .bind(kind)
-    .bind(target_ref)
     .fetch_optional(pool)
     .await?
     {
@@ -61,8 +62,10 @@ pub async fn get_or_create_short_link(
             return Ok(row);
         }
         // Stale URL — drop the row so the slow path creates a fresh Shlink entry.
-        sqlx::query("DELETE FROM qr_short_links WHERE id = $1")
-            .bind(row.id)
+        sqlx::query!(
+            "DELETE FROM qr_short_links WHERE id = $1",
+            row.id,
+        )
             .execute(pool)
             .await?;
     }
@@ -73,7 +76,8 @@ pub async fn get_or_create_short_link(
         .create_short_url(long_url, custom_slug, &tags)
         .await?;
 
-    let row = sqlx::query_as::<_, ShortLinkRow>(
+    let row = sqlx::query_as!(
+        ShortLinkRow,
         "INSERT INTO qr_short_links
              (org_id, branch_id, kind, target_ref, long_url, short_code, short_url, label)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -81,15 +85,15 @@ pub async fn get_or_create_short_link(
              SET short_url = EXCLUDED.short_url, short_code = EXCLUDED.short_code
          RETURNING id, org_id, branch_id, kind, target_ref, long_url,
                    short_code, short_url, label, created_at",
+        org_id,
+        branch_id,
+        kind,
+        target_ref,
+        long_url,
+        &short.short_code,
+        &short.short_url,
+        label,
     )
-    .bind(org_id)
-    .bind(branch_id)
-    .bind(kind)
-    .bind(target_ref)
-    .bind(long_url)
-    .bind(&short.short_code)
-    .bind(&short.short_url)
-    .bind(label)
     .fetch_one(pool)
     .await?;
 
@@ -117,12 +121,13 @@ pub struct CreateTableRequest {
 }
 
 pub async fn fetch_table(pool: &PgPool, table_id: Uuid) -> Result<BranchTable, AppError> {
-    sqlx::query_as::<_, BranchTable>(
+    sqlx::query_as!(
+        BranchTable,
         "SELECT id, org_id, branch_id, label, is_active, created_at, updated_at
          FROM branch_tables
          WHERE id = $1",
+        table_id,
     )
-    .bind(table_id)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Table not found".into()))

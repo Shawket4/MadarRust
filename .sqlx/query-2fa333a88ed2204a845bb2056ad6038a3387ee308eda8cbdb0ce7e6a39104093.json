@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT misr.station_id FROM menu_item_station_routes misr JOIN kitchen_stations ks ON ks.id = misr.station_id AND ks.deleted_at IS NULL AND ks.is_active WHERE misr.branch_id = $1 AND misr.menu_item_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "station_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2fa333a88ed2204a845bb2056ad6038a3387ee308eda8cbdb0ce7e6a39104093"
+}

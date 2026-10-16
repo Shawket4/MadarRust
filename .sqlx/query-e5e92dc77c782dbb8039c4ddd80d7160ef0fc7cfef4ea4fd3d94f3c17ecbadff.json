@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() WHERE b.status = 'seated' AND b.ends_at + interval '60 minutes' < now() AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id WHERE fb.id = b.branch_id AND fo.plan = 'free') AND NOT EXISTS (SELECT 1 FROM open_tickets ot WHERE ot.booking_id = b.id AND ot.status = 'open') AND (NOT EXISTS (SELECT 1 FROM open_tickets ot WHERE ot.booking_id = b.id) OR EXISTS (SELECT 1 FROM open_tickets ot WHERE ot.booking_id = b.id AND ot.status = 'settled')) RETURNING b.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e5e92dc77c782dbb8039c4ddd80d7160ef0fc7cfef4ea4fd3d94f3c17ecbadff"
+}

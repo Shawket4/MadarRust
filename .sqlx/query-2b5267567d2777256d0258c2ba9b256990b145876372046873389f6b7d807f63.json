@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT SUM(party_size)::bigint FROM bookings WHERE branch_id = $1 AND starts_at = $2 AND status IN ('confirmed', 'seated') AND ($3::uuid IS NULL OR id <> $3)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sum",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2b5267567d2777256d0258c2ba9b256990b145876372046873389f6b7d807f63"
+}

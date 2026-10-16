@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_requests SET status = $2, decided_by = NULL, decided_at = NULL, decision_note = NULL, updated_at = now() WHERE id = $1 AND status = 'approved'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "52155cacf8195c338fd9ead5c2634395b7814aa76ff050a56a9eec1db58a41d2"
+}

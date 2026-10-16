@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE stocktakes SET status = 'finalized', finalized_by = $2, finalized_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5c847dab5daab0fa807cb07e4033f36f435ed616f47b6751e9e3d1724aa416e6"
+}

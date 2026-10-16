@@ -65,11 +65,11 @@ pub async fn run_due(
     for (branch_id, since) in due {
         match build_branch(pool, store, branch_id).await {
             Ok(b) => {
-                sqlx::query(
+                sqlx::query!(
                     "DELETE FROM asset_bundle_dirty WHERE branch_id = $1 AND dirty_since <= $2",
+                    branch_id,
+                    since,
                 )
-                .bind(branch_id)
-                .bind(since)
                 .execute(pool)
                 .await?;
                 if let Some(b) = b {
@@ -88,8 +88,10 @@ pub async fn referenced_files(
     store: &AssetStore,
     branch_id: Uuid,
 ) -> Result<(Uuid, Vec<TarFile>), AppError> {
-    let org_id: Uuid = sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
-        .bind(branch_id)
+    let org_id: Uuid = sqlx::query_scalar!(
+        "SELECT org_id FROM branches WHERE id = $1",
+        branch_id,
+    )
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -127,8 +129,10 @@ pub async fn referenced_files(
 
 async fn feed_seq(pool: &PgPool, branch_id: Uuid) -> i64 {
     // The changefeed (§10.1) may not exist on an older schema; fall back to 0.
-    sqlx::query_scalar::<_, Option<i64>>("SELECT max(seq) FROM sync_changes WHERE branch_id = $1")
-        .bind(branch_id)
+    sqlx::query_scalar!(
+        "SELECT max(seq) FROM sync_changes WHERE branch_id = $1",
+        branch_id,
+    )
         .fetch_one(pool)
         .await
         .ok()
@@ -200,17 +204,17 @@ pub async fn build_branch(
         std::fs::create_dir_all(parent).map_err(|_| AppError::Internal)?;
     }
     std::fs::rename(&tmp, &dest).map_err(|_| AppError::Internal)?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO asset_bundles (branch_id, org_id, seq, file_key, bytes, sha256, file_count) \
          VALUES ($1,$2,$3,$4,$5,$6,$7)",
+        branch_id,
+        org_id,
+        seq,
+        &key,
+        bytes as i64,
+        &sha,
+        files.len() as i32,
     )
-    .bind(branch_id)
-    .bind(org_id)
-    .bind(seq)
-    .bind(&key)
-    .bind(bytes as i64)
-    .bind(&sha)
-    .bind(files.len() as i32)
     .execute(pool)
     .await?;
 
@@ -224,9 +228,11 @@ pub async fn build_branch(
     .fetch_all(pool)
     .await?;
     for (s, k) in old {
-        sqlx::query("DELETE FROM asset_bundles WHERE branch_id = $1 AND seq = $2")
-            .bind(branch_id)
-            .bind(s)
+        sqlx::query!(
+            "DELETE FROM asset_bundles WHERE branch_id = $1 AND seq = $2",
+            branch_id,
+            s,
+        )
             .execute(pool)
             .await?;
         let _ = std::fs::remove_file(store.path_for_key(&k));

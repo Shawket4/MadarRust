@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attendance_records SET late_minutes = 0, early_leave_minutes = 0, status = CASE WHEN status_overridden THEN status ELSE 'present' END WHERE id = $1 AND covered_employee_id IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6ee9213f77c2cb62fdc60e3c8838e4f209ede72397407e2776e2ba0b83542375"
+}

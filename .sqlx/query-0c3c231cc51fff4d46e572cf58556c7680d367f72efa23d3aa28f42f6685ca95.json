@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, end_date, title, location, status, decided_at) VALUES ($1, $2, 'mission', $3, $3, 'Supplier visit', 'Obour City', 'approved', now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0c3c231cc51fff4d46e572cf58556c7680d367f72efa23d3aa28f42f6685ca95"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kitchen_stations SET is_default = false, updated_at = now() WHERE branch_id = $1 AND is_default AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "89430a0b9c7fce3b2ae11626985c5642e33ea8c47f7523d76cbeb5c37f1c4b98"
+}

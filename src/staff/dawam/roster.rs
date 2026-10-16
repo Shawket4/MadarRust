@@ -636,13 +636,13 @@ async fn close_claim(
     status: &str,
     by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_open_shift_claims SET status = $2, decided_at = now(), decided_by = $3 \
           WHERE open_shift_id = $1 AND status = 'pending'",
+        open_shift_id,
+        status,
+        by,
     )
-    .bind(open_shift_id)
-    .bind(status)
-    .bind(by)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -790,14 +790,14 @@ pub async fn publish(
     )
     .await?;
     let ws = week_start(body.week_start);
-    let fresh = sqlx::query(
+    let fresh = sqlx::query!(
         "INSERT INTO staff_week_publications (org_id, branch_id, week_start, published_by) \
          VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        org_id,
+        body.branch_id,
+        ws,
+        claims.user_id_safe().ok(),
     )
-    .bind(org_id)
-    .bind(body.branch_id)
-    .bind(ws)
-    .bind(claims.user_id_safe().ok())
     .execute(pool)
     .await?
     .rows_affected();
@@ -883,9 +883,11 @@ async fn own_employees(
         return Ok(Vec::new());
     };
     Ok(
-        sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
-            .bind(user)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT id FROM employees WHERE user_id = $1 AND org_id = $2",
+            user,
+            org_id,
+        )
             .fetch_all(pool)
             .await?,
     )
@@ -971,15 +973,15 @@ pub async fn post_open_shift(
     if block_started(pool, body.branch_id, body.work_shift_id, body.on_date).await? {
         return Err(shift_started());
     }
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO staff_open_shifts (org_id, branch_id, work_shift_id, on_date, posted_by) \
          VALUES ($1, $2, $3, $4, $5) RETURNING id",
+        org_id,
+        body.branch_id,
+        body.work_shift_id,
+        body.on_date,
+        claims.user_id_safe().ok(),
     )
-    .bind(org_id)
-    .bind(body.branch_id)
-    .bind(body.work_shift_id)
-    .bind(body.on_date)
-    .bind(claims.user_id_safe().ok())
     .fetch_one(pool)
     .await?;
     // A draft week's open shift is announced when the week is published.
@@ -1079,13 +1081,13 @@ pub async fn claim_open_shift(
         tx.rollback().await?;
     }
     let mut tx = pool.begin().await?;
-    let claimed: Option<Uuid> = sqlx::query_scalar(
+    let claimed: Option<Uuid> = sqlx::query_scalar!(
         "UPDATE staff_open_shifts SET status = 'claimed', claimed_by = $2, claimed_at = now() \
           WHERE id = $1 AND org_id = $3 AND status = 'open' RETURNING id",
+        *id,
+        employee_id,
+        org_id,
     )
-    .bind(*id)
-    .bind(employee_id)
-    .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?;
     if claimed.is_none() {
@@ -1096,13 +1098,13 @@ pub async fn claim_open_shift(
         });
     }
     // Logged with the same now() as claimed_at (one transaction).
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_open_shift_claims (org_id, open_shift_id, employee_id, status) \
          VALUES ($1, $2, $3, 'pending')",
+        org_id,
+        *id,
+        employee_id,
     )
-    .bind(org_id)
-    .bind(*id)
-    .bind(employee_id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1161,22 +1163,22 @@ pub async fn withdraw_claim(
         ));
     };
     let mut tx = pool.begin().await?;
-    let reopened: Option<Uuid> = sqlx::query_scalar(
+    let reopened: Option<Uuid> = sqlx::query_scalar!(
         "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL \
           WHERE id = $1 AND status = 'claimed' AND claimed_by = $2 RETURNING id",
+        *id,
+        employee_id,
     )
-    .bind(*id)
-    .bind(employee_id)
     .fetch_optional(&mut *tx)
     .await?;
     if reopened.is_none() {
         drop(tx);
-        let last: Option<String> = sqlx::query_scalar(
+        let last: Option<String> = sqlx::query_scalar!(
             "SELECT status FROM staff_open_shift_claims \
               WHERE open_shift_id = $1 AND employee_id = $2 ORDER BY created_at DESC LIMIT 1",
+            *id,
+            employee_id,
         )
-        .bind(*id)
-        .bind(employee_id)
         .fetch_optional(pool)
         .await?;
         return Err(match last.as_deref() {
@@ -1336,12 +1338,12 @@ pub async fn decide_claim(
     }
     let mut tx = pool.begin().await?;
     if body.approve {
-        let won: Option<Uuid> = sqlx::query_scalar(
+        let won: Option<Uuid> = sqlx::query_scalar!(
             "UPDATE staff_open_shifts SET status = 'filled', decided_by = $2 \
               WHERE id = $1 AND status = 'claimed' RETURNING id",
+            *id,
+            by,
         )
-        .bind(*id)
-        .bind(by)
         .fetch_optional(&mut *tx)
         .await?;
         if won.is_none() {
@@ -1389,11 +1391,11 @@ pub async fn decide_claim(
             warnings,
         }));
     } else {
-        let won: Option<Uuid> = sqlx::query_scalar(
+        let won: Option<Uuid> = sqlx::query_scalar!(
             "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL \
               WHERE id = $1 AND status = 'claimed' RETURNING id",
+            *id,
         )
-        .bind(*id)
         .fetch_optional(&mut *tx)
         .await?;
         if won.is_none() {
@@ -1451,20 +1453,22 @@ pub async fn cancel_open_shift(
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, branch_id).await?;
     let by = claims.user_id_safe().ok();
     let mut tx = pool.begin().await?;
-    let gone: Option<Option<Uuid>> = sqlx::query_scalar(
+    let gone: Option<Option<Uuid>> = sqlx::query_scalar!(
         "UPDATE staff_open_shifts SET status = 'cancelled', decided_by = $2 \
           WHERE id = $1 AND status IN ('open', 'claimed') \
           RETURNING claimed_by",
+        *id,
+        by,
     )
-    .bind(*id)
-    .bind(by)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(claimer) = gone else {
         drop(tx);
         let status: String =
-            sqlx::query_scalar("SELECT status FROM staff_open_shifts WHERE id = $1")
-                .bind(*id)
+            sqlx::query_scalar!(
+                "SELECT status FROM staff_open_shifts WHERE id = $1",
+                *id,
+            )
                 .fetch_one(pool)
                 .await?;
         return Err(crate::staff::coded_vars(
@@ -1770,17 +1774,17 @@ pub async fn ask_swap(
     let fits = apply_swap(&mut probe, org_id, &draft, &requester, &peer, None).await;
     probe.rollback().await?;
     fits?;
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO staff_swaps (org_id, requester_id, requester_date, requester_shift_id, \
             peer_id, peer_date, peer_shift_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        org_id,
+        employee_id,
+        body.my_date,
+        body.my_shift_id,
+        body.peer_id,
+        body.peer_date,
+        body.peer_shift_id,
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(body.my_date)
-    .bind(body.my_shift_id)
-    .bind(body.peer_id)
-    .bind(body.peer_date)
-    .bind(body.peer_shift_id)
     .fetch_one(pool)
     .await?;
     let name = employee_name(pool, employee_id).await;
@@ -1816,13 +1820,13 @@ pub async fn answer_swap(
     let employee_id = me.employee_id;
     let org_id = me.org_id;
     let pool = pool.get_ref();
-    let row: Option<Uuid> = sqlx::query_scalar(
+    let row: Option<Uuid> = sqlx::query_scalar!(
         "UPDATE staff_swaps SET status = $3 WHERE id = $1 AND peer_id = $2 \
             AND status = 'awaiting_peer' RETURNING requester_id",
+        *id,
+        employee_id,
+        if body.approve { "pending" } else { "rejected" },
     )
-    .bind(*id)
-    .bind(employee_id)
-    .bind(if body.approve { "pending" } else { "rejected" })
     .fetch_optional(pool)
     .await?;
     let Some(requester) = row else {
@@ -1879,13 +1883,13 @@ pub async fn cancel_swap(
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
-    let peer: Option<Uuid> = sqlx::query_scalar(
+    let peer: Option<Uuid> = sqlx::query_scalar!(
         "UPDATE staff_swaps SET status = 'cancelled' WHERE id = $1 AND requester_id = $2 \
             AND status IN ('awaiting_peer', 'pending') \
           RETURNING peer_id",
+        *id,
+        me.employee_id,
     )
-    .bind(*id)
-    .bind(me.employee_id)
     .fetch_optional(pool)
     .await?;
     let Some(peer) = peer else {
@@ -1969,8 +1973,10 @@ pub async fn list_open_shifts(
     {
         Some(b) => b,
         None => {
-            sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL")
-                .bind(org_id)
+            sqlx::query_scalar!(
+                "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
+                org_id,
+            )
                 .fetch_all(pool.get_ref())
                 .await?
         }
@@ -2051,13 +2057,13 @@ pub async fn decide_swap(
         }
     }
     let mut tx = pool.begin().await?;
-    let won: Option<Uuid> = sqlx::query_scalar(
+    let won: Option<Uuid> = sqlx::query_scalar!(
         "UPDATE staff_swaps SET status = $2, decided_by = $3 \
           WHERE id = $1 AND status = 'pending' RETURNING id",
+        *id,
+        if body.approve { "approved" } else { "rejected" },
+        by,
     )
-    .bind(*id)
-    .bind(if body.approve { "approved" } else { "rejected" })
-    .bind(by)
     .fetch_optional(&mut *tx)
     .await?;
     if won.is_none() {
@@ -2143,28 +2149,26 @@ async fn save_preferences(
 ) -> Result<(), AppError> {
     let days = check_preferences(body)?;
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE employees SET pref_time = $2, cant_work_days = $3, prefs_set_by = $4 \
           WHERE id = $1",
+        employee_id,
+        body.pref_time.as_deref(),
+        &days,
+        source,
     )
-    .bind(employee_id)
-    .bind(body.pref_time.as_deref())
-    .bind(&days)
-    .bind(source)
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_preference_log \
              (org_id, employee_id, source, pref_time, cant_work_days, changed_by, note) \
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
-    )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(source)
-    .bind(body.pref_time.as_deref())
-    .bind(&days)
-    .bind(by)
-    .bind(
+        org_id,
+        employee_id,
+        source,
+        body.pref_time.as_deref(),
+        &days,
+        by,
         body.note
             .as_deref()
             .map(str::trim)
@@ -2431,9 +2435,11 @@ pub async fn put_coverage(
     access::gate(pool, &claims, org_id, Cap::HrScheduleEdit).await?;
     access::require_at(pool, &claims, org_id, Cap::HrScheduleEdit, body.branch_id).await?;
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM staff_coverage_needs WHERE branch_id = $1 AND org_id = $2")
-        .bind(body.branch_id)
-        .bind(org_id)
+    sqlx::query!(
+        "DELETE FROM staff_coverage_needs WHERE branch_id = $1 AND org_id = $2",
+        body.branch_id,
+        org_id,
+    )
         .execute(&mut *tx)
         .await?;
     for n in &body.needs {

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO organizations (id, name, slug, currency_code, tax_rate, timezone, is_active, is_demo, demo_expires_at, onboarding_completed_at) VALUES ($1, $2, $3, 'EGP', 0.14, 'Africa/Cairo', true, true, $4, $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "494027e35a993863e9068225d2f967ecbd31623b3468bccfe0a5aa33726f891e"
+}

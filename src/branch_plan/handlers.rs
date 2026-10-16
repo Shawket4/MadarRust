@@ -188,12 +188,13 @@ async fn registered_devices(
     pool: &PgPool,
     branch_id: Uuid,
 ) -> Result<Vec<PlanRegisteredDevice>, AppError> {
-    Ok(sqlx::query_as::<_, PlanRegisteredDevice>(
+    Ok(sqlx::query_as!(
+        PlanRegisteredDevice,
         "SELECT id, code, label, kind, platform, app_version, last_seen_at
            FROM devices WHERE branch_id = $1 AND retired_at IS NULL
           ORDER BY kind, code",
+        branch_id,
     )
-    .bind(branch_id)
     .fetch_all(pool)
     .await?)
 }
@@ -689,9 +690,11 @@ pub async fn save_plan(
     .bind(claims.user_id_safe().ok())
     .execute(&mut *tx)
     .await?;
-    sqlx::query("UPDATE branches SET hardware_plan_version = $2 WHERE id = $1")
-        .bind(branch_id)
-        .bind(version + 1)
+    sqlx::query!(
+        "UPDATE branches SET hardware_plan_version = $2 WHERE id = $1",
+        branch_id,
+        version + 1,
+    )
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -828,23 +831,23 @@ async fn remove_sections(
             ),
         });
     }
-    let removed: Vec<Uuid> = sqlx::query_scalar(
+    let removed: Vec<Uuid> = sqlx::query_scalar!(
         "UPDATE kitchen_stations SET deleted_at = now(), is_default = false, updated_at = now()
           WHERE branch_id = $1 AND deleted_at IS NULL AND is_active AND NOT (id = ANY($2))
           RETURNING id",
+        branch_id,
+        &keep,
     )
-    .bind(branch_id)
-    .bind(&keep)
     .fetch_all(&mut **tx)
     .await?;
     if !removed.is_empty() {
         // Their item routes would point at a section that no longer exists;
         // those items fall back to their category, then the default section.
-        sqlx::query(
+        sqlx::query!(
             "DELETE FROM menu_item_station_routes WHERE branch_id = $1 AND station_id = ANY($2)",
+            branch_id,
+            &removed,
         )
-        .bind(branch_id)
-        .bind(&removed)
         .execute(&mut **tx)
         .await?;
     }
@@ -863,22 +866,30 @@ async fn write_pieces(
     let slot_ids: Vec<Uuid> = plan.devices.iter().map(|d| d.id).collect();
     let printer_ids: Vec<Uuid> = plan.printers.iter().map(|p| p.id).collect();
 
-    sqlx::query("UPDATE branch_device_slots SET device_id = NULL, receipt_printer_id = NULL WHERE branch_id = $1")
-        .bind(branch_id)
+    sqlx::query!(
+        "UPDATE branch_device_slots SET device_id = NULL, receipt_printer_id = NULL WHERE branch_id = $1",
+        branch_id,
+    )
         .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE branch_printers SET host_device_id = NULL WHERE branch_id = $1")
-        .bind(branch_id)
+    sqlx::query!(
+        "UPDATE branch_printers SET host_device_id = NULL WHERE branch_id = $1",
+        branch_id,
+    )
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM branch_printers WHERE branch_id = $1 AND NOT (id = ANY($2))")
-        .bind(branch_id)
-        .bind(&printer_ids)
+    sqlx::query!(
+        "DELETE FROM branch_printers WHERE branch_id = $1 AND NOT (id = ANY($2))",
+        branch_id,
+        &printer_ids,
+    )
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM branch_device_slots WHERE branch_id = $1 AND NOT (id = ANY($2))")
-        .bind(branch_id)
-        .bind(&slot_ids)
+    sqlx::query!(
+        "DELETE FROM branch_device_slots WHERE branch_id = $1 AND NOT (id = ANY($2))",
+        branch_id,
+        &slot_ids,
+    )
         .execute(&mut **tx)
         .await?;
 
@@ -953,9 +964,11 @@ async fn write_pieces(
         .iter()
         .filter(|d| d.receipt_printer_id.is_some())
     {
-        sqlx::query("UPDATE branch_device_slots SET receipt_printer_id = $2 WHERE id = $1")
-            .bind(d.id)
-            .bind(d.receipt_printer_id)
+        sqlx::query!(
+            "UPDATE branch_device_slots SET receipt_printer_id = $2 WHERE id = $1",
+            d.id,
+            d.receipt_printer_id,
+        )
             .execute(&mut **tx)
             .await?;
     }
@@ -972,20 +985,20 @@ async fn write_sections(
     plan: &BranchPlan,
 ) -> Result<(), AppError> {
     let ids: Vec<Uuid> = plan.sections.iter().map(|s| s.id).collect();
-    sqlx::query(
+    sqlx::query!(
         "UPDATE kitchen_stations
             SET is_default = false,
                 name = CASE WHEN id = ANY($2) THEN id::text ELSE name END
           WHERE branch_id = $1 AND deleted_at IS NULL",
+        branch_id,
+        &ids,
     )
-    .bind(branch_id)
-    .bind(&ids)
     .execute(&mut **tx)
     .await?;
 
     for (i, s) in plan.sections.iter().enumerate() {
         // A section restored from an earlier plan comes back from its soft delete.
-        let n = sqlx::query(
+        let n = sqlx::query!(
             "INSERT INTO kitchen_stations
                  (id, org_id, branch_id, name, sort_order, is_default, is_active, canvas_x, canvas_y)
              VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)
@@ -993,15 +1006,15 @@ async fn write_sections(
                  is_default = EXCLUDED.is_default, is_active = true, deleted_at = NULL,
                  canvas_x = EXCLUDED.canvas_x, canvas_y = EXCLUDED.canvas_y, updated_at = now()
              WHERE kitchen_stations.branch_id = EXCLUDED.branch_id",
+            s.id,
+            org_id,
+            branch_id,
+            s.name.trim(),
+            i as i32,
+            s.is_default,
+            s.x,
+            s.y,
         )
-        .bind(s.id)
-        .bind(org_id)
-        .bind(branch_id)
-        .bind(s.name.trim())
-        .bind(i as i32)
-        .bind(s.is_default)
-        .bind(s.x)
-        .bind(s.y)
         .execute(&mut **tx)
         .await?
         .rows_affected();
@@ -1013,40 +1026,46 @@ async fn write_sections(
         }
     }
 
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM kitchen_station_screens WHERE station_id IN
             (SELECT id FROM kitchen_stations WHERE branch_id = $1)",
+        branch_id,
     )
-    .bind(branch_id)
     .execute(&mut **tx)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM kitchen_station_printers WHERE station_id IN
             (SELECT id FROM kitchen_stations WHERE branch_id = $1)",
+        branch_id,
     )
-    .bind(branch_id)
     .execute(&mut **tx)
     .await?;
-    sqlx::query("DELETE FROM category_station_routes WHERE branch_id = $1")
-        .bind(branch_id)
+    sqlx::query!(
+        "DELETE FROM category_station_routes WHERE branch_id = $1",
+        branch_id,
+    )
         .execute(&mut **tx)
         .await?;
 
     let printers: HashMap<Uuid, &PlanPrinter> = plan.printers.iter().map(|p| (p.id, p)).collect();
     for s in &plan.sections {
         for slot in &s.screen_ids {
-            sqlx::query("INSERT INTO kitchen_station_screens (org_id, station_id, slot_id) VALUES ($1, $2, $3)")
-                .bind(org_id)
-                .bind(s.id)
-                .bind(slot)
+            sqlx::query!(
+                "INSERT INTO kitchen_station_screens (org_id, station_id, slot_id) VALUES ($1, $2, $3)",
+                org_id,
+                s.id,
+                slot,
+            )
                 .execute(&mut **tx)
                 .await?;
         }
         for printer in &s.printer_ids {
-            sqlx::query("INSERT INTO kitchen_station_printers (org_id, station_id, printer_id) VALUES ($1, $2, $3)")
-                .bind(org_id)
-                .bind(s.id)
-                .bind(printer)
+            sqlx::query!(
+                "INSERT INTO kitchen_station_printers (org_id, station_id, printer_id) VALUES ($1, $2, $3)",
+                org_id,
+                s.id,
+                printer,
+            )
                 .execute(&mut **tx)
                 .await?;
         }

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO combo_channel_branch_overrides (branch_id, org_id, sell_pos, sell_qr, sell_online, sell_delivery) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (branch_id) DO UPDATE SET sell_pos = EXCLUDED.sell_pos, sell_qr = EXCLUDED.sell_qr, sell_online = EXCLUDED.sell_online, sell_delivery = EXCLUDED.sell_delivery, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90d76cd57b1cd2e3280422c3b39cebea5a94342178802196cd188fc26d0bc9ce"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO deal_rule_branch_overrides (deal_rule_id, branch_id, org_id, is_active) VALUES ($1, $2, $3, $4) ON CONFLICT (deal_rule_id, branch_id) DO UPDATE SET is_active = EXCLUDED.is_active",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a85f1197480f1e3fdfec0342044fbaae6c06b7a36648ab8277e3e81b96627873"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE open_tickets t SET seated_at = o.seated_at FROM table_occupancies o WHERE t.id = $1 AND t.seated_at IS NULL AND o.open_ticket_id = t.id AND o.ended_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3ecbf61db0011965d55d5378eddcf9538704c9f1b0c80d73dd87278f47b23331"
+}

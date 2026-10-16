@@ -68,8 +68,10 @@ pub async fn effective_tz_name<'e, E: PgExecutor<'e>>(
     exec: E,
     branch_id: Uuid,
 ) -> Result<String, AppError> {
-    sqlx::query_scalar::<_, Option<String>>("SELECT effective_timezone($1)")
-        .bind(branch_id)
+    sqlx::query_scalar!(
+        "SELECT effective_timezone($1)",
+        branch_id,
+    )
         .fetch_one(exec)
         .await?
         .ok_or_else(|| AppError::NotFound("Branch not found".into()))
@@ -105,10 +107,10 @@ mod tests {
 
     #[sqlx::test]
     async fn a_branch_zone_overrides_its_orgs(pool: sqlx::PgPool) {
-        let org: Uuid = sqlx::query_scalar(
+        let org: Uuid = sqlx::query_scalar!(
             "INSERT INTO organizations (name, slug, timezone) VALUES ('Tz', $1, 'Europe/London') RETURNING id",
+            format!("tz-{}", Uuid::new_v4()),
         )
-        .bind(format!("tz-{}", Uuid::new_v4()))
         .fetch_one(&pool)
         .await
         .unwrap();

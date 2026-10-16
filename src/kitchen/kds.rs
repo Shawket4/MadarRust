@@ -43,7 +43,7 @@ pub async fn feed(
     check_permission(pool.get_ref(), &claims, "kitchen_orders", "read").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
 
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT kt.id FROM kitchen_tickets kt \
          WHERE kt.branch_id = $1 AND kt.closed_at IS NULL AND kt.status <> 'voided' \
            AND ($2::uuid IS NULL OR EXISTS ( \
@@ -52,9 +52,9 @@ pub async fn feed(
                      AND kti.voided_at IS NULL AND kti.bumped_at IS NULL \
                      AND kti.station_id = $2)) \
          ORDER BY kt.created_at",
+        query.branch_id,
+        query.station_id,
     )
-    .bind(query.branch_id)
-    .bind(query.station_id)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -103,20 +103,20 @@ pub(crate) async fn set_bump_inner(
 
     let mut tx = pool.begin().await?;
     if bumped {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE kitchen_ticket_items SET bumped_at = now(), bumped_by = $2 \
              WHERE id = $1 AND bumped_at IS NULL AND voided_at IS NULL",
+            item_id,
+            actor.teller_id,
         )
-        .bind(item_id)
-        .bind(actor.teller_id)
         .execute(&mut *tx)
         .await?;
     } else {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE kitchen_ticket_items SET bumped_at = NULL, bumped_by = NULL \
              WHERE id = $1 AND voided_at IS NULL",
+            item_id,
         )
-        .bind(item_id)
         .execute(&mut *tx)
         .await?;
     }
@@ -233,12 +233,12 @@ async fn set_bump(
     check_permission(pool.get_ref(), &claims, "kitchen_orders", "update").await?;
 
     // Branch-gate against the line's ticket before mutating.
-    let branch_id: Option<Uuid> = sqlx::query_scalar(
+    let branch_id: Option<Uuid> = sqlx::query_scalar!(
         "SELECT kt.branch_id FROM kitchen_ticket_items kti \
          JOIN kitchen_tickets kt ON kt.id = kti.kitchen_ticket_id \
          WHERE kti.id = $1 AND kti.voided_at IS NULL",
+        item_id,
     )
-    .bind(item_id)
     .fetch_optional(pool.get_ref())
     .await?;
     let Some(branch_id) = branch_id else {

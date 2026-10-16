@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, check_in_method, is_manual, punch_reason, created_by) VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, $12, $10, $11, $8, $9) ON CONFLICT (employee_id, business_date, COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL DO NOTHING RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Uuid",
+        "Text",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7354ff81cf575c74f9d22a08474744f36ce0cb7913b61b031cef23aa79bd82f0"
+}

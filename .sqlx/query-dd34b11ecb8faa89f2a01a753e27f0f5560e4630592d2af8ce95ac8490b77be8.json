@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT mi.id FROM menu_items mi JOIN menu_item_combos c ON c.menu_item_id = mi.id WHERE mi.id = $1 AND mi.org_id = $2 AND mi.kind = 'combo' AND mi.deleted_at IS NULL FOR UPDATE OF mi",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dd34b11ecb8faa89f2a01a753e27f0f5560e4630592d2af8ce95ac8490b77be8"
+}

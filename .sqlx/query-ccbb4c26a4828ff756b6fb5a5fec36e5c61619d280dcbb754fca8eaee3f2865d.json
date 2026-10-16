@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attendance_records SET check_in_latitude = NULL, check_in_longitude = NULL, check_out_latitude = NULL, check_out_longitude = NULL, updated_at = now() WHERE org_id = $1 AND business_date BETWEEN $2 AND $3 AND (check_in_latitude IS NOT NULL OR check_in_longitude IS NOT NULL OR check_out_latitude IS NOT NULL OR check_out_longitude IS NOT NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ccbb4c26a4828ff756b6fb5a5fec36e5c61619d280dcbb754fca8eaee3f2865d"
+}

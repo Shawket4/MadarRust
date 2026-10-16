@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET plan_inactive = false, plan_inactive_at = NULL,\n                        plan_inactive_seen_at = NULL\n                  WHERE org_id = $1 AND plan_inactive\n              RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "583fbfd5ce9f9c386fca3655eb4522d14c8bd30a3ccd70bb0f1fc0998133d15c"
+}

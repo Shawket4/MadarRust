@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE orders SET customer_id = $2 WHERE id = $1 AND customer_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "37c32a8f5ced031d8c478d6fd8171ba93b98887ab4e2a06723df2d896f3268a6"
+}

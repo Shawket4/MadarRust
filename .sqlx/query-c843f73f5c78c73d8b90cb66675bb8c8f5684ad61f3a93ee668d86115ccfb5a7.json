@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT is_cash FROM org_payment_methods WHERE org_id = $1 AND name = $2 AND is_active = true",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_cash",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c843f73f5c78c73d8b90cb66675bb8c8f5684ad61f3a93ee668d86115ccfb5a7"
+}

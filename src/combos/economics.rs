@@ -105,12 +105,12 @@ pub async fn analyse(
         .flat_map(|s| s.choices.iter().filter_map(|c| c.menu_item_id))
         .collect();
     // The item choices that are live, active items.
-    let live: HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+    let live: HashSet<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM menu_items WHERE org_id = $1 AND id = ANY($2) \
             AND kind = 'item' AND deleted_at IS NULL AND is_active",
+        org_id,
+        &item_choices,
     )
-    .bind(org_id)
-    .bind(&item_choices)
     .fetch_all(&mut *conn)
     .await?
     .into_iter()

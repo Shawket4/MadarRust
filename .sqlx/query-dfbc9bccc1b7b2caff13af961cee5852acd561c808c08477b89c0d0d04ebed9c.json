@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customers SET merged_into = $2 WHERE merged_into = $1 AND org_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dfbc9bccc1b7b2caff13af961cee5852acd561c808c08477b89c0d0d04ebed9c"
+}

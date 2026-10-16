@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT suggestion FROM staff_suggestion_events WHERE branch_id = $1 AND source = 'suggestion' AND on_date BETWEEN $2 AND $2 + 6",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "suggestion",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "462e63843c8ee6f287e211697d8be1293e847db4fe3a8547ac07240e44f1f56e"
+}

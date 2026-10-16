@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_roster_changes (org_id, employee_id, on_date) VALUES ($1, $2, $3) ON CONFLICT (employee_id, on_date) DO UPDATE SET changed_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bc064109671aa63fc08e7df0a784941cdeb219b55241b18d716634f1972b9962"
+}

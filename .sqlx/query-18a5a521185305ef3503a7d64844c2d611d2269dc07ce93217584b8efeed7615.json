@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO menu_item_modifier_groups (menu_item_id, group_id, sort) VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "18a5a521185305ef3503a7d64844c2d611d2269dc07ce93217584b8efeed7615"
+}

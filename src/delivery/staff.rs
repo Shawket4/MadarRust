@@ -576,11 +576,11 @@ pub async fn finalize_delivery_order(
     }
 
     // Validate payment method (and snapshot is_cash) against the org's methods.
-    let is_cash: Option<bool> = sqlx::query_scalar(
+    let is_cash: Option<bool> = sqlx::query_scalar!(
         "SELECT is_cash FROM org_payment_methods WHERE org_id = $1 AND name = $2 AND is_active = true",
+        order.org_id,
+        &body.payment_method,
     )
-    .bind(order.org_id)
-    .bind(&body.payment_method)
     .fetch_optional(pool.get_ref())
     .await?;
     let is_cash = is_cash.ok_or_else(|| AppError::BadRequest("Unknown payment method".into()))?;
@@ -629,8 +629,10 @@ pub async fn finalize_delivery_order(
     let mut tx = pool.get_ref().begin().await?;
 
     // Same per-shift advisory lock the POS create path uses (cash TOCTOU).
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
-        .bind(body.till_id.to_string())
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtext($1::text))",
+        body.till_id.to_string(),
+    )
         .execute(&mut *tx)
         .await?;
     let still_open: bool =
@@ -650,8 +652,10 @@ pub async fn finalize_delivery_order(
 
     // Guard against a concurrent finalize having already linked an order.
     let already: Option<Uuid> =
-        sqlx::query_scalar("SELECT order_id FROM delivery_orders WHERE id = $1 FOR UPDATE")
-            .bind(id)
+        sqlx::query_scalar!(
+            "SELECT order_id FROM delivery_orders WHERE id = $1 FOR UPDATE",
+            id,
+        )
             .fetch_one(&mut *tx)
             .await?;
     if already.is_some() {
@@ -706,15 +710,15 @@ pub async fn finalize_delivery_order(
     // a concurrent finalize, but a cancel that landed between this handler's
     // read and its lock must not be overwritten by a `delivered`. Zero rows
     // means the order left the line, and the sale is rolled back with it.
-    let rows = sqlx::query(
+    let rows = sqlx::query!(
         "UPDATE delivery_orders SET status = 'delivered', delivered_at = now(), order_id = $2, \
          payment_method = $3, updated_at = now() \
          WHERE id = $1 AND order_id IS NULL \
            AND status NOT IN ('delivered', 'cancelled', 'rejected')",
+        id,
+        created.id,
+        &body.payment_method,
     )
-    .bind(id)
-    .bind(created.id)
-    .bind(&body.payment_method)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -788,11 +792,11 @@ pub async fn set_prep_time(
         ));
     }
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE delivery_orders SET extra_prep_minutes = $2, updated_at = now() WHERE id = $1",
+        id,
+        body.extra_prep_minutes,
     )
-    .bind(id)
-    .bind(body.extra_prep_minutes)
     .execute(pool.get_ref())
     .await?;
 

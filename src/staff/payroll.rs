@@ -153,12 +153,12 @@ pub(crate) async fn pay_readable(
         Err(e) => return Err(e),
     };
     Ok(Some(
-        sqlx::query_scalar(
+        sqlx::query_scalar!(
             "SELECT DISTINCT employee_id FROM employee_branches \
               WHERE employee_id = ANY($1) AND branch_id = ANY($2)",
+            employees,
+            &at,
         )
-        .bind(employees)
-        .bind(&at)
         .fetch_all(pool)
         .await?,
     ))
@@ -335,19 +335,19 @@ pub(crate) async fn audit<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO payroll_audit_log (org_id, actor_id, action, entity, entity_id, employee_id, \
              period_id, reason, details) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        org_id,
+        actor,
+        action,
+        entity,
+        entity_id,
+        employee_id,
+        period_id,
+        reason,
+        details,
     )
-    .bind(org_id)
-    .bind(actor)
-    .bind(action)
-    .bind(entity)
-    .bind(entity_id)
-    .bind(employee_id)
-    .bind(period_id)
-    .bind(reason)
-    .bind(details)
     .execute(conn)
     .await?;
     Ok(())
@@ -720,18 +720,18 @@ pub async fn override_deduction(
     let mut tx = pool.begin().await?;
     // `original_amount_piastres` is only ever set from the CURRENT amount when it
     // is still NULL, so overriding twice does not lose what the rule first said.
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         "UPDATE payroll_deductions SET \
              original_amount_piastres = COALESCE(original_amount_piastres, amount_piastres), \
              amount_piastres = $3, overridden_at = now(), overridden_by = $4, \
              override_reason = $5, updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND waived_at IS NULL",
+        *id,
+        org_id,
+        body.amount_piastres,
+        claims.user_id_safe().ok(),
+        reason,
     )
-    .bind(*id)
-    .bind(org_id)
-    .bind(body.amount_piastres)
-    .bind(claims.user_id_safe().ok())
-    .bind(reason)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -795,16 +795,16 @@ pub async fn waive_deduction(
     // Deliberately NOT a delete. The row stays so the decision is on the record,
     // and so the nightly sweep sees it and leaves it alone instead of recreating
     // the penalty the manager just forgave.
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         "UPDATE payroll_deductions SET \
              original_amount_piastres = COALESCE(original_amount_piastres, amount_piastres), \
              waived_at = now(), waived_by = $3, waive_reason = $4, updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND waived_at IS NULL",
+        *id,
+        org_id,
+        claims.user_id_safe().ok(),
+        reason,
     )
-    .bind(*id)
-    .bind(org_id)
-    .bind(claims.user_id_safe().ok())
-    .bind(reason)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -877,15 +877,15 @@ pub async fn unwaive_deduction(
     }
     let mut tx = pool.begin().await?;
     // Who took the waiver back, when and why stay on the row (AT-7, AT-10).
-    sqlx::query(
+    sqlx::query!(
         "UPDATE payroll_deductions SET waived_at = NULL, waived_by = NULL, waive_reason = NULL, \
              unwaived_at = now(), unwaived_by = $3, unwaive_reason = $4, \
              updated_at = now() WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+        claims.user_id_safe().ok(),
+        reason,
     )
-    .bind(*id)
-    .bind(org_id)
-    .bind(claims.user_id_safe().ok())
-    .bind(reason)
     .execute(&mut *tx)
     .await?;
     audit(
@@ -984,17 +984,15 @@ pub(crate) async fn insert_advance(
     let installments = body.installments.unwrap_or(1);
     let monthly = installment_of(body.amount_piastres, installments)?;
 
-    let id = sqlx::query_scalar::<_, Uuid>(
+    let id = sqlx::query_scalar!(
         "INSERT INTO salary_advances (org_id, employee_id, amount_piastres, installments, \
                                       monthly_installment_piastres, remaining_piastres, reason) \
          VALUES ($1, $2, $3, $4, $5, $3, $6) RETURNING id",
-    )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(body.amount_piastres)
-    .bind(installments)
-    .bind(monthly)
-    .bind(
+        org_id,
+        employee_id,
+        body.amount_piastres,
+        installments,
+        monthly,
         body.reason
             .as_deref()
             .map(str::trim)
@@ -1249,11 +1247,11 @@ pub async fn set_period_status(
     access::require_everywhere(pool.get_ref(), &claims, org_id, Cap::HrPayrollRun).await?;
 
     let mut tx = pool.begin().await?;
-    let current: String = sqlx::query_scalar(
+    let current: String = sqlx::query_scalar!(
         "SELECT status FROM payroll_periods WHERE id = $1 AND org_id = $2 FOR UPDATE",
+        *id,
+        org_id,
     )
-    .bind(*id)
-    .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| AppError::NotFound("Payroll period not found".into()))?;
@@ -1284,17 +1282,19 @@ pub async fn set_period_status(
                     "Someone has already been paid — this payroll can't be reopened.",
                 ));
             }
-            let dropped = sqlx::query("DELETE FROM payslips WHERE payroll_period_id = $1")
-                .bind(*id)
+            let dropped = sqlx::query!(
+                "DELETE FROM payslips WHERE payroll_period_id = $1",
+                *id,
+            )
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE payroll_periods SET status = 'draft', employee_count = 0, \
                      total_net_piastres = 0, generated_at = NULL, generated_by = NULL, \
                      updated_at = now() WHERE id = $1",
+                *id,
             )
-            .bind(*id)
             .execute(&mut *tx)
             .await?;
             audit(
@@ -1312,11 +1312,11 @@ pub async fn set_period_status(
             .await?;
         }
         ("paid", "closed") => {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE payroll_periods SET status = 'closed', closed_at = now(), updated_at = now() \
                   WHERE id = $1",
+                *id,
             )
-            .bind(*id)
             .execute(&mut *tx)
             .await?;
             audit(
@@ -1421,9 +1421,11 @@ pub async fn delete_period(
         json!({ "name": name }),
     )
     .await?;
-    sqlx::query("DELETE FROM payroll_periods WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    sqlx::query!(
+        "DELETE FROM payroll_periods WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -1533,8 +1535,10 @@ async fn rules_by_branch(
     org_id: Uuid,
 ) -> Result<HashMap<Option<Uuid>, AttendanceSettings>, AppError> {
     let branches: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL")
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL",
+            org_id,
+        )
             .fetch_all(&mut *conn)
             .await?;
     let mut out = HashMap::new();
@@ -2225,17 +2229,17 @@ pub async fn generate_period(
         // trigger derives `remaining_piastres`; deleting the payslip later
         // deletes these rows and the money comes back (AV-6).
         for (advance_id, take) in &slip.advance_applications {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO salary_advance_collections \
                      (org_id, advance_id, payslip_id, period_id, employee_id, amount_piastres) \
                  VALUES ($1, $2, $3, $4, $5, $6)",
+                org_id,
+                advance_id,
+                payslip_id,
+                *id,
+                slip.employee_id,
+                take,
             )
-            .bind(org_id)
-            .bind(advance_id)
-            .bind(payslip_id)
-            .bind(*id)
-            .bind(slip.employee_id)
-            .bind(take)
             .execute(&mut *tx)
             .await?;
         }
@@ -2244,15 +2248,15 @@ pub async fn generate_period(
         grand_total = grand_total.saturating_add(slip.net_piastres);
     }
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE payroll_periods SET status = 'generated', employee_count = $2, \
              total_net_piastres = $3, generated_at = now(), generated_by = $4, updated_at = now() \
           WHERE id = $1",
+        *id,
+        employee_count,
+        grand_total,
+        actor,
     )
-    .bind(*id)
-    .bind(employee_count)
-    .bind(grand_total)
-    .bind(actor)
     .execute(&mut *tx)
     .await?;
     // Nothing to pay anyone? Then everyone is "paid" and the month is Paid.
@@ -2294,13 +2298,13 @@ pub(crate) async fn settle_period_if_all_paid(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     period_id: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE payroll_periods SET status = 'paid', paid_at = now(), updated_at = now() \
           WHERE id = $1 AND status = 'generated' \
             AND EXISTS (SELECT 1 FROM payslips WHERE payroll_period_id = $1) \
             AND NOT EXISTS (SELECT 1 FROM payslips WHERE payroll_period_id = $1 AND paid_at IS NULL)",
+        period_id,
     )
-    .bind(period_id)
     .execute(&mut **tx)
     .await?;
     Ok(())

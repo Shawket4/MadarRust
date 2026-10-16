@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM loyalty_pass_cache WHERE customer_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dadf81316f9c209bcb3889615252b992366d6fbc2d6f1951002fd622d8d4e2b9"
+}

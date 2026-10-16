@@ -619,16 +619,16 @@ pub async fn put_settings(
     // number, and rewriting it to a default would be a worse surprise than
     // carrying it across. It is also exactly what the dashboard has been
     // displaying since the mode changed.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE loyalty_reward_items SET cost_currency = $3 \
           WHERE org_id = $1 \
             AND COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid) \
               = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid) \
             AND cost_currency <> $3",
+        org_id,
+        incoming.branch_id,
+        row.mode.as_str(),
     )
-    .bind(org_id)
-    .bind(incoming.branch_id)
-    .bind(row.mode.as_str())
     .execute(pool.get_ref())
     .await?;
 
@@ -657,9 +657,11 @@ pub async fn delete_settings(
         AppError::BadRequest("branch_id is required: only a branch override may be removed".into())
     })?;
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
-    sqlx::query("DELETE FROM loyalty_settings WHERE org_id = $1 AND branch_id = $2")
-        .bind(org_id)
-        .bind(branch_id)
+    sqlx::query!(
+        "DELETE FROM loyalty_settings WHERE org_id = $1 AND branch_id = $2",
+        org_id,
+        branch_id,
+    )
         .execute(pool.get_ref())
         .await?;
     crate::loyalty::wallet::store::purge_org(pool.get_ref(), org_id).await;
@@ -945,27 +947,27 @@ pub async fn put_reward_items(
     // Replace the scope's list in one transaction so a failure never leaves a
     // half-written catalogue an admin would have to notice and repair.
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM loyalty_reward_items WHERE org_id = $1 \
            AND COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid) \
              = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)",
+        org_id,
+        incoming.branch_id,
     )
-    .bind(org_id)
-    .bind(incoming.branch_id)
     .execute(&mut *tx)
     .await?;
     for (i, item) in incoming.items.iter().enumerate() {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO loyalty_reward_items \
                 (org_id, branch_id, menu_item_id, cost_currency, cost_amount, sort_order) \
              VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
+            org_id,
+            incoming.branch_id,
+            item.menu_item_id,
+            item.cost_currency.as_deref().unwrap_or(&scope.mode),
+            item.cost_amount.unwrap_or(scope.default_reward_cost),
+            i as i32,
         )
-        .bind(org_id)
-        .bind(incoming.branch_id)
-        .bind(item.menu_item_id)
-        .bind(item.cost_currency.as_deref().unwrap_or(&scope.mode))
-        .bind(item.cost_amount.unwrap_or(scope.default_reward_cost))
-        .bind(i as i32)
         .execute(&mut *tx)
         .await?;
     }
@@ -1206,24 +1208,24 @@ pub async fn put_earning_items(
     // One transaction, like the catalogue: a half-written list would be a list
     // whose emptiness means something, which is the worst thing to leave behind.
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM loyalty_earning_items WHERE org_id = $1 \
            AND COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid) \
              = COALESCE($2::uuid, '00000000-0000-0000-0000-000000000000'::uuid)",
+        org_id,
+        incoming.branch_id,
     )
-    .bind(org_id)
-    .bind(incoming.branch_id)
     .execute(&mut *tx)
     .await?;
     for (i, id) in distinct.iter().enumerate() {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO loyalty_earning_items (org_id, branch_id, menu_item_id, sort_order) \
              VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+            org_id,
+            incoming.branch_id,
+            id,
+            i as i32,
         )
-        .bind(org_id)
-        .bind(incoming.branch_id)
-        .bind(id)
-        .bind(i as i32)
         .execute(&mut *tx)
         .await?;
     }

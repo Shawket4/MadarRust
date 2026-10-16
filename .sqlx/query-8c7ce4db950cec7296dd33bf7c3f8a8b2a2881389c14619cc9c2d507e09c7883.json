@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE delivery_otp SET consumed_at = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8c7ce4db950cec7296dd33bf7c3f8a8b2a2881389c14619cc9c2d507e09c7883"
+}

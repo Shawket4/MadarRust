@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attendance_flags SET resolution = $3, resolved_by = $2, resolved_at = now() WHERE attendance_record_id = $1 AND kind = 'cover' AND resolution IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "00c91d7ceac04a4ba91c1c38ec5da3444f4652801ed24f3eb2419d59be2a96b2"
+}

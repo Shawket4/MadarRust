@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE employees SET employment_status = 'terminated', app_access = false, termination_date = GREATEST(CURRENT_DATE, COALESCE(hire_date, CURRENT_DATE)), updated_at = now() WHERE id = $1 AND org_id = $2 AND employment_status <> 'terminated'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "24fbe6eb7dd9052485f56f860d37934061ce269e36a06d566d6b0e7adabca368"
+}

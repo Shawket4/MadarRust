@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_devices SET revoked_at = now() WHERE id = $1 AND employee_id = $2 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "199e32aada59effc860fad86e27b1cd14f6f0f66443d627bb2f1e1e26bbdb632"
+}

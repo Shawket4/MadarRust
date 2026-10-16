@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO user_branch_assignments (user_id, branch_id, assigned_by)\n        VALUES ($1, $2, $3)\n        ON CONFLICT DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f7c82371c1d5e4ace5399693ab7507a79e0b483b70c4265f0c8c662bfd1af03f"
+}

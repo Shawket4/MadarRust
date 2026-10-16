@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT phone_canonical($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "phone_canonical",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "77df93ea209afff318ae9b9a05d9d1dceb492e6ff22468722ea2934a2006b3d1"
+}

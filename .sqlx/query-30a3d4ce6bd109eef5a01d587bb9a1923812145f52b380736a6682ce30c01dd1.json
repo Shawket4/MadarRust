@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE open_tickets SET customer_name = NULL, updated_at = now()\n          WHERE customer_id = ANY($1) AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "30a3d4ce6bd109eef5a01d587bb9a1923812145f52b380736a6682ce30c01dd1"
+}

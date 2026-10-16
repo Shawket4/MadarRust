@@ -414,11 +414,11 @@ pub async fn create_credential(
     // The branch must belong to the scoped org. Under RLS this SELECT can only
     // see the caller's own branches anyway; the explicit check turns a
     // cross-org id into a clean 404 instead of a foreign-key error.
-    let branch_name: String = sqlx::query_scalar(
+    let branch_name: String = sqlx::query_scalar!(
         "SELECT name FROM branches WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL",
+        body.branch_id,
+        org_id,
     )
-    .bind(body.branch_id)
-    .bind(org_id)
     .fetch_optional(db.get_ref())
     .await?
     .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -577,13 +577,13 @@ pub async fn revoke_credential(
 
     // Soft revocation: the row survives as the record of who held access.
     // Idempotent — re-revoking an already-revoked credential still succeeds.
-    let affected = sqlx::query(
+    let affected = sqlx::query!(
         "UPDATE integration_credentials
             SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
           WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
     )
-    .bind(*id)
-    .bind(org_id)
     .execute(db.get_ref())
     .await?
     .rows_affected();

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE deal_rules SET name = $2, name_translations = $3, kind = $4, qty = $5, price = $6, get_qty = $7, get_percent = $8, max_per_order = $9, sort = $10, is_active = $11, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Text",
+        "Int2",
+        "Int4",
+        "Int2",
+        "Int2",
+        "Int2",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "672d7286e81abc08b823b83080331c1bd0a795ec240bcadb09c94a4a3f88e598"
+}

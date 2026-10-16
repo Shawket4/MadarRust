@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payroll_deductions SET waived_at = NULL, waived_by = NULL, waive_reason = NULL, unwaived_at = now(), unwaived_by = $3, unwaive_reason = $4, updated_at = now() WHERE id = $1 AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aea7428ac35640376c8eca1fde3a19025d1cdbd27fd7d5f71552873f4fd39c0b"
+}

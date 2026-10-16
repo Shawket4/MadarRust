@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payroll_deductions SET original_amount_piastres = COALESCE(original_amount_piastres, amount_piastres), waived_at = now(), waived_by = $3, waive_reason = $4, updated_at = now() WHERE id = $1 AND org_id = $2 AND waived_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "594f6afbcdf6de25b54b7ba1dcebe292842a6d1eb715b17e86bc67edd10a0cd7"
+}

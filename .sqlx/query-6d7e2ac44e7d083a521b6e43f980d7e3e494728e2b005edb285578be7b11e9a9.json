@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE menu_item_sizes SET price = $2 WHERE menu_item_id = $1 AND label = 'one_size'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6d7e2ac44e7d083a521b6e43f980d7e3e494728e2b005edb285578be7b11e9a9"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT csr.station_id FROM category_station_routes csr JOIN menu_items mi ON mi.category_id = csr.category_id JOIN kitchen_stations ks ON ks.id = csr.station_id AND ks.deleted_at IS NULL AND ks.is_active WHERE csr.branch_id = $1 AND mi.id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "station_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3a10cf3ddb5f3940adc944a8d191aa2dc7037bc682baf92921f4de3d5fda00ec"
+}

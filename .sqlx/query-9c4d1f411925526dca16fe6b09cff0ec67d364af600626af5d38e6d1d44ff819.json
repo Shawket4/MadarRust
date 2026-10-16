@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM table_transfer_requests WHERE occupant_kind = $1 AND occupant_id = $2 AND status = 'waiting'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9c4d1f411925526dca16fe6b09cff0ec67d364af600626af5d38e6d1d44ff819"
+}

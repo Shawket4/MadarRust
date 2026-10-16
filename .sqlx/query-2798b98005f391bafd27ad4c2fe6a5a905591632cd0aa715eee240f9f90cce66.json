@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE branch_device_slots SET device_id = NULL, receipt_printer_id = NULL WHERE branch_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2798b98005f391bafd27ad4c2fe6a5a905591632cd0aa715eee240f9f90cce66"
+}

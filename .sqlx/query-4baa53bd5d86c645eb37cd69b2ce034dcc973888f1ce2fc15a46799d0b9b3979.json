@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO order_ref_counters (branch_id, business_date, last_seq)\n         SELECT o.branch_id,\n                (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date,\n                count(*)\n         FROM orders o JOIN branches b ON b.id = o.branch_id\n           JOIN organizations bo ON bo.id = b.org_id\n         WHERE ($1::uuid IS NULL OR b.org_id   = $1)\n           AND ($2::uuid IS NULL OR o.branch_id = $2)\n         GROUP BY o.branch_id, (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date\n         ON CONFLICT (branch_id, business_date)\n         DO UPDATE SET last_seq = GREATEST(order_ref_counters.last_seq, EXCLUDED.last_seq)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4baa53bd5d86c645eb37cd69b2ce034dcc973888f1ce2fc15a46799d0b9b3979"
+}

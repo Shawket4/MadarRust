@@ -622,8 +622,10 @@ async fn prior_pricing_outcomes(
     }
 
     let org_branches: Vec<Uuid> = if rows.iter().any(|r| r.branch_id.is_none()) {
-        sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1")
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT id FROM branches WHERE org_id = $1",
+            org_id,
+        )
             .fetch_all(pool)
             .await?
     } else {
@@ -1649,8 +1651,10 @@ pub async fn create_decision(
     let branch_ids: Vec<Uuid> = match b.branch_id {
         Some(br) => vec![br],
         None => {
-            sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1")
-                .bind(query.org_id)
+            sqlx::query_scalar!(
+                "SELECT id FROM branches WHERE org_id = $1",
+                query.org_id,
+            )
                 .fetch_all(pool.get_ref())
                 .await?
         }
@@ -1666,26 +1670,28 @@ pub async fn create_decision(
     )
     .await?;
 
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO menu_decisions \
              (org_id, branch_id, menu_item_id, size_label, signal_kind, action, \
               detail, baseline, created_by) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+        query.org_id,
+        b.branch_id,
+        b.menu_item_id,
+        &b.size_label,
+        &b.signal_kind,
+        &b.action,
+        &b.detail,
+        &baseline,
+        claims.user_id_safe()?,
     )
-    .bind(query.org_id)
-    .bind(b.branch_id)
-    .bind(b.menu_item_id)
-    .bind(&b.size_label)
-    .bind(&b.signal_kind)
-    .bind(&b.action)
-    .bind(&b.detail)
-    .bind(&baseline)
-    .bind(claims.user_id_safe()?)
     .fetch_one(pool.get_ref())
     .await?;
 
-    let item_name: String = sqlx::query_scalar("SELECT name FROM menu_items WHERE id = $1")
-        .bind(b.menu_item_id)
+    let item_name: String = sqlx::query_scalar!(
+        "SELECT name FROM menu_items WHERE id = $1",
+        b.menu_item_id,
+    )
         .fetch_one(pool.get_ref())
         .await?;
 
@@ -1755,8 +1761,10 @@ pub async fn list_decisions(
     .fetch_all(pool.get_ref())
     .await?;
 
-    let org_branches: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM branches WHERE org_id = $1")
-        .bind(query.org_id)
+    let org_branches: Vec<Uuid> = sqlx::query_scalar!(
+        "SELECT id FROM branches WHERE org_id = $1",
+        query.org_id,
+    )
         .fetch_all(pool.get_ref())
         .await?;
 

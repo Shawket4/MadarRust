@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT branch_id FROM attendance_records WHERE employee_id = $1 AND business_date = $2 ORDER BY covered_employee_id IS NOT NULL, check_in_at NULLS LAST LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "70a7d36b2d4f1b5e2c81227a216985413baa5bd4d40287de81d73508f7e82c6d"
+}

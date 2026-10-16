@@ -133,12 +133,12 @@ pub async fn complete_onboarding(
         )));
     }
 
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         "UPDATE organizations
          SET onboarding_completed_at = COALESCE(onboarding_completed_at, now())
          WHERE id = $1",
+        org_id,
     )
-    .bind(org_id)
     .execute(pool.get_ref())
     .await?;
     if updated.rows_affected() == 0 {

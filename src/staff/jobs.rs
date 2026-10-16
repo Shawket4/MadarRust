@@ -339,7 +339,7 @@ pub async fn precompute_suggestions(pool: &PgPool) -> Result<(), AppError> {
             tracing::warn!(%branch_id, "suggestion precompute failed: {e}");
         }
     }
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM staff_suggestion_events WHERE created_at < now() - INTERVAL '24 months'",
     )
     .execute(pool)
@@ -413,8 +413,10 @@ async fn close_forgotten(pool: &PgPool, row: &OpenRecord) -> Result<(), AppError
         .num_minutes()
         .max(0);
     // Late minutes were settled at check-in; only the closing figures move.
-    let late: i32 = sqlx::query_scalar("SELECT late_minutes FROM attendance_records WHERE id = $1")
-        .bind(row.id)
+    let late: i32 = sqlx::query_scalar!(
+        "SELECT late_minutes FROM attendance_records WHERE id = $1",
+        row.id,
+    )
         .fetch_one(pool)
         .await?;
     // These rows all have a check-in by definition (that is what makes them
@@ -427,7 +429,7 @@ async fn close_forgotten(pool: &PgPool, row: &OpenRecord) -> Result<(), AppError
         late as i64,
     );
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE attendance_records SET \
                  check_out_at = $4, check_out_method = 'auto', \
                  worked_minutes = $2, overtime_minutes = 0, early_leave_minutes = 0, \
@@ -435,11 +437,11 @@ async fn close_forgotten(pool: &PgPool, row: &OpenRecord) -> Result<(), AppError
                  edit_reason = COALESCE(edit_reason, 'Auto-closed: no checkout recorded'), \
                  updated_at = now() \
                WHERE id = $1 AND check_out_at IS NULL",
+        row.id,
+        worked as i32,
+        status.as_str(),
+        close_at,
     )
-    .bind(row.id)
-    .bind(worked as i32)
-    .bind(status.as_str())
-    .bind(close_at)
     .execute(pool)
     .await?;
     // A cover is never late or a half day (CV-7, E2E B-TEAM-5).
@@ -489,17 +491,17 @@ pub async fn close_unrostered(pool: &PgPool) -> Result<(), AppError> {
     .await?;
     for (id, org_id, check_in, close_at) in rows {
         let worked = (close_at - check_in).num_minutes().max(0) as i32;
-        if let Err(e) = sqlx::query(
+        if let Err(e) = sqlx::query!(
             "UPDATE attendance_records SET \
                  check_out_at = $2, check_out_method = 'auto', \
                  worked_minutes = $3, overtime_minutes = 0, early_leave_minutes = 0, \
                  edit_reason = COALESCE(edit_reason, 'Auto-closed: no checkout recorded'), \
                  updated_at = now() \
                WHERE id = $1 AND check_out_at IS NULL",
+            id,
+            close_at,
+            worked,
         )
-        .bind(id)
-        .bind(close_at)
-        .bind(worked)
         .execute(pool)
         .await
         {
@@ -632,7 +634,7 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
                 continue;
             }
         };
-        if let Err(e) = sqlx::query(
+        if let Err(e) = sqlx::query!(
             "INSERT INTO attendance_records \
                  (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
                   scheduled_start_at, scheduled_end_at, is_manual, edit_reason) \
@@ -640,15 +642,15 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
              ON CONFLICT (employee_id, business_date, \
                           COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL \
              DO NOTHING",
+            row.org_id,
+            row.employee_id,
+            row.branch_id,
+            row.work_shift_id,
+            row.business_date,
+            if on_leave { "on_leave" } else { "absent" },
+            row.scheduled_start_at,
+            row.scheduled_end_at,
         )
-        .bind(row.org_id)
-        .bind(row.employee_id)
-        .bind(row.branch_id)
-        .bind(row.work_shift_id)
-        .bind(row.business_date)
-        .bind(if on_leave { "on_leave" } else { "absent" })
-        .bind(row.scheduled_start_at)
-        .bind(row.scheduled_end_at)
         .execute(pool)
         .await
         {

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE delivery_orders SET customer_name = '', customer_phone = '',\n                place_name = NULL, floor = NULL, unit_number = NULL, landmark = NULL,\n                address_line = NULL, delivery_notes = NULL,\n                customer_lat = NULL, customer_lng = NULL, updated_at = now()\n          WHERE customer_id = ANY($1) AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0d2e67289d0b748fa138f5016f375b7153b6f55c8b379a736c17187394beb456"
+}

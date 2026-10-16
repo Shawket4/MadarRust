@@ -425,15 +425,15 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
         && let Some(url) = row.logo_url.as_deref()
         && let Some(p) = read_logo(url).and_then(|img| palette_from_image(&img))
     {
-        let _ = sqlx::query(
+        let _ = sqlx::query!(
             "UPDATE organizations \
                 SET brand_background = $2, brand_foreground = $3, brand_accent = $4 \
               WHERE id = $1 AND brand_background IS NULL",
+            org_id,
+            &p.background,
+            &p.foreground,
+            &p.accent,
         )
-        .bind(org_id)
-        .bind(&p.background)
-        .bind(&p.foreground)
-        .bind(&p.accent)
         .execute(pool)
         .await;
         row.brand_background = Some(p.background);
@@ -448,9 +448,11 @@ pub async fn load(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<OrgBrand, s
         (Some(known), _) => known,
         (None, Some(url)) => {
             let mark = read_logo(url).map(|img| is_mark(&img)).unwrap_or(false);
-            let _ = sqlx::query("UPDATE organizations SET brand_logo_is_mark = $2 WHERE id = $1")
-                .bind(org_id)
-                .bind(mark)
+            let _ = sqlx::query!(
+                "UPDATE organizations SET brand_logo_is_mark = $2 WHERE id = $1",
+                org_id,
+                mark,
+            )
                 .execute(pool)
                 .await;
             mark

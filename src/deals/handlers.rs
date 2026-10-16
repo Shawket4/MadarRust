@@ -59,11 +59,11 @@ async fn validate_pool(
     {
         return Err(invalid(field));
     }
-    let known: HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+    let known: HashSet<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM categories WHERE org_id = $1 AND id = ANY($2) AND deleted_at IS NULL",
+        org,
+        &cats,
     )
-    .bind(org)
-    .bind(&cats)
     .fetch_all(&mut *conn)
     .await?
     .into_iter()
@@ -129,23 +129,25 @@ async fn write_children(
     id: Uuid,
     b: &DealWrite,
 ) -> Result<(), AppError> {
-    sqlx::query("DELETE FROM deal_rule_items WHERE deal_rule_id = $1")
-        .bind(id)
+    sqlx::query!(
+        "DELETE FROM deal_rule_items WHERE deal_rule_id = $1",
+        id,
+    )
         .execute(&mut *conn)
         .await?;
     for (role, pool) in [("pool", &b.pool), ("reward", &b.reward_pool)] {
         for (i, e) in pool.iter().enumerate() {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO deal_rule_items (org_id, deal_rule_id, role, menu_item_id, category_id, size_label, sort) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                org,
+                id,
+                role,
+                e.menu_item_id,
+                e.category_id,
+                e.size_label.as_deref(),
+                i as i32,
             )
-            .bind(org)
-            .bind(id)
-            .bind(role)
-            .bind(e.menu_item_id)
-            .bind(e.category_id)
-            .bind(e.size_label.as_deref())
-            .bind(i as i32)
             .execute(&mut *conn)
             .await?;
         }
@@ -219,22 +221,22 @@ pub async fn create_deal(
     let org = claims_org(&claims)?;
     let mut tx = pool.begin().await?;
     validate(&mut tx, org, &body).await?;
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO deal_rules (org_id, name, name_translations, kind, qty, price, get_qty, get_percent, \
                                  max_per_order, sort, is_active) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
+        org,
+        body.name.trim(),
+        &body.name_translations,
+        &body.kind,
+        body.qty,
+        body.price,
+        body.get_qty,
+        body.get_percent,
+        body.max_per_order,
+        body.sort,
+        body.is_active,
     )
-    .bind(org)
-    .bind(body.name.trim())
-    .bind(&body.name_translations)
-    .bind(&body.kind)
-    .bind(body.qty)
-    .bind(body.price)
-    .bind(body.get_qty)
-    .bind(body.get_percent)
-    .bind(body.max_per_order)
-    .bind(body.sort)
-    .bind(body.is_active)
     .fetch_one(&mut *tx)
     .await?;
     write_children(&mut tx, org, id, &body).await?;
@@ -265,23 +267,23 @@ pub async fn update_deal(
     let mut tx = pool.begin().await?;
     live_deal(&mut tx, org, id).await?;
     validate(&mut tx, org, &body).await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE deal_rules SET name = $2, name_translations = $3, kind = $4, qty = $5, price = $6, \
                 get_qty = $7, get_percent = $8, max_per_order = $9, sort = $10, is_active = $11, \
                 updated_at = now() \
           WHERE id = $1",
+        id,
+        body.name.trim(),
+        &body.name_translations,
+        &body.kind,
+        body.qty,
+        body.price,
+        body.get_qty,
+        body.get_percent,
+        body.max_per_order,
+        body.sort,
+        body.is_active,
     )
-    .bind(id)
-    .bind(body.name.trim())
-    .bind(&body.name_translations)
-    .bind(&body.kind)
-    .bind(body.qty)
-    .bind(body.price)
-    .bind(body.get_qty)
-    .bind(body.get_percent)
-    .bind(body.max_per_order)
-    .bind(body.sort)
-    .bind(body.is_active)
     .execute(&mut *tx)
     .await?;
     write_children(&mut tx, org, id, &body).await?;
@@ -306,12 +308,12 @@ pub async fn delete_deal(
     let claims = extract_claims(&req)?;
     require(pool.get_ref(), &claims, Cap::MenuDealsEdit, None).await?;
     let org = claims_org(&claims)?;
-    let done = sqlx::query(
+    let done = sqlx::query!(
         "UPDATE deal_rules SET deleted_at = now(), updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL",
+        *id,
+        org,
     )
-    .bind(*id)
-    .bind(org)
     .execute(pool.get_ref())
     .await?;
     if done.rows_affected() == 0 {
@@ -351,19 +353,21 @@ pub async fn put_deal_branch(
     if !branch_ok {
         return Err(AppError::NotFound("Branch not found".into()));
     }
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO deal_rule_branch_overrides (deal_rule_id, branch_id, org_id, is_active) \
          VALUES ($1, $2, $3, $4) \
          ON CONFLICT (deal_rule_id, branch_id) DO UPDATE SET is_active = EXCLUDED.is_active",
+        id,
+        branch_id,
+        org,
+        body.is_active,
     )
-    .bind(id)
-    .bind(branch_id)
-    .bind(org)
-    .bind(body.is_active)
     .execute(&mut *conn)
     .await?;
-    sqlx::query("UPDATE deal_rules SET updated_at = now() WHERE id = $1")
-        .bind(id)
+    sqlx::query!(
+        "UPDATE deal_rules SET updated_at = now() WHERE id = $1",
+        id,
+    )
         .execute(&mut *conn)
         .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -388,15 +392,17 @@ pub async fn delete_deal_branch(
     let org = claims_org(&claims)?;
     let mut conn = pool.acquire().await?;
     live_deal(&mut conn, org, id).await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM deal_rule_branch_overrides WHERE deal_rule_id = $1 AND branch_id = $2",
+        id,
+        branch_id,
     )
-    .bind(id)
-    .bind(branch_id)
     .execute(&mut *conn)
     .await?;
-    sqlx::query("UPDATE deal_rules SET updated_at = now() WHERE id = $1")
-        .bind(id)
+    sqlx::query!(
+        "UPDATE deal_rules SET updated_at = now() WHERE id = $1",
+        id,
+    )
         .execute(&mut *conn)
         .await?;
     Ok(HttpResponse::NoContent().finish())

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT e.employment_status FROM employees e JOIN organizations o ON o.id = e.org_id WHERE e.phone_key = $1 AND e.app_access AND 'dawam' = ANY(o.modules) ORDER BY e.updated_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "employment_status",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3c4f448dc9cb67ef2299472858edebd1eef4076b90b9f3b8977b3a4de0e13b94"
+}

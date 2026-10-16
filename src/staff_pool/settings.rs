@@ -296,9 +296,11 @@ pub async fn delete_settings(
         AppError::BadRequest("Name the branch whose override you want to remove".into())
     })?;
     require_branch_access(pool.get_ref(), &claims, branch_id).await?;
-    sqlx::query("DELETE FROM staff_pool_settings WHERE org_id = $1 AND branch_id = $2")
-        .bind(org_id)
-        .bind(branch_id)
+    sqlx::query!(
+        "DELETE FROM staff_pool_settings WHERE org_id = $1 AND branch_id = $2",
+        org_id,
+        branch_id,
+    )
         .execute(pool.get_ref())
         .await?;
     Ok(HttpResponse::NoContent().finish())

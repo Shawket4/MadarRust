@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO catalog_revision (org_id, revision) VALUES ($1, 1) ON CONFLICT (org_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c3d36574b622d89c1a8a961e23ceea0f447ecb034c2862b6e3746036ac83fa65"
+}

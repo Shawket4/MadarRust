@@ -97,9 +97,11 @@ pub async fn run_tick(pool: &PgPool) -> Result<Repointed, AppError> {
         let mut tx = pool.begin().await?;
         // The survivor at the END of the chain, so one move is enough however
         // many merges deep the duplicate is. A broken chain moves nothing.
-        let into: Option<Uuid> = sqlx::query_scalar("SELECT customers_resolve($1, $2)")
-            .bind(org)
-            .bind(from)
+        let into: Option<Uuid> = sqlx::query_scalar!(
+            "SELECT customers_resolve($1, $2)",
+            org,
+            from,
+        )
             .fetch_one(&mut *tx)
             .await?;
         let Some(into) = into.filter(|i| *i != from) else {

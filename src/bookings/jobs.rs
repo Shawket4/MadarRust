@@ -65,7 +65,7 @@ pub async fn run_tick(pool: &PgPool, hub: &BranchEventHub) -> Result<(), crate::
 }
 
 async fn send_reminders(pool: &PgPool) -> Result<(), crate::errors::AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "UPDATE bookings b SET reminder_sent_at = now(), updated_at = now() \
          FROM branch_booking_settings s \
          WHERE s.branch_id = b.branch_id AND s.reminder_lead_minutes IS NOT NULL \
@@ -149,7 +149,7 @@ async fn complete_finished(
     pool: &PgPool,
     hub: &BranchEventHub,
 ) -> Result<(), crate::errors::AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() \
          WHERE b.status = 'seated' AND b.ends_at + interval '60 minutes' < now() \
            AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \

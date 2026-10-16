@@ -229,8 +229,10 @@ pub async fn delete_discount(
     let existing = fetch_or_404(pool.get_ref(), *id).await?;
     require_org_access(&claims, existing.org_id)?;
 
-    sqlx::query("DELETE FROM discounts WHERE id = $1")
-        .bind(*id)
+    sqlx::query!(
+        "DELETE FROM discounts WHERE id = $1",
+        *id,
+    )
         .execute(pool.get_ref())
         .await?;
 

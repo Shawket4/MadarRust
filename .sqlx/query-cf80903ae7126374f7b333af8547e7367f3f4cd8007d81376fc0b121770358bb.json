@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_branch_assignments (user_id, branch_id)\n         SELECT $1, $2 WHERE NOT EXISTS\n           (SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf80903ae7126374f7b333af8547e7367f3f4cd8007d81376fc0b121770358bb"
+}

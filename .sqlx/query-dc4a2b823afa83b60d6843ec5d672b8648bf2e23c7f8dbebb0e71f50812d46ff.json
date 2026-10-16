@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attendance_records SET cover_status = $2, edited_by = $3 WHERE id = $1 AND cover_status = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dc4a2b823afa83b60d6843ec5d672b8648bf2e23c7f8dbebb0e71f50812d46ff"
+}

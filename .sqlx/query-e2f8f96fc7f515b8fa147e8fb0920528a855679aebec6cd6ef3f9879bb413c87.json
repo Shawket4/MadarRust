@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT price_override FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2 AND size_label::text = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "price_override",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e2f8f96fc7f515b8fa147e8fb0920528a855679aebec6cd6ef3f9879bb413c87"
+}

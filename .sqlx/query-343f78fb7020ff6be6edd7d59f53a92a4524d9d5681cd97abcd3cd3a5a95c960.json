@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE branch_printers SET host_device_id = NULL WHERE branch_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "343f78fb7020ff6be6edd7d59f53a92a4524d9d5681cd97abcd3cd3a5a95c960"
+}

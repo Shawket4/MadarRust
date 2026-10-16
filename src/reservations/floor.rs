@@ -309,12 +309,12 @@ async fn stale_layout_error(
     branch_id: Uuid,
     stale: &[Uuid],
 ) -> crate::errors::AppError {
-    let labels: Vec<String> = sqlx::query_scalar(
+    let labels: Vec<String> = sqlx::query_scalar!(
         "SELECT label FROM branch_tables \
          WHERE branch_id = $1 AND id = ANY($2) ORDER BY lower(label)",
+        branch_id,
+        stale,
     )
-    .bind(branch_id)
-    .bind(stale)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -398,8 +398,10 @@ pub async fn update_section(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "floor_plan", "update").await?;
 
-    let branch_id: Uuid = sqlx::query_scalar("SELECT branch_id FROM floor_sections WHERE id = $1")
-        .bind(*id)
+    let branch_id: Uuid = sqlx::query_scalar!(
+        "SELECT branch_id FROM floor_sections WHERE id = $1",
+        *id,
+    )
         .fetch_optional(pool.get_ref())
         .await?
         .ok_or_else(|| AppError::NotFound("Section not found".into()))?;
@@ -447,8 +449,10 @@ pub async fn delete_section(
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "floor_plan", "delete").await?;
 
-    let branch_id: Uuid = sqlx::query_scalar("SELECT branch_id FROM floor_sections WHERE id = $1")
-        .bind(*id)
+    let branch_id: Uuid = sqlx::query_scalar!(
+        "SELECT branch_id FROM floor_sections WHERE id = $1",
+        *id,
+    )
         .fetch_optional(pool.get_ref())
         .await?
         .ok_or_else(|| AppError::NotFound("Section not found".into()))?;
@@ -456,8 +460,10 @@ pub async fn delete_section(
 
     // Tables in the section keep existing (section_id → NULL via FK) so we never
     // orphan an occupied table by deleting its section.
-    sqlx::query("DELETE FROM floor_sections WHERE id = $1")
-        .bind(*id)
+    sqlx::query!(
+        "DELETE FROM floor_sections WHERE id = $1",
+        *id,
+    )
         .execute(pool.get_ref())
         .await?;
     publish_layout_changed(hub.get_ref(), branch_id);
@@ -632,8 +638,10 @@ pub async fn delete_table(
         ));
     }
 
-    sqlx::query("DELETE FROM branch_tables WHERE id = $1")
-        .bind(*id)
+    sqlx::query!(
+        "DELETE FROM branch_tables WHERE id = $1",
+        *id,
+    )
         .execute(pool.get_ref())
         .await?;
     publish_layout_changed(hub.get_ref(), branch_id);
@@ -665,22 +673,22 @@ pub async fn save_layout(
         // Scoped to the branch so a forged id can't move another branch's table.
         // The `expected_updated_at` clause is what makes an autosaving client
         // safe: no match means someone else wrote this row first.
-        let affected = sqlx::query(
+        let affected = sqlx::query!(
             "UPDATE branch_tables SET \
                  section_id = $3, pos_x = $4, pos_y = $5, width = $6, height = $7, \
                  rotation = $8, updated_at = now() \
              WHERE id = $1 AND branch_id = $2 \
                AND ($9::timestamptz IS NULL OR updated_at = $9)",
+            t.id,
+            body.branch_id,
+            t.section_id,
+            t.pos_x,
+            t.pos_y,
+            t.width,
+            t.height,
+            t.rotation,
+            t.expected_updated_at,
         )
-        .bind(t.id)
-        .bind(body.branch_id)
-        .bind(t.section_id)
-        .bind(t.pos_x)
-        .bind(t.pos_y)
-        .bind(t.width)
-        .bind(t.height)
-        .bind(t.rotation)
-        .bind(t.expected_updated_at)
         .execute(&mut *tx)
         .await?
         .rows_affected();
@@ -712,8 +720,10 @@ pub async fn save_layout(
 }
 
 pub(crate) async fn fetch_table_branch(pool: &PgPool, table_id: Uuid) -> Result<Uuid, AppError> {
-    sqlx::query_scalar("SELECT branch_id FROM branch_tables WHERE id = $1")
-        .bind(table_id)
+    sqlx::query_scalar!(
+        "SELECT branch_id FROM branch_tables WHERE id = $1",
+        table_id,
+    )
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Table not found".into()))

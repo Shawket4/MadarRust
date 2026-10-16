@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO branch_stock (branch_id, org_ingredient_id, on_hand) VALUES ($1, $2, 0) ON CONFLICT (branch_id, org_ingredient_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5b7dcf6f2c201b8952d2432e42633bfccb3d0641bbc26508d291896b44da2367"
+}

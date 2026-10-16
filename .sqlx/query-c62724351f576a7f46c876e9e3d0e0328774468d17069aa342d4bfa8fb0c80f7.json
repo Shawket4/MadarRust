@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM branch_printers WHERE branch_id = $1 AND NOT (id = ANY($2))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c62724351f576a7f46c876e9e3d0e0328774468d17069aa342d4bfa8fb0c80f7"
+}

@@ -370,12 +370,12 @@ pub async fn create_refund_inner(
     // The org's vocabulary, and whether the word meant cash TODAY. Snapshotted
     // onto the row so a later flip of the method's flag cannot move a closed
     // shift's drawer.
-    let is_cash: bool = sqlx::query_scalar(
+    let is_cash: bool = sqlx::query_scalar!(
         "SELECT is_cash FROM org_payment_methods \
          WHERE org_id = $1 AND name = $2 AND is_active = true",
+        actor.org_id,
+        body.method.trim(),
     )
-    .bind(actor.org_id)
-    .bind(body.method.trim())
     .fetch_optional(pool.get_ref())
     .await?
     .ok_or_else(|| {
@@ -393,8 +393,10 @@ pub async fn create_refund_inner(
     // snapshot — and is subtracted — or is refused, never silently left out
     // of a just-closed drawer.
     let mut tx = pool.get_ref().begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text))")
-        .bind(shift_id.to_string())
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtext($1::text))",
+        shift_id.to_string(),
+    )
         .execute(&mut *tx)
         .await?;
 
@@ -449,7 +451,7 @@ pub async fn create_refund_inner(
         }
         None => None,
     };
-    let refund_id: Uuid = match sqlx::query_scalar::<_, Uuid>(
+    let refund_id: Uuid = match sqlx::query_scalar!(
         r#"
         INSERT INTO order_refunds
             (org_id, branch_id, order_id, till_id, amount, method, is_cash,
@@ -457,20 +459,20 @@ pub async fn create_refund_inner(
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         RETURNING id
         "#,
+        actor.org_id,
+        order.branch_id,
+        order.id,
+        shift_id,
+        body.amount,
+        body.method.trim(),
+        is_cash,
+        body.reason.as_str(),
+        note,
+        actor.teller_id,
+        issued_at,
+        body.client_ref,
+        device_id,
     )
-    .bind(actor.org_id)
-    .bind(order.branch_id)
-    .bind(order.id)
-    .bind(shift_id)
-    .bind(body.amount)
-    .bind(body.method.trim())
-    .bind(is_cash)
-    .bind(body.reason.as_str())
-    .bind(note)
-    .bind(actor.teller_id)
-    .bind(issued_at)
-    .bind(body.client_ref)
-    .bind(device_id)
     .fetch_one(&mut *tx)
     .await
     {
@@ -494,15 +496,15 @@ pub async fn create_refund_inner(
     };
 
     for line in &lines {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO order_refund_lines (org_id, refund_id, order_item_id, quantity, amount) \
              VALUES ($1, $2, $3, $4, $5)",
+            actor.org_id,
+            refund_id,
+            line.order_item_id,
+            line.quantity,
+            line.amount,
         )
-        .bind(actor.org_id)
-        .bind(refund_id)
-        .bind(line.order_item_id)
-        .bind(line.quantity)
-        .bind(line.amount)
         .execute(&mut *tx)
         .await?;
     }
@@ -793,12 +795,12 @@ async fn resolve_refund_till(
     }
 
     // A person may (rarely, flagged) hold two open tills: use the newest.
-    sqlx::query_scalar::<_, Uuid>(
+    sqlx::query_scalar!(
         "SELECT id FROM tills WHERE teller_id = $1 AND branch_id = $2 AND status = 'open' \
          ORDER BY opened_at DESC LIMIT 1",
+        actor.teller_id,
+        order.branch_id,
     )
-    .bind(actor.teller_id)
-    .bind(order.branch_id)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| {
@@ -862,8 +864,10 @@ pub async fn list_till_refunds(
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "refunds", "read").await?;
-    let branch_id: Uuid = sqlx::query_scalar("SELECT branch_id FROM tills WHERE id = $1")
-        .bind(*shift_id)
+    let branch_id: Uuid = sqlx::query_scalar!(
+        "SELECT branch_id FROM tills WHERE id = $1",
+        *shift_id,
+    )
         .fetch_optional(pool.get_ref())
         .await?
         .ok_or_else(|| AppError::NotFound("Till not found".into()))?;
@@ -871,10 +875,10 @@ pub async fn list_till_refunds(
 
     let mut conn = pool.get_ref().acquire().await?;
     let totals = till_refund_totals(&mut conn, *shift_id).await?;
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM order_refunds WHERE till_id = $1 ORDER BY issued_at DESC, created_at DESC",
+        *shift_id,
     )
-    .bind(*shift_id)
     .fetch_all(&mut *conn)
     .await?;
     let refunds = fetch_refunds_by_ids(&mut conn, &ids).await?;
@@ -1012,9 +1016,11 @@ async fn fetch_refund_by_client_ref(
     // Org-scoped so a cross-org client_ref collision cannot echo another
     // tenant's refund (mirrors fetch_order_by_idempotency_key).
     let id: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM order_refunds WHERE client_ref = $1 AND org_id = $2")
-            .bind(client_ref)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT id FROM order_refunds WHERE client_ref = $1 AND org_id = $2",
+            client_ref,
+            org_id,
+        )
             .fetch_optional(pool)
             .await?;
     let Some(id) = id else {
@@ -1049,10 +1055,10 @@ async fn fetch_order_refunds_on(
     conn: &mut PgConnection,
     order_id: Uuid,
 ) -> Result<Vec<RefundFull>, AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM order_refunds WHERE order_id = $1 ORDER BY issued_at, created_at",
+        order_id,
     )
-    .bind(order_id)
     .fetch_all(&mut *conn)
     .await?;
     fetch_refunds_by_ids(conn, &ids).await
@@ -1080,7 +1086,8 @@ async fn fetch_refunds_by_ids(
     .bind(ids)
     .fetch_all(&mut *conn)
     .await?;
-    let lines = sqlx::query_as::<_, RefundLine>(
+    let lines = sqlx::query_as!(
+        RefundLine,
         r#"
         SELECT l.id, l.refund_id, l.order_item_id, i.item_name, l.quantity, l.amount, l.restock
         FROM order_refund_lines l
@@ -1088,8 +1095,8 @@ async fn fetch_refunds_by_ids(
         WHERE l.refund_id = ANY($1)
         ORDER BY l.id
         "#,
+        ids,
     )
-    .bind(ids)
     .fetch_all(&mut *conn)
     .await?;
 

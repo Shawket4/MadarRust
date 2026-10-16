@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO delivery_otp (phone, code, purpose, expires_at)\n         VALUES ($1, $2, $3, now() + make_interval(secs => $4))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d75f2042adbf55aeda1c67d57a512a9f6437d1609ec6630582c7566bb80f41fa"
+}

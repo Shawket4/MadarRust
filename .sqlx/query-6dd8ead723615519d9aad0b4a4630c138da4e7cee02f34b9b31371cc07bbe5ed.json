@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE push_devices SET revoked_at = now() WHERE token = $1 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6dd8ead723615519d9aad0b4a4630c138da4e7cee02f34b9b31371cc07bbe5ed"
+}

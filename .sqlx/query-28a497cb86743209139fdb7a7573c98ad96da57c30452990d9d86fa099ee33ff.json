@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE branch_stock SET last_counted_at = now() WHERE branch_id = $1 AND org_ingredient_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "28a497cb86743209139fdb7a7573c98ad96da57c30452990d9d86fa099ee33ff"
+}

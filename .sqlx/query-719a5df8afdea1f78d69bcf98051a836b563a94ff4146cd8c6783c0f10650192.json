@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_fairness_audits (org_id, branch_id, month, flagged, payload) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Bool",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "719a5df8afdea1f78d69bcf98051a836b563a94ff4146cd8c6783c0f10650192"
+}

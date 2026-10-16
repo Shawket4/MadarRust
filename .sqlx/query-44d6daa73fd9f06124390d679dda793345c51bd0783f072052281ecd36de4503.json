@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attendance_tombstones (org_id, employee_id, business_date, work_shift_id, deleted_by, reason) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (employee_id, business_date, COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) DO UPDATE SET deleted_by = EXCLUDED.deleted_by, reason = EXCLUDED.reason, created_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "44d6daa73fd9f06124390d679dda793345c51bd0783f072052281ecd36de4503"
+}

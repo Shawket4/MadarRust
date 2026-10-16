@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM tills WHERE teller_id = $1 AND branch_id = $2 AND status = 'open' ORDER BY opened_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5f6f44205976f8e2a73bddd7f163fd16b4eb97a4e2d79c146e5eda9b432d3eec"
+}

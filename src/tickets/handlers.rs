@@ -351,8 +351,10 @@ async fn require_ticket_branch_access(
     ticket_id: Uuid,
 ) -> Result<(), AppError> {
     let branch_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT branch_id FROM open_tickets WHERE id = $1")
-            .bind(ticket_id)
+        sqlx::query_scalar!(
+            "SELECT branch_id FROM open_tickets WHERE id = $1",
+            ticket_id,
+        )
             .fetch_optional(pool)
             .await?;
     let branch_id = branch_id.ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
@@ -365,8 +367,10 @@ where
 {
     match table_id {
         Some(t) => Ok(
-            sqlx::query_scalar("SELECT label FROM branch_tables WHERE id = $1")
-                .bind(t)
+            sqlx::query_scalar!(
+                "SELECT label FROM branch_tables WHERE id = $1",
+                t,
+            )
                 .fetch_optional(pool)
                 .await?,
         ),
@@ -445,8 +449,10 @@ pub(crate) async fn create_open_ticket_inner(
     // Idempotent re-fire: same ticket key → return the existing ticket.
     if let Some(key) = body.idempotency_key {
         let existing: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM open_tickets WHERE idempotency_key = $1")
-                .bind(key)
+            sqlx::query_scalar!(
+                "SELECT id FROM open_tickets WHERE idempotency_key = $1",
+                key,
+            )
                 .fetch_optional(pool.get_ref())
                 .await?;
         if let Some(id) = existing {
@@ -478,8 +484,10 @@ pub(crate) async fn create_open_ticket_inner(
     }
 
     let org_id: Uuid =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(body.branch_id)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+            body.branch_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -776,14 +784,14 @@ pub async fn list_open_tickets(
         Some("all") => None,
         Some(s) => Some(s),
     };
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM open_tickets \
          WHERE branch_id = $1 AND ($2::text IS NULL OR status::text = $2) \
          ORDER BY opened_at DESC \
          LIMIT CASE WHEN $2::text = 'open' THEN NULL ELSE 500 END",
+        query.branch_id,
+        status,
     )
-    .bind(query.branch_id)
-    .bind(status)
     .fetch_all(pool.get_ref())
     .await?;
     let out = super::open_ticket_views(pool.get_ref(), &ids).await?;
@@ -1091,11 +1099,11 @@ pub(crate) async fn void_ticket_line_inner(
     // The bill's running subtotal is a column, not a sum over the lines, so it
     // has to be told. Exactly what this line added, never a recomputation:
     // re-summing would silently re-price a bill under today's menu.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE open_tickets SET subtotal = subtotal - $2, updated_at = now() WHERE id = $1",
+        id,
+        line_total,
     )
-    .bind(id)
-    .bind(line_total)
     .execute(&mut *tx)
     .await?;
 
@@ -1206,10 +1214,10 @@ pub async fn move_ticket_table(
     }
     // The old table's row ends `moved`, a row opens on the new one, and the
     // move may be exactly what this party's transfer wish asked for.
-    let old_table: Option<Uuid> = sqlx::query_scalar(
+    let old_table: Option<Uuid> = sqlx::query_scalar!(
         "SELECT table_id FROM table_occupancies WHERE open_ticket_id = $1 AND ended_at IS NULL",
+        *id,
     )
-    .bind(*id)
     .fetch_optional(&mut *tx)
     .await?;
     let hand = crate::floor_ops::Hand::of(&mut *tx, claims.user_id(), branch_id).await?;
@@ -1311,9 +1319,11 @@ pub(crate) async fn set_ticket_customer_inner(
     };
     let resolved: Option<Uuid> = match customer_id {
         Some(c) => {
-            sqlx::query_scalar("SELECT customers_resolve($1, $2)")
-                .bind(org)
-                .bind(c)
+            sqlx::query_scalar!(
+                "SELECT customers_resolve($1, $2)",
+                org,
+                c,
+            )
                 .fetch_one(&mut *tx)
                 .await?
         }
@@ -1331,18 +1341,22 @@ pub(crate) async fn set_ticket_customer_inner(
         ("open", None) => {
             // Skipping the no-change write keeps a re-flush off the changefeed.
             if current != resolved {
-                sqlx::query("UPDATE open_tickets SET customer_id = $2 WHERE id = $1")
-                    .bind(ticket_id)
-                    .bind(resolved)
+                sqlx::query!(
+                    "UPDATE open_tickets SET customer_id = $2 WHERE id = $1",
+                    ticket_id,
+                    resolved,
+                )
                     .execute(&mut *tx)
                     .await?;
             }
             true
         }
         (_, Some(order)) => {
-            sqlx::query("UPDATE open_tickets SET customer_id = $2 WHERE id = $1")
-                .bind(ticket_id)
-                .bind(resolved)
+            sqlx::query!(
+                "UPDATE open_tickets SET customer_id = $2 WHERE id = $1",
+                ticket_id,
+                resolved,
+            )
                 .execute(&mut *tx)
                 .await?;
             crate::customers::handlers::attach_to_order(&mut tx, org, order, resolved).await?;
@@ -1454,8 +1468,10 @@ pub async fn settle_open_ticket(
         && let Some(ask) = settle_discount_ask(pool.get_ref(), org, *id, &body).await?
     {
         let branch: Option<Uuid> =
-            sqlx::query_scalar("SELECT branch_id FROM open_tickets WHERE id = $1")
-                .bind(*id)
+            sqlx::query_scalar!(
+                "SELECT branch_id FROM open_tickets WHERE id = $1",
+                *id,
+            )
                 .fetch_optional(pool.get_ref())
                 .await?;
         let eff =

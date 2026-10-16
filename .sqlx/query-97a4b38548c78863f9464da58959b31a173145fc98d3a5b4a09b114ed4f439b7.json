@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO loyalty_customers (id, org_id, member_token, joined_branch_id, apple_auth_token) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO UPDATE SET deleted_at = NULL, pass_voided_at = NULL, member_token = EXCLUDED.member_token, apple_auth_token = EXCLUDED.apple_auth_token, joined_branch_id = EXCLUDED.joined_branch_id, apple_serial = NULL, google_object_id = NULL, enrolled_at = now(), updated_at = now() WHERE loyalty_customers.deleted_at IS NOT NULL AND loyalty_customers.org_id = EXCLUDED.org_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "97a4b38548c78863f9464da58959b31a173145fc98d3a5b4a09b114ed4f439b7"
+}

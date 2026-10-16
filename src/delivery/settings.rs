@@ -286,7 +286,7 @@ pub async fn put_branch_settings(
     }
 
     // Upsert config WITHOUT touching the *_override columns (POS-owned).
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO branch_delivery_settings
             (branch_id, in_mall_enabled, outside_enabled, in_mall_open_time, in_mall_close_time,
              outside_open_time, outside_close_time, in_mall_fee, prep_time_minutes,
@@ -323,32 +323,32 @@ pub async fn put_branch_settings(
              pickup_discount_id = EXCLUDED.pickup_discount_id,
              auto_reject_minutes = EXCLUDED.auto_reject_minutes,
              updated_at = now()",
+        body.branch_id,
+        body.in_mall_enabled,
+        body.outside_enabled,
+        body.in_mall_open_time,
+        body.in_mall_close_time,
+        body.outside_open_time,
+        body.outside_close_time,
+        body.in_mall_fee,
+        body.prep_time_minutes,
+        body.max_road_distance_meters,
+        body.in_mall_discount_id,
+        body.outside_discount_id,
+        body.otp_required,
+        body.in_mall_require_location,
+        body.umbrella_enabled,
+        body.pickup_enabled,
+        body.umbrella_open_time,
+        body.umbrella_close_time,
+        body.pickup_open_time,
+        body.pickup_close_time,
+        body.umbrella_fee,
+        body.pickup_fee,
+        body.umbrella_discount_id,
+        body.pickup_discount_id,
+        body.auto_reject_minutes,
     )
-    .bind(body.branch_id)
-    .bind(body.in_mall_enabled)
-    .bind(body.outside_enabled)
-    .bind(body.in_mall_open_time)
-    .bind(body.in_mall_close_time)
-    .bind(body.outside_open_time)
-    .bind(body.outside_close_time)
-    .bind(body.in_mall_fee)
-    .bind(body.prep_time_minutes)
-    .bind(body.max_road_distance_meters)
-    .bind(body.in_mall_discount_id)
-    .bind(body.outside_discount_id)
-    .bind(body.otp_required)
-    .bind(body.in_mall_require_location)
-    .bind(body.umbrella_enabled)
-    .bind(body.pickup_enabled)
-    .bind(body.umbrella_open_time)
-    .bind(body.umbrella_close_time)
-    .bind(body.pickup_open_time)
-    .bind(body.pickup_close_time)
-    .bind(body.umbrella_fee)
-    .bind(body.pickup_fee)
-    .bind(body.umbrella_discount_id)
-    .bind(body.pickup_discount_id)
-    .bind(body.auto_reject_minutes)
     .execute(pool.get_ref())
     .await?;
 
@@ -390,10 +390,10 @@ pub async fn set_accepting(
     validate_channel(&body.channel)?;
     validate_override(&body.mode)?;
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO branch_delivery_settings (branch_id) VALUES ($1) ON CONFLICT (branch_id) DO NOTHING",
+        body.branch_id,
     )
-    .bind(body.branch_id)
     .execute(pool.get_ref())
     .await?;
 
@@ -599,9 +599,11 @@ pub async fn delete_zone(
     check_permission(pool.get_ref(), &claims, "delivery_settings", "delete").await?;
     require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
 
-    let done = sqlx::query("DELETE FROM delivery_zones WHERE id = $1 AND branch_id = $2")
-        .bind(path.into_inner())
-        .bind(query.branch_id)
+    let done = sqlx::query!(
+        "DELETE FROM delivery_zones WHERE id = $1 AND branch_id = $2",
+        path.into_inner(),
+        query.branch_id,
+    )
         .execute(pool.get_ref())
         .await?;
     if done.rows_affected() == 0 {

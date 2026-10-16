@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM loyalty_settings WHERE org_id = $1 AND branch_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "89ecd03c1ba92d5bcd4af2387e51cae9ce5f64bbf093e1c231707ec510a1cbfe"
+}

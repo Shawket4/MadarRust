@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM category_station_routes WHERE branch_id = $1 AND category_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd88827a599412ef1928eb2fb6b6c1dab467024e2a41dc242547230e37824136"
+}

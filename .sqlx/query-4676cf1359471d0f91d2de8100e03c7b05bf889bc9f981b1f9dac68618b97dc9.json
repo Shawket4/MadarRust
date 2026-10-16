@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organizations SET brand_logo_is_mark = $2 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4676cf1359471d0f91d2de8100e03c7b05bf889bc9f981b1f9dac68618b97dc9"
+}

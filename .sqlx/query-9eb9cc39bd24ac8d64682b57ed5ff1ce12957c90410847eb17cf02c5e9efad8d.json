@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organizations SET deleted_at = NOW(), is_active = false WHERE id = $1 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9eb9cc39bd24ac8d64682b57ed5ff1ce12957c90410847eb17cf02c5e9efad8d"
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payroll_deductions SET original_amount_piastres = COALESCE(original_amount_piastres, amount_piastres), amount_piastres = $3, overridden_at = now(), overridden_by = $4, override_reason = $5, updated_at = now() WHERE id = $1 AND org_id = $2 AND waived_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d48f5678155aca6940f71c6337fb9b121a01df628f389f826011ad07835c4a31"
+}

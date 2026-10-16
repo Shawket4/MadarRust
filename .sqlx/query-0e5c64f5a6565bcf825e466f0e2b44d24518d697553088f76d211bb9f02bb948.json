@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_swaps SET status = 'cancelled' WHERE id = $1 AND requester_id = $2 AND status IN ('awaiting_peer', 'pending') RETURNING peer_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "peer_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0e5c64f5a6565bcf825e466f0e2b44d24518d697553088f76d211bb9f02bb948"
+}

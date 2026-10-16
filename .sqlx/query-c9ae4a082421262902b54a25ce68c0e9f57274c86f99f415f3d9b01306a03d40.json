@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_otp (phone, code, expires_at) VALUES ($1, $2, now() + ($3 || ' seconds')::interval)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c9ae4a082421262902b54a25ce68c0e9f57274c86f99f415f3d9b01306a03d40"
+}

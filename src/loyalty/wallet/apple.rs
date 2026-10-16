@@ -1285,12 +1285,12 @@ pub async fn notify_devices(pool: &PgPool, member: &MemberRow) -> Result<(), App
             // the point of distinguishing this: otherwise we push into the void
             // on every balance change, forever.
             super::apns::PushOutcome::Unregistered => {
-                let _ = sqlx::query(
+                let _ = sqlx::query!(
                     "DELETE FROM loyalty_pass_devices \
                       WHERE device_library_id = $1 AND customer_id = $2",
+                    &device_library_id,
+                    member.id,
                 )
-                .bind(&device_library_id)
-                .bind(member.id)
                 .execute(pool)
                 .await;
             }

@@ -521,12 +521,12 @@ async fn availability(pool: &PgPool, org_id: Uuid) -> Result<Availability, AppEr
         })
         .collect();
 
-    let booking: Vec<String> = sqlx::query_scalar(
+    let booking: Vec<String> = sqlx::query_scalar!(
         "SELECT b.name FROM branch_booking_settings s JOIN branches b ON b.id = s.branch_id \
           WHERE b.org_id = $1 AND b.is_active AND b.deleted_at IS NULL AND s.enabled \
           ORDER BY b.name",
+        org_id,
     )
-    .bind(org_id)
     .fetch_all(pool)
     .await?;
 
@@ -733,9 +733,11 @@ pub async fn put_links_page(
     .execute(&mut *tx)
     .await?;
     if let Some(social) = social {
-        sqlx::query("UPDATE organizations SET social_links = $2, updated_at = now() WHERE id = $1")
-            .bind(org_id)
-            .bind(social)
+        sqlx::query!(
+            "UPDATE organizations SET social_links = $2, updated_at = now() WHERE id = $1",
+            org_id,
+            social,
+        )
             .execute(&mut *tx)
             .await?;
     }
@@ -777,10 +779,10 @@ pub(crate) async fn public_links_page(
     pool: &PgPool,
     org_id: Uuid,
 ) -> Result<PublicLinksPage, AppError> {
-    let slug: Option<Option<String>> = sqlx::query_scalar(
+    let slug: Option<Option<String>> = sqlx::query_scalar!(
         "SELECT slug FROM organizations WHERE id = $1 AND is_active AND deleted_at IS NULL",
+        org_id,
     )
-    .bind(org_id)
     .fetch_optional(pool)
     .await?;
     let slug = slug.ok_or_else(|| AppError::NotFound("No shop at that address".into()))?;

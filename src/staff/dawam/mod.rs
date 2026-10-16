@@ -93,16 +93,16 @@ async fn notify_keyed(
     args: Value,
     dedupe: Option<&str>,
 ) {
-    let res = sqlx::query(
+    let res = sqlx::query!(
         "INSERT INTO staff_notifications (org_id, employee_id, key, args, dedupe_key) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (employee_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING",
+        org_id,
+        employee_id,
+        key,
+        &args,
+        dedupe,
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(key)
-    .bind(&args)
-    .bind(dedupe)
     .execute(pool)
     .await;
     match res {
@@ -169,12 +169,12 @@ pub async fn set_push_token(
 )]
 pub async fn sign_out(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_devices SET revoked_at = now() \
           WHERE id = $1 AND employee_id = $2 AND revoked_at IS NULL",
+        me.device_id,
+        me.employee_id,
     )
-    .bind(me.device_id)
-    .bind(me.employee_id)
     .execute(pool)
     .await?;
     crate::push::revoke_all(pool, Recipient::Employee(me.employee_id), PUSH_APP).await?;
@@ -195,13 +195,13 @@ async fn linked_employees(pool: &PgPool, org_id: Uuid) -> Result<Vec<(Uuid, Uuid
 
 /// The owners' employee records — who hears about acts waiting for the owner.
 pub(crate) async fn owners(pool: &PgPool, org_id: Uuid) -> Result<Vec<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT e.id FROM employees e \
            JOIN users u ON u.id = e.user_id AND u.is_active AND u.deleted_at IS NULL \
                        AND (u.is_owner OR u.role = 'org_admin') \
           WHERE e.org_id = $1 AND e.employment_status = 'active'",
+        org_id,
     )
-    .bind(org_id)
     .fetch_all(pool)
     .await?)
 }
@@ -285,8 +285,10 @@ pub(crate) async fn branches_of(pool: &PgPool, employee_id: Uuid) -> Result<Vec<
 }
 
 pub(crate) async fn employee_name(pool: &PgPool, employee_id: Uuid) -> String {
-    sqlx::query_scalar("SELECT name FROM employees WHERE id = $1")
-        .bind(employee_id)
+    sqlx::query_scalar!(
+        "SELECT name FROM employees WHERE id = $1",
+        employee_id,
+    )
         .fetch_optional(pool)
         .await
         .ok()
@@ -296,8 +298,10 @@ pub(crate) async fn employee_name(pool: &PgPool, employee_id: Uuid) -> String {
 
 /// A user's name, for acts recorded by user (who punched, who approved).
 pub(crate) async fn user_name(pool: &PgPool, user_id: Uuid) -> String {
-    sqlx::query_scalar("SELECT name FROM users WHERE id = $1")
-        .bind(user_id)
+    sqlx::query_scalar!(
+        "SELECT name FROM users WHERE id = $1",
+        user_id,
+    )
         .fetch_optional(pool)
         .await
         .ok()
@@ -308,11 +312,11 @@ pub(crate) async fn user_name(pool: &PgPool, user_id: Uuid) -> String {
 /// Revoke an employee's phone at once (RO-4, RO-10): the device, and with it
 /// every staff token minted for it, and its pushes.
 pub async fn revoke_devices(pool: &PgPool, employee_id: Uuid) -> Result<u64, AppError> {
-    let n = sqlx::query(
+    let n = sqlx::query!(
         "UPDATE staff_devices SET revoked_at = now() \
           WHERE employee_id = $1 AND revoked_at IS NULL",
+        employee_id,
     )
-    .bind(employee_id)
     .execute(pool)
     .await?
     .rows_affected();
@@ -323,8 +327,10 @@ pub async fn revoke_devices(pool: &PgPool, employee_id: Uuid) -> Result<u64, App
 /// The linked user was deactivated or deleted (RO-10): their employee's phone
 /// is signed out.
 pub async fn revoke_for_user(pool: &PgPool, user_id: Uuid) -> Result<u64, AppError> {
-    let employee: Option<Uuid> = sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1")
-        .bind(user_id)
+    let employee: Option<Uuid> = sqlx::query_scalar!(
+        "SELECT id FROM employees WHERE user_id = $1",
+        user_id,
+    )
         .fetch_optional(pool)
         .await?;
     match employee {

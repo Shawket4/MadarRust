@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payroll_periods SET coordinates_wiped_at = now() WHERE org_id = $1 AND start_date = $2 AND end_date = $3 AND status IN ('generated', 'paid', 'closed')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f13931bc1d99a0f3b17a68e26adb09223b954ba4895df1f79ac1b2b318b5248a"
+}

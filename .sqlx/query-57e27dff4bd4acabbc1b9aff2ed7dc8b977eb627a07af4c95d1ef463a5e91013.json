@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE employees SET pref_time = $2, cant_work_days = $3, prefs_set_by = $4 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int2Array",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57e27dff4bd4acabbc1b9aff2ed7dc8b977eb627a07af4c95d1ef463a5e91013"
+}

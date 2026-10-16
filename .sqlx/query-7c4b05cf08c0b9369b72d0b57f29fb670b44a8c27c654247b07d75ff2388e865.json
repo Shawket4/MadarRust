@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE salary_advances SET status = $3, amount_piastres = $4, remaining_piastres = $4, installments = $5, monthly_installment_piastres = $6, decided_by = $7, decided_at = now(), decision_note = $8, updated_at = now() WHERE id = $1 AND org_id = $2 AND status = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int8",
+        "Int4",
+        "Int8",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7c4b05cf08c0b9369b72d0b57f29fb670b44a8c27c654247b07d75ff2388e865"
+}

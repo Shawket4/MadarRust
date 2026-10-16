@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO table_occupancies (org_id, branch_id, table_id, held_by, party_size, started_by, started_till_id, started_device, seated_at) SELECT bt.org_id, bt.branch_id, bt.id, 'party', p.party_size, p.started_by, p.started_till_id, p.started_device, COALESCE(p.seated_at, p.started_at) FROM branch_tables bt, table_occupancies p WHERE bt.id = $1 AND p.id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ab32d05e15bbfb7b254f528fe84c0e6669bdebdb9e94de71e3ae2487cb72742f"
+}

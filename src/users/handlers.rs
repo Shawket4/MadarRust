@@ -818,8 +818,10 @@ pub async fn assign_branch(
     require_same_org(&claims, target_org)?;
 
     let branch_org: Uuid =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(body.branch_id)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+            body.branch_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -850,16 +852,16 @@ pub async fn assign_branch(
         }
     }
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO user_branch_assignments (user_id, branch_id, assigned_by)
         VALUES ($1, $2, $3)
         ON CONFLICT DO NOTHING
         "#,
+        *user_id,
+        body.branch_id,
+        claims.user_id(),
     )
-    .bind(*user_id)
-    .bind(body.branch_id)
-    .bind(claims.user_id())
     .execute(pool.get_ref())
     .await?;
 
@@ -909,8 +911,10 @@ pub async fn unassign_branch(
     .await?;
 
     let branch_org: Uuid =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(branch_id)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+            branch_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -931,9 +935,11 @@ pub async fn unassign_branch(
         }
     }
 
-    sqlx::query("DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2")
-        .bind(user_id)
-        .bind(branch_id)
+    sqlx::query!(
+        "DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2",
+        user_id,
+        branch_id,
+    )
         .execute(pool.get_ref())
         .await?;
 
@@ -983,15 +989,16 @@ pub async fn list_user_branches(
         }
     }
 
-    let rows = sqlx::query_as::<_, UserBranch>(
+    let rows = sqlx::query_as!(
+        UserBranch,
         r#"
         SELECT uba.branch_id, b.name as branch_name
         FROM user_branch_assignments uba
         JOIN branches b ON b.id = uba.branch_id
         WHERE uba.user_id = $1
         "#,
+        *user_id,
     )
-    .bind(*user_id)
     .fetch_all(pool.get_ref())
     .await?;
 

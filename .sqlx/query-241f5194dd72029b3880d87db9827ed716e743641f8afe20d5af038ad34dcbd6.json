@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_drinks SET order_id = COALESCE(order_id, $2), comp_minor = $3, extras_minor = $4, comp_minor_reported = $5, cost_minor = COALESCE(cost_minor, $6), updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "241f5194dd72029b3880d87db9827ed716e743641f8afe20d5af038ad34dcbd6"
+}

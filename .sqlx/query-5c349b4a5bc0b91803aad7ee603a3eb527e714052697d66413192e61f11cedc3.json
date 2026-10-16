@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM open_tickets WHERE branch_id = $1 AND ($2::text IS NULL OR status::text = $2) ORDER BY opened_at DESC LIMIT CASE WHEN $2::text = 'open' THEN NULL ELSE 500 END",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5c349b4a5bc0b91803aad7ee603a3eb527e714052697d66413192e61f11cedc3"
+}

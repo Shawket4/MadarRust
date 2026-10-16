@@ -303,11 +303,11 @@ pub(crate) async fn reset_day(
     by: Option<Uuid>,
 ) -> Result<bool, AppError> {
     let drop_all = async |conn: &mut PgConnection| -> Result<bool, AppError> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2",
+            employee_id,
+            date,
         )
-        .bind(employee_id)
-        .bind(date)
         .execute(&mut *conn)
         .await?
         .rows_affected()
@@ -374,12 +374,12 @@ pub(crate) async fn add_block(
     by: Option<Uuid>,
 ) -> Result<(), AppError> {
     materialise(conn, org_id, employee_id, date, reason, by).await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM staff_schedule_overrides \
           WHERE employee_id = $1 AND on_date = $2 AND work_shift_id IS NULL",
+        employee_id,
+        date,
     )
-    .bind(employee_id)
-    .bind(date)
     .execute(&mut *conn)
     .await?;
     insert_row(
@@ -459,16 +459,16 @@ pub(crate) async fn set_times(
     by: Option<Uuid>,
 ) -> Result<bool, AppError> {
     materialise(conn, org_id, employee_id, date, None, by).await?;
-    let n = sqlx::query(
+    let n = sqlx::query!(
         "UPDATE staff_schedule_overrides SET start_time = $4, end_time = $5, created_by = $6 \
           WHERE employee_id = $1 AND on_date = $2 AND work_shift_id = $3",
+        employee_id,
+        date,
+        work_shift_id,
+        times.map(|t| t.0),
+        times.map(|t| t.1),
+        by,
     )
-    .bind(employee_id)
-    .bind(date)
-    .bind(work_shift_id)
-    .bind(times.map(|t| t.0))
-    .bind(times.map(|t| t.1))
-    .bind(by)
     .execute(&mut *conn)
     .await?
     .rows_affected();
@@ -540,7 +540,7 @@ pub(crate) async fn log_manual(
     work_shift_id: Uuid,
     by: Option<Uuid>,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_suggestion_events \
              (org_id, branch_id, suggestion, employee_id, on_date, accepted, decided_by, \
               work_shift_id, source) \
@@ -550,13 +550,13 @@ pub(crate) async fn log_manual(
                   WHERE eb.employee_id = $3 ORDER BY eb.assigned_at LIMIT 1)) AS b \
                FROM work_shifts ws WHERE ws.id = $6 AND ws.org_id = $1) x \
           WHERE b IS NOT NULL",
+        org_id,
+        format!("manual|{date}|{work_shift_id}|{employee_id}"),
+        employee_id,
+        date,
+        by,
+        work_shift_id,
     )
-    .bind(org_id)
-    .bind(format!("manual|{date}|{work_shift_id}|{employee_id}"))
-    .bind(employee_id)
-    .bind(date)
-    .bind(by)
-    .bind(work_shift_id)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -608,13 +608,13 @@ pub(crate) async fn published_horizon(
     conn: &mut PgConnection,
     employees: &[Uuid],
 ) -> Result<Option<(NaiveDate, NaiveDate)>, AppError> {
-    let last: Option<NaiveDate> = sqlx::query_scalar(
+    let last: Option<NaiveDate> = sqlx::query_scalar!(
         "SELECT MAX(p.week_start) FROM staff_week_publications p \
           WHERE p.branch_id IN (SELECT branch_id FROM employee_branches \
                                  WHERE employee_id = ANY($1)) \
             AND p.week_start >= CURRENT_DATE - 8",
+        employees,
     )
-    .bind(employees)
     .fetch_one(&mut *conn)
     .await?;
     Ok(last.map(|w| {
@@ -641,8 +641,10 @@ pub(crate) async fn clear_stale_absences(
     employee_id: Uuid,
     date: NaiveDate,
 ) -> Result<(), AppError> {
-    let org_id: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM employees WHERE id = $1")
-        .bind(employee_id)
+    let org_id: Option<Uuid> = sqlx::query_scalar!(
+        "SELECT org_id FROM employees WHERE id = $1",
+        employee_id,
+    )
         .fetch_optional(pool)
         .await?;
     let Some(org_id) = org_id else {
@@ -690,16 +692,18 @@ pub(crate) async fn clear_stale_absences(
         return Ok(());
     }
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM payroll_deductions \
           WHERE attendance_record_id = ANY($1) AND source <> 'manual' \
             AND created_by IS NULL AND waived_at IS NULL AND overridden_at IS NULL",
+        &stale,
     )
-    .bind(&stale)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM attendance_records WHERE id = ANY($1)")
-        .bind(&stale)
+    sqlx::query!(
+        "DELETE FROM attendance_records WHERE id = ANY($1)",
+        &stale,
+    )
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -741,13 +745,13 @@ pub(crate) async fn mark_changed_and_tell(
         if !published {
             continue;
         }
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO staff_roster_changes (org_id, employee_id, on_date) VALUES ($1, $2, $3) \
              ON CONFLICT (employee_id, on_date) DO UPDATE SET changed_at = now()",
+            org_id,
+            employee_id,
+            date,
         )
-        .bind(org_id)
-        .bind(employee_id)
-        .bind(date)
         .execute(pool)
         .await?;
         if tell {

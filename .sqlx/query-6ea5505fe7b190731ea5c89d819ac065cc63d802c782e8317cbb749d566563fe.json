@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_suggestion_cache SET stale = true, computed_at = 'epoch' WHERE branch_id = $1 AND week_start = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6ea5505fe7b190731ea5c89d819ac065cc63d802c782e8317cbb749d566563fe"
+}

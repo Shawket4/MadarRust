@@ -202,29 +202,29 @@ pub async fn resolve_station(
 ) -> Result<Option<Uuid>, AppError> {
     if let Some(mi) = menu_item_id {
         // 1. Per-item override.
-        if let Some(s) = sqlx::query_scalar::<_, Uuid>(
+        if let Some(s) = sqlx::query_scalar!(
             "SELECT misr.station_id FROM menu_item_station_routes misr \
              JOIN kitchen_stations ks ON ks.id = misr.station_id \
                 AND ks.deleted_at IS NULL AND ks.is_active \
              WHERE misr.branch_id = $1 AND misr.menu_item_id = $2",
+            branch_id,
+            mi,
         )
-        .bind(branch_id)
-        .bind(mi)
         .fetch_optional(&mut **tx)
         .await?
         {
             return Ok(Some(s));
         }
         // 2. Category rule for the item's category.
-        if let Some(s) = sqlx::query_scalar::<_, Uuid>(
+        if let Some(s) = sqlx::query_scalar!(
             "SELECT csr.station_id FROM category_station_routes csr \
              JOIN menu_items mi ON mi.category_id = csr.category_id \
              JOIN kitchen_stations ks ON ks.id = csr.station_id \
                 AND ks.deleted_at IS NULL AND ks.is_active \
              WHERE csr.branch_id = $1 AND mi.id = $2",
+            branch_id,
+            mi,
         )
-        .bind(branch_id)
-        .bind(mi)
         .fetch_optional(&mut **tx)
         .await?
         {
@@ -232,11 +232,11 @@ pub async fn resolve_station(
         }
     }
     // 3. Branch default station (catch-all), else None (unrouted bucket).
-    Ok(sqlx::query_scalar::<_, Uuid>(
+    Ok(sqlx::query_scalar!(
         "SELECT id FROM kitchen_stations \
          WHERE branch_id = $1 AND is_default AND is_active AND deleted_at IS NULL",
+        branch_id,
     )
-    .bind(branch_id)
     .fetch_optional(&mut **tx)
     .await?)
 }
@@ -282,40 +282,40 @@ pub(crate) async fn emit_kitchen_ticket(
     // eventual server row share one id; else let Postgres generate it.
     let ticket_id: Uuid = match ctx.kitchen_ticket_id {
         Some(cid) => {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO kitchen_tickets \
                     (id, org_id, branch_id, order_id, open_ticket_id, round_id, \
                      table_label, kitchen_ref, round_number) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING",
+                cid,
+                ctx.org_id,
+                ctx.branch_id,
+                ctx.source.order_id(),
+                ctx.source.open_ticket_id(),
+                ctx.source.round_id(),
+                ctx.table_label,
+                ctx.kitchen_ref,
+                ctx.round_number,
             )
-            .bind(cid)
-            .bind(ctx.org_id)
-            .bind(ctx.branch_id)
-            .bind(ctx.source.order_id())
-            .bind(ctx.source.open_ticket_id())
-            .bind(ctx.source.round_id())
-            .bind(ctx.table_label)
-            .bind(ctx.kitchen_ref)
-            .bind(ctx.round_number)
             .execute(&mut **tx)
             .await?;
             cid
         }
         None => {
-            sqlx::query_scalar(
+            sqlx::query_scalar!(
                 "INSERT INTO kitchen_tickets \
                 (org_id, branch_id, order_id, open_ticket_id, round_id, \
                  table_label, kitchen_ref, round_number) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+                ctx.org_id,
+                ctx.branch_id,
+                ctx.source.order_id(),
+                ctx.source.open_ticket_id(),
+                ctx.source.round_id(),
+                ctx.table_label,
+                ctx.kitchen_ref,
+                ctx.round_number,
             )
-            .bind(ctx.org_id)
-            .bind(ctx.branch_id)
-            .bind(ctx.source.order_id())
-            .bind(ctx.source.open_ticket_id())
-            .bind(ctx.source.round_id())
-            .bind(ctx.table_label)
-            .bind(ctx.kitchen_ref)
-            .bind(ctx.round_number)
             .fetch_one(&mut **tx)
             .await?
         }
@@ -325,35 +325,35 @@ pub(crate) async fn emit_kitchen_ticket(
         // A client-derived line id (idempotent) when present, else server-generated.
         match line.kitchen_item_id {
             Some(iid) => {
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO kitchen_ticket_items \
                         (id, kitchen_ticket_id, station_id, menu_item_id, line, qty, \
                          open_ticket_item_id) \
                      VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING",
+                    iid,
+                    ticket_id,
+                    station_id,
+                    line.menu_item_id,
+                    serde_json::to_value(line).unwrap_or(serde_json::Value::Null),
+                    line.qty,
+                    line.open_ticket_item_id,
                 )
-                .bind(iid)
-                .bind(ticket_id)
-                .bind(station_id)
-                .bind(line.menu_item_id)
-                .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
-                .bind(line.qty)
-                .bind(line.open_ticket_item_id)
                 .execute(&mut **tx)
                 .await?;
             }
             None => {
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO kitchen_ticket_items \
                         (kitchen_ticket_id, station_id, menu_item_id, line, qty, \
                          open_ticket_item_id) \
                      VALUES ($1, $2, $3, $4, $5, $6)",
+                    ticket_id,
+                    station_id,
+                    line.menu_item_id,
+                    serde_json::to_value(line).unwrap_or(serde_json::Value::Null),
+                    line.qty,
+                    line.open_ticket_item_id,
                 )
-                .bind(ticket_id)
-                .bind(station_id)
-                .bind(line.menu_item_id)
-                .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
-                .bind(line.qty)
-                .bind(line.open_ticket_item_id)
                 .execute(&mut **tx)
                 .await?;
             }
@@ -612,8 +612,10 @@ pub(crate) async fn publish_kitchen(
 /// is not `Copy` and the two reads have to borrow it in turn.
 async fn routing_mode_on(conn: &mut PgConnection, branch_id: Uuid) -> Result<String, AppError> {
     let stored: Option<String> =
-        sqlx::query_scalar("SELECT kitchen_routing_mode::text FROM branches WHERE id = $1")
-            .bind(branch_id)
+        sqlx::query_scalar!(
+            "SELECT kitchen_routing_mode::text FROM branches WHERE id = $1",
+            branch_id,
+        )
             .fetch_optional(&mut *conn)
             .await?
             .flatten();
@@ -644,8 +646,10 @@ where
     E: PgExecutor<'e> + Copy,
 {
     let stored: Option<String> =
-        sqlx::query_scalar("SELECT kitchen_routing_mode::text FROM branches WHERE id = $1")
-            .bind(branch_id)
+        sqlx::query_scalar!(
+            "SELECT kitchen_routing_mode::text FROM branches WHERE id = $1",
+            branch_id,
+        )
             .fetch_optional(executor)
             .await?
             .flatten();

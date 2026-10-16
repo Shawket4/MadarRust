@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO authz_replay_flags\n                     (org_id, branch_id, op, author_id, capability, reason, details)\n                 VALUES ($1, $3, 'PinSignIn', $2, 'pos:sign_in', 'pin_wrong_branch', $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "69bd397c0a95d5f40cbbf82d2ac973b8ae3da2e0c31ab99ef934662baecdde9d"
+}

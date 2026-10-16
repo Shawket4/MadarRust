@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_swaps (org_id, requester_id, requester_date, requester_shift_id, peer_id, peer_date, peer_shift_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6d3d34b3d981126e1414bef2fc46f571d08345643ad0579f4e9ee5d7b139f55a"
+}

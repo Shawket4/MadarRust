@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customers (org_id, name, phone, phone_key, source, marketing_opt_out) VALUES ($1, 'Ali', $2, phone_canonical($2), 'loyalty', $3) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ae769a77e7a8c47ea0e014f8f010b95d382675f97a5bd0fc1472b6bcf141e830"
+}

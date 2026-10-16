@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM staff_schedule_overrides WHERE employee_id = $1 AND on_date = $2 AND work_shift_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de19b2ffec3e810c0b14a0c6317d8bbad206a8aa93d13183a6a25a0ba1216b6d"
+}

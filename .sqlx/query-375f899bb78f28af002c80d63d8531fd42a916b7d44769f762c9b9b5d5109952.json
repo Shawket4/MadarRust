@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, status, payment_method, subtotal, tax_amount, total_amount, created_at, order_ref) VALUES ($1, $2, $3, $4, $5, 'completed'::order_status, 'Cash', $6, $7, $8, $9, $10)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "375f899bb78f28af002c80d63d8531fd42a916b7d44769f762c9b9b5d5109952"
+}

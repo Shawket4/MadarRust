@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_learning_state (branch_id, org_id, frozen) VALUES ($1, $2, $3) ON CONFLICT (branch_id) DO UPDATE SET frozen = EXCLUDED.frozen, changed_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6f5e1ee407951dfcfe130e2190e3338da9275a9d9e41bcdc05d51ade6b62d057"
+}

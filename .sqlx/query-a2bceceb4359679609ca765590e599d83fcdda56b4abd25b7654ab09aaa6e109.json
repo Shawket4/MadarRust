@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, check_out_at, check_in_method, check_out_method, check_in_distance_meters, late_minutes, worked_minutes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $9::timestamptz IS NULL THEN NULL ELSE 'mobile_gps' END, CASE WHEN $10::timestamptz IS NULL THEN NULL ELSE 'mobile_gps' END, CASE WHEN $9::timestamptz IS NULL THEN NULL ELSE 42.0 END, $11, $12) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a2bceceb4359679609ca765590e599d83fcdda56b4abd25b7654ab09aaa6e109"
+}

@@ -131,11 +131,11 @@ pub async fn used_on<'e, E>(exec: E, branch_id: Uuid, day: NaiveDate) -> Result<
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let n: Option<i64> = sqlx::query_scalar(
+    let n: Option<i64> = sqlx::query_scalar!(
         "SELECT sum(quantity)::bigint FROM staff_drinks WHERE branch_id = $1 AND business_date = $2",
+        branch_id,
+        day,
     )
-    .bind(branch_id)
-    .bind(day)
     .fetch_one(exec)
     .await?;
     Ok(n.unwrap_or(0) as i32)

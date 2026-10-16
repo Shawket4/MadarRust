@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM payslips WHERE payroll_period_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1c6efc9cdc2038f84c348544ada817fc5b8321ff9d69d7f85735a45f692a2296"
+}

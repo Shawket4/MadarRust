@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE organizations SET brand_background = $2, brand_foreground = $3, brand_accent = $4, brand_logo_is_mark = $5, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "be05b07fc780a0286077b02343a5e6819de316321442e597d4deb203dd6afec5"
+}

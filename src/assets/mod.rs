@@ -102,8 +102,10 @@ impl AssetStore {
 /// within the caller's transaction (released at commit/rollback). Take several
 /// keys in sorted order.
 pub async fn lock_file_key(conn: &mut sqlx::PgConnection, key: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 7019))")
-        .bind(key)
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 7019))",
+        key,
+    )
         .execute(conn)
         .await
         .map(|_| ())

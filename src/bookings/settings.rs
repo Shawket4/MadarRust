@@ -270,7 +270,7 @@ pub async fn put_settings(
     body.validate()?;
     let org_id = resolve_branch_org(pool.get_ref(), body.branch_id).await?;
     let s = body.into_inner();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO branch_booking_settings \
             (branch_id, org_id, enabled, hours, slot_minutes, default_duration_minutes, min_party, \
              max_party, lead_time_minutes, horizon_days, hold_minutes, auto_no_show_minutes, \
@@ -285,23 +285,23 @@ pub async fn put_settings(
             reminder_lead_minutes = EXCLUDED.reminder_lead_minutes, require_otp = EXCLUDED.require_otp, \
             max_covers_per_slot = EXCLUDED.max_covers_per_slot, blackout_dates = EXCLUDED.blackout_dates, \
             updated_at = now()",
+        s.branch_id,
+        org_id,
+        s.enabled,
+        serde_json::to_value(&s.hours).unwrap_or(serde_json::Value::Array(vec![])),
+        s.slot_minutes,
+        s.default_duration_minutes,
+        s.min_party,
+        s.max_party,
+        s.lead_time_minutes,
+        s.horizon_days,
+        s.hold_minutes,
+        s.auto_no_show_minutes,
+        s.reminder_lead_minutes,
+        s.require_otp,
+        s.max_covers_per_slot,
+        serde_json::to_value(&s.blackout_dates).unwrap_or(serde_json::Value::Array(vec![])),
     )
-    .bind(s.branch_id)
-    .bind(org_id)
-    .bind(s.enabled)
-    .bind(serde_json::to_value(&s.hours).unwrap_or(serde_json::Value::Array(vec![])))
-    .bind(s.slot_minutes)
-    .bind(s.default_duration_minutes)
-    .bind(s.min_party)
-    .bind(s.max_party)
-    .bind(s.lead_time_minutes)
-    .bind(s.horizon_days)
-    .bind(s.hold_minutes)
-    .bind(s.auto_no_show_minutes)
-    .bind(s.reminder_lead_minutes)
-    .bind(s.require_otp)
-    .bind(s.max_covers_per_slot)
-    .bind(serde_json::to_value(&s.blackout_dates).unwrap_or(serde_json::Value::Array(vec![])))
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(load_settings(pool.get_ref(), s.branch_id).await?))

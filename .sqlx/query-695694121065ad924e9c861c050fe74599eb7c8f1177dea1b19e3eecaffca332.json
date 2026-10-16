@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM branches WHERE org_id = $1 AND is_active AND deleted_at IS NULL AND kind = 'branch' ORDER BY (id = $2) DESC, created_at, id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "695694121065ad924e9c861c050fe74599eb7c8f1177dea1b19e3eecaffca332"
+}

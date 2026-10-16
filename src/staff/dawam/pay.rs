@@ -348,9 +348,11 @@ pub async fn my_estimate(me: Me, pool: crate::db::Db) -> Result<HttpResponse, Ap
     let today = today_for_employee(pool.get_ref(), org_id, employee_id).await?;
     let (start, end) = period_window(today, settings.period_start_day.max(1) as u32);
     let on_payroll: bool =
-        sqlx::query_scalar("SELECT on_payroll FROM employees WHERE id = $1 AND org_id = $2")
-            .bind(employee_id)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT on_payroll FROM employees WHERE id = $1 AND org_id = $2",
+            employee_id,
+            org_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .unwrap_or(false);
@@ -409,11 +411,11 @@ pub async fn mark_paid(
     }
     let by = claims.user_id_safe().ok();
     let mut tx = pool.begin().await?;
-    let status: String = sqlx::query_scalar(
+    let status: String = sqlx::query_scalar!(
         "SELECT status FROM payroll_periods WHERE id = $1 AND org_id = $2 FOR UPDATE",
+        period_id,
+        org_id,
     )
-    .bind(period_id)
-    .bind(org_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| crate::staff::coded(404, "PERIOD_NOT_FOUND", "Payroll period not found"))?;
@@ -968,9 +970,11 @@ pub async fn decide_adjustment(
     // The manager who added it hears back, in the app, through their employee.
     if let Some(creator) = a.created_by {
         let theirs: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
-                .bind(creator)
-                .bind(org_id)
+            sqlx::query_scalar!(
+                "SELECT id FROM employees WHERE user_id = $1 AND org_id = $2",
+                creator,
+                org_id,
+            )
                 .fetch_optional(pool)
                 .await?;
         if let Some(e) = theirs {
@@ -1236,28 +1240,30 @@ pub async fn review_advance(
         approve_advance_checks(pool, &claims, org_id, &subject, amount, asked).await?;
     }
     let mut tx = pool.begin().await?;
-    let won = sqlx::query(
+    let won = sqlx::query!(
         "UPDATE salary_advances SET status = $3, amount_piastres = $4, remaining_piastres = $4, \
             installments = $5, monthly_installment_piastres = $6, decided_by = $7, \
             decided_at = now(), decision_note = $8, updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND status = 'pending'",
+        *id,
+        org_id,
+        if body.approve { "approved" } else { "rejected" },
+        amount,
+        installments,
+        monthly,
+        by,
+        note,
     )
-    .bind(*id)
-    .bind(org_id)
-    .bind(if body.approve { "approved" } else { "rejected" })
-    .bind(amount)
-    .bind(installments)
-    .bind(monthly)
-    .bind(by)
-    .bind(note)
     .execute(&mut *tx)
     .await?
     .rows_affected();
     if won == 0 {
         // Decided by someone else since it was read: they told the person.
         drop(tx);
-        let now: String = sqlx::query_scalar("SELECT status FROM salary_advances WHERE id = $1")
-            .bind(*id)
+        let now: String = sqlx::query_scalar!(
+            "SELECT status FROM salary_advances WHERE id = $1",
+            *id,
+        )
             .fetch_one(pool)
             .await?;
         return Err(super::already_decided(&now));
@@ -1344,18 +1350,18 @@ pub async fn record_advance(
         .map(str::trim)
         .filter(|r| !r.is_empty());
     let mut tx = pool.begin().await?;
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO salary_advances (org_id, employee_id, amount_piastres, installments, \
              monthly_installment_piastres, remaining_piastres, reason, status, decided_by, decided_at) \
          VALUES ($1, $2, $3, $4, $5, $3, $6, 'approved', $7, now()) RETURNING id",
+        org_id,
+        body.employee_id,
+        body.amount_piastres,
+        installments,
+        monthly,
+        reason,
+        by,
     )
-    .bind(org_id)
-    .bind(body.employee_id)
-    .bind(body.amount_piastres)
-    .bind(installments)
-    .bind(monthly)
-    .bind(reason)
-    .bind(by)
     .fetch_one(&mut *tx)
     .await?;
     audit(
@@ -1483,18 +1489,18 @@ pub async fn log_expense_advance(
             "The date can't be in the future",
         ));
     }
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO expense_advances (org_id, employee_id, branch_id, amount_piastres, purpose, via, \
             handed_by, given_on) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+        org_id,
+        body.employee_id,
+        branch,
+        body.amount_piastres,
+        purpose,
+        &body.via,
+        claims.user_id_safe().ok(),
+        given_on,
     )
-    .bind(org_id)
-    .bind(body.employee_id)
-    .bind(branch)
-    .bind(body.amount_piastres)
-    .bind(purpose)
-    .bind(&body.via)
-    .bind(claims.user_id_safe().ok())
-    .bind(given_on)
     .fetch_one(pool)
     .await?;
     audit(
@@ -1639,8 +1645,10 @@ async fn expense_for_correction(
         .to_string();
     period_lock::assert_open(pool, org_id, row.given_on, "this expense advance").await?;
     let movement: Option<Uuid> =
-        sqlx::query_scalar("SELECT till_movement_id FROM expense_advances WHERE id = $1")
-            .bind(id)
+        sqlx::query_scalar!(
+            "SELECT till_movement_id FROM expense_advances WHERE id = $1",
+            id,
+        )
             .fetch_one(pool)
             .await?;
     Ok((row, reason, movement))
@@ -1667,9 +1675,11 @@ pub async fn clear_expense_advance(
     let (row, reason, movement) =
         expense_for_correction(pool, &claims, org_id, *id, query.reason.as_deref()).await?;
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM expense_advances WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    sqlx::query!(
+        "DELETE FROM expense_advances WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(&mut *tx)
         .await?;
     audit(
@@ -1724,10 +1734,12 @@ pub async fn reassign_expense_advance(
         return Err(AppError::BadRequest("It's already theirs.".into()));
     }
     let mut tx = pool.begin().await?;
-    sqlx::query("UPDATE expense_advances SET employee_id = $3 WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
-        .bind(to.id)
+    sqlx::query!(
+        "UPDATE expense_advances SET employee_id = $3 WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+        to.id,
+    )
         .execute(&mut *tx)
         .await?;
     audit(
@@ -1771,11 +1783,12 @@ pub struct StaffNotification {
     security(("bearer_jwt" = []))
 )]
 pub async fn my_notifications(me: Me, pool: crate::db::Db) -> Result<HttpResponse, AppError> {
-    let rows = sqlx::query_as::<_, StaffNotification>(
+    let rows = sqlx::query_as!(
+        StaffNotification,
         "SELECT id, key, args, created_at, read_at FROM staff_notifications \
           WHERE employee_id = $1 ORDER BY created_at DESC LIMIT 100",
+        me.employee_id,
     )
-    .bind(me.employee_id)
     .fetch_all(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().json(rows))
@@ -1798,12 +1811,12 @@ pub async fn read_notifications(
     pool: crate::db::Db,
     body: web::Json<ReadNotifications>,
 ) -> Result<HttpResponse, AppError> {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_notifications SET read_at = now() \
           WHERE employee_id = $1 AND read_at IS NULL AND (cardinality($2::uuid[]) = 0 OR id = ANY($2))",
+        me.employee_id,
+        &body.ids,
     )
-    .bind(me.employee_id)
-    .bind(&body.ids)
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::NoContent().finish())

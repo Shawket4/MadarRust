@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET code = $2, label = $3, branch_id = $4, retired_at = CASE WHEN $5::bool IS NULL THEN retired_at WHEN $5 THEN COALESCE(retired_at, now()) ELSE NULL END, credential_hash = CASE WHEN $5::bool THEN NULL ELSE credential_hash END WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dbde964baddd082f4a37ae220d7fd14dfb0f49ecece1d3e53c7441f33ac240bf"
+}

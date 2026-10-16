@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payroll_periods SET status = 'draft', employee_count = 0, total_net_piastres = 0, generated_at = NULL, generated_by = NULL, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "01dfa36dce6259d40a8279455a9e1764b697fe65332d393a95ac56e6a3331e9e"
+}

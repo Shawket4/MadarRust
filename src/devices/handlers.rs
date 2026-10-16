@@ -267,17 +267,17 @@ pub async fn update_device(
         Some(l) => clean_label(l.as_deref()),
         None => current.label.clone(),
     };
-    sqlx::query(
+    sqlx::query!(
         "UPDATE devices SET code = $2, label = $3, branch_id = $4, \
             retired_at = CASE WHEN $5::bool IS NULL THEN retired_at WHEN $5 THEN COALESCE(retired_at, now()) ELSE NULL END, \
             credential_hash = CASE WHEN $5::bool THEN NULL ELSE credential_hash END \
          WHERE id = $1",
+        *id,
+        &code,
+        label,
+        branch,
+        body.retired,
     )
-    .bind(*id)
-    .bind(&code)
-    .bind(label)
-    .bind(branch)
-    .bind(body.retired)
     .execute(pool.get_ref())
     .await?;
     if let Some(retired) = body.retired {
@@ -286,9 +286,11 @@ pub async fn update_device(
         // trigger revokes an inactive person's assignments), so its open
         // session reads and bumps nothing; its next sign-in is refused and the
         // screen goes back to setup.
-        sqlx::query("UPDATE users SET is_active = $2 WHERE device_id = $1")
-            .bind(*id)
-            .bind(!retired)
+        sqlx::query!(
+            "UPDATE users SET is_active = $2 WHERE device_id = $1",
+            *id,
+            !retired,
+        )
             .execute(pool.get_ref())
             .await?;
     }

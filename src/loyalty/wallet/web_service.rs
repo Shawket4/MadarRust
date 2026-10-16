@@ -93,16 +93,16 @@ pub async fn register(
     let (device_library_id, _pass_type, serial) = path.into_inner();
     let member = authenticated_member(pool.get_ref(), &req, &serial).await?;
 
-    let inserted = sqlx::query(
+    let inserted = sqlx::query!(
         "INSERT INTO loyalty_pass_devices (device_library_id, customer_id, org_id, push_token) \
          VALUES ($1,$2,$3,$4) \
          ON CONFLICT (device_library_id, customer_id) \
          DO UPDATE SET push_token = EXCLUDED.push_token",
+        &device_library_id,
+        member.id,
+        member.org_id,
+        &body.push_token,
     )
-    .bind(&device_library_id)
-    .bind(member.id)
-    .bind(member.org_id)
-    .bind(&body.push_token)
     .execute(pool.get_ref())
     .await?;
 
@@ -121,11 +121,11 @@ pub async fn unregister(
 ) -> Result<HttpResponse, AppError> {
     let (device_library_id, _pass_type, serial) = path.into_inner();
     let member = authenticated_member(pool.get_ref(), &req, &serial).await?;
-    sqlx::query(
+    sqlx::query!(
         "DELETE FROM loyalty_pass_devices WHERE device_library_id = $1 AND customer_id = $2",
+        &device_library_id,
+        member.id,
     )
-    .bind(&device_library_id)
-    .bind(member.id)
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::Ok().finish())

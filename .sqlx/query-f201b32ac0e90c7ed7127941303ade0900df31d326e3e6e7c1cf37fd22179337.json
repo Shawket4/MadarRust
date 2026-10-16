@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, business_date, status, scheduled_start_at, scheduled_end_at, check_in_at, check_in_latitude, check_in_longitude, check_in_distance_meters, check_in_method, covered_employee_id, cover_status, created_by) VALUES ($1, $2, $3, $4, $5, 'present', $6, $7, $13, $8, $9, $10, 'cover', $11, 'pending', $12) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Timestamptz",
+        "Timestamptz",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f201b32ac0e90c7ed7127941303ade0900df31d326e3e6e7c1cf37fd22179337"
+}

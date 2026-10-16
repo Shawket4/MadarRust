@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO menu_items (org_id, category_id, name, name_translations, description, description_translations, base_price, is_active, kind) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'combo') RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Text",
+        "Jsonb",
+        "Int4",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "101d98bdb1e1ffccb43c34b87c39921d9358c7a10478f9d75cf24f3913a4396e"
+}

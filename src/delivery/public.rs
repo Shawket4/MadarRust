@@ -474,10 +474,10 @@ pub async fn public_menu(
                 "the dine-in menu is read-only: pass preview=true".into(),
             ));
         }
-        let org_id: Option<Uuid> = sqlx::query_scalar(
+        let org_id: Option<Uuid> = sqlx::query_scalar!(
             "SELECT org_id FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+            branch_id,
         )
-        .bind(branch_id)
         .fetch_optional(pool.get_ref())
         .await?;
         let org_id = org_id.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -1648,13 +1648,13 @@ pub async fn otp_request(
 
     let code = generate_otp_code();
 
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO delivery_otp (phone, code, expires_at) \
          VALUES ($1, $2, now() + ($3 || ' seconds')::interval)",
+        &phone,
+        &code,
+        OTP_TTL_SECONDS.to_string(),
     )
-    .bind(&phone)
-    .bind(&code)
-    .bind(OTP_TTL_SECONDS.to_string())
     .execute(pool.get_ref())
     .await?;
 
@@ -2356,12 +2356,12 @@ async fn guest_customer(
     org_id: Uuid,
     phone: &str,
 ) -> Result<Option<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT id FROM customers WHERE org_id = $1 AND phone_key = $2
             AND merged_into IS NULL AND erased_at IS NULL",
+        org_id,
+        phone,
     )
-    .bind(org_id)
-    .bind(phone)
     .fetch_optional(pool)
     .await?)
 }

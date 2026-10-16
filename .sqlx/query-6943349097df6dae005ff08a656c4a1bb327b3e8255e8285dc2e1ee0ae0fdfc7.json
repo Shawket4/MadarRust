@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sum(quantity)::bigint FROM staff_drinks WHERE branch_id = $1 AND business_date = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sum",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6943349097df6dae005ff08a656c4a1bb327b3e8255e8285dc2e1ee0ae0fdfc7"
+}

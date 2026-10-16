@@ -215,14 +215,14 @@ pub async fn covers_at<'e, E>(
 where
     E: PgExecutor<'e>,
 {
-    let n: Option<i64> = sqlx::query_scalar(
+    let n: Option<i64> = sqlx::query_scalar!(
         "SELECT SUM(party_size)::bigint FROM bookings \
          WHERE branch_id = $1 AND starts_at = $2 AND status IN ('confirmed', 'seated') \
            AND ($3::uuid IS NULL OR id <> $3)",
+        branch_id,
+        starts_at,
+        exclude_booking,
     )
-    .bind(branch_id)
-    .bind(starts_at)
-    .bind(exclude_booking)
     .fetch_one(exec)
     .await?;
     Ok(n.unwrap_or(0))

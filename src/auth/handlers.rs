@@ -263,12 +263,12 @@ pub(crate) async fn upgrade_verified_pin(
         rehash_if_stale(pool, user_id, PasswordColumn::Pin, pin, h).await;
     }
     let fp = crate::auth::pin_fingerprint::fingerprint(org_id, pin);
-    if let Err(e) = sqlx::query(
+    if let Err(e) = sqlx::query!(
         "UPDATE users SET pin_fingerprint = $1 WHERE id = $2
            AND (pin_fingerprint IS NULL OR pin_fingerprint <> $1)",
+        &fp,
+        user_id,
     )
-    .bind(&fp)
-    .bind(user_id)
     .execute(pool)
     .await
     {
@@ -438,10 +438,10 @@ pub async fn login(
             })?;
 
             // Derive org_id from the branch — never trust the client to supply it
-            let branch_org_id: Uuid = sqlx::query_scalar(
-                "SELECT org_id FROM branches WHERE id = $1 AND is_active = TRUE AND deleted_at IS NULL"
+            let branch_org_id: Uuid = sqlx::query_scalar!(
+                "SELECT org_id FROM branches WHERE id = $1 AND is_active = TRUE AND deleted_at IS NULL",
+                branch_id,
             )
-            .bind(branch_id)
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid branch".into()))?;
@@ -595,12 +595,12 @@ pub async fn login(
             // logged and otherwise ignored: every PIN is being re-issued at
             // rollout, so there is no backlog to manage (§6).
             let fp = crate::auth::pin_fingerprint::fingerprint(branch_org_id, pin);
-            if let Err(e) = sqlx::query(
+            if let Err(e) = sqlx::query!(
                 "UPDATE users SET pin_fingerprint = $1 WHERE id = $2
                    AND (pin_fingerprint IS NULL OR pin_fingerprint <> $1)",
+                &fp,
+                matched.id,
             )
-            .bind(&fp)
-            .bind(matched.id)
             .execute(pool.get_ref())
             .await
             {
@@ -612,9 +612,11 @@ pub async fn login(
             // offline-auth bundle can let them unlock offline later. Best-effort
             // — a hashing/store failure must never block a valid login.
             if let Ok(off_hash) = crate::auth::offline::hash_offline_pin(pin) {
-                let _ = sqlx::query("UPDATE users SET offline_pin_hash = $1 WHERE id = $2")
-                    .bind(&off_hash)
-                    .bind(matched.id)
+                let _ = sqlx::query!(
+                    "UPDATE users SET offline_pin_hash = $1 WHERE id = $2",
+                    &off_hash,
+                    matched.id,
+                )
                     .execute(pool.get_ref())
                     .await;
             }
@@ -864,30 +866,32 @@ pub async fn device_session(
     // The screen's principal, made on its first sign-in and kept in step with
     // the device: its name follows the slot, its branch follows the device.
     let mut tx = pool.begin().await?;
-    let user_id: Uuid = sqlx::query_scalar(
+    let user_id: Uuid = sqlx::query_scalar!(
         "INSERT INTO users (org_id, name, role, is_active, device_id)
          VALUES ($1, $2, 'kitchen', TRUE, $3)
          ON CONFLICT (device_id) WHERE device_id IS NOT NULL
          DO UPDATE SET name = EXCLUDED.name, is_active = TRUE, deleted_at = NULL
          RETURNING id",
+        org_id,
+        &name,
+        device,
     )
-    .bind(org_id)
-    .bind(&name)
-    .bind(device)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id <> $2")
-        .bind(user_id)
-        .bind(branch_id)
+    sqlx::query!(
+        "DELETE FROM user_branch_assignments WHERE user_id = $1 AND branch_id <> $2",
+        user_id,
+        branch_id,
+    )
         .execute(&mut *tx)
         .await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO user_branch_assignments (user_id, branch_id)
          SELECT $1, $2 WHERE NOT EXISTS
            (SELECT 1 FROM user_branch_assignments WHERE user_id = $1 AND branch_id = $2)",
+        user_id,
+        branch_id,
     )
-    .bind(user_id)
-    .bind(branch_id)
     .execute(&mut *tx)
     .await?;
     let user = sqlx::query_as::<_, User>(&format!(

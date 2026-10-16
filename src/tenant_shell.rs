@@ -387,13 +387,13 @@ async fn menu_branch(pool: &PgPool, org_id: Uuid, full_path: &str) -> Option<Uui
 /// `wanted` when it is one of the shop's own open branches, else its first one.
 /// Shared with the MCP server's menu tool.
 pub(crate) async fn shop_branch(pool: &PgPool, org_id: Uuid, wanted: Option<Uuid>) -> Option<Uuid> {
-    sqlx::query_scalar::<_, Uuid>(
+    sqlx::query_scalar!(
         "SELECT id FROM branches \
           WHERE org_id = $1 AND is_active AND deleted_at IS NULL AND kind = 'branch' \
           ORDER BY (id = $2) DESC, created_at, id LIMIT 1",
+        org_id,
+        wanted.unwrap_or(Uuid::nil()),
     )
-    .bind(org_id)
-    .bind(wanted.unwrap_or(Uuid::nil()))
     .fetch_optional(pool)
     .await
     .ok()

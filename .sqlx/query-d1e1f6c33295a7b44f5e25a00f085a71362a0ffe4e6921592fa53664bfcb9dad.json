@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE device_activation_codes SET used_by_device = $2 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d1e1f6c33295a7b44f5e25a00f085a71362a0ffe4e6921592fa53664bfcb9dad"
+}

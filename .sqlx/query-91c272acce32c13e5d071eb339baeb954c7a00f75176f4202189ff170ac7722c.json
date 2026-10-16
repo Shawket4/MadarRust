@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE table_transfer_requests SET status = 'cancelled', resolved_at = now(), updated_at = now() WHERE id = $1 AND status = 'waiting'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "91c272acce32c13e5d071eb339baeb954c7a00f75176f4202189ff170ac7722c"
+}

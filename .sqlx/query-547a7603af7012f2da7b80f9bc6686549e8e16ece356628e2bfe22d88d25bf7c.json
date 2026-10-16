@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE open_tickets SET subtotal = subtotal + $2, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "547a7603af7012f2da7b80f9bc6686549e8e16ece356628e2bfe22d88d25bf7c"
+}

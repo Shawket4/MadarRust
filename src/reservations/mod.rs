@@ -18,8 +18,10 @@ pub(crate) async fn resolve_branch_org(
     pool: &sqlx::PgPool,
     branch_id: uuid::Uuid,
 ) -> Result<uuid::Uuid, crate::errors::AppError> {
-    sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-        .bind(branch_id)
+    sqlx::query_scalar!(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+        branch_id,
+    )
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| crate::errors::AppError::NotFound("Branch not found".into()))

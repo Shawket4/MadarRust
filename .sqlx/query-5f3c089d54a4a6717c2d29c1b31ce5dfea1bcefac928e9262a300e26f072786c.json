@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payroll_periods SET status = 'closed', closed_at = now(), updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5f3c089d54a4a6717c2d29c1b31ce5dfea1bcefac928e9262a300e26f072786c"
+}

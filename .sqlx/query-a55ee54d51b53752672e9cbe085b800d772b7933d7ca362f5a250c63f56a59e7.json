@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, business_date, status, scheduled_start_at, scheduled_end_at, is_manual, created_by, edit_reason) VALUES ($1, $2, $3, $4, $5, 'absent', $6, $7, FALSE, $8, 'Written by an approved punch correction') ON CONFLICT (employee_id, business_date, COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE covered_employee_id IS NULL DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Timestamptz",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a55ee54d51b53752672e9cbe085b800d772b7933d7ca362f5a250c63f56a59e7"
+}

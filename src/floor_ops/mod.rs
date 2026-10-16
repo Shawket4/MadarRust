@@ -224,13 +224,13 @@ impl Hand {
     where
         E: PgExecutor<'e>,
     {
-        let till_id: Option<Uuid> = sqlx::query_scalar(
+        let till_id: Option<Uuid> = sqlx::query_scalar!(
             "SELECT id FROM tills \
               WHERE teller_id = $1 AND branch_id = $2 AND status = 'open' \
               ORDER BY opened_at DESC LIMIT 1",
+            user_id,
+            branch_id,
         )
-        .bind(user_id)
-        .bind(branch_id)
         .fetch_optional(exec)
         .await?;
         Ok(Self { user_id, till_id })
@@ -296,11 +296,11 @@ pub(crate) async fn lock_table(
     table_id: Uuid,
     branch_id: Uuid,
 ) -> Result<bool, AppError> {
-    let found: Option<Uuid> = sqlx::query_scalar(
+    let found: Option<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM branch_tables WHERE id = $1 AND branch_id = $2 FOR UPDATE",
+        table_id,
+        branch_id,
     )
-    .bind(table_id)
-    .bind(branch_id)
     .fetch_optional(&mut **tx)
     .await?;
     Ok(found.is_some())
@@ -455,9 +455,11 @@ pub(crate) async fn take_table(
             let same_hand = o.started_by == Some(by.user_id) || by.till_id.is_some();
             if o.held_by == "party" && same_hand {
                 if by.till_id.is_some() && o.started_till_id != by.till_id {
-                    sqlx::query("UPDATE table_occupancies SET started_till_id = $2 WHERE id = $1")
-                        .bind(o.id)
-                        .bind(by.till_id)
+                    sqlx::query!(
+                        "UPDATE table_occupancies SET started_till_id = $2 WHERE id = $1",
+                        o.id,
+                        by.till_id,
+                    )
                         .execute(&mut **tx)
                         .await?;
                 }
@@ -519,13 +521,13 @@ pub(crate) async fn take_table(
     if let Some(ticket_id) = open_ticket_id {
         // The bill carries the same instant, so a settle can copy it onto the
         // sale and a later move inherits it.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE open_tickets t SET seated_at = o.seated_at \
                FROM table_occupancies o \
               WHERE t.id = $1 AND t.seated_at IS NULL \
                 AND o.open_ticket_id = t.id AND o.ended_at IS NULL",
+            ticket_id,
         )
-        .bind(ticket_id)
         .execute(&mut **tx)
         .await?;
     }
@@ -567,17 +569,17 @@ async fn end_occupancy_row<'e, E>(
 where
     E: PgExecutor<'e>,
 {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE table_occupancies \
             SET ended_at = now(), ended_by = $2, ended_till_id = $3, end_reason = $4, \
                 needs_bussing = $5, updated_at = now() \
           WHERE id = $1 AND ended_at IS NULL",
+        occupancy_id,
+        by.user_id,
+        by.till_id,
+        reason.as_str(),
+        needs_bussing,
     )
-    .bind(occupancy_id)
-    .bind(by.user_id)
-    .bind(by.till_id)
-    .bind(reason.as_str())
-    .bind(needs_bussing)
     .execute(exec)
     .await?;
     Ok(())
@@ -602,18 +604,18 @@ pub(crate) async fn end_ticket_occupancy<'e, E>(
 where
     E: PgExecutor<'e>,
 {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "UPDATE table_occupancies \
             SET ended_at = now(), ended_by = $2, ended_till_id = $3, end_reason = $4, \
                 needs_bussing = $5, updated_at = now() \
           WHERE open_ticket_id = $1 AND ended_at IS NULL \
           RETURNING table_id",
+        ticket_id,
+        by.user_id,
+        by.till_id,
+        reason.as_str(),
+        needs_bussing,
     )
-    .bind(ticket_id)
-    .bind(by.user_id)
-    .bind(by.till_id)
-    .bind(reason.as_str())
-    .bind(needs_bussing)
     .fetch_optional(exec)
     .await?)
 }
@@ -627,17 +629,17 @@ pub(crate) async fn release_party_hold(
     needs_bussing: bool,
     by: &Hand,
 ) -> Result<bool, AppError> {
-    let ended = sqlx::query(
+    let ended = sqlx::query!(
         "UPDATE table_occupancies \
             SET ended_at = now(), ended_by = $2, ended_till_id = $3, end_reason = $4, \
                 needs_bussing = $5, updated_at = now() \
           WHERE table_id = $1 AND ended_at IS NULL AND held_by = 'party'",
+        table_id,
+        by.user_id,
+        by.till_id,
+        EndReason::Released.as_str(),
+        needs_bussing,
     )
-    .bind(table_id)
-    .bind(by.user_id)
-    .bind(by.till_id)
-    .bind(EndReason::Released.as_str())
-    .bind(needs_bussing)
     .execute(&mut **tx)
     .await?;
     Ok(ended.rows_affected() > 0)
@@ -693,9 +695,11 @@ pub(crate) async fn relocate_ticket(
     if current.is_some() && current != to_table {
         end_ticket_occupancy(&mut **tx, ticket_id, EndReason::Moved, false, by).await?;
     }
-    sqlx::query("UPDATE open_tickets SET table_id = $2, updated_at = now() WHERE id = $1")
-        .bind(ticket_id)
-        .bind(to_table)
+    sqlx::query!(
+        "UPDATE open_tickets SET table_id = $2, updated_at = now() WHERE id = $1",
+        ticket_id,
+        to_table,
+    )
         .execute(&mut **tx)
         .await?;
     let Some(t) = to_table else {
@@ -757,7 +761,7 @@ pub(crate) async fn land_party_hold(
     hold: &Occupancy,
     to_table: Uuid,
 ) -> Result<(), AppError> {
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO table_occupancies \
             (org_id, branch_id, table_id, held_by, party_size, started_by, started_till_id, \
              started_device, seated_at) \
@@ -765,9 +769,9 @@ pub(crate) async fn land_party_hold(
                 p.started_till_id, p.started_device, COALESCE(p.seated_at, p.started_at) \
            FROM branch_tables bt, table_occupancies p \
           WHERE bt.id = $1 AND p.id = $2",
+        to_table,
+        hold.id,
     )
-    .bind(to_table)
-    .bind(hold.id)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -788,13 +792,13 @@ pub(crate) async fn cancel_waiting_transfers(
     tx: &mut Transaction<'_, Postgres>,
     occupant_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "UPDATE table_transfer_requests \
          SET status = 'cancelled', resolved_at = now(), updated_at = now() \
          WHERE occupant_id = $1 AND status = 'waiting' \
          RETURNING id",
+        occupant_id,
     )
-    .bind(occupant_id)
     .fetch_all(&mut **tx)
     .await?)
 }
@@ -840,8 +844,10 @@ impl FloorEvents {
     pub(crate) async fn publish(self, pool: &sqlx::PgPool, hub: &BranchEventHub, branch_id: Uuid) {
         for id in self.transfers {
             let status: Option<String> =
-                sqlx::query_scalar("SELECT status FROM table_transfer_requests WHERE id = $1")
-                    .bind(id)
+                sqlx::query_scalar!(
+                    "SELECT status FROM table_transfer_requests WHERE id = $1",
+                    id,
+                )
                     .fetch_optional(pool)
                     .await
                     .ok()

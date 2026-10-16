@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE payroll_periods SET status = 'paid', paid_at = now(), updated_at = now() WHERE id = $1 AND status = 'generated' AND EXISTS (SELECT 1 FROM payslips WHERE payroll_period_id = $1) AND NOT EXISTS (SELECT 1 FROM payslips WHERE payroll_period_id = $1 AND paid_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "59c9eb7d0bab05f6ca53e2fd86be7e21de87810882dbd983c2d28064a682cf43"
+}

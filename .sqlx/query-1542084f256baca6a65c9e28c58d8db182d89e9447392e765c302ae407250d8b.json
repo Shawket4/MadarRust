@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET plan_inactive_seen_at = now()\n          WHERE id = $1 AND plan_inactive AND plan_inactive_seen_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1542084f256baca6a65c9e28c58d8db182d89e9447392e765c302ae407250d8b"
+}

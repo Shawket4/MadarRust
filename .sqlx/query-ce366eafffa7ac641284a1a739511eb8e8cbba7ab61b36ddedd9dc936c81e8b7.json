@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO branch_delivery_settings (branch_id) VALUES ($1) ON CONFLICT (branch_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ce366eafffa7ac641284a1a739511eb8e8cbba7ab61b36ddedd9dc936c81e8b7"
+}

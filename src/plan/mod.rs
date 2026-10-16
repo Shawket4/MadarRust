@@ -55,8 +55,10 @@ pub async fn plan_of<'e, E>(ex: E, org: Uuid) -> Result<Plan, AppError>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let plan: Option<String> = sqlx::query_scalar("SELECT plan FROM organizations WHERE id = $1")
-        .bind(org)
+    let plan: Option<String> = sqlx::query_scalar!(
+        "SELECT plan FROM organizations WHERE id = $1",
+        org,
+    )
         .fetch_optional(ex)
         .await?;
     Ok(plan.as_deref().map_or(Plan::Paid, Plan::parse))
@@ -111,10 +113,10 @@ pub async fn public_gate_branch<'e, E>(ex: E, branch: Uuid, f: Feature) -> Resul
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let plan: Option<String> = sqlx::query_scalar(
+    let plan: Option<String> = sqlx::query_scalar!(
         "SELECT o.plan FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
+        branch,
     )
-    .bind(branch)
     .fetch_optional(ex)
     .await?;
     match plan.as_deref().map(Plan::parse) {
@@ -260,8 +262,10 @@ where
         return Ok(());
     };
     let inactive: Option<bool> =
-        sqlx::query_scalar("SELECT plan_inactive FROM devices WHERE id = $1")
-            .bind(device)
+        sqlx::query_scalar!(
+            "SELECT plan_inactive FROM devices WHERE id = $1",
+            device,
+        )
             .fetch_optional(ex)
             .await?;
     if inactive == Some(true) {
@@ -332,11 +336,11 @@ pub async fn mark_till_told<'e, E>(ex: E, device: Uuid) -> Result<(), AppError>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE devices SET plan_inactive_seen_at = now()
           WHERE id = $1 AND plan_inactive AND plan_inactive_seen_at IS NULL",
+        device,
     )
-    .bind(device)
     .execute(ex)
     .await?;
     Ok(())
@@ -411,9 +415,11 @@ pub async fn change_plan(
     if from == to {
         return Ok(out);
     }
-    let updated = sqlx::query("UPDATE organizations SET plan = $2 WHERE id = $1")
-        .bind(org)
-        .bind(to.as_str())
+    let updated = sqlx::query!(
+        "UPDATE organizations SET plan = $2 WHERE id = $1",
+        org,
+        to.as_str(),
+    )
         .execute(&mut *conn)
         .await?
         .rows_affected();
@@ -428,26 +434,26 @@ pub async fn change_plan(
                 .iter()
                 .filter_map(|k| Uuid::parse_str(&k.device_id).ok())
                 .collect();
-            out.deactivated = sqlx::query_scalar(
+            out.deactivated = sqlx::query_scalar!(
                 "UPDATE devices SET plan_inactive = true, plan_inactive_at = now(),
                         plan_inactive_seen_at = NULL
                   WHERE org_id = $1 AND kind = 'pos' AND retired_at IS NULL
                     AND branch_id IS NOT NULL AND NOT plan_inactive AND NOT (id = ANY($2))
               RETURNING id",
+                org,
+                &keep_ids,
             )
-            .bind(org)
-            .bind(&keep_ids)
             .fetch_all(&mut *conn)
             .await?;
         }
         Plan::Paid => {
-            out.reactivated = sqlx::query_scalar(
+            out.reactivated = sqlx::query_scalar!(
                 "UPDATE devices SET plan_inactive = false, plan_inactive_at = NULL,
                         plan_inactive_seen_at = NULL
                   WHERE org_id = $1 AND plan_inactive
               RETURNING id",
+                org,
             )
-            .bind(org)
             .fetch_all(&mut *conn)
             .await?;
         }
@@ -483,28 +489,30 @@ pub async fn set_active_till(
     if !ok {
         return Err(AppError::NotFound("That till is not in this branch".into()));
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE devices SET plan_inactive = false, plan_inactive_at = NULL,
                 plan_inactive_seen_at = NULL
           WHERE id = $1 AND plan_inactive",
+        device,
     )
-    .bind(device)
     .execute(&mut *conn)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE devices SET plan_inactive = true, plan_inactive_at = now(),
                 plan_inactive_seen_at = NULL
           WHERE org_id = $1 AND branch_id = $2 AND kind = 'pos' AND retired_at IS NULL
             AND id <> $3 AND NOT plan_inactive",
+        org,
+        branch,
+        device,
     )
-    .bind(org)
-    .bind(branch)
-    .bind(device)
     .execute(&mut *conn)
     .await?;
     // The set of who may sell changed: a till's snapshot and feed refresh.
-    sqlx::query("SELECT authz_bump_epoch($1)")
-        .bind(org)
+    sqlx::query!(
+        "SELECT authz_bump_epoch($1)",
+        org,
+    )
         .execute(&mut *conn)
         .await?;
     Ok(())

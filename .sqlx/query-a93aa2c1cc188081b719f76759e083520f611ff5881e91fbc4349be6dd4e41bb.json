@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, reason, effective_date, source, attendance_record_id, created_by, status, reason_code) VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE), $6, NULL, $7, $8, $9) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8",
+        "Text",
+        "Date",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a93aa2c1cc188081b719f76759e083520f611ff5881e91fbc4349be6dd4e41bb"
+}

@@ -113,9 +113,11 @@ async fn insert_claims(
 ) -> Result<(), AppError> {
     for t in table_ids {
         // org_id / during / active are filled by the BEFORE INSERT trigger.
-        sqlx::query("INSERT INTO booking_tables (booking_id, table_id) VALUES ($1, $2)")
-            .bind(booking_id)
-            .bind(t)
+        sqlx::query!(
+            "INSERT INTO booking_tables (booking_id, table_id) VALUES ($1, $2)",
+            booking_id,
+            t,
+        )
             .execute(&mut **tx)
             .await
             .map_err(map_claim_error)?;
@@ -361,30 +363,28 @@ pub(crate) async fn create_booking_inner(
         None,
     )
     .await?;
-    let id: Uuid = sqlx::query_scalar(
+    let id: Uuid = sqlx::query_scalar!(
         "INSERT INTO bookings (org_id, branch_id, party_size, starts_at, ends_at, guest_name, \
              guest_phone, phone_verified, notes, source, locale, section_id, created_by, customer_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
-    )
-    .bind(org_id)
-    .bind(body.branch_id)
-    .bind(body.party_size as i16)
-    .bind(body.starts_at)
-    .bind(ends_at)
-    .bind(name)
-    .bind(&phone)
-    .bind(phone_verified)
-    .bind(
+        org_id,
+        body.branch_id,
+        body.party_size as i16,
+        body.starts_at,
+        ends_at,
+        name,
+        &phone,
+        phone_verified,
         body.notes
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty()),
+        source,
+        clean_locale(body.locale.as_deref()),
+        body.section_id,
+        created_by,
+        customer_id,
     )
-    .bind(source)
-    .bind(clean_locale(body.locale.as_deref()))
-    .bind(body.section_id)
-    .bind(created_by)
-    .bind(customer_id)
     .fetch_one(&mut *tx)
     .await?;
     insert_claims(&mut tx, id, &table_ids).await?;
@@ -566,8 +566,10 @@ pub(crate) async fn update_booking_inner(
 
     // Drop the claims first so the window move never trips the exclusion
     // against the booking's own old range, then re-claim.
-    sqlx::query("DELETE FROM booking_tables WHERE booking_id = $1")
-        .bind(id)
+    sqlx::query!(
+        "DELETE FROM booking_tables WHERE booking_id = $1",
+        id,
+    )
         .execute(&mut *tx)
         .await?;
     let phone = match &body.guest_phone {
@@ -582,21 +584,19 @@ pub(crate) async fn update_booking_inner(
     if body.guest_name.is_some() && name.is_none() {
         return Err(AppError::BadRequest("guest_name cannot be empty".into()));
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE bookings SET party_size = $2, starts_at = $3, ends_at = $4, section_id = $5, \
              guest_name = COALESCE($6, guest_name), guest_phone = COALESCE($7, guest_phone), \
              notes = CASE WHEN $8 THEN $9 ELSE notes END, updated_at = now() \
          WHERE id = $1",
-    )
-    .bind(id)
-    .bind(party as i16)
-    .bind(starts_at)
-    .bind(ends_at)
-    .bind(section_id)
-    .bind(name)
-    .bind(phone)
-    .bind(body.notes.is_some())
-    .bind(
+        id,
+        party as i16,
+        starts_at,
+        ends_at,
+        section_id,
+        name,
+        phone,
+        body.notes.is_some(),
         body.notes
             .as_deref()
             .map(str::trim)
@@ -662,10 +662,10 @@ async fn claimed_tables(
     tx: &mut Transaction<'_, Postgres>,
     booking_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT table_id FROM booking_tables WHERE booking_id = $1 ORDER BY table_id",
+        booking_id,
     )
-    .bind(booking_id)
     .fetch_all(&mut **tx)
     .await?)
 }
@@ -804,14 +804,14 @@ pub(crate) async fn cancel_inner(
             return Err(AppError::Conflict(format!("Booking is already {other}")));
         }
     };
-    sqlx::query(
+    sqlx::query!(
         "UPDATE bookings SET status = 'cancelled', cancelled_at = now(), cancelled_by = $2, \
              cancel_reason = $3, updated_at = now() \
          WHERE id = $1",
+        id,
+        by,
+        reason.map(str::trim).filter(|s| !s.is_empty()),
     )
-    .bind(id)
-    .bind(by)
-    .bind(reason.map(str::trim).filter(|s| !s.is_empty()))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -861,11 +861,11 @@ pub async fn cancel_booking(
 /// showed up, and if they then left that is a cancellation (see the table
 /// above), which is also the exit that gives their table back.
 pub(crate) async fn no_show_inner(pool: &PgPool, id: Uuid) -> Result<HttpResponse, AppError> {
-    let n = sqlx::query(
+    let n = sqlx::query!(
         "UPDATE bookings SET status = 'no_show', no_show_at = now(), updated_at = now() \
          WHERE id = $1 AND status = 'confirmed'",
+        id,
     )
-    .bind(id)
     .execute(pool)
     .await?
     .rows_affected();
@@ -958,19 +958,21 @@ pub(crate) async fn seat_core(
     }
     if let Some(ids) = &body.table_ids {
         validate_tables(&mut tx, branch_id, ids).await?;
-        sqlx::query("DELETE FROM booking_tables WHERE booking_id = $1")
-            .bind(id)
+        sqlx::query!(
+            "DELETE FROM booking_tables WHERE booking_id = $1",
+            id,
+        )
             .execute(&mut *tx)
             .await?;
         insert_claims(&mut tx, id, ids).await?;
     }
     let hand = Hand::of(&mut *tx, actor.teller_id, branch_id).await?;
     let tables = take_claimed_tables(&mut tx, id, branch_id, party_size, &hand).await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE bookings SET status = 'seated', seated_at = COALESCE(seated_at, now()), updated_at = now() \
          WHERE id = $1",
+        id,
     )
-    .bind(id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1067,11 +1069,11 @@ pub async fn complete_booking(
     } else {
         Vec::new()
     };
-    sqlx::query(
+    sqlx::query!(
         "UPDATE bookings SET status = 'completed', completed_at = COALESCE(completed_at, now()), \
              updated_at = now() WHERE id = $1 AND status = 'seated'",
+        *id,
     )
-    .bind(*id)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1126,11 +1128,11 @@ pub(crate) async fn link_ticket(
     if !matches!(status.as_str(), "confirmed" | "seated") {
         return Err(AppError::Conflict(format!("Booking is {status}")));
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE bookings SET status = 'seated', seated_at = COALESCE(seated_at, now()), \
              updated_at = now() WHERE id = $1",
+        booking_id,
     )
-    .bind(booking_id)
     .execute(&mut **tx)
     .await?;
 
@@ -1150,20 +1152,22 @@ pub(crate) async fn link_ticket(
         let hand = Hand::of(&mut **tx, user, branch_id).await?;
         release_claimed_tables(tx, booking_id, branch_id, &hand).await?;
     }
-    sqlx::query("DELETE FROM booking_tables WHERE booking_id = $1")
-        .bind(booking_id)
+    sqlx::query!(
+        "DELETE FROM booking_tables WHERE booking_id = $1",
+        booking_id,
+    )
         .execute(&mut **tx)
         .await?;
     // The party is on this table whatever the claims say; if another booking
     // holds it for an overlapping window the exclusion constraint keeps that
     // claim and this booking simply carries none. The ticket's own ledger row
     // is the truth about the table either way.
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO booking_tables (booking_id, table_id) VALUES ($1, $2) \
          ON CONFLICT ON CONSTRAINT booking_tables_no_overlap DO NOTHING",
+        booking_id,
+        table,
     )
-    .bind(booking_id)
-    .bind(table)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1179,15 +1183,15 @@ pub(crate) async fn complete_by_ticket<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    let id: Option<Uuid> = sqlx::query_scalar(
+    let id: Option<Uuid> = sqlx::query_scalar!(
         "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() \
          FROM open_tickets ot \
          WHERE ot.id = $1 AND ot.booking_id = b.id AND b.status = 'seated' \
            AND NOT EXISTS (SELECT 1 FROM open_tickets o2 \
                            WHERE o2.booking_id = b.id AND o2.id <> ot.id AND o2.status = 'open') \
          RETURNING b.id",
+        ticket_id,
     )
-    .bind(ticket_id)
     .fetch_optional(exec)
     .await?;
     Ok(id)

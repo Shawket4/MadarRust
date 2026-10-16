@@ -818,18 +818,20 @@ pub(crate) async fn learning_frozen(
     let (accepted, decided) = acceptance_4w(pool, branch_id).await?;
     let frozen = engine::frozen(accepted, decided);
     let was: Option<bool> =
-        sqlx::query_scalar("SELECT frozen FROM staff_learning_state WHERE branch_id = $1")
-            .bind(branch_id)
+        sqlx::query_scalar!(
+            "SELECT frozen FROM staff_learning_state WHERE branch_id = $1",
+            branch_id,
+        )
             .fetch_optional(pool)
             .await?;
     if was != Some(frozen) {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO staff_learning_state (branch_id, org_id, frozen) VALUES ($1, $2, $3) \
              ON CONFLICT (branch_id) DO UPDATE SET frozen = EXCLUDED.frozen, changed_at = now()",
+            branch_id,
+            org_id,
+            frozen,
         )
-        .bind(branch_id)
-        .bind(org_id)
-        .bind(frozen)
         .execute(pool)
         .await?;
         // First sighting of a healthy branch is not news; a freeze or a thaw is.
@@ -856,8 +858,10 @@ pub(crate) async fn learning_frozen(
 
 async fn branch_name(pool: &PgPool, branch_id: Uuid) -> Result<String, AppError> {
     Ok(
-        sqlx::query_scalar::<_, String>("SELECT name FROM branches WHERE id = $1")
-            .bind(branch_id)
+        sqlx::query_scalar!(
+            "SELECT name FROM branches WHERE id = $1",
+            branch_id,
+        )
             .fetch_optional(pool)
             .await?
             .unwrap_or_default(),
@@ -1036,13 +1040,13 @@ pub(crate) async fn load_problem(
     }
     let fits = learned(pool, branch_id, &late_of).await?;
     let frozen = learning_frozen(pool, org_id, branch_id).await?;
-    let decided: HashSet<String> = sqlx::query_scalar(
+    let decided: HashSet<String> = sqlx::query_scalar!(
         "SELECT suggestion FROM staff_suggestion_events WHERE branch_id = $1 \
             AND source = 'suggestion' AND on_date BETWEEN $2 AND $3",
+        branch_id,
+        ws,
+        to,
     )
-    .bind(branch_id)
-    .bind(ws)
-    .bind(to)
     .fetch_all(pool)
     .await?
     .into_iter()
@@ -1234,12 +1238,12 @@ async fn cached_suggestions(
         Some(v) => v,
         None => precompute(pool, org_id, branch_id, ws).await?,
     };
-    let decided: HashSet<String> = sqlx::query_scalar(
+    let decided: HashSet<String> = sqlx::query_scalar!(
         "SELECT suggestion FROM staff_suggestion_events WHERE branch_id = $1 \
             AND source = 'suggestion' AND on_date BETWEEN $2 AND $2 + 6",
+        branch_id,
+        ws,
     )
-    .bind(branch_id)
-    .bind(ws)
     .fetch_all(pool)
     .await?
     .into_iter()
@@ -1258,16 +1262,16 @@ pub async fn precompute(
     ws: NaiveDate,
 ) -> Result<Vec<Suggestion>, AppError> {
     let out = suggest(pool, org_id, branch_id, ws).await?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_suggestion_cache (org_id, branch_id, week_start, payload) \
          VALUES ($1, $2, $3, $4) \
          ON CONFLICT (branch_id, week_start) DO UPDATE SET payload = EXCLUDED.payload, \
              computed_at = now(), stale = false",
+        org_id,
+        branch_id,
+        ws,
+        json!(out),
     )
-    .bind(org_id)
-    .bind(branch_id)
-    .bind(ws)
-    .bind(json!(out))
     .execute(pool)
     .await?;
     Ok(out)
@@ -1311,7 +1315,7 @@ async fn set_pattern_day(
         if day.is_none() {
             let start = from.max(d);
             for other in (0..7i16).filter(|x| *x != dow) {
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO staff_schedules \
                          (org_id, employee_id, work_shift_id, day_of_week, effective_from, \
                           effective_to, branch_id) \
@@ -1319,33 +1323,37 @@ async fn set_pattern_day(
                          SELECT 1 FROM staff_schedules WHERE employee_id = $2 AND day_of_week = $4 \
                             AND (effective_to IS NULL OR effective_to >= $5) \
                             AND ($6::date IS NULL OR effective_from <= $6))",
+                    org_id,
+                    employee_id,
+                    ws_id,
+                    other,
+                    start,
+                    until,
+                    at,
                 )
-                .bind(org_id)
-                .bind(employee_id)
-                .bind(ws_id)
-                .bind(other)
-                .bind(start)
-                .bind(until)
-                .bind(at)
                 .execute(&mut *conn)
                 .await?;
             }
         }
         if from >= d {
-            sqlx::query("DELETE FROM staff_schedules WHERE id = $1")
-                .bind(id)
+            sqlx::query!(
+                "DELETE FROM staff_schedules WHERE id = $1",
+                id,
+            )
                 .execute(&mut *conn)
                 .await?;
         } else {
-            sqlx::query("UPDATE staff_schedules SET effective_to = $2 WHERE id = $1")
-                .bind(id)
-                .bind(d - Duration::days(1))
+            sqlx::query!(
+                "UPDATE staff_schedules SET effective_to = $2 WHERE id = $1",
+                id,
+                d - Duration::days(1),
+            )
                 .execute(&mut *conn)
                 .await?;
         }
     }
     if let Some(shift) = shift {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, \
                  effective_from, branch_id) \
              SELECT $1, $2, w.id, $4, $5, \
@@ -1353,13 +1361,13 @@ async fn set_pattern_day(
                              SELECT 1 FROM employee_branches eb \
                               WHERE eb.employee_id = $2 AND eb.branch_id = $6) THEN $6 END \
                FROM work_shifts w WHERE w.id = $3 AND w.org_id = $1",
+            org_id,
+            employee_id,
+            shift,
+            dow,
+            d,
+            branch,
         )
-        .bind(org_id)
-        .bind(employee_id)
-        .bind(shift)
-        .bind(dow)
-        .bind(d)
-        .bind(branch)
         .execute(&mut *conn)
         .await?;
     }
@@ -1525,12 +1533,12 @@ pub async fn decide_suggestion(
     .execute(pool)
     .await?;
     // A rejection asks for the next best, so the kept week is recomputed.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_suggestion_cache SET stale = true, computed_at = 'epoch' \
           WHERE branch_id = $1 AND week_start = $2",
+        body.branch_id,
+        week_start(s.date),
     )
-    .bind(body.branch_id)
-    .bind(week_start(s.date))
     .execute(pool)
     .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -1751,10 +1759,10 @@ pub async fn fairness(
                 access::require_at(pool, &claims, org_id, Cap::HrRosterSettings, b).await?;
                 vec![b]
             }
-            None => sqlx::query_scalar(
+            None => sqlx::query_scalar!(
                 "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL ORDER BY name",
+                org_id,
             )
-            .bind(org_id)
             .fetch_all(pool)
             .await?,
         };
@@ -1796,15 +1804,15 @@ pub async fn monthly_fairness(pool: &PgPool) -> Result<(), AppError> {
     for (org_id, branch_id, month) in due {
         let one = async {
             let report = branch_fairness(pool, org_id, branch_id, month).await?;
-            let fresh = sqlx::query(
+            let fresh = sqlx::query!(
                 "INSERT INTO staff_fairness_audits (org_id, branch_id, month, flagged, payload) \
                  VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+                org_id,
+                branch_id,
+                month,
+                report.flagged,
+                json!(report),
             )
-            .bind(org_id)
-            .bind(branch_id)
-            .bind(month)
-            .bind(report.flagged)
-            .bind(json!(report))
             .execute(pool)
             .await?
             .rows_affected();

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO menu_item_combos (menu_item_id, org_id) VALUES ($1, $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a7c151e1ca60d26c8feab3a5dff5ebc9ed42825924a2062e6a4209d8a42fa0f6"
+}

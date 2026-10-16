@@ -103,10 +103,10 @@ impl FromRequest for IntegrationCaller {
 
             // Best-effort usage stamp. A failure here must never fail an
             // otherwise-valid pull, so the result is deliberately discarded.
-            let _ = sqlx::query(
+            let _ = sqlx::query!(
                 "UPDATE integration_credentials SET last_used_at = now() WHERE id = $1",
+                credential_id,
             )
-            .bind(credential_id)
             .execute(pool.get_ref())
             .await;
 

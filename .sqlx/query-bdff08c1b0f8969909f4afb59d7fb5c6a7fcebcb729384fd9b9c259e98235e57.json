@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO combo_choice_size_surcharges (choice_id, org_id, size_label, surcharge) VALUES ($1, $2, $3, $4) ON CONFLICT (choice_id, size_label) DO UPDATE SET surcharge = EXCLUDED.surcharge",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bdff08c1b0f8969909f4afb59d7fb5c6a7fcebcb729384fd9b9c259e98235e57"
+}

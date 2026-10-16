@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO asset_bundle_dirty (branch_id, dirty_since) SELECT id, now() FROM branches WHERE org_id = $1 ON CONFLICT (branch_id) DO UPDATE SET dirty_since = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4a09ecd15d0ae7ffb7279d00bd9631353b4b1662da58a3de2904b6891df5ddd5"
+}

@@ -79,10 +79,10 @@ async fn resolve_scope_unchecked(
     org_id: Option<Uuid>,
 ) -> Result<Scope, AppError> {
     if let Some(b) = branch_id {
-        let name: Option<String> = sqlx::query_scalar(
+        let name: Option<String> = sqlx::query_scalar!(
             "SELECT name FROM branches WHERE id = $1 AND is_active AND deleted_at IS NULL",
+            b,
         )
-        .bind(b)
         .fetch_optional(pool)
         .await?;
         let branch_name = name.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
@@ -95,8 +95,10 @@ async fn resolve_scope_unchecked(
     let o =
         org_id.ok_or_else(|| AppError::BadRequest("Name a branch or an organisation".into()))?;
     let exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM organizations WHERE id = $1 AND deleted_at IS NULL")
-            .bind(o)
+        sqlx::query_scalar!(
+            "SELECT id FROM organizations WHERE id = $1 AND deleted_at IS NULL",
+            o,
+        )
             .fetch_optional(pool)
             .await?;
     exists.ok_or_else(|| AppError::NotFound("Organisation not found".into()))?;
@@ -611,18 +613,18 @@ pub async fn join(
         // none on file: dropped unless the shop asked for one, and only ever as
         // a valid PAIR — a month with no day greets nobody, a day with no month
         // greets everybody twelve times.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE customers \
                 SET locale = $2, \
                     birth_month = CASE WHEN birth_month IS NULL THEN $3 ELSE birth_month END, \
                     birth_day = CASE WHEN birth_month IS NULL THEN $4 ELSE birth_day END, \
                     updated_at = now() \
               WHERE id = $1",
+            customer_id,
+            locale,
+            birthday.map(|(m, _)| m),
+            birthday.map(|(_, d)| d),
         )
-        .bind(customer_id)
-        .bind(locale)
-        .bind(birthday.map(|(m, _)| m))
-        .bind(birthday.map(|(_, d)| d))
         .execute(&mut *tx)
         .await?;
     }
@@ -900,16 +902,16 @@ pub async fn set_preferences(
     };
     // COALESCE so a page that only reports its language cannot silently switch
     // marketing back on for someone who turned it off.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE customers \
             SET marketing_opt_out = COALESCE($2, marketing_opt_out), \
                 locale = COALESCE($3, locale), \
                 updated_at = now() \
           WHERE id = $1",
+        member.id,
+        body.marketing_opt_out,
+        locale,
     )
-    .bind(member.id)
-    .bind(body.marketing_opt_out)
-    .bind(locale)
     .execute(pool.get_ref())
     .await?;
     Ok(HttpResponse::NoContent().finish())
@@ -990,12 +992,12 @@ pub async fn apple_pass(
     let bytes = wallet::apple::pass_bytes_for(pool.get_ref(), &member).await?;
 
     // Record the serial so pass updates can find this member later.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE loyalty_customers SET apple_serial = $2, pass_updated_at = now() \
          WHERE id = $1 AND apple_serial IS NULL",
+        member.id,
+        member.id.to_string(),
     )
-    .bind(member.id)
-    .bind(member.id.to_string())
     .execute(pool.get_ref())
     .await?;
 

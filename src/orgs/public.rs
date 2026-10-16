@@ -93,8 +93,10 @@ pub(crate) async fn public_brand(pool: &PgPool, org_id: Uuid) -> Result<PublicBr
     // may exist and simply have no address of its own, which is what a shop
     // that has never been given a slug looks like.
     let slug: Option<String> =
-        sqlx::query_scalar::<_, Option<String>>("SELECT slug FROM organizations WHERE id = $1")
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT slug FROM organizations WHERE id = $1",
+            org_id,
+        )
             .fetch_optional(pool)
             .await?
             .ok_or_else(|| AppError::NotFound("No shop at that address".into()))?;
@@ -150,11 +152,11 @@ async fn resolve_org_unchecked(pool: &PgPool, query: &BrandQuery) -> Result<Uuid
     ) {
         (Some(id), _) => Ok(id),
         (None, Some(slug)) => {
-            sqlx::query_scalar::<_, Uuid>(
+            sqlx::query_scalar!(
                 "SELECT id FROM organizations \
                   WHERE slug = $1 AND is_active AND deleted_at IS NULL",
+                slug.trim().to_lowercase(),
             )
-            .bind(slug.trim().to_lowercase())
             .fetch_optional(pool)
             .await?
             // Deliberately the same answer as a shop that does not exist. A

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now() WHERE m.id = $1 AND m.deleted_at IS NOT NULL AND EXISTS (SELECT 1 FROM customers c WHERE c.id = m.id AND c.erased_at IS NOT NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "effd6b76e9dd9de1c52423552bdae610556c83a2095b1078155466d1aab99c22"
+}

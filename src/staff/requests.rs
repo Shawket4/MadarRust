@@ -896,13 +896,13 @@ async fn request_branch(
     employee_id: Uuid,
     date: NaiveDate,
 ) -> Result<Option<Uuid>, AppError> {
-    let on_record: Option<Uuid> = sqlx::query_scalar(
+    let on_record: Option<Uuid> = sqlx::query_scalar!(
         "SELECT branch_id FROM attendance_records \
           WHERE employee_id = $1 AND business_date = $2 \
           ORDER BY covered_employee_id IS NOT NULL, check_in_at NULLS LAST LIMIT 1",
+        employee_id,
+        date,
     )
-    .bind(employee_id)
-    .bind(date)
     .fetch_optional(pool)
     .await?;
     Ok(match on_record {
@@ -940,8 +940,10 @@ async fn enrich(pool: &PgPool, rows: &mut [StaffRequest]) -> Result<(), AppError
             Some(v) => *v,
             None => {
                 let user: Option<Uuid> =
-                    sqlx::query_scalar("SELECT user_id FROM employees WHERE id = $1")
-                        .bind(r.employee_id)
+                    sqlx::query_scalar!(
+                        "SELECT user_id FROM employees WHERE id = $1",
+                        r.employee_id,
+                    )
                         .fetch_optional(pool)
                         .await?
                         .flatten();
@@ -1066,13 +1068,13 @@ async fn insert_request(
         // The record must be the requester's OWN and on the day being corrected.
         // Without this, anyone could file a correction against a colleague's
         // punch and — once a manager waved it through — rewrite their pay.
-        let owned: Option<NaiveDate> = sqlx::query_scalar(
+        let owned: Option<NaiveDate> = sqlx::query_scalar!(
             "SELECT business_date FROM attendance_records \
               WHERE id = $1 AND employee_id = $2 AND org_id = $3",
+            record_id,
+            employee_id,
+            org_id,
         )
-        .bind(record_id)
-        .bind(employee_id)
-        .bind(org_id)
         .fetch_optional(pool)
         .await?;
         match owned {
@@ -1127,14 +1129,14 @@ async fn insert_request(
                     "That shift hasn't started yet",
                 ));
             }
-            record_id = sqlx::query_scalar(
+            record_id = sqlx::query_scalar!(
                 "SELECT id FROM attendance_records \
                   WHERE employee_id = $1 AND business_date = $2 AND work_shift_id = $3 \
                     AND covered_employee_id IS NULL",
+                employee_id,
+                body.on_date,
+                shift,
             )
-            .bind(employee_id)
-            .bind(body.on_date)
-            .bind(shift)
             .fetch_optional(pool)
             .await?;
             if record_id.is_some() {
@@ -1154,7 +1156,7 @@ async fn insert_request(
     // `staff_requests_no_overlap` and the one-live-correction indexes are the
     // arbiters: a violation comes back as a DB error, mapped to the right 409
     // message in `AppError::from`.
-    let id = sqlx::query_scalar::<_, Uuid>(
+    let id = sqlx::query_scalar!(
         "INSERT INTO staff_requests \
              (org_id, employee_id, kind, on_date, end_date, from_time, to_time, \
               is_half_day, leave_half, work_shift_id, title, location, \
@@ -1162,23 +1164,23 @@ async fn insert_request(
          VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, FALSE), $9, $10, $11, $12, $13, $14, \
                  $15, $16) \
          RETURNING id",
+        org_id,
+        employee_id,
+        &body.kind,
+        body.on_date,
+        shape.end_date,
+        body.from_time,
+        body.to_time,
+        body.is_half_day,
+        shape.leave_half,
+        shift_id,
+        shape.title,
+        clean(body.location.as_ref()),
+        record_id,
+        clean(body.reason.as_ref()),
+        window.map(|w| w.0),
+        window.map(|w| w.1),
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(&body.kind)
-    .bind(body.on_date)
-    .bind(shape.end_date)
-    .bind(body.from_time)
-    .bind(body.to_time)
-    .bind(body.is_half_day)
-    .bind(shape.leave_half)
-    .bind(shift_id)
-    .bind(shape.title)
-    .bind(clean(body.location.as_ref()))
-    .bind(record_id)
-    .bind(clean(body.reason.as_ref()))
-    .bind(window.map(|w| w.0))
-    .bind(window.map(|w| w.1))
     .fetch_one(pool)
     .await?;
 
@@ -1274,9 +1276,11 @@ async fn after_filing(
     // M17): neither the person it is for nor a manager filing it for them.
     let filer: Option<Uuid> = match claims.and_then(|c| c.user_id_safe().ok()) {
         Some(user) => {
-            sqlx::query_scalar("SELECT id FROM employees WHERE user_id = $1 AND org_id = $2")
-                .bind(user)
-                .bind(org_id)
+            sqlx::query_scalar!(
+                "SELECT id FROM employees WHERE user_id = $1 AND org_id = $2",
+                user,
+                org_id,
+            )
                 .fetch_optional(pool)
                 .await?
         }
@@ -1689,7 +1693,7 @@ async fn apply_decision(
 
     // A cancellation has its own who / when / why: the decision's columns
     // keep the approval it undoes (AT-10, E2E B-TEAM-3).
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_requests SET status = $2, \
              decided_by = CASE WHEN $2 = 'cancelled' THEN decided_by ELSE $3 END, \
              decided_at = CASE WHEN $2 = 'cancelled' THEN decided_at ELSE now() END, \
@@ -1699,12 +1703,12 @@ async fn apply_decision(
              cancel_note = CASE WHEN $2 = 'cancelled' THEN $4 ELSE cancel_note END, \
              is_paid = COALESCE($5, is_paid), updated_at = now() \
           WHERE id = $1",
+        id,
+        decision,
+        actor,
+        note,
+        is_paid,
     )
-    .bind(id)
-    .bind(decision)
-    .bind(actor)
-    .bind(note)
-    .bind(is_paid)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1729,13 +1733,13 @@ async fn apply_decision(
         None => Ok(()),
     };
     if let Err(e) = applied {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE staff_requests SET status = $2, decided_by = NULL, decided_at = NULL, \
                  decision_note = NULL, updated_at = now() \
               WHERE id = $1 AND status = 'approved'",
+            id,
+            before,
         )
-        .bind(id)
-        .bind(before)
         .execute(pool)
         .await?;
         return Err(e);
@@ -1800,7 +1804,7 @@ async fn record_for_shift(
         )
         .await?;
     }
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO attendance_records \
              (org_id, employee_id, branch_id, work_shift_id, business_date, status, \
               scheduled_start_at, scheduled_end_at, is_manual, created_by, edit_reason) \
@@ -1810,34 +1814,34 @@ async fn record_for_shift(
                       COALESCE(work_shift_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
             WHERE covered_employee_id IS NULL \
          DO NOTHING",
+        org_id,
+        request.employee_id,
+        shift.branch_id.unwrap_or(branch),
+        shift_id,
+        request.on_date,
+        shift.scheduled_start_at,
+        shift.scheduled_end_at,
+        actor,
     )
-    .bind(org_id)
-    .bind(request.employee_id)
-    .bind(shift.branch_id.unwrap_or(branch))
-    .bind(shift_id)
-    .bind(request.on_date)
-    .bind(shift.scheduled_start_at)
-    .bind(shift.scheduled_end_at)
-    .bind(actor)
     .execute(pool)
     .await?;
-    let record_id: Uuid = sqlx::query_scalar(
+    let record_id: Uuid = sqlx::query_scalar!(
         "SELECT id FROM attendance_records \
           WHERE employee_id = $1 AND business_date = $2 AND work_shift_id = $3 \
             AND covered_employee_id IS NULL",
+        request.employee_id,
+        request.on_date,
+        shift_id,
     )
-    .bind(request.employee_id)
-    .bind(request.on_date)
-    .bind(shift_id)
     .fetch_one(pool)
     .await?;
     // From now on the request fixes that record (and the one-live-correction
     // rule per record applies).
-    sqlx::query(
+    sqlx::query!(
         "UPDATE staff_requests SET attendance_record_id = $2, updated_at = now() WHERE id = $1",
+        request_id,
+        record_id,
     )
-    .bind(request_id)
-    .bind(record_id)
     .execute(pool)
     .await?;
     Ok(record_id)
@@ -1927,14 +1931,14 @@ pub(crate) async fn reprice_days(
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<(), AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM attendance_records \
           WHERE org_id = $1 AND employee_id = $2 AND business_date BETWEEN $3 AND $4",
+        org_id,
+        employee_id,
+        from,
+        to,
     )
-    .bind(org_id)
-    .bind(employee_id)
-    .bind(from)
-    .bind(to)
     .fetch_all(pool)
     .await?;
     for id in ids {

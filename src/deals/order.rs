@@ -397,19 +397,19 @@ pub async fn insert(
 ) -> Result<Vec<OrderDeal>, AppError> {
     let mut out = Vec::with_capacity(deals.len());
     for d in deals {
-        let id: Uuid = sqlx::query_scalar(
+        let id: Uuid = sqlx::query_scalar!(
             "INSERT INTO order_deals (org_id, order_id, deal_rule_id, deal_name, name_translations, \
                                       times, discount, discount_server) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+            org_id,
+            order_id,
+            d.rule_id,
+            &d.name,
+            &d.name_translations,
+            d.times as i16,
+            d.discount,
+            d.discount_server,
         )
-        .bind(org_id)
-        .bind(order_id)
-        .bind(d.rule_id)
-        .bind(&d.name)
-        .bind(&d.name_translations)
-        .bind(d.times as i16)
-        .bind(d.discount)
-        .bind(d.discount_server)
         .fetch_one(&mut *conn)
         .await?;
         let mut lines = Vec::with_capacity(d.lines.len());
@@ -417,15 +417,15 @@ pub async fn insert(
             let Some(item) = row_of.get(idx) else {
                 continue;
             };
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO order_deal_lines (order_deal_id, order_item_id, org_id, units, discount) \
                  VALUES ($1, $2, $3, $4, $5)",
+                id,
+                item,
+                org_id,
+                *units as i16,
+                *discount,
             )
-            .bind(id)
-            .bind(item)
-            .bind(org_id)
-            .bind(*units as i16)
-            .bind(*discount)
             .execute(&mut *conn)
             .await?;
             lines.push(OrderDealLine {

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO customer_identity_audit (org_id, customer_id, kind, actor_kind, actor_user, old_value, new_value)\n         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7f3f7348a5ef4d1f64c34e0bccf192f295291bb6b5bc0da7ec9ae579dcf4dd70"
+}

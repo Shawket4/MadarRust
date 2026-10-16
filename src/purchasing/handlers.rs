@@ -236,11 +236,12 @@ pub async fn list_suppliers(
     check_permission(pool.get_ref(), &claims, "suppliers", "read").await?;
     require_org(&claims, *org_id)?;
 
-    let rows = sqlx::query_as::<_, Supplier>(
+    let rows = sqlx::query_as!(
+        Supplier,
         "SELECT id, org_id, name, contact_name, phone, email, is_active, created_at, updated_at \
          FROM suppliers WHERE org_id = $1 AND deleted_at IS NULL ORDER BY name ASC",
+        *org_id,
     )
-    .bind(*org_id)
     .fetch_all(pool.get_ref())
     .await?;
 
@@ -266,8 +267,10 @@ pub async fn update_supplier(
     check_permission(pool.get_ref(), &claims, "suppliers", "update").await?;
 
     let org_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL")
-            .bind(*id)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL",
+            *id,
+        )
             .fetch_optional(pool.get_ref())
             .await?;
     let org_id = org_id.ok_or_else(|| AppError::NotFound("Supplier not found".into()))?;
@@ -318,15 +321,19 @@ pub async fn delete_supplier(
     check_permission(pool.get_ref(), &claims, "suppliers", "delete").await?;
 
     let org_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL")
-            .bind(*id)
+        sqlx::query_scalar!(
+            "SELECT org_id FROM suppliers WHERE id = $1 AND deleted_at IS NULL",
+            *id,
+        )
             .fetch_optional(pool.get_ref())
             .await?;
     let org_id = org_id.ok_or_else(|| AppError::NotFound("Supplier not found".into()))?;
     require_org(&claims, org_id)?;
 
-    sqlx::query("UPDATE suppliers SET deleted_at = now() WHERE id = $1")
-        .bind(*id)
+    sqlx::query!(
+        "UPDATE suppliers SET deleted_at = now() WHERE id = $1",
+        *id,
+    )
         .execute(pool.get_ref())
         .await?;
 

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM attendance_records WHERE org_id = $1 AND business_date = $2 AND status = 'absent' AND check_in_at IS NULL AND NOT is_manual AND created_by IS NULL AND NOT status_overridden AND covered_employee_id IS NULL FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "59800327fe91c4cfa48334e0737765c575834f271eca551295e082b74bc58e91"
+}

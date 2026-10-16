@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE branch_tables SET section_id = $3, pos_x = $4, pos_y = $5, width = $6, height = $7, rotation = $8, updated_at = now() WHERE id = $1 AND branch_id = $2 AND ($9::timestamptz IS NULL OR updated_at = $9)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Float8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "148e3a12d8d81deabe8afa07de5d1f2dae2d25d0bf97d1c77427d5e1942eb0e6"
+}

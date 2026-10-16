@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings SET status = 'seated', seated_at = COALESCE(seated_at, now()), updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "129198f0b1a0394d036e3c152a33ba5f7ef6ff190c6a0d26b705751ea539fef0"
+}

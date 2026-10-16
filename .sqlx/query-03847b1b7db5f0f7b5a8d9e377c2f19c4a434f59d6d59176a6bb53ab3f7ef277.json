@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM work_shift_day_times WHERE work_shift_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "03847b1b7db5f0f7b5a8d9e377c2f19c4a434f59d6d59176a6bb53ab3f7ef277"
+}

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE combo_slot_choices SET menu_item_id = $2, category_id = $3, surcharge = $4, included_size_label = $5, sort = $6 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "428a2338d7cf30e30b5ce4060c5cb910f4dc4dffa59e4b30863120d78db813c8"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM combo_choice_size_surcharges WHERE choice_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4acda0d98ca19193f2c2d861cab12f5b5047be7c9c74bf00185a139d6bad89cb"
+}

@@ -175,8 +175,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Delete the demo org and everything under it. Org FKs do not all cascade, so
 /// the child tables are cleared explicitly, deepest first.
 async fn wipe(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let existing: Option<Uuid> = sqlx::query_scalar("SELECT id FROM organizations WHERE slug = $1")
-        .bind(ORG_SLUG)
+    let existing: Option<Uuid> = sqlx::query_scalar!(
+        "SELECT id FROM organizations WHERE slug = $1",
+        ORG_SLUG,
+    )
         .fetch_optional(pool)
         .await?;
     let Some(org) = existing else {
@@ -216,16 +218,22 @@ async fn wipe(pool: &PgPool) -> Result<(), sqlx::Error> {
     .bind(org)
     .execute(pool)
     .await?;
-    sqlx::query("DELETE FROM users WHERE org_id = $1")
-        .bind(org)
+    sqlx::query!(
+        "DELETE FROM users WHERE org_id = $1",
+        org,
+    )
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM branches WHERE org_id = $1")
-        .bind(org)
+    sqlx::query!(
+        "DELETE FROM branches WHERE org_id = $1",
+        org,
+    )
         .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM organizations WHERE id = $1")
-        .bind(org)
+    sqlx::query!(
+        "DELETE FROM organizations WHERE id = $1",
+        org,
+    )
         .execute(pool)
         .await?;
     println!("  (removed the previous demo org)");
@@ -235,12 +243,12 @@ async fn wipe(pool: &PgPool) -> Result<(), sqlx::Error> {
 async fn create_org(pool: &PgPool) -> Result<Uuid, sqlx::Error> {
     // Onboarding is marked complete so the dashboard lands on the real app
     // instead of the first-run wizard.
-    sqlx::query_scalar(
+    sqlx::query_scalar!(
         "INSERT INTO organizations (name, slug, timezone, onboarding_completed_at, modules) \
          VALUES ($1, $2, 'Africa/Cairo'::timezone_name, now(), '{pos,dawam}') RETURNING id",
+        ORG_NAME,
+        ORG_SLUG,
     )
-    .bind(ORG_NAME)
-    .bind(ORG_SLUG)
     .fetch_one(pool)
     .await
 }
@@ -250,12 +258,12 @@ fn hash() -> String {
 }
 
 async fn create_admin(pool: &PgPool, org: Uuid) -> Result<Uuid, sqlx::Error> {
-    sqlx::query_scalar(
+    sqlx::query_scalar!(
         "INSERT INTO users (org_id, name, email, password_hash, role) \
          VALUES ($1, 'Demo Admin', 'admin@demo.madar', $2, 'org_admin') RETURNING id",
+        org,
+        hash(),
     )
-    .bind(org)
-    .bind(hash())
     .fetch_one(pool)
     .await
 }
@@ -263,14 +271,14 @@ async fn create_admin(pool: &PgPool, org: Uuid) -> Result<Uuid, sqlx::Error> {
 async fn create_branches(pool: &PgPool, org: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut ids = Vec::new();
     for (name, lat, lng) in BRANCHES {
-        let id: Uuid = sqlx::query_scalar(
+        let id: Uuid = sqlx::query_scalar!(
             "INSERT INTO branches (org_id, name, timezone, latitude, longitude, geo_radius_meters) \
              VALUES ($1, $2, 'Africa/Cairo'::timezone_name, $3, $4, 200) RETURNING id",
+            org,
+            name,
+            lat,
+            lng,
         )
-        .bind(org)
-        .bind(name)
-        .bind(lat)
-        .bind(lng)
         .fetch_one(pool)
         .await?;
         ids.push(id);
@@ -281,11 +289,11 @@ async fn create_branches(pool: &PgPool, org: Uuid) -> Result<Vec<Uuid>, sqlx::Er
 async fn create_departments(pool: &PgPool, org: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut ids = Vec::new();
     for name in ["Front of House", "Kitchen"] {
-        let id: Uuid = sqlx::query_scalar(
+        let id: Uuid = sqlx::query_scalar!(
             "INSERT INTO departments (org_id, name) VALUES ($1, $2) RETURNING id",
+            org,
+            name,
         )
-        .bind(org)
-        .bind(name)
         .fetch_one(pool)
         .await?;
         ids.push(id);
@@ -301,46 +309,48 @@ async fn create_employees(
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut ids = Vec::new();
     for e in EMPLOYEES.iter() {
-        let id: Uuid = sqlx::query_scalar(
+        let id: Uuid = sqlx::query_scalar!(
             "INSERT INTO users (org_id, name, email, password_hash, role) \
              VALUES ($1, $2, $3, $4, 'teller') RETURNING id",
+            org,
+            e.name,
+            e.email,
+            hash(),
         )
-        .bind(org)
-        .bind(e.name)
-        .bind(e.email)
-        .bind(hash())
         .fetch_one(pool)
         .await?;
 
-        sqlx::query("INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)")
-            .bind(id)
-            .bind(branches[e.branch])
+        sqlx::query!(
+            "INSERT INTO user_branch_assignments (user_id, branch_id) VALUES ($1, $2)",
+            id,
+            branches[e.branch],
+        )
             .execute(pool)
             .await?;
 
         // A demo cashier who is also on payroll: a linked employee sharing the
         // user's id (as every employee migrated from a staff profile does).
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO employees (id, user_id, org_id, name, department_id, job_title, hire_date, \
                  employment_status, base_salary_piastres, employee_code) \
              VALUES ($1, $1, $2, $8, $3, $4, CURRENT_DATE - 400, $5, $6, $7)",
+            id,
+            org,
+            departments[e.department],
+            e.title,
+            e.status,
+            e.salary_piastres,
+            format!("EMP-{:03}", ids.len() + 1),
+            e.name,
         )
-        .bind(id)
-        .bind(org)
-        .bind(departments[e.department])
-        .bind(e.title)
-        .bind(e.status)
-        .bind(e.salary_piastres)
-        .bind(format!("EMP-{:03}", ids.len() + 1))
-        .bind(e.name)
         .execute(pool)
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO employee_branches (employee_id, branch_id, org_id) VALUES ($1, $2, $3)",
+            id,
+            branches[e.branch],
+            org,
         )
-        .bind(id)
-        .bind(branches[e.branch])
-        .bind(org)
         .execute(pool)
         .await?;
 
@@ -383,7 +393,7 @@ async fn create_shifts(
 /// The rules the dashboard's editor exposes — seeded with the ladder the brief
 /// asked for: half a day's pay once you are more than half an hour late.
 async fn create_settings(pool: &PgPool, org: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"INSERT INTO attendance_settings
                (org_id, late_deduction_tiers, absence_deduction_days,
                 default_overtime_multiplier, working_days_per_month,
@@ -394,8 +404,8 @@ async fn create_settings(pool: &PgPool, org: Uuid) -> Result<(), sqlx::Error> {
                  {"from_minutes":31, "to_minutes":120,  "kind":"day_fraction","value":0.5},
                  {"from_minutes":121,"to_minutes":null, "kind":"day_fraction","value":1}]'::jsonb,
                1.00, 1.50, 30.00, TRUE, TRUE)"#,
+        org,
     )
-    .bind(org)
     .execute(pool)
     .await?;
     Ok(())
@@ -437,28 +447,28 @@ async fn roster(
         // it would mark the whole team absent every week — the roster IS the
         // definition of who is expected, so it has to exclude the weekend.
         for day_of_week in [6i16, 0, 1, 2, 3, 4] {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, \
                      effective_from) \
                  VALUES ($1, $2, $3, $4, CURRENT_DATE - 60)",
+                org,
+                user,
+                shift,
+                day_of_week,
             )
-            .bind(org)
-            .bind(user)
-            .bind(shift)
-            .bind(day_of_week)
             .execute(pool)
             .await?;
         }
     }
 
     // One per-date override, so the resolution ladder has something to show.
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_schedule_overrides (org_id, employee_id, on_date, work_shift_id, reason) \
          VALUES ($1, $2, CURRENT_DATE + 1, $3, 'Covering the evening shift')",
+        org,
+        staff[0],
+        shifts[1],
     )
-    .bind(org)
-    .bind(staff[0])
-    .bind(shifts[1])
     .execute(pool)
     .await?;
     Ok(())
@@ -523,30 +533,30 @@ async fn create_requests(
     for (user, type_idx, start_offset, days) in
         [(staff[3], 0usize, -12i64, 3i64), (staff[4], 2, -8, 2)]
     {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO staff_requests (org_id, employee_id, kind, leave_type_id, on_date, end_date, \
                  status, decided_at, reason) \
              VALUES ($1, $2, 'leave', $3, $4, $5, 'approved', now(), 'Planned')",
+            org,
+            user,
+            leave_types[type_idx],
+            today + Duration::days(start_offset),
+            today + Duration::days(start_offset + days - 1),
         )
-        .bind(org)
-        .bind(user)
-        .bind(leave_types[type_idx])
-        .bind(today + Duration::days(start_offset))
-        .bind(today + Duration::days(start_offset + days - 1))
         .execute(pool)
         .await?;
         n += 1;
     }
 
     // An approved mission, and one rejected request so the history is not all yes.
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, end_date, title, location, \
              status, decided_at) \
          VALUES ($1, $2, 'mission', $3, $3, 'Supplier visit', 'Obour City', 'approved', now())",
+        org,
+        staff[0],
+        today - Duration::days(5),
     )
-    .bind(org)
-    .bind(staff[0])
-    .bind(today - Duration::days(5))
     .execute(pool)
     .await?;
     sqlx::query(
@@ -640,7 +650,7 @@ async fn create_attendance(
                 ),
             };
 
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO attendance_records (org_id, employee_id, branch_id, work_shift_id, \
                      business_date, status, scheduled_start_at, scheduled_end_at, \
                      check_in_at, check_out_at, check_in_method, check_out_method, \
@@ -650,19 +660,19 @@ async fn create_attendance(
                      CASE WHEN $10::timestamptz IS NULL THEN NULL ELSE 'mobile_gps' END, \
                      CASE WHEN $9::timestamptz IS NULL THEN NULL ELSE 42.0 END, $11, $12) \
                  ON CONFLICT DO NOTHING",
+                org,
+                user,
+                branch,
+                shift,
+                date,
+                status,
+                start,
+                end,
+                check_in,
+                check_out,
+                late_min.max(0) as i32,
+                worked.max(0) as i32,
             )
-            .bind(org)
-            .bind(user)
-            .bind(branch)
-            .bind(shift)
-            .bind(date)
-            .bind(status)
-            .bind(start)
-            .bind(end)
-            .bind(check_in)
-            .bind(check_out)
-            .bind(late_min.max(0) as i32)
-            .bind(worked.max(0) as i32)
             .execute(pool)
             .await?;
             written += 1;
@@ -745,16 +755,16 @@ async fn create_payroll(pool: &PgPool, org: Uuid, admin: Uuid) -> Result<usize, 
             "draft",
         ),
     ] {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status, generated_by) \
              VALUES ($1, $2, $3, $4, $5, $6)",
+            org,
+            &name,
+            start,
+            end,
+            if status == "paid" { "draft" } else { status },
+            admin,
         )
-        .bind(org)
-        .bind(&name)
-        .bind(start)
-        .bind(end)
-        .bind(if status == "paid" { "draft" } else { status })
-        .bind(admin)
         .execute(pool)
         .await?;
     }

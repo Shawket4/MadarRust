@@ -1,0 +1,89 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO org_payment_methods\n        (org_id, name, label_translations, color, icon, is_cash, is_active, visible_in_integrations)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        RETURNING id, org_id, name, label_translations, color, icon, is_cash, is_active, visible_in_integrations, created_at, updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "org_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "label_translations",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "color",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "icon",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "is_cash",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "visible_in_integrations",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Jsonb",
+        "Text",
+        "Text",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4b8d6b24bd2386e106229c0e286530a640caaf2e30a45e325dbbc1cf6ca3d400"
+}

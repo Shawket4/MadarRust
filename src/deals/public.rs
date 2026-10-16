@@ -47,10 +47,10 @@ pub async fn branch_cart_quote(
     body: web::Json<PublicCartQuoteRequest>,
 ) -> Result<HttpResponse, AppError> {
     crate::plan::public_gate_branch(pool.get_ref(), *id, madar_plan::Feature::Online).await?;
-    let org_id: Option<Uuid> = sqlx::query_scalar(
+    let org_id: Option<Uuid> = sqlx::query_scalar!(
         "SELECT org_id FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+        *id,
     )
-    .bind(*id)
     .fetch_optional(pool.get_ref())
     .await?;
     let org_id = org_id.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;

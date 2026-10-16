@@ -96,8 +96,10 @@ pub(crate) async fn check_code(
 
 /// Spend a code: it matches nothing from now on.
 pub(crate) async fn consume(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
-    sqlx::query("UPDATE delivery_otp SET consumed_at = now() WHERE id = $1")
-        .bind(id)
+    sqlx::query!(
+        "UPDATE delivery_otp SET consumed_at = now() WHERE id = $1",
+        id,
+    )
         .execute(pool)
         .await?;
     Ok(())

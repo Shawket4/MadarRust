@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customer_addresses SET label = NULL, place_name = NULL, floor = NULL,\n                unit_number = NULL, landmark = NULL, address_line = NULL, delivery_notes = NULL,\n                lat = NULL, lng = NULL, norm_key = '', erased_at = COALESCE(erased_at, now())\n          WHERE customer_id = ANY($1) AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3ea6fcbd2ef2b669067129694f6cd3743d09dd42e02668fee713a3bfaeef68ee"
+}

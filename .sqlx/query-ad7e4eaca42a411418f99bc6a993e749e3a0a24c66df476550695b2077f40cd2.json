@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE deal_rules SET deleted_at = now(), updated_at = now() WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad7e4eaca42a411418f99bc6a993e749e3a0a24c66df476550695b2077f40cd2"
+}

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO users (org_id, name, role, is_active, device_id)\n         VALUES ($1, $2, 'kitchen', TRUE, $3)\n         ON CONFLICT (device_id) WHERE device_id IS NOT NULL\n         DO UPDATE SET name = EXCLUDED.name, is_active = TRUE, deleted_at = NULL\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "81f2668802f71c6dc6f029bda28b96483286f439cfb23939dd5f8056d8abda58"
+}

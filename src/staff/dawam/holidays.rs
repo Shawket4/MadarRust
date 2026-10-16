@@ -287,28 +287,30 @@ pub async fn decide_holiday(
 /// a decision and stays (detached from the record).
 async fn forgive_absences(pool: &PgPool, org_id: Uuid, date: NaiveDate) -> Result<(), AppError> {
     let mut tx = pool.begin().await?;
-    let gone: Vec<Uuid> = sqlx::query_scalar(
+    let gone: Vec<Uuid> = sqlx::query_scalar!(
         "SELECT id FROM attendance_records \
           WHERE org_id = $1 AND business_date = $2 AND status = 'absent' \
             AND check_in_at IS NULL AND NOT is_manual AND created_by IS NULL \
             AND NOT status_overridden AND covered_employee_id IS NULL \
           FOR UPDATE",
+        org_id,
+        date,
     )
-    .bind(org_id)
-    .bind(date)
     .fetch_all(&mut *tx)
     .await?;
     if !gone.is_empty() {
-        sqlx::query(
+        sqlx::query!(
             "DELETE FROM payroll_deductions \
               WHERE attendance_record_id = ANY($1) AND source <> 'manual' \
                 AND created_by IS NULL AND waived_at IS NULL AND overridden_at IS NULL",
+            &gone,
         )
-        .bind(&gone)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("DELETE FROM attendance_records WHERE id = ANY($1)")
-            .bind(&gone)
+        sqlx::query!(
+            "DELETE FROM attendance_records WHERE id = ANY($1)",
+            &gone,
+        )
             .execute(&mut *tx)
             .await?;
     }

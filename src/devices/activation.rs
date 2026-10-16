@@ -194,10 +194,10 @@ pub async fn verify_credential(
     device_id: Uuid,
     token: &str,
 ) -> Result<bool, AppError> {
-    let stored: Option<String> = sqlx::query_scalar(
+    let stored: Option<String> = sqlx::query_scalar!(
         "SELECT credential_hash FROM devices WHERE id = $1 AND retired_at IS NULL",
+        device_id,
     )
-    .bind(device_id)
     .fetch_optional(pool)
     .await?
     .flatten();
@@ -269,8 +269,10 @@ pub async fn create_code(
         .filter(|s| !s.is_empty())
         .or(slot.as_ref().map(|(_, name)| name.as_str()))
         .map(|s| s.chars().take(120).collect::<String>());
-    let org: Uuid = sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
-        .bind(body.branch_id)
+    let org: Uuid = sqlx::query_scalar!(
+        "SELECT org_id FROM branches WHERE id = $1",
+        body.branch_id,
+    )
         .fetch_one(pool.get_ref())
         .await?;
     // The plan's device limits, asked early so the dashboard says so at the
@@ -347,8 +349,10 @@ pub async fn revoke_code(
     let claims = extract_claims(&req)?;
     crate::authz::require::require(pool.get_ref(), &claims, Cap::BranchesEdit, None).await?;
     let branch: Uuid =
-        sqlx::query_scalar("SELECT branch_id FROM device_activation_codes WHERE id = $1")
-            .bind(*id)
+        sqlx::query_scalar!(
+            "SELECT branch_id FROM device_activation_codes WHERE id = $1",
+            *id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("No such activation code".into()))?;
@@ -453,8 +457,10 @@ pub async fn activate(
     .bind(hash_token(&token))
     .execute(&mut *tx)
     .await?;
-    let owner: Uuid = sqlx::query_scalar("SELECT org_id FROM devices WHERE id = $1")
-        .bind(body.device_id)
+    let owner: Uuid = sqlx::query_scalar!(
+        "SELECT org_id FROM devices WHERE id = $1",
+        body.device_id,
+    )
         .fetch_one(&mut *tx)
         .await?;
     if owner != org_id {
@@ -463,9 +469,11 @@ pub async fn activate(
             "This device belongs to another organization".into(),
         ));
     }
-    sqlx::query("UPDATE device_activation_codes SET used_by_device = $2 WHERE id = $1")
-        .bind(code_id)
-        .bind(body.device_id)
+    sqlx::query!(
+        "UPDATE device_activation_codes SET used_by_device = $2 WHERE id = $1",
+        code_id,
+        body.device_id,
+    )
         .execute(&mut *tx)
         .await?;
     if let Some(slot_id) = slot_id {

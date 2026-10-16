@@ -69,13 +69,13 @@ pub async fn remaining(
 ) -> Result<Option<i64>, AppError> {
     let mut worst = 0i64;
     for (kind, key) in buckets(device, branch) {
-        let secs: Option<i64> = sqlx::query_scalar(
+        let secs: Option<i64> = sqlx::query_scalar!(
             "SELECT CEIL(EXTRACT(EPOCH FROM (blocked_until - now())))::bigint
                FROM pin_attempts
               WHERE kind = $1 AND key = $2 AND blocked_until > now()",
+            kind,
+            &key,
         )
-        .bind(kind)
-        .bind(&key)
         .fetch_optional(pool)
         .await?
         .flatten();
@@ -123,13 +123,13 @@ pub async fn record_failure(pool: &PgPool, device: Option<&str>, branch: Uuid) {
         };
         let wait = delay_after(fails, free);
         if wait > 0 {
-            let _ = sqlx::query(
+            let _ = sqlx::query!(
                 "UPDATE pin_attempts SET blocked_until = now() + make_interval(secs => $3)
                   WHERE kind = $1 AND key = $2",
+                kind,
+                &key,
+                wait as f64,
             )
-            .bind(kind)
-            .bind(&key)
-            .bind(wait as f64)
             .execute(pool)
             .await;
         }
@@ -141,9 +141,11 @@ pub async fn record_failure(pool: &PgPool, device: Option<&str>, branch: Uuid) {
 /// PINs.
 pub async fn clear(pool: &PgPool, device: Option<&str>, branch: Uuid) {
     for (kind, key) in buckets(device, branch) {
-        let _ = sqlx::query("DELETE FROM pin_attempts WHERE kind = $1 AND key = $2")
-            .bind(kind)
-            .bind(&key)
+        let _ = sqlx::query!(
+            "DELETE FROM pin_attempts WHERE kind = $1 AND key = $2",
+            kind,
+            &key,
+        )
             .execute(pool)
             .await;
     }
@@ -163,7 +165,7 @@ pub async fn record_wrong_branch(
     device: Option<&str>,
 ) {
     let details = serde_json::json!({ "attempts": 1, "device_id": device });
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         "UPDATE authz_replay_flags
             SET details = jsonb_set(
                     details || jsonb_build_object('device_id', $4::text),
@@ -172,25 +174,25 @@ pub async fn record_wrong_branch(
                 occurred_at = now()
           WHERE org_id = $1 AND author_id = $2 AND branch_id = $3
             AND reason = 'pin_wrong_branch' AND reviewed_at IS NULL",
+        org_id,
+        user_id,
+        branch,
+        device,
     )
-    .bind(org_id)
-    .bind(user_id)
-    .bind(branch)
-    .bind(device)
     .execute(pool)
     .await;
     let inserted = match updated {
         Ok(r) if r.rows_affected() > 0 => return,
         Ok(_) => {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO authz_replay_flags
                      (org_id, branch_id, op, author_id, capability, reason, details)
                  VALUES ($1, $3, 'PinSignIn', $2, 'pos:sign_in', 'pin_wrong_branch', $4)",
+                org_id,
+                user_id,
+                branch,
+                details,
             )
-            .bind(org_id)
-            .bind(user_id)
-            .bind(branch)
-            .bind(details)
             .execute(pool)
             .await
         }

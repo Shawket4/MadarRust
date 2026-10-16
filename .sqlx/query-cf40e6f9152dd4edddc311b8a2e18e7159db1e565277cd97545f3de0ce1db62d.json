@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE staff_open_shifts SET status = 'open', claimed_by = NULL, claimed_at = NULL WHERE id = $1 AND status = 'claimed' AND claimed_by = $2 RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cf40e6f9152dd4edddc311b8a2e18e7159db1e565277cd97545f3de0ce1db62d"
+}

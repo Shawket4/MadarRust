@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE menu_item_combos SET updated_at = now() WHERE menu_item_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8752d623fa97507d271c2d056b7022193bdd84d6de03fe64e68fbd9ccefdea43"
+}

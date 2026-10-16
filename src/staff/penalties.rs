@@ -162,13 +162,13 @@ async fn upsert_auto_deduction(
     // A row a person wrote (a flag's unpaid excuse carries `created_by`) is a
     // decision, like a waiver: the sweep never deletes or re-prices it.
     if amount <= 0 {
-        let deleted = sqlx::query(
+        let deleted = sqlx::query!(
             "DELETE FROM payroll_deductions \
               WHERE attendance_record_id = $1 AND source = $2 \
                 AND waived_at IS NULL AND overridden_at IS NULL AND created_by IS NULL",
+            day.record_id,
+            source,
         )
-        .bind(day.record_id)
-        .bind(source)
         .execute(&mut *conn)
         .await?
         .rows_affected();
@@ -177,7 +177,7 @@ async fn upsert_auto_deduction(
 
     // The DO UPDATE deliberately excludes rows a human has touched: re-running the
     // sweep must never resurrect a waived penalty or overwrite a corrected figure.
-    let affected = sqlx::query(
+    let affected = sqlx::query!(
         "INSERT INTO payroll_deductions \
              (org_id, employee_id, amount_piastres, original_amount_piastres, reason, \
               effective_date, source, attendance_record_id, reason_code, reason_vars) \
@@ -193,16 +193,16 @@ async fn upsert_auto_deduction(
               WHERE payroll_deductions.waived_at IS NULL \
                 AND payroll_deductions.overridden_at IS NULL \
                 AND payroll_deductions.created_by IS NULL",
+        day.org_id,
+        day.employee_id,
+        amount,
+        reason,
+        day.business_date,
+        source,
+        day.record_id,
+        code,
+        vars,
     )
-    .bind(day.org_id)
-    .bind(day.employee_id)
-    .bind(amount)
-    .bind(reason)
-    .bind(day.business_date)
-    .bind(source)
-    .bind(day.record_id)
-    .bind(code)
-    .bind(vars)
     .execute(&mut *conn)
     .await?
     .rows_affected();

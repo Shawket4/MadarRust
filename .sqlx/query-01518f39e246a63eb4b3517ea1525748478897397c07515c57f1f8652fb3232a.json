@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE customers SET name = '', phone = NULL, phone_key = NULL, notes = NULL, birth_month = NULL, birth_day = NULL, marketing_opt_out = true, erased_at = now(), updated_at = now() WHERE id = $1 AND erased_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "01518f39e246a63eb4b3517ea1525748478897397c07515c57f1f8652fb3232a"
+}

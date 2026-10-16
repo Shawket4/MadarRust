@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO staff_schedules (org_id, employee_id, work_shift_id, day_of_week, effective_from, effective_to, branch_id) SELECT $1, $2, $3, $4, $5, $6, $7 WHERE NOT EXISTS ( SELECT 1 FROM staff_schedules WHERE employee_id = $2 AND day_of_week = $4 AND (effective_to IS NULL OR effective_to >= $5) AND ($6::date IS NULL OR effective_from <= $6))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int2",
+        "Date",
+        "Date",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d7a83f4086c3941a1578ed7faf1b7d3cae0ba7c5cf3e15183f0f4387cde1fad9"
+}

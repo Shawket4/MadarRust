@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM asset_bundle_dirty WHERE branch_id = $1 AND dirty_since <= $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dbac0db01bf3c550ce844aa6f6f0a6e54d67cec586daa88374314fbb652cebbd"
+}

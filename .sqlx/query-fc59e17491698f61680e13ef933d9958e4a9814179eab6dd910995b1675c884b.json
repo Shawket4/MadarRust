@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM menu_items WHERE org_id = $1 AND id = ANY($2) AND kind = 'item' AND deleted_at IS NULL AND is_active",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fc59e17491698f61680e13ef933d9958e4a9814179eab6dd910995b1675c884b"
+}

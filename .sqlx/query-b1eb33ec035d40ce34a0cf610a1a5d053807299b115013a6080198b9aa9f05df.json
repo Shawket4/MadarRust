@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE menu_items SET meal_combo_id = $2, meal_slot_id = $3, updated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b1eb33ec035d40ce34a0cf610a1a5d053807299b115013a6080198b9aa9f05df"
+}

@@ -309,19 +309,21 @@ pub async fn award_inner(
     .await?;
     // Record who the sale earned for even when it rounded down to zero points,
     // so "was this sale claimed?" has an answer either way.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE orders SET loyalty_customer_id = $2 \
           WHERE id = $1 AND loyalty_customer_id IS NULL",
+        order.id,
+        member.id,
     )
-    .bind(order.id)
-    .bind(member.id)
     .execute(&mut *tx)
     .await?;
     // A card under the customer's id (design §2.1): a sale scanned for a member
     // IS that customer's sale, unless the till already attached someone.
-    sqlx::query("UPDATE orders SET customer_id = $2 WHERE id = $1 AND customer_id IS NULL")
-        .bind(order.id)
-        .bind(member.id)
+    sqlx::query!(
+        "UPDATE orders SET customer_id = $2 WHERE id = $1 AND customer_id IS NULL",
+        order.id,
+        member.id,
+    )
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

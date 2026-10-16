@@ -198,7 +198,7 @@ async fn run(
 
     // Step C — seed the counter for EVERY (branch, business-day) group so a later
     // (even backdated) live order continues from N+1 instead of restarting at 1.
-    let seeded = sqlx::query(
+    let seeded = sqlx::query!(
         "INSERT INTO order_ref_counters (branch_id, business_date, last_seq)
          SELECT o.branch_id,
                 (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date,
@@ -210,9 +210,9 @@ async fn run(
          GROUP BY o.branch_id, (o.created_at AT TIME ZONE COALESCE(b.timezone, bo.timezone)::text)::date
          ON CONFLICT (branch_id, business_date)
          DO UPDATE SET last_seq = GREATEST(order_ref_counters.last_seq, EXCLUDED.last_seq)",
+        org,
+        branch,
     )
-    .bind(org)
-    .bind(branch)
     .execute(&mut *tx)
     .await?
     .rows_affected();

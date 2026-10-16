@@ -482,9 +482,11 @@ pub async fn delete_department(
         )));
     }
 
-    let deleted = sqlx::query("DELETE FROM departments WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    let deleted = sqlx::query!(
+        "DELETE FROM departments WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(pool.get_ref())
         .await?
         .rows_affected();
@@ -908,14 +910,14 @@ pub async fn create_employee(
     .fetch_one(&mut *tx)
     .await?;
     for b in &branches {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO employee_branches (employee_id, branch_id, org_id, assigned_by) \
              VALUES ($1, $2, $3, $4)",
+            id,
+            b,
+            org_id,
+            claims.user_id_safe().ok(),
         )
-        .bind(id)
-        .bind(b)
-        .bind(org_id)
-        .bind(claims.user_id_safe().ok())
         .execute(&mut *tx)
         .await?;
     }
@@ -1123,22 +1125,22 @@ pub async fn put_employee(
     .await?;
     if let Some(wanted) = &body.branch_ids {
         let wanted = dedup(wanted.clone());
-        sqlx::query(
+        sqlx::query!(
             "DELETE FROM employee_branches WHERE employee_id = $1 AND NOT (branch_id = ANY($2))",
+            *employee_id,
+            &wanted,
         )
-        .bind(*employee_id)
-        .bind(&wanted)
         .execute(&mut *tx)
         .await?;
         for b in &wanted {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO employee_branches (employee_id, branch_id, org_id, assigned_by) \
                  VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                *employee_id,
+                b,
+                org_id,
+                claims.user_id_safe().ok(),
             )
-            .bind(*employee_id)
-            .bind(b)
-            .bind(org_id)
-            .bind(claims.user_id_safe().ok())
             .execute(&mut *tx)
             .await?;
         }
@@ -1176,14 +1178,14 @@ pub async fn delete_employee(
     // Deliberately NOT a delete: attendance and payslips are records of what
     // happened and outlive the employment (AT-6). The person is terminated
     // today, loses the app, and drops out of rosters and payroll from here.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE employees SET employment_status = 'terminated', app_access = false, \
              termination_date = GREATEST(CURRENT_DATE, COALESCE(hire_date, CURRENT_DATE)), \
              updated_at = now() \
           WHERE id = $1 AND org_id = $2 AND employment_status <> 'terminated'",
+        *employee_id,
+        org_id,
     )
-    .bind(*employee_id)
-    .bind(org_id)
     .execute(pool)
     .await?;
     crate::staff::dawam::revoke_devices(pool, *employee_id).await?;
@@ -1274,18 +1276,22 @@ pub async fn delete_document(
     let org_id = scope_org(&req, &claims)?;
     access::gate(pool.get_ref(), &claims, org_id, Cap::HrStaffDelete).await?;
     let owner: Uuid =
-        sqlx::query_scalar("SELECT employee_id FROM staff_documents WHERE id = $1 AND org_id = $2")
-            .bind(*id)
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT employee_id FROM staff_documents WHERE id = $1 AND org_id = $2",
+            *id,
+            org_id,
+        )
             .fetch_optional(pool.get_ref())
             .await?
             .ok_or_else(|| AppError::NotFound("Document not found".into()))?;
     let subject = access::subject(pool.get_ref(), org_id, owner).await?;
     access::require_for(pool.get_ref(), &claims, Cap::HrStaffDelete, &subject).await?;
 
-    sqlx::query("DELETE FROM staff_documents WHERE id = $1 AND org_id = $2")
-        .bind(*id)
-        .bind(org_id)
+    sqlx::query!(
+        "DELETE FROM staff_documents WHERE id = $1 AND org_id = $2",
+        *id,
+        org_id,
+    )
         .execute(pool.get_ref())
         .await?;
     Ok(HttpResponse::NoContent().finish())

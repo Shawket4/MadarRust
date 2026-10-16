@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM employee_branches WHERE employee_id = $1 AND NOT (branch_id = ANY($2))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b6c36d7d5e56a5a6947a12bf8f29c2d7fb545aa71bc6dfbb0528d3d6e81b5efa"
+}

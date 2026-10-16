@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM attendance_records WHERE employee_id = $1 AND business_date = $2 AND work_shift_id = $3 AND covered_employee_id IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "683d71e280b15368b9919a4e1c6eaccfab300e4d0316391ed3b0cc4a0df654ef"
+}

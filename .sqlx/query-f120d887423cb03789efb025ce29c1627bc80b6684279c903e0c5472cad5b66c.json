@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, order_id, order_line_index, reward_menu_item_id, created_by, source, order_item_id) VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9,'redemption',$10) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int4",
+        "Uuid",
+        "Int4",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f120d887423cb03789efb025ce29c1627bc80b6684279c903e0c5472cad5b66c"
+}

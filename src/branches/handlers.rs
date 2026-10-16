@@ -694,8 +694,10 @@ pub async fn delete_branch(
         )));
     }
 
-    sqlx::query("UPDATE branches SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
-        .bind(*id)
+    sqlx::query!(
+        "UPDATE branches SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+        *id,
+    )
         .execute(pool.get_ref())
         .await?;
 
@@ -818,8 +820,10 @@ async fn check_warehouse_limit(
     org_id: Uuid,
 ) -> Result<(), AppError> {
     let max: Option<i32> =
-        sqlx::query_scalar("SELECT max_warehouses FROM organizations WHERE id = $1 FOR UPDATE")
-            .bind(org_id)
+        sqlx::query_scalar!(
+            "SELECT max_warehouses FROM organizations WHERE id = $1 FOR UPDATE",
+            org_id,
+        )
             .fetch_optional(&mut *conn)
             .await?
             .flatten();

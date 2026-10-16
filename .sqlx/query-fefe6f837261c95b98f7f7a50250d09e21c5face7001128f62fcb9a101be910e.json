@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT effective_timezone($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "effective_timezone",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fefe6f837261c95b98f7f7a50250d09e21c5face7001128f62fcb9a101be910e"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT MAX(resolved_at) FROM attendance_flags WHERE attendance_record_id = $1 AND kind = 'left_mid_shift' AND resolution IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "125974c1462ec676f87c7a07846879c53d8842815cd29e12956929f4144eb654"
+}

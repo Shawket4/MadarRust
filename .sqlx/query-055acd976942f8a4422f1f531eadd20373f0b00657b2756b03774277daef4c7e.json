@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE open_tickets SET opened_via = 'qr_table', customer_id = COALESCE(customer_id, $2) WHERE table_id = $1 AND status = 'open' AND opened_via IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "055acd976942f8a4422f1f531eadd20373f0b00657b2756b03774277daef4c7e"
+}

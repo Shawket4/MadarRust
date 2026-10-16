@@ -768,16 +768,16 @@ pub(crate) async fn fire_round(
         // same figure from the same struct; the CHECK on the table holds them to it.
         // The id comes back so the kitchen copy can carry it: voiding this
         // bill line has to be able to find the plate it ordered.
-        let item_id: Uuid = sqlx::query_scalar(
+        let item_id: Uuid = sqlx::query_scalar!(
             "INSERT INTO open_ticket_items \
                 (open_ticket_id, round_id, menu_item_id, line, line_total) \
              VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            open_ticket_id,
+            round_id,
+            menu_item_id,
+            serde_json::to_value(line).unwrap_or(serde_json::Value::Null),
+            line.line_total,
         )
-        .bind(open_ticket_id)
-        .bind(round_id)
-        .bind(menu_item_id)
-        .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
-        .bind(line.line_total)
         .fetch_one(&mut **tx)
         .await?;
         bill_line_ids.push(item_id);
@@ -786,11 +786,11 @@ pub(crate) async fn fire_round(
 
     // Only the money moves on the bill. Readiness is the kitchen's to say and
     // `ready_at` is history — a new round does not unhappen the last plating.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE open_tickets SET subtotal = subtotal + $2, updated_at = now() WHERE id = $1",
+        open_ticket_id,
+        round_subtotal,
     )
-    .bind(open_ticket_id)
-    .bind(round_subtotal)
     .execute(&mut **tx)
     .await?;
 
@@ -951,13 +951,13 @@ pub(crate) async fn mint_ticket_ref(
     .bind(branch_id)
     .fetch_one(&mut **tx)
     .await?;
-    let seq: i32 = sqlx::query_scalar(
+    let seq: i32 = sqlx::query_scalar!(
         "INSERT INTO ticket_ref_counters (branch_id, business_date, last_seq) VALUES ($1, $2, 1) \
          ON CONFLICT (branch_id, business_date) \
          DO UPDATE SET last_seq = ticket_ref_counters.last_seq + 1 RETURNING last_seq",
+        branch_id,
+        biz_date,
     )
-    .bind(branch_id)
-    .bind(biz_date)
     .fetch_one(&mut **tx)
     .await?;
     Ok(format!(
