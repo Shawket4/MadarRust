@@ -1607,6 +1607,7 @@ pub async fn branch_addon_sales(
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
+    crate::compat_usage::count_internal("reports::branch_addon_sales");
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     let (branch_ids, _org) =

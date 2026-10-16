@@ -242,12 +242,7 @@ pub async fn tenant_pool(base: &PgPool, org_id: Uuid) -> PgPool {
                         // Only needed on the fallback path: when the session
                         // already authenticated as `madar_app` there is no
                         // higher-privileged role to step down from.
-                        if !login_as_app {
-                            sqlx::query("SET ROLE madar_app")
-                                .execute(&mut *conn)
-                                .await?;
-                        }
-                        Ok(())
+                        session_setup(conn, !login_as_app).await
                     })
                 })
                 .connect_lazy_with(opts)
@@ -340,6 +335,61 @@ where
     }
 }
 
+/// `SET ROLE madar_app` (the fallback path) plus the tenant session limits,
+/// in ONE round trip. The limits are `madar_app`'s role settings too
+/// (migration `20261016130000_app_role_timeouts`), but a role setting applies
+/// only to a session that LOGS IN as the role, not to one that `SET ROLE`s
+/// into it — so they are set here for both paths alike. Owner connections
+/// (migrations, jobs, the seeder) never pass through here.
+async fn session_setup(conn: &mut sqlx::PgConnection, set_role: bool) -> Result<(), sqlx::Error> {
+    // A `&str` with no arguments goes out as ONE simple Query: both SETs in
+    // one round trip.
+    sqlx::Executor::execute(&mut *conn, session_sql(set_role))
+        .await
+        .map(|_| ())
+}
+
+/// The statements [`session_setup`] sends (built once; `'static`).
+fn session_sql(set_role: bool) -> &'static str {
+    static WITH_ROLE: OnceLock<String> = OnceLock::new();
+    static WITHOUT: OnceLock<String> = OnceLock::new();
+    if set_role {
+        WITH_ROLE.get_or_init(|| format!("SET ROLE madar_app; {}", session_limits_sql()))
+    } else {
+        WITHOUT.get_or_init(|| session_limits_sql().to_string())
+    }
+}
+
+/// A Postgres interval setting such as `30s`, `500ms`, `2min` or `0`; anything
+/// else falls back to the default (env values never reach SQL unchecked).
+fn timeout_setting(var: &str, default: &'static str) -> String {
+    let v = std::env::var(var).ok().map(|v| v.trim().to_string());
+    let ok = |v: &str| {
+        let digits = v.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+        !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_digit())
+            && matches!(&v[digits.len()..], "" | "ms" | "s" | "min" | "h")
+    };
+    match v {
+        Some(v) if ok(&v) => v,
+        _ => default.to_string(),
+    }
+}
+
+/// `statement_timeout` / `idle_in_transaction_session_timeout` for tenant
+/// sessions: `MADAR_APP_STATEMENT_TIMEOUT` (default 30s) and
+/// `MADAR_APP_IDLE_TX_TIMEOUT` (default 60s); `0` turns one off.
+fn session_limits_sql() -> &'static str {
+    static V: OnceLock<String> = OnceLock::new();
+    V.get_or_init(|| {
+        format!(
+            "SET statement_timeout = '{}'; SET idle_in_transaction_session_timeout = '{}';",
+            timeout_setting("MADAR_APP_STATEMENT_TIMEOUT", "30s"),
+            timeout_setting("MADAR_APP_IDLE_TX_TIMEOUT", "60s"),
+        )
+    })
+}
+
 fn shared_registry() -> &'static std::sync::Mutex<std::collections::HashMap<String, PgPool>> {
     static R: OnceLock<std::sync::Mutex<std::collections::HashMap<String, PgPool>>> =
         OnceLock::new();
@@ -378,11 +428,7 @@ fn shared_pool(base: &PgPool) -> PgPool {
         .max_lifetime(Duration::from_secs(1800))
         .after_connect(move |conn, _meta| {
             Box::pin(async move {
-                if !login_as_app {
-                    sqlx::query("SET ROLE madar_app")
-                        .execute(&mut *conn)
-                        .await?;
-                }
+                session_setup(conn, !login_as_app).await?;
                 stamp(conn).await
             })
         })
@@ -498,4 +544,46 @@ impl FromRequest for Db {
             }
         })
     }
+}
+
+// ── Transient-failure retry (DB_ARCHITECTURE_AUDIT §6.3, Phase 1.8) ─────────
+//
+// A deadlock (40P01) or a serialization failure (40001) aborts the whole
+// transaction and leaves nothing behind, so an idempotent write can simply be
+// run again. Only the OUTERMOST retrying caller in a task retries: replay
+// retries the whole op, and the order path it reaches then runs once per
+// attempt instead of multiplying the attempts.
+
+tokio::task_local! {
+    static RETRYING: ();
+}
+
+/// How many times a retrying caller runs its write at most.
+pub const RETRY_ATTEMPTS: u32 = 3;
+
+/// A deadlock or serialization failure: the transaction was rolled back whole.
+pub fn is_transient(e: &AppError) -> bool {
+    match e {
+        AppError::Db(sqlx::Error::Database(d)) => {
+            matches!(d.code().as_deref(), Some("40P01") | Some("40001"))
+        }
+        _ => false,
+    }
+}
+
+/// True inside [`retrying`]: an enclosing caller already retries.
+pub fn in_retry_scope() -> bool {
+    RETRYING.try_with(|_| ()).is_ok()
+}
+
+/// Run `fut` marked as the retrying caller (see [`in_retry_scope`]).
+pub async fn retrying<F: Future>(fut: F) -> F::Output {
+    RETRYING.scope((), fut).await
+}
+
+/// The pause before attempt `next` (2, 3, …): short, growing, and jittered
+/// so two tills that deadlocked do not collide again in step.
+pub async fn retry_pause(next: u32) {
+    let jitter = u64::from(Uuid::new_v4().as_bytes()[0] % 40);
+    tokio::time::sleep(Duration::from_millis(20 * u64::from(next) + jitter)).await;
 }

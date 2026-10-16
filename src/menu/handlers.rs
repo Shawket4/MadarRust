@@ -912,8 +912,23 @@ pub async fn list_menu_items(
     // menu from this endpoint and cannot sell a combo, so `kind=combo` rows are
     // left out for it. Part of the cache key: two clients, two bodies.
     let sells_combos = crate::client_seen::sells_combos(req.headers());
+    // The org's `catalog_revision` is part of the key: every catalog write the
+    // triggers see (items, sizes, options, recipes, prices, ingredients,
+    // combos, deals) bumps it, so a cached body never outlives the catalog it
+    // was built from, whichever path wrote it. One indexed read, against the
+    // ~1,000 statements a `full=true` body costs.
+    let revision: i64 = match &cache {
+        Some(c) if c.enabled() => sqlx::query_scalar!(
+            "SELECT revision FROM catalog_revision WHERE org_id = $1",
+            query.org_id
+        )
+        .fetch_optional(pool.get_ref())
+        .await?
+        .unwrap_or(0),
+        _ => 0,
+    };
     let variant = format!(
-        "menu|{}|{}|{}|{}",
+        "menu|r{revision}|{}|{}|{}|{}",
         query.category_id.map(|c| c.to_string()).unwrap_or_default(),
         query.branch_id.map(|b| b.to_string()).unwrap_or_default(),
         query.full.unwrap_or(false),
@@ -1725,6 +1740,7 @@ pub async fn list_addon_items(
     pool: crate::db::Db,
     query: web::Query<AddonItemQuery>,
 ) -> Result<HttpResponse, AppError> {
+    crate::client_seen::legacy_hit_at(crate::compat_usage::KIND_MENU_LEGACY_READ, "GET /addon-items");
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
@@ -1850,6 +1866,7 @@ pub async fn list_addon_catalog(
     pool: crate::db::Db,
     query: web::Query<AddonCatalogQuery>,
 ) -> Result<HttpResponse, AppError> {
+    crate::client_seen::legacy_hit_at(crate::compat_usage::KIND_MENU_LEGACY_READ, "GET /addon-items/catalog");
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     require_same_org(&claims, Some(query.org_id))?;
@@ -1926,7 +1943,7 @@ pub async fn list_addon_catalog(
     path = "/addon-items",
     tag = "menu",
     request_body = CreateAddonItemRequest,
-    responses((status = 201, description = "Addon item created", body = AddonItem), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn create_addon_item(
@@ -1934,36 +1951,9 @@ pub async fn create_addon_item(
     pool: crate::db::Db,
     body: web::Json<CreateAddonItemRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "create").await?;
-    require_same_org(&claims, Some(body.org_id))?;
-
-    let mut_body = body.into_inner();
-    let mut name_translations = mut_body
-        .name_translations
-        .unwrap_or_else(|| serde_json::json!({}));
-    crate::translation::ensure_translations_json(&mut name_translations, Some(&mut_body.name))
-        .await
-        .map_err(|_| AppError::Internal)?;
-
-    let mut row = sqlx::query_as::<_, AddonItem>(
-        "INSERT INTO addon_items (org_id, name, name_translations, type, default_price)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, org_id, name, name_translations, type as addon_type, default_price,
-                   is_active, created_at, updated_at,
-                   NULL::uuid as primary_ingredient_id",
-    )
-    .bind(mut_body.org_id)
-    .bind(&mut_body.name)
-    .bind(name_translations)
-    .bind(&mut_body.addon_type)
-    .bind(mut_body.default_price)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    row.ingredients = vec![];
-
-    Ok(HttpResponse::Created().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, body);
+    Err(crate::compat_usage::shim_write_removed("POST /addon-items"))
 }
 
 #[utoipa::path(
@@ -1972,7 +1962,7 @@ pub async fn create_addon_item(
     tag = "menu",
     params(("id" = Uuid, Path, description = "Addon item ID")),
     request_body = UpdateAddonItemRequest,
-    responses((status = 200, description = "Addon item updated", body = AddonItem), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn update_addon_item(
@@ -1981,51 +1971,9 @@ pub async fn update_addon_item(
     id: web::Path<Uuid>,
     body: web::Json<UpdateAddonItemRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-
-    let existing = fetch_addon_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(existing.org_id))?;
-
-    let mut_body = body.into_inner();
-
-    let mut name_translations = existing.name_translations;
-    if let Some(new_name) = &mut_body.name {
-        crate::translation::ensure_translations_json(&mut name_translations, Some(new_name))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    } else if let Some(new_tr) = mut_body.name_translations {
-        name_translations = new_tr;
-        crate::translation::ensure_translations_json(&mut name_translations, Some(&existing.name))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    }
-
-    let mut row = sqlx::query_as::<_, AddonItem>(
-        "UPDATE addon_items SET
-             name              = COALESCE($2, name),
-             name_translations = $3,
-             type              = COALESCE($4, type),
-             default_price     = COALESCE($5, default_price),
-             is_active         = COALESCE($6, is_active)
-         WHERE id = $1
-         RETURNING id, org_id, name, name_translations, type as addon_type, default_price,
-                   is_active, created_at, updated_at,
-                   (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = addon_items.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id",
-    )
-    .bind(*id)
-    .bind(&mut_body.name)
-    .bind(name_translations)
-    .bind(&mut_body.addon_type)
-    .bind(mut_body.default_price)
-    .bind(mut_body.is_active)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Addon item not found".into()))?;
-
-    row.ingredients = fetch_addon_ingredients(pool.get_ref(), *id).await?;
-
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, id, body);
+    Err(crate::compat_usage::shim_write_removed("PATCH /addon-items/{id}"))
 }
 
 #[utoipa::path(
@@ -2033,7 +1981,7 @@ pub async fn update_addon_item(
     path = "/addon-items/{id}",
     tag = "menu",
     params(("id" = Uuid, Path, description = "Addon item ID")),
-    responses((status = 204, description = "Addon item deleted"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_addon_item(
@@ -2041,18 +1989,9 @@ pub async fn delete_addon_item(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
-
-    let existing = fetch_addon_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(existing.org_id))?;
-
-    sqlx::query("DELETE FROM addon_items WHERE id = $1")
-        .bind(*id)
-        .execute(pool.get_ref())
-        .await?;
-
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, id);
+    Err(crate::compat_usage::shim_write_removed("DELETE /addon-items/{id}"))
 }
 
 // ── Addon Slots ───────────────────────────────────────────────
@@ -2251,7 +2190,7 @@ pub async fn delete_addon_slot(
     path = "/menu-items/{id}/overrides",
     tag = "menu",
     params(("id" = Uuid, Path, description = "Menu item ID")),
-    responses((status = 200, description = "List addon overrides", body = Vec<AddonOverride>), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_addon_overrides(
@@ -2259,44 +2198,9 @@ pub async fn list_addon_overrides(
     pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
-
-    let item = fetch_menu_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    let rows = sqlx::query_as::<_, AddonOverride>(
-        r#"
-        SELECT
-            o.id,
-            o.menu_item_id,
-            o.addon_item_id,
-            ai.name                                      AS addon_item_name,
-            o.size_label::text                           AS size_label,
-            o.ingredient_name,
-            o.org_ingredient_id,
-            o.ingredient_unit,
-            o.quantity_used,
-            o.replaces_org_ingredient_id,
-            ri.name                                      AS replaces_ingredient_name,
-            o.combo_addon_item_id,
-            ci.name                                      AS combo_addon_item_name,
-            o.created_at,
-            o.updated_at
-        FROM  menu_item_addon_overrides o
-        JOIN  addon_items ai ON ai.id = o.addon_item_id
-        LEFT JOIN org_ingredients ri ON ri.id = o.replaces_org_ingredient_id
-        LEFT JOIN addon_items      ci ON ci.id = o.combo_addon_item_id
-        WHERE o.menu_item_id = $1
-        ORDER BY ai.name ASC, o.size_label ASC NULLS FIRST,
-                 o.ingredient_name ASC, o.combo_addon_item_id ASC NULLS FIRST
-        "#,
-    )
-    .bind(*id)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(rows))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, id);
+    Err(crate::compat_usage::shim_write_removed("GET /menu-items/{id}/overrides"))
 }
 
 #[utoipa::path(
@@ -2305,7 +2209,7 @@ pub async fn list_addon_overrides(
     tag = "menu",
     params(("id" = Uuid, Path, description = "Menu item ID")),
     request_body = UpsertAddonOverrideRequest,
-    responses((status = 200, description = "Addon override upserted", body = AddonOverride), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_addon_override(
@@ -2314,169 +2218,9 @@ pub async fn upsert_addon_override(
     id: web::Path<Uuid>,
     body: web::Json<UpsertAddonOverrideRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-
-    let item = fetch_menu_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    // Verify the addon_item belongs to the same org
-    let addon = fetch_addon_item(pool.get_ref(), body.addon_item_id).await?;
-    require_same_org(&claims, Some(addon.org_id))?;
-
-    if body.quantity_used <= 0.0 {
-        return Err(AppError::BadRequest(
-            "quantity_used must be greater than 0".into(),
-        ));
-    }
-    // Normalize the deduction to the replacement ingredient's base unit.
-    let (norm_unit, norm_qty) = crate::recipes::handlers::normalize_recipe_unit(
-        pool.get_ref(),
-        addon.org_id,
-        body.org_ingredient_id,
-        &body.ingredient_unit,
-        body.quantity_used,
-    )
-    .await?;
-
-    // Upsert using the appropriate partial unique index path.
-    // Because size_label and combo_addon_item_id are nullable we can't use
-    // a single ON CONFLICT clause — instead we do a manual upsert:
-    // try UPDATE first, INSERT if no row matched.
-    let existing_id: Option<Uuid> = match (body.size_label.as_deref(), body.combo_addon_item_id) {
-        (Some(size), Some(combo)) => {
-            sqlx::query_scalar(
-                "SELECT id FROM menu_item_addon_overrides
-             WHERE menu_item_id = $1 AND addon_item_id = $2
-               AND ingredient_name = $3
-               AND size_label = $4
-               AND combo_addon_item_id = $5",
-            )
-            .bind(*id)
-            .bind(body.addon_item_id)
-            .bind(&body.ingredient_name)
-            .bind(size)
-            .bind(combo)
-            .fetch_optional(pool.get_ref())
-            .await?
-        }
-
-        (Some(size), None) => {
-            sqlx::query_scalar(
-                "SELECT id FROM menu_item_addon_overrides
-             WHERE menu_item_id = $1 AND addon_item_id = $2
-               AND ingredient_name = $3
-               AND size_label = $4
-               AND combo_addon_item_id IS NULL",
-            )
-            .bind(*id)
-            .bind(body.addon_item_id)
-            .bind(&body.ingredient_name)
-            .bind(size)
-            .fetch_optional(pool.get_ref())
-            .await?
-        }
-
-        (None, Some(combo)) => {
-            sqlx::query_scalar(
-                "SELECT id FROM menu_item_addon_overrides
-             WHERE menu_item_id = $1 AND addon_item_id = $2
-               AND ingredient_name = $3
-               AND size_label IS NULL
-               AND combo_addon_item_id = $4",
-            )
-            .bind(*id)
-            .bind(body.addon_item_id)
-            .bind(&body.ingredient_name)
-            .bind(combo)
-            .fetch_optional(pool.get_ref())
-            .await?
-        }
-
-        (None, None) => {
-            sqlx::query_scalar(
-                "SELECT id FROM menu_item_addon_overrides
-             WHERE menu_item_id = $1 AND addon_item_id = $2
-               AND ingredient_name = $3
-               AND size_label IS NULL
-               AND combo_addon_item_id IS NULL",
-            )
-            .bind(*id)
-            .bind(body.addon_item_id)
-            .bind(&body.ingredient_name)
-            .fetch_optional(pool.get_ref())
-            .await?
-        }
-    }
-    .flatten();
-
-    let row = if let Some(eid) = existing_id {
-        sqlx::query_as::<_, AddonOverride>(
-            r#"
-            UPDATE menu_item_addon_overrides SET
-                org_ingredient_id          = $2,
-                ingredient_unit            = $3,
-                quantity_used              = $4,
-                replaces_org_ingredient_id = $5,
-                updated_at                 = NOW()
-            WHERE id = $1
-            RETURNING
-                id, menu_item_id, addon_item_id,
-                (SELECT name FROM addon_items WHERE id = addon_item_id) AS addon_item_name,
-                size_label::text,
-                ingredient_name, org_ingredient_id, ingredient_unit, quantity_used,
-                replaces_org_ingredient_id,
-                (SELECT name FROM org_ingredients WHERE id = replaces_org_ingredient_id)
-                    AS replaces_ingredient_name,
-                combo_addon_item_id,
-                (SELECT name FROM addon_items WHERE id = combo_addon_item_id)
-                    AS combo_addon_item_name,
-                created_at, updated_at
-            "#,
-        )
-        .bind(eid)
-        .bind(body.org_ingredient_id)
-        .bind(&norm_unit)
-        .bind(norm_qty)
-        .bind(body.replaces_org_ingredient_id)
-        .fetch_one(pool.get_ref())
-        .await?
-    } else {
-        sqlx::query_as::<_, AddonOverride>(
-            r#"
-            INSERT INTO menu_item_addon_overrides
-                (menu_item_id, addon_item_id, size_label, ingredient_name,
-                 org_ingredient_id, ingredient_unit, quantity_used,
-                 replaces_org_ingredient_id, combo_addon_item_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING
-                id, menu_item_id, addon_item_id,
-                (SELECT name FROM addon_items WHERE id = $2) AS addon_item_name,
-                size_label::text,
-                ingredient_name, org_ingredient_id, ingredient_unit, quantity_used,
-                replaces_org_ingredient_id,
-                (SELECT name FROM org_ingredients WHERE id = $8)
-                    AS replaces_ingredient_name,
-                combo_addon_item_id,
-                (SELECT name FROM addon_items WHERE id = $9)
-                    AS combo_addon_item_name,
-                created_at, updated_at
-            "#,
-        )
-        .bind(*id)
-        .bind(body.addon_item_id)
-        .bind(&body.size_label)
-        .bind(&body.ingredient_name)
-        .bind(body.org_ingredient_id)
-        .bind(&norm_unit)
-        .bind(norm_qty)
-        .bind(body.replaces_org_ingredient_id)
-        .bind(body.combo_addon_item_id)
-        .fetch_one(pool.get_ref())
-        .await?
-    };
-
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, id, body);
+    Err(crate::compat_usage::shim_write_removed("POST /menu-items/{id}/overrides"))
 }
 
 #[utoipa::path(
@@ -2487,7 +2231,7 @@ pub async fn upsert_addon_override(
         ("id" = Uuid, Path, description = "Menu item ID"),
         ("override_id" = Uuid, Path, description = "Override ID")
     ),
-    responses((status = 204, description = "Addon override deleted"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_addon_override(
@@ -2495,20 +2239,9 @@ pub async fn delete_addon_override(
     pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let (item_id, override_id) = path.into_inner();
-    check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
-
-    let item = fetch_menu_item(pool.get_ref(), item_id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    sqlx::query("DELETE FROM menu_item_addon_overrides WHERE id = $1 AND menu_item_id = $2")
-        .bind(override_id)
-        .bind(item_id)
-        .execute(pool.get_ref())
-        .await?;
-
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, path);
+    Err(crate::compat_usage::shim_write_removed("DELETE /menu-items/{id}/overrides/{override_id}"))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2986,6 +2719,7 @@ pub async fn list_branch_menu_overrides(
     pool: crate::db::Db,
     query: web::Query<BranchOverridesQuery>,
 ) -> Result<HttpResponse, AppError> {
+    crate::client_seen::legacy_hit_at(crate::compat_usage::KIND_MENU_LEGACY_READ, "GET /branch-menu-overrides");
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
@@ -3186,6 +2920,7 @@ pub async fn list_branch_addon_overrides(
     pool: crate::db::Db,
     query: web::Query<BranchOverridesQuery>,
 ) -> Result<HttpResponse, AppError> {
+    crate::client_seen::legacy_hit_at(crate::compat_usage::KIND_MENU_LEGACY_READ, "GET /branch-addon-overrides");
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "menu_items", "read").await?;
     branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
@@ -3207,7 +2942,7 @@ pub async fn list_branch_addon_overrides(
     tag = "menu",
     operation_id = "upsert_branch_addon_override",
     request_body = BranchAddonOverrideInput,
-    responses((status = 200, description = "Addon override upserted", body = BranchAddonOverride), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_branch_addon_override(
@@ -3215,44 +2950,9 @@ pub async fn upsert_branch_addon_override(
     pool: crate::db::Db,
     body: web::Json<BranchAddonOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    let org_id = branch_in_scope(pool.get_ref(), &claims, body.branch_id).await?;
-
-    // The addon must belong to the same org as the branch.
-    let addon_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM addon_items WHERE id = $1")
-            .bind(body.addon_item_id)
-            .fetch_optional(pool.get_ref())
-            .await?;
-    if addon_org != Some(org_id) {
-        return Err(AppError::NotFound(
-            "Addon not found in this organization".into(),
-        ));
-    }
-    if let Some(p) = body.price_override
-        && p < 0
-    {
-        return Err(AppError::BadRequest("price_override must be ≥ 0".into()));
-    }
-
-    let row = sqlx::query_as::<_, BranchAddonOverride>(
-        "INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available, updated_at)
-         VALUES ($1, $2, $3, $4, now())
-         ON CONFLICT (branch_id, addon_item_id)
-         DO UPDATE SET price_override = EXCLUDED.price_override,
-                       is_available   = EXCLUDED.is_available,
-                       updated_at     = now()
-         RETURNING branch_id, addon_item_id, price_override, is_available, updated_at",
-    )
-    .bind(body.branch_id)
-    .bind(body.addon_item_id)
-    .bind(body.price_override)
-    .bind(body.is_available)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, body);
+    Err(crate::compat_usage::shim_write_removed("PUT /branch-addon-overrides"))
 }
 
 #[utoipa::path(
@@ -3261,7 +2961,7 @@ pub async fn upsert_branch_addon_override(
     tag = "menu",
     operation_id = "delete_branch_addon_override",
     params(BranchAddonOverrideKeyQuery),
-    responses((status = 204, description = "Addon override cleared — reverts to the org default"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_branch_addon_override(
@@ -3269,17 +2969,9 @@ pub async fn delete_branch_addon_override(
     pool: crate::db::Db,
     query: web::Query<BranchAddonOverrideKeyQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
-
-    sqlx::query("DELETE FROM branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = $2")
-        .bind(query.branch_id)
-        .bind(query.addon_item_id)
-        .execute(pool.get_ref())
-        .await?;
-
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, query);
+    Err(crate::compat_usage::shim_write_removed("DELETE /branch-addon-overrides"))
 }
 
 // ── Helpers ───────────────────────────────────────────────────

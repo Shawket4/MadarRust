@@ -91,7 +91,12 @@ async fn run() -> std::io::Result<()> {
     // the full migration set). Migrations are embedded at compile time; this is a
     // no-op when the DB is already current and fails fast on a checksum mismatch.
     tracing::info!("Applying database migrations...");
-    sqlx::migrate!("./migrations")
+    // A CONCURRENTLY index build that failed on a previous boot left an
+    // INVALID index its migration would now skip; drop it first.
+    madar_rust::migrate_guard::drop_invalid_pending_indexes(&pool, &madar_rust::MIGRATOR)
+        .await
+        .expect("Failed to check for invalid indexes before migrating");
+    madar_rust::MIGRATOR
         .run(&pool)
         .await
         .expect("Failed to apply database migrations");
@@ -146,6 +151,9 @@ async fn run() -> std::io::Result<()> {
     madar_rust::assets::worker::spawn(pool.get_ref().clone());
     madar_rust::assets::bundle::spawn(pool.get_ref().clone());
     madar_rust::sync::pull::sweeper::spawn(pool.get_ref().clone());
+    // DB architecture Phase 1: shim usage counters and the sales rollups.
+    madar_rust::compat_usage::spawn(pool.get_ref().clone());
+    madar_rust::rollups::spawn(pool.get_ref().clone());
     madar_rust::sync::pull::listener::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
     loyalty::birthdays::spawn(pool.get_ref().clone());
     loyalty::winback::spawn(pool.get_ref().clone());
@@ -270,6 +278,12 @@ async fn run() -> std::io::Result<()> {
             ))
             .wrap(cors)
             .wrap(Compress::default())
+            // The minimum-client gate (§7.2). INERT until the owner inserts a
+            // `client_version_policy` row: with none it passes every request
+            // through untouched. Inside `client_seen` so its 426s are counted.
+            .wrap(actix_web::middleware::from_fn(
+                madar_rust::version_gate::gate,
+            ))
             // Client version telemetry + legacy path hits (LEGACY_REMOVAL.md
             // Phase T). App-level so it sees every route; it reads the org the
             // scope's JwtMiddleware resolved after the handler ran.

@@ -5,10 +5,12 @@
 //! org's `version`, which instantly orphans that org's cached entries; the TTL is
 //! a backstop for any write path that forgets to invalidate.
 //!
-//! Env-gated: `MENU_CACHE_TTL_SECS` (default 0 = OFF). When off, every method is a
-//! no-op, so production and the test suite are unchanged unless it's enabled. The
-//! handlers extract it as `Option<web::Data<MenuCache>>`, so apps that never
-//! register it (every test) simply get `None` and the live DB path.
+//! `MENU_CACHE_TTL_SECS` (default 30 since 2026-10-16, DB architecture Phase 1.8;
+//! `0` turns it OFF, and then every method is a no-op). `GET /menu-items` also
+//! keys on the org's `catalog_revision`, so any catalog write invalidates it at
+//! once; the TTL bounds anything the revision does not see. The handlers
+//! extract it as `Option<web::Data<MenuCache>>`, so apps that never register it
+//! (every test) simply get `None` and the live DB path.
 
 use actix_web::web::Bytes;
 use moka::future::Cache;
@@ -17,6 +19,9 @@ use std::sync::RwLock;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// The TTL when `MENU_CACHE_TTL_SECS` is unset.
+pub const DEFAULT_TTL_SECS: u64 = 30;
+
 pub struct MenuCache {
     enabled: bool,
     bodies: Cache<String, Bytes>,
@@ -24,12 +29,12 @@ pub struct MenuCache {
 }
 
 impl MenuCache {
-    /// Build from `MENU_CACHE_TTL_SECS` (unset/0 → disabled).
+    /// Build from `MENU_CACHE_TTL_SECS` (unset → 30 s, `0` → disabled).
     pub fn from_env() -> Self {
         let ttl = std::env::var("MENU_CACHE_TTL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+            .unwrap_or(DEFAULT_TTL_SECS);
         let enabled = ttl > 0;
         if enabled {
             tracing::info!("Menu cache ENABLED (ttl={ttl}s)");
@@ -42,6 +47,11 @@ impl MenuCache {
                 .build(),
             versions: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Whether the cache is on (`MENU_CACHE_TTL_SECS` > 0).
+    pub fn enabled(&self) -> bool {
+        self.enabled
     }
 
     fn version(&self, org: Uuid) -> u64 {

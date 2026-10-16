@@ -646,7 +646,7 @@ pub struct OrderItemInput {
     pub combo: Option<crate::combos::types::ComboInput>,
 }
 
-#[derive(Deserialize, Serialize, Default, ToSchema)]
+#[derive(Deserialize, Serialize, Default, Clone, ToSchema)]
 pub struct CreateOrderRequest {
     pub branch_id: Uuid,
     #[serde(alias = "shift_id")]
@@ -1690,6 +1690,51 @@ pub(crate) async fn create_order_inner(
     // queued offline order is historical and must not re-appear on the kitchen).
     hub: Option<&crate::realtime::hub::BranchEventHub>,
     // `&mut` so the floor outcome can be handed back; see `SettledFloor`.
+    mut ticket: Option<&mut SettledTicket>,
+) -> Result<HttpResponse, AppError> {
+    // A deadlock or serialization failure rolled the sale back whole, so it is
+    // run again (up to `RETRY_ATTEMPTS`): the sale is idempotent on its key,
+    // and nothing outside the transaction happened before the failure. When a
+    // caller (replay) already retries, this runs once per its attempt.
+    let may_retry = !crate::db::in_retry_scope();
+    let body = body.into_inner();
+    crate::db::retrying(async move {
+        let mut attempt = 1;
+        loop {
+            if let Some(t) = ticket.as_deref_mut() {
+                t.floor = SettledFloor::default();
+            }
+            let res = create_order_once(
+                pool.clone(),
+                web::Json(body.clone()),
+                actor.clone(),
+                hub,
+                ticket.as_deref_mut(),
+            )
+            .await;
+            match res {
+                Err(e)
+                    if may_retry
+                        && attempt < crate::db::RETRY_ATTEMPTS
+                        && crate::db::is_transient(&e) =>
+                {
+                    attempt += 1;
+                    tracing::warn!(attempt, error = %e, "create order: transient failure, retrying");
+                    crate::db::retry_pause(attempt).await;
+                }
+                other => return other,
+            }
+        }
+    })
+    .await
+}
+
+/// One attempt of [`create_order_inner`].
+async fn create_order_once(
+    pool: crate::db::Db,
+    body: web::Json<CreateOrderRequest>,
+    actor: ActingContext,
+    hub: Option<&crate::realtime::hub::BranchEventHub>,
     ticket: Option<&mut SettledTicket>,
 ) -> Result<HttpResponse, AppError> {
     if let Some(key) = body.idempotency_key
@@ -3160,6 +3205,8 @@ pub(crate) async fn create_order_inner(
     // The stored row of each input line (a combo line: its header), for the
     // rewards and the deals that name lines by index.
     let mut row_of_input: std::collections::HashMap<usize, Uuid> = Default::default();
+    // Every line's stock deductions, posted together after the lines (below).
+    let mut sale_deductions: Vec<(Uuid, _)> = Vec::new();
     for (row_index, resolved) in resolved_items.into_iter().enumerate() {
         let input_index = row_input[row_index];
         let is_header = resolved.combo.kind == crate::combos::order_line::LineKind::Header;
@@ -3371,9 +3418,8 @@ pub(crate) async fn create_order_inner(
             optional_rows.push(row);
         }
 
-        // Apply inventory deductions through the ledger. Negative stock is
-        // ALLOWED but FLAGGED: the movement records below_zero and the sale
-        // surfaces a warning (Foodics default).
+        // Inventory deductions are COLLECTED here and posted after the last
+        // line, in one canonical order (see below).
         for deduction in &resolved.deductions {
             let Some(ing_id) = deduction.org_ingredient_id else {
                 tracing::warn!(
@@ -3383,34 +3429,7 @@ pub(crate) async fn create_order_inner(
                 );
                 continue;
             };
-
-            // Post the sale to the ledger. The trigger upserts the branch
-            // balance (creating it on an ingredient's first sale here) and
-            // reports the resulting balance; negative is allowed but flagged.
-            let posted = crate::inventory::movements::record_movement(
-                &mut *tx,
-                crate::inventory::movements::MovementParams {
-                    branch_id: body.branch_id,
-                    org_ingredient_id: ing_id,
-                    movement_type: "sale",
-                    quantity: -deduction.quantity,
-                    unit_cost: deduction
-                        .cost_per_unit
-                        .and_then(crate::inventory::movements::exact_cost),
-                    reason: None,
-                    source_type: Some("order"),
-                    source_id: Some(order.id),
-                    note: None,
-                    created_by: Some(actor.teller_id),
-                },
-            )
-            .await?;
-            if posted.below_zero {
-                warnings.push(format!(
-                    "{} is oversold — stock is now {:.3} {}",
-                    deduction.ingredient_name, posted.balance_after, deduction.unit
-                ));
-            }
+            sale_deductions.push((ing_id, deduction.clone()));
         }
 
         order_items_full.push(OrderItemFull {
@@ -3419,6 +3438,47 @@ pub(crate) async fn create_order_inner(
             optionals: optional_rows,
             bundle_components: vec![],
         });
+    }
+
+    // Apply inventory deductions through the ledger. Negative stock is
+    // ALLOWED but FLAGGED: the movement records below_zero and the sale
+    // surfaces a warning (Foodics default).
+    //
+    // Each movement row-locks its `branch_stock` row until COMMIT (the
+    // `inventory_movements_apply` trigger). Posted in cart order, two sales at
+    // one branch could lock the same ingredients in opposite orders and
+    // deadlock; posted sorted by ingredient (stable, so one ingredient's
+    // entries keep their cart order) every sale locks in the same order.
+    sale_deductions.sort_by_key(|(ing_id, _)| *ing_id);
+    for (ing_id, deduction) in &sale_deductions {
+        let ing_id = *ing_id;
+        // Post the sale to the ledger. The trigger upserts the branch
+        // balance (creating it on an ingredient's first sale here) and
+        // reports the resulting balance; negative is allowed but flagged.
+        let posted = crate::inventory::movements::record_movement(
+            &mut *tx,
+            crate::inventory::movements::MovementParams {
+                branch_id: body.branch_id,
+                org_ingredient_id: ing_id,
+                movement_type: "sale",
+                quantity: -deduction.quantity,
+                unit_cost: deduction
+                    .cost_per_unit
+                    .and_then(crate::inventory::movements::exact_cost),
+                reason: None,
+                source_type: Some("order"),
+                source_id: Some(order.id),
+                note: None,
+                created_by: Some(actor.teller_id),
+            },
+        )
+        .await?;
+        if posted.below_zero {
+            warnings.push(format!(
+                "{} is oversold — stock is now {:.3} {}",
+                deduction.ingredient_name, posted.balance_after, deduction.unit
+            ));
+        }
     }
 
     // Fire the order to the kitchen — LIVE orders only (a replayed offline order is
@@ -4460,49 +4520,12 @@ async fn fetch_order_items_full(
     pool: &PgPool,
     order_id: Uuid,
 ) -> Result<Vec<OrderItemFull>, AppError> {
-    let items = sqlx::query_as::<_, OrderItem>(
-        "SELECT id, order_id, menu_item_id, item_name, name_translations, size_label, \
-                unit_price, quantity, line_total, notes, deductions_snapshot, \
-                line_cost, unit_cost, cost_missing, \
-                is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id, \
-                line_kind, combo_line_id, combo_slot_id, combo_slot_name, \
-                combo_slot_name_translations, \
-                combo_unit_price, combo_share, combo_surcharge, deal_minor \
-         FROM order_items WHERE order_id = $1 \
-         ORDER BY COALESCE(combo_line_id, id), combo_line_id IS NOT NULL, id",
-    )
-    .bind(order_id)
-    .fetch_all(pool)
-    .await?;
-
-    let mut result = Vec::new();
-    for item in items {
-        let addons = sqlx::query_as::<_, OrderItemAddon>(
-            "SELECT id, order_item_id, addon_item_id, addon_name, name_translations, \
-                    unit_price, quantity, line_total, line_cost, staff_comp_minor \
-             FROM order_item_addons WHERE order_item_id = $1 ORDER BY id",
-        )
-        .bind(item.id)
-        .fetch_all(pool)
-        .await?;
-
-        let optionals = sqlx::query_as::<_, OrderItemOptional>(
-            "SELECT id, order_item_id, optional_field_id, field_name, name_translations, price, \
-                    org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost \
-             FROM order_item_optionals WHERE order_item_id = $1 ORDER BY id",
-        )
-        .bind(item.id)
-        .fetch_all(pool)
-        .await?;
-
-        result.push(OrderItemFull {
-            item,
-            addons,
-            optionals,
-            bundle_components: vec![],
-        });
-    }
-    Ok(result)
+    // One query per table for the whole order (the batched loader), not two
+    // per line. Same rows, same order.
+    Ok(fetch_orders_items_full_batch(pool, &[order_id])
+        .await?
+        .remove(&order_id)
+        .unwrap_or_default())
 }
 
 /// Batched variant of [fetch_order_items_full] for `include_items=true` list

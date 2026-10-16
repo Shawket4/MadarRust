@@ -565,7 +565,43 @@ pub fn replay_names_shift_id(body: &serde_json::Value) -> bool {
 /// One op per call keeps the proven client-side drain engine (FIFO, dependency
 /// gating, backoff, idempotency, close-last) intact — the client just points each
 /// op at this route instead of the per-resource live one.
+///
+/// A deadlock or serialization failure (40P01 / 40001) rolled the op back
+/// whole; the op is idempotent, so it is run again, up to
+/// `db::RETRY_ATTEMPTS` times, before the error reaches the till (whose outbox
+/// would retry it later anyway).
 pub async fn replay(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: web::Data<BranchEventHub>,
+    body: web::Json<serde_json::Value>,
+) -> Result<HttpResponse, AppError> {
+    let body = body.into_inner();
+    crate::db::retrying(async {
+        let mut attempt = 1;
+        loop {
+            let res = replay_once(
+                req.clone(),
+                pool.clone(),
+                hub.clone(),
+                web::Json(body.clone()),
+            )
+            .await;
+            match res {
+                Err(e) if attempt < crate::db::RETRY_ATTEMPTS && crate::db::is_transient(&e) => {
+                    attempt += 1;
+                    tracing::warn!(attempt, error = %e, "replay: transient failure, retrying the op");
+                    crate::db::retry_pause(attempt).await;
+                }
+                other => return other,
+            }
+        }
+    })
+    .await
+}
+
+/// One attempt of [`replay`].
+async fn replay_once(
     req: HttpRequest,
     pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
