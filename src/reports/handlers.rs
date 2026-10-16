@@ -441,7 +441,7 @@ pub async fn shift_summary(
         JOIN users    u ON u.id = s.teller_id
         LEFT JOIN orders o          ON o.till_id  = s.id
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-        WHERE s.id = $1
+        WHERE s.id = $1 AND s.deleted_at IS NULL
         GROUP BY s.id, b.name, u.name
         "#,
     )
@@ -2953,7 +2953,7 @@ pub async fn branch_till_sessions(
             LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
             WHERE o.till_id = s.id AND o.{SOLD}
         ) sal ON TRUE
-        WHERE s.branch_id = ANY($1)
+        WHERE s.branch_id = ANY($1) AND s.deleted_at IS NULL
           AND ($2::timestamptz IS NULL OR s.opened_at >= $2)
           AND ($3::timestamptz IS NULL OR s.opened_at <= $3)
           AND (s.branch_id = ANY($4) OR s.teller_id = $5)
