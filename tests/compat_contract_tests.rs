@@ -228,13 +228,20 @@ async fn seed_catalog(pool: &PgPool) {
     lc::channel_addon_override(pool, BRANCH, VANILLA, "outside", Some(600), None).await;
 }
 
-/// Timestamps change every run; ids are fixed or derived.
+/// Timestamps change every run, and so do ids the database or a seed helper
+/// generates (a new org's ingredient categories, an attachment row): those are
+/// blanked. The fixture's own `c0de…` ids and every other value are compared
+/// exactly.
 fn blank_times(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Object(m) => {
             for (k, x) in m.iter_mut() {
                 if k.ends_with("_at") || k == "created" || k == "updated" {
                     *x = serde_json::Value::String("<time>".into());
+                } else if x.as_str().is_some_and(|s| {
+                    !s.starts_with("c0de0000") && uuid::Uuid::parse_str(s).is_ok()
+                }) {
+                    *x = serde_json::Value::String("<generated id>".into());
                 } else {
                     blank_times(x);
                 }
@@ -280,8 +287,8 @@ async fn the_old_shapes_are_served_exactly_as_before(pool: PgPool) {
         format!("/addon-items/catalog?org_id={ORG}"),
         format!("/branch-menu-overrides?branch_id={BRANCH}"),
         format!("/branch-addon-overrides?branch_id={BRANCH}"),
-        format!("/delivery/channel-overrides?branch_id={BRANCH}"),
-        format!("/delivery/channel-addon-overrides?branch_id={BRANCH}"),
+        format!("/delivery/channel-overrides?branch_id={BRANCH}&channel=outside"),
+        format!("/delivery/channel-addon-overrides?branch_id={BRANCH}&channel=outside"),
         format!("/recipes/drinks/{LATTE}"),
         format!("/recipes/addons/{VANILLA}"),
         format!("/public/branches/{BRANCH}/menu?channel=dine_in&preview=true"),
@@ -307,8 +314,9 @@ async fn the_old_shapes_are_served_exactly_as_before(pool: PgPool) {
         std::fs::write(PIN, serde_json::to_string_pretty(&now).unwrap() + "\n").unwrap();
         return;
     }
-    let pinned: serde_json::Value =
+    let mut pinned: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(PIN).expect("pin recorded")).unwrap();
+    blank_times(&mut pinned);
     for (route, want) in pinned.as_object().unwrap() {
         assert_eq!(&now[route], want, "{route}");
     }

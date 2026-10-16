@@ -1,0 +1,1367 @@
+{
+  "/addon-items/catalog?org_id=c0de0000-0000-4000-8000-000000000001": {
+    "body": {
+      "data": [
+        {
+          "addon_type": "extra",
+          "created_at": "<time>",
+          "default_price": 500,
+          "id": "c0de0000-0000-4000-8000-00000000000e",
+          "ingredients": [],
+          "is_active": true,
+          "name": "Vanilla",
+          "name_translations": {},
+          "org_id": "c0de0000-0000-4000-8000-000000000001",
+          "primary_ingredient_id": "c0de0000-0000-4000-8000-00000000000b",
+          "updated_at": "<time>"
+        },
+        {
+          "addon_type": "milk_type",
+          "created_at": "<time>",
+          "default_price": 800,
+          "id": "c0de0000-0000-4000-8000-00000000000c",
+          "ingredients": [],
+          "is_active": true,
+          "name": "Oat",
+          "name_translations": {},
+          "org_id": "c0de0000-0000-4000-8000-000000000001",
+          "primary_ingredient_id": null,
+          "updated_at": "<time>"
+        },
+        {
+          "addon_type": "milk_type",
+          "created_at": "<time>",
+          "default_price": 0,
+          "id": "c0de0000-0000-4000-8000-00000000000d",
+          "ingredients": [],
+          "is_active": true,
+          "name": "Skim",
+          "name_translations": {},
+          "org_id": "c0de0000-0000-4000-8000-000000000001",
+          "primary_ingredient_id": null,
+          "updated_at": "<time>"
+        }
+      ],
+      "page": 1,
+      "per_page": 50,
+      "total": 3,
+      "total_pages": 1
+    },
+    "status": 200
+  },
+  "/addon-items?org_id=c0de0000-0000-4000-8000-000000000001": {
+    "body": [
+      {
+        "addon_type": "extra",
+        "created_at": "<time>",
+        "default_price": 500,
+        "id": "c0de0000-0000-4000-8000-00000000000e",
+        "ingredients": [
+          {
+            "category_id": "<generated id>",
+            "category_slug": "general",
+            "ingredient_name": "Vanilla syrup",
+            "ingredient_unit": "ml",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000b",
+            "quantity_used": 15.0
+          }
+        ],
+        "is_active": true,
+        "name": "Vanilla",
+        "name_translations": {},
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "effect": "adds",
+          "group_id": "<generated id>",
+          "id": "c0de0000-0000-4000-8000-00000000000e",
+          "ingredients": [
+            {
+              "id": "c0de0000-0000-4000-8000-00000000000b",
+              "name": "Vanilla syrup",
+              "unit": "ml"
+            }
+          ],
+          "kind": "extra",
+          "name": "Vanilla",
+          "price": 500,
+          "replaces": null,
+          "sized": [],
+          "swap_category_id": null,
+          "swap_category_slug": null
+        },
+        "primary_ingredient_id": "c0de0000-0000-4000-8000-00000000000b",
+        "updated_at": "<time>"
+      },
+      {
+        "addon_type": "milk_type",
+        "created_at": "<time>",
+        "default_price": 800,
+        "id": "c0de0000-0000-4000-8000-00000000000c",
+        "ingredients": [],
+        "is_active": true,
+        "name": "Oat",
+        "name_translations": {},
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "effect": "swaps",
+          "group_id": "<generated id>",
+          "id": "c0de0000-0000-4000-8000-00000000000c",
+          "ingredients": [],
+          "kind": "milk_type",
+          "name": "Oat",
+          "price": 800,
+          "replaces": null,
+          "sized": [],
+          "swap_category_id": null,
+          "swap_category_slug": null
+        },
+        "primary_ingredient_id": null,
+        "updated_at": "<time>"
+      },
+      {
+        "addon_type": "milk_type",
+        "created_at": "<time>",
+        "default_price": 0,
+        "id": "c0de0000-0000-4000-8000-00000000000d",
+        "ingredients": [],
+        "is_active": true,
+        "name": "Skim",
+        "name_translations": {},
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "effect": "swaps",
+          "group_id": "<generated id>",
+          "id": "c0de0000-0000-4000-8000-00000000000d",
+          "ingredients": [],
+          "kind": "milk_type",
+          "name": "Skim",
+          "price": 0,
+          "replaces": null,
+          "sized": [],
+          "swap_category_id": null,
+          "swap_category_slug": null
+        },
+        "primary_ingredient_id": null,
+        "updated_at": "<time>"
+      }
+    ],
+    "status": 200
+  },
+  "/addon-items?org_id=c0de0000-0000-4000-8000-000000000001&branch_id=c0de0000-0000-4000-8000-000000000002": {
+    "body": [
+      {
+        "addon_type": "extra",
+        "created_at": "<time>",
+        "default_price": 500,
+        "id": "c0de0000-0000-4000-8000-00000000000e",
+        "ingredients": [
+          {
+            "category_id": "<generated id>",
+            "category_slug": "general",
+            "ingredient_name": "Vanilla syrup",
+            "ingredient_unit": "ml",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000b",
+            "quantity_used": 15.0
+          }
+        ],
+        "is_active": true,
+        "name": "Vanilla",
+        "name_translations": {},
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "effect": "adds",
+          "group_id": "<generated id>",
+          "id": "c0de0000-0000-4000-8000-00000000000e",
+          "ingredients": [
+            {
+              "id": "c0de0000-0000-4000-8000-00000000000b",
+              "name": "Vanilla syrup",
+              "unit": "ml"
+            }
+          ],
+          "kind": "extra",
+          "name": "Vanilla",
+          "price": 500,
+          "replaces": null,
+          "sized": [],
+          "swap_category_id": null,
+          "swap_category_slug": null
+        },
+        "primary_ingredient_id": "c0de0000-0000-4000-8000-00000000000b",
+        "updated_at": "<time>"
+      },
+      {
+        "addon_type": "milk_type",
+        "created_at": "<time>",
+        "default_price": 900,
+        "id": "c0de0000-0000-4000-8000-00000000000c",
+        "ingredients": [],
+        "is_active": true,
+        "name": "Oat",
+        "name_translations": {},
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "effect": "swaps",
+          "group_id": "<generated id>",
+          "id": "c0de0000-0000-4000-8000-00000000000c",
+          "ingredients": [],
+          "kind": "milk_type",
+          "name": "Oat",
+          "price": 900,
+          "replaces": null,
+          "sized": [],
+          "swap_category_id": null,
+          "swap_category_slug": null
+        },
+        "primary_ingredient_id": null,
+        "updated_at": "<time>"
+      },
+      {
+        "addon_type": "milk_type",
+        "created_at": "<time>",
+        "default_price": 0,
+        "id": "c0de0000-0000-4000-8000-00000000000d",
+        "ingredients": [],
+        "is_active": true,
+        "name": "Skim",
+        "name_translations": {},
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "effect": "swaps",
+          "group_id": "<generated id>",
+          "id": "c0de0000-0000-4000-8000-00000000000d",
+          "ingredients": [],
+          "kind": "milk_type",
+          "name": "Skim",
+          "price": 0,
+          "replaces": null,
+          "sized": [],
+          "swap_category_id": null,
+          "swap_category_slug": null
+        },
+        "primary_ingredient_id": null,
+        "updated_at": "<time>"
+      }
+    ],
+    "status": 200
+  },
+  "/branch-addon-overrides?branch_id=c0de0000-0000-4000-8000-000000000002": {
+    "body": [
+      {
+        "addon_item_id": "c0de0000-0000-4000-8000-00000000000c",
+        "branch_id": "c0de0000-0000-4000-8000-000000000002",
+        "is_available": true,
+        "price_override": 900,
+        "updated_at": "<time>"
+      }
+    ],
+    "status": 200
+  },
+  "/branch-menu-overrides?branch_id=c0de0000-0000-4000-8000-000000000002": {
+    "body": [
+      {
+        "branch_id": "c0de0000-0000-4000-8000-000000000002",
+        "is_available": true,
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000006",
+        "price_override": 2200,
+        "sizes": [],
+        "updated_at": "<time>"
+      }
+    ],
+    "status": 200
+  },
+  "/bundles": {
+    "body": {
+      "data": [],
+      "page": 1,
+      "per_page": 20,
+      "total": 0,
+      "total_pages": 0
+    },
+    "status": 200
+  },
+  "/delivery/channel-addon-overrides?branch_id=c0de0000-0000-4000-8000-000000000002&channel=outside": {
+    "body": [
+      {
+        "addon_item_id": "c0de0000-0000-4000-8000-00000000000e",
+        "branch_id": "c0de0000-0000-4000-8000-000000000002",
+        "channel": "outside",
+        "is_available": null,
+        "price_override": 600
+      }
+    ],
+    "status": 200
+  },
+  "/delivery/channel-overrides?branch_id=c0de0000-0000-4000-8000-000000000002&channel=outside": {
+    "body": [
+      {
+        "branch_id": "c0de0000-0000-4000-8000-000000000002",
+        "channel": "outside",
+        "is_available": true,
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000006",
+        "price_override": 2500
+      }
+    ],
+    "status": 200
+  },
+  "/menu-items/c0de0000-0000-4000-8000-000000000005": {
+    "body": {
+      "addon_slots": [
+        {
+          "addon_type": "milk_type",
+          "created_at": "<time>",
+          "id": "<generated id>",
+          "is_required": true,
+          "label": "milk_type",
+          "label_translations": {},
+          "max_selections": 1,
+          "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+          "min_selections": 1
+        }
+      ],
+      "all_sizes": [
+        {
+          "id": "c0de0000-0000-4000-8000-000000000007",
+          "is_active": true,
+          "label": "Small",
+          "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+          "price_override": 4000
+        },
+        {
+          "id": "c0de0000-0000-4000-8000-000000000008",
+          "is_active": true,
+          "label": "Large",
+          "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+          "price_override": 5000
+        }
+      ],
+      "allowed_addon_ids": [
+        "c0de0000-0000-4000-8000-00000000000c",
+        "c0de0000-0000-4000-8000-00000000000e"
+      ],
+      "base_price": 4000,
+      "category_id": "c0de0000-0000-4000-8000-000000000004",
+      "combo": null,
+      "created_at": "<time>",
+      "default_milk_addon_id": null,
+      "deleted_at": "<time>",
+      "description": null,
+      "description_translations": {},
+      "id": "c0de0000-0000-4000-8000-000000000005",
+      "image_url": null,
+      "is_active": true,
+      "kind": "item",
+      "meal": null,
+      "name": "Latte",
+      "name_translations": {},
+      "optional_fields": [
+        {
+          "created_at": "<time>",
+          "id": "c0de0000-0000-4000-8000-00000000000f",
+          "ingredient_name": "Cream",
+          "ingredient_unit": "ml",
+          "is_active": true,
+          "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+          "name": "Whipped cream",
+          "name_translations": {},
+          "org_ingredient_id": "c0de0000-0000-4000-8000-000000000010",
+          "price": 300,
+          "quantity_used": 40.0,
+          "size_label": null,
+          "updated_at": "<time>"
+        }
+      ],
+      "org_id": "c0de0000-0000-4000-8000-000000000001",
+      "recipe_steps": [],
+      "recipes": [
+        {
+          "category": "general",
+          "ingredient_name": "Whole milk",
+          "ingredient_unit": "ml",
+          "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+          "quantity_used": 200.0,
+          "size_label": "Small",
+          "usable_quantity": 200.0
+        },
+        {
+          "category": "general",
+          "ingredient_name": "Whole milk",
+          "ingredient_unit": "ml",
+          "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+          "quantity_used": 300.0,
+          "size_label": "Large",
+          "usable_quantity": 300.0
+        },
+        {
+          "category": "general",
+          "ingredient_name": "Espresso bean",
+          "ingredient_unit": "g",
+          "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+          "quantity_used": 18.0,
+          "size_label": "Small",
+          "usable_quantity": 18.0
+        },
+        {
+          "category": "general",
+          "ingredient_name": "Espresso bean",
+          "ingredient_unit": "g",
+          "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+          "quantity_used": 18.0,
+          "size_label": "Large",
+          "usable_quantity": 18.0
+        }
+      ],
+      "sizes": [
+        {
+          "id": "c0de0000-0000-4000-8000-000000000008",
+          "is_active": true,
+          "label": "Large",
+          "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+          "price_override": 5000
+        },
+        {
+          "id": "c0de0000-0000-4000-8000-000000000007",
+          "is_active": true,
+          "label": "Small",
+          "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+          "price_override": 4000
+        }
+      ],
+      "updated_at": "<time>"
+    },
+    "status": 200
+  },
+  "/menu-items/c0de0000-0000-4000-8000-000000000005/addon-slots": {
+    "body": [
+      {
+        "addon_type": "milk_type",
+        "created_at": "<time>",
+        "id": "<generated id>",
+        "is_required": true,
+        "label": "milk_type",
+        "label_translations": {},
+        "max_selections": 1,
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+        "min_selections": 1
+      }
+    ],
+    "status": 200
+  },
+  "/menu-items/c0de0000-0000-4000-8000-000000000005/optionals": {
+    "body": [
+      {
+        "created_at": "<time>",
+        "id": "c0de0000-0000-4000-8000-00000000000f",
+        "ingredient_name": "Cream",
+        "ingredient_unit": "ml",
+        "is_active": true,
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+        "name": "Whipped cream",
+        "name_translations": {},
+        "org_ingredient_id": "c0de0000-0000-4000-8000-000000000010",
+        "price": 300,
+        "quantity_used": 40.0,
+        "size_label": null,
+        "updated_at": "<time>"
+      }
+    ],
+    "status": 200
+  },
+  "/menu-items?org_id=c0de0000-0000-4000-8000-000000000001&full=true": {
+    "body": [
+      {
+        "addon_slots": [
+          {
+            "addon_type": "milk_type",
+            "created_at": "<time>",
+            "id": "<generated id>",
+            "is_required": true,
+            "label": "milk_type",
+            "label_translations": {},
+            "max_selections": 1,
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "min_selections": 1
+          }
+        ],
+        "all_sizes": [
+          {
+            "id": "c0de0000-0000-4000-8000-000000000007",
+            "is_active": true,
+            "label": "Small",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 4000
+          },
+          {
+            "id": "c0de0000-0000-4000-8000-000000000008",
+            "is_active": true,
+            "label": "Large",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 5000
+          }
+        ],
+        "allowed_addon_ids": [
+          "c0de0000-0000-4000-8000-00000000000c",
+          "c0de0000-0000-4000-8000-00000000000e"
+        ],
+        "base_price": 4000,
+        "category_id": "c0de0000-0000-4000-8000-000000000004",
+        "combo": null,
+        "created_at": "<time>",
+        "default_milk_addon_id": null,
+        "deleted_at": "<time>",
+        "description": null,
+        "description_translations": {},
+        "id": "c0de0000-0000-4000-8000-000000000005",
+        "image_url": null,
+        "is_active": true,
+        "kind": "item",
+        "meal": null,
+        "name": "Latte",
+        "name_translations": {},
+        "optional_fields": [
+          {
+            "created_at": "<time>",
+            "id": "c0de0000-0000-4000-8000-00000000000f",
+            "ingredient_name": "Cream",
+            "ingredient_unit": "ml",
+            "is_active": true,
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "name": "Whipped cream",
+            "name_translations": {},
+            "org_ingredient_id": "c0de0000-0000-4000-8000-000000000010",
+            "price": 300,
+            "quantity_used": 40.0,
+            "size_label": null,
+            "updated_at": "<time>"
+          }
+        ],
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "bases": [],
+          "branch_price": null,
+          "default_recipe_size": "Small",
+          "groups": [
+            {
+              "effect": "adds",
+              "id": "<generated id>",
+              "included": [
+                "c0de0000-0000-4000-8000-00000000000e"
+              ],
+              "is_required": false,
+              "legacy_type": "extra",
+              "min": 0,
+              "options": [
+                {
+                  "branch_price": null,
+                  "id": "c0de0000-0000-4000-8000-00000000000e",
+                  "is_active": true,
+                  "is_default": false,
+                  "price": 500
+                }
+              ]
+            },
+            {
+              "effect": "swaps",
+              "id": "<generated id>",
+              "included": [
+                "c0de0000-0000-4000-8000-00000000000c"
+              ],
+              "is_required": true,
+              "legacy_type": "milk_type",
+              "min": 1,
+              "options": [
+                {
+                  "branch_price": null,
+                  "id": "c0de0000-0000-4000-8000-00000000000c",
+                  "is_active": true,
+                  "is_default": false,
+                  "price": 800
+                },
+                {
+                  "branch_price": null,
+                  "id": "c0de0000-0000-4000-8000-00000000000d",
+                  "is_active": true,
+                  "is_default": false,
+                  "price": 0
+                }
+              ]
+            }
+          ],
+          "id": "c0de0000-0000-4000-8000-000000000005",
+          "optionals": [
+            {
+              "id": "c0de0000-0000-4000-8000-00000000000f",
+              "price": 300,
+              "size_label": null
+            }
+          ],
+          "recipe": [
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+              "size_label": "Large"
+            },
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+              "size_label": "Large"
+            },
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+              "size_label": "Small"
+            },
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+              "size_label": "Small"
+            }
+          ],
+          "sizes": [
+            {
+              "branch_price": null,
+              "is_active": true,
+              "label": "Small",
+              "price": 4000
+            },
+            {
+              "branch_price": null,
+              "is_active": true,
+              "label": "Large",
+              "price": 5000
+            }
+          ]
+        },
+        "recipe_steps": [],
+        "recipes": [
+          {
+            "category": "general",
+            "ingredient_name": "Whole milk",
+            "ingredient_unit": "ml",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+            "quantity_used": 200.0,
+            "size_label": "Small",
+            "usable_quantity": 200.0
+          },
+          {
+            "category": "general",
+            "ingredient_name": "Whole milk",
+            "ingredient_unit": "ml",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+            "quantity_used": 300.0,
+            "size_label": "Large",
+            "usable_quantity": 300.0
+          },
+          {
+            "category": "general",
+            "ingredient_name": "Espresso bean",
+            "ingredient_unit": "g",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+            "quantity_used": 18.0,
+            "size_label": "Small",
+            "usable_quantity": 18.0
+          },
+          {
+            "category": "general",
+            "ingredient_name": "Espresso bean",
+            "ingredient_unit": "g",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+            "quantity_used": 18.0,
+            "size_label": "Large",
+            "usable_quantity": 18.0
+          }
+        ],
+        "sizes": [
+          {
+            "id": "c0de0000-0000-4000-8000-000000000008",
+            "is_active": true,
+            "label": "Large",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 5000
+          },
+          {
+            "id": "c0de0000-0000-4000-8000-000000000007",
+            "is_active": true,
+            "label": "Small",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 4000
+          }
+        ],
+        "updated_at": "<time>"
+      },
+      {
+        "addon_slots": [],
+        "all_sizes": [
+          {
+            "id": "<generated id>",
+            "is_active": true,
+            "label": "one_size",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000006",
+            "price_override": 2000
+          }
+        ],
+        "allowed_addon_ids": [],
+        "base_price": 2000,
+        "category_id": "c0de0000-0000-4000-8000-000000000004",
+        "combo": null,
+        "created_at": "<time>",
+        "default_milk_addon_id": null,
+        "deleted_at": "<time>",
+        "description": null,
+        "description_translations": {},
+        "id": "c0de0000-0000-4000-8000-000000000006",
+        "image_url": null,
+        "is_active": true,
+        "kind": "item",
+        "meal": null,
+        "name": "Tea",
+        "name_translations": {},
+        "optional_fields": [],
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "bases": [],
+          "branch_price": null,
+          "default_recipe_size": null,
+          "id": "c0de0000-0000-4000-8000-000000000006",
+          "optionals": [],
+          "recipe": [],
+          "sizes": [
+            {
+              "branch_price": null,
+              "is_active": true,
+              "label": "one_size",
+              "price": 2000
+            }
+          ]
+        },
+        "recipe_steps": [],
+        "recipes": [],
+        "sizes": [],
+        "updated_at": "<time>"
+      }
+    ],
+    "status": 200
+  },
+  "/menu-items?org_id=c0de0000-0000-4000-8000-000000000001&full=true&branch_id=c0de0000-0000-4000-8000-000000000002": {
+    "body": [
+      {
+        "addon_slots": [
+          {
+            "addon_type": "milk_type",
+            "created_at": "<time>",
+            "id": "<generated id>",
+            "is_required": true,
+            "label": "milk_type",
+            "label_translations": {},
+            "max_selections": 1,
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "min_selections": 1
+          }
+        ],
+        "all_sizes": [
+          {
+            "id": "c0de0000-0000-4000-8000-000000000007",
+            "is_active": true,
+            "label": "Small",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 4000
+          },
+          {
+            "id": "c0de0000-0000-4000-8000-000000000008",
+            "is_active": true,
+            "label": "Large",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 5300
+          }
+        ],
+        "allowed_addon_ids": [
+          "c0de0000-0000-4000-8000-00000000000c",
+          "c0de0000-0000-4000-8000-00000000000e"
+        ],
+        "base_price": 4000,
+        "category_id": "c0de0000-0000-4000-8000-000000000004",
+        "combo": null,
+        "created_at": "<time>",
+        "default_milk_addon_id": null,
+        "deleted_at": "<time>",
+        "description": null,
+        "description_translations": {},
+        "id": "c0de0000-0000-4000-8000-000000000005",
+        "image_url": null,
+        "is_active": true,
+        "kind": "item",
+        "meal": null,
+        "name": "Latte",
+        "name_translations": {},
+        "optional_fields": [
+          {
+            "created_at": "<time>",
+            "id": "c0de0000-0000-4000-8000-00000000000f",
+            "ingredient_name": "Cream",
+            "ingredient_unit": "ml",
+            "is_active": true,
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "name": "Whipped cream",
+            "name_translations": {},
+            "org_ingredient_id": "c0de0000-0000-4000-8000-000000000010",
+            "price": 300,
+            "quantity_used": 40.0,
+            "size_label": null,
+            "updated_at": "<time>"
+          }
+        ],
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "bases": [],
+          "branch_price": null,
+          "default_recipe_size": "Small",
+          "groups": [
+            {
+              "effect": "adds",
+              "id": "<generated id>",
+              "included": [
+                "c0de0000-0000-4000-8000-00000000000e"
+              ],
+              "is_required": false,
+              "legacy_type": "extra",
+              "min": 0,
+              "options": [
+                {
+                  "branch_price": null,
+                  "id": "c0de0000-0000-4000-8000-00000000000e",
+                  "is_active": true,
+                  "is_default": false,
+                  "price": 500
+                }
+              ]
+            },
+            {
+              "effect": "swaps",
+              "id": "<generated id>",
+              "included": [
+                "c0de0000-0000-4000-8000-00000000000c"
+              ],
+              "is_required": true,
+              "legacy_type": "milk_type",
+              "min": 1,
+              "options": [
+                {
+                  "branch_price": 900,
+                  "id": "c0de0000-0000-4000-8000-00000000000c",
+                  "is_active": true,
+                  "is_default": false,
+                  "price": 800
+                },
+                {
+                  "branch_price": null,
+                  "id": "c0de0000-0000-4000-8000-00000000000d",
+                  "is_active": true,
+                  "is_default": false,
+                  "price": 0
+                }
+              ]
+            }
+          ],
+          "id": "c0de0000-0000-4000-8000-000000000005",
+          "optionals": [
+            {
+              "id": "c0de0000-0000-4000-8000-00000000000f",
+              "price": 300,
+              "size_label": null
+            }
+          ],
+          "recipe": [
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+              "size_label": "Large"
+            },
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+              "size_label": "Large"
+            },
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+              "size_label": "Small"
+            },
+            {
+              "category": "general",
+              "ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+              "size_label": "Small"
+            }
+          ],
+          "sizes": [
+            {
+              "branch_price": null,
+              "is_active": true,
+              "label": "Small",
+              "price": 4000
+            },
+            {
+              "branch_price": 5300,
+              "is_active": true,
+              "label": "Large",
+              "price": 5000
+            }
+          ]
+        },
+        "recipe_steps": [],
+        "recipes": [
+          {
+            "category": "general",
+            "ingredient_name": "Whole milk",
+            "ingredient_unit": "ml",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+            "quantity_used": 200.0,
+            "size_label": "Small",
+            "usable_quantity": 200.0
+          },
+          {
+            "category": "general",
+            "ingredient_name": "Whole milk",
+            "ingredient_unit": "ml",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+            "quantity_used": 300.0,
+            "size_label": "Large",
+            "usable_quantity": 300.0
+          },
+          {
+            "category": "general",
+            "ingredient_name": "Espresso bean",
+            "ingredient_unit": "g",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+            "quantity_used": 18.0,
+            "size_label": "Small",
+            "usable_quantity": 18.0
+          },
+          {
+            "category": "general",
+            "ingredient_name": "Espresso bean",
+            "ingredient_unit": "g",
+            "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+            "quantity_used": 18.0,
+            "size_label": "Large",
+            "usable_quantity": 18.0
+          }
+        ],
+        "sizes": [
+          {
+            "id": "c0de0000-0000-4000-8000-000000000008",
+            "is_active": true,
+            "label": "Large",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 5300
+          },
+          {
+            "id": "c0de0000-0000-4000-8000-000000000007",
+            "is_active": true,
+            "label": "Small",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+            "price_override": 4000
+          }
+        ],
+        "updated_at": "<time>"
+      },
+      {
+        "addon_slots": [],
+        "all_sizes": [
+          {
+            "id": "<generated id>",
+            "is_active": true,
+            "label": "one_size",
+            "menu_item_id": "c0de0000-0000-4000-8000-000000000006",
+            "price_override": 2000
+          }
+        ],
+        "allowed_addon_ids": [],
+        "base_price": 2200,
+        "category_id": "c0de0000-0000-4000-8000-000000000004",
+        "combo": null,
+        "created_at": "<time>",
+        "default_milk_addon_id": null,
+        "deleted_at": "<time>",
+        "description": null,
+        "description_translations": {},
+        "id": "c0de0000-0000-4000-8000-000000000006",
+        "image_url": null,
+        "is_active": true,
+        "kind": "item",
+        "meal": null,
+        "name": "Tea",
+        "name_translations": {},
+        "optional_fields": [],
+        "org_id": "c0de0000-0000-4000-8000-000000000001",
+        "pricing": {
+          "bases": [],
+          "branch_price": 2200,
+          "default_recipe_size": null,
+          "id": "c0de0000-0000-4000-8000-000000000006",
+          "optionals": [],
+          "recipe": [],
+          "sizes": [
+            {
+              "branch_price": null,
+              "is_active": true,
+              "label": "one_size",
+              "price": 2000
+            }
+          ]
+        },
+        "recipe_steps": [],
+        "recipes": [],
+        "sizes": [],
+        "updated_at": "<time>"
+      }
+    ],
+    "status": 200
+  },
+  "/public/branches/c0de0000-0000-4000-8000-000000000002/menu?channel=dine_in&preview=true": {
+    "body": {
+      "addons": [
+        {
+          "addon_item_id": "c0de0000-0000-4000-8000-00000000000e",
+          "is_available": true,
+          "name": "Vanilla",
+          "name_translations": {},
+          "price": 500,
+          "type": "extra"
+        },
+        {
+          "addon_item_id": "c0de0000-0000-4000-8000-00000000000c",
+          "is_available": true,
+          "name": "Oat",
+          "name_translations": {},
+          "price": 900,
+          "type": "milk_type"
+        },
+        {
+          "addon_item_id": "c0de0000-0000-4000-8000-00000000000d",
+          "is_available": true,
+          "name": "Skim",
+          "name_translations": {},
+          "price": 0,
+          "type": "milk_type"
+        }
+      ],
+      "categories": [
+        {
+          "display_order": 0,
+          "id": "c0de0000-0000-4000-8000-000000000004",
+          "image_url": null,
+          "name": "Coffee",
+          "name_translations": {}
+        }
+      ],
+      "deals": [],
+      "items": [
+        {
+          "allowed_addon_ids": [
+            "c0de0000-0000-4000-8000-00000000000c",
+            "c0de0000-0000-4000-8000-00000000000e"
+          ],
+          "category_id": "c0de0000-0000-4000-8000-000000000004",
+          "combo": null,
+          "default_milk_addon_id": null,
+          "description": null,
+          "id": "c0de0000-0000-4000-8000-000000000005",
+          "image_url": null,
+          "kind": "item",
+          "meal": null,
+          "modifier_groups": [
+            {
+              "addon_type": "extra",
+              "group_id": "<generated id>",
+              "is_required": false,
+              "max_selections": null,
+              "min_selections": 0,
+              "name": "extra",
+              "name_translations": {},
+              "options": [
+                {
+                  "name": "Vanilla",
+                  "name_translations": {},
+                  "option_id": "c0de0000-0000-4000-8000-00000000000e",
+                  "price": 500
+                }
+              ],
+              "selection_type": "multi"
+            },
+            {
+              "addon_type": "milk_type",
+              "group_id": "<generated id>",
+              "is_required": true,
+              "max_selections": 1,
+              "min_selections": 1,
+              "name": "milk_type",
+              "name_translations": {},
+              "options": [
+                {
+                  "name": "Oat",
+                  "name_translations": {},
+                  "option_id": "c0de0000-0000-4000-8000-00000000000c",
+                  "price": 900
+                }
+              ],
+              "selection_type": "single"
+            },
+            {
+              "addon_type": null,
+              "group_id": "<generated id>",
+              "is_required": false,
+              "max_selections": null,
+              "min_selections": 0,
+              "name": "Options",
+              "name_translations": {},
+              "options": [],
+              "selection_type": "multi"
+            }
+          ],
+          "name": "Latte",
+          "name_translations": {},
+          "optionals": [
+            {
+              "id": "c0de0000-0000-4000-8000-00000000000f",
+              "name": "Whipped cream",
+              "name_translations": {},
+              "price": 300,
+              "size_label": null
+            }
+          ],
+          "price": 4000,
+          "pricing": {
+            "bases": [],
+            "branch_price": null,
+            "default_recipe_size": "Small",
+            "groups": [
+              {
+                "effect": "adds",
+                "id": "<generated id>",
+                "included": [
+                  "c0de0000-0000-4000-8000-00000000000e"
+                ],
+                "is_required": false,
+                "legacy_type": "extra",
+                "min": 0,
+                "options": [
+                  {
+                    "branch_price": null,
+                    "id": "c0de0000-0000-4000-8000-00000000000e",
+                    "is_active": true,
+                    "is_default": false,
+                    "price": 500
+                  }
+                ]
+              },
+              {
+                "effect": "swaps",
+                "id": "<generated id>",
+                "included": [
+                  "c0de0000-0000-4000-8000-00000000000c"
+                ],
+                "is_required": true,
+                "legacy_type": "milk_type",
+                "min": 1,
+                "options": [
+                  {
+                    "branch_price": 900,
+                    "id": "c0de0000-0000-4000-8000-00000000000c",
+                    "is_active": true,
+                    "is_default": false,
+                    "price": 800
+                  },
+                  {
+                    "branch_price": null,
+                    "id": "c0de0000-0000-4000-8000-00000000000d",
+                    "is_active": true,
+                    "is_default": false,
+                    "price": 0
+                  }
+                ]
+              }
+            ],
+            "id": "c0de0000-0000-4000-8000-000000000005",
+            "optionals": [
+              {
+                "id": "c0de0000-0000-4000-8000-00000000000f",
+                "price": 300,
+                "size_label": null
+              }
+            ],
+            "recipe": [],
+            "sizes": [
+              {
+                "branch_price": null,
+                "is_active": true,
+                "label": "Small",
+                "price": 4000
+              },
+              {
+                "branch_price": 5300,
+                "is_active": true,
+                "label": "Large",
+                "price": 5000
+              }
+            ]
+          },
+          "sizes": [
+            {
+              "label": "Large",
+              "price": 5300
+            },
+            {
+              "label": "Small",
+              "price": 4000
+            }
+          ]
+        },
+        {
+          "allowed_addon_ids": [],
+          "category_id": "c0de0000-0000-4000-8000-000000000004",
+          "combo": null,
+          "default_milk_addon_id": null,
+          "description": null,
+          "id": "c0de0000-0000-4000-8000-000000000006",
+          "image_url": null,
+          "kind": "item",
+          "meal": null,
+          "modifier_groups": [],
+          "name": "Tea",
+          "name_translations": {},
+          "optionals": [],
+          "price": 2200,
+          "pricing": {
+            "bases": [],
+            "branch_price": 2200,
+            "default_recipe_size": null,
+            "id": "c0de0000-0000-4000-8000-000000000006",
+            "optionals": [],
+            "recipe": [],
+            "sizes": [
+              {
+                "branch_price": null,
+                "is_active": true,
+                "label": "one_size",
+                "price": 2000
+              }
+            ]
+          },
+          "sizes": []
+        }
+      ],
+      "option_pricing": [
+        {
+          "channel_price": null,
+          "view": {
+            "effect": "adds",
+            "group_id": "<generated id>",
+            "id": "c0de0000-0000-4000-8000-00000000000e",
+            "ingredients": [
+              {
+                "id": "c0de0000-0000-4000-8000-00000000000b",
+                "name": "Vanilla syrup",
+                "unit": "ml"
+              }
+            ],
+            "kind": "extra",
+            "name": "Vanilla",
+            "price": 500,
+            "replaces": null,
+            "sized": [],
+            "swap_category_id": null,
+            "swap_category_slug": null
+          }
+        },
+        {
+          "channel_price": null,
+          "view": {
+            "effect": "swaps",
+            "group_id": "<generated id>",
+            "id": "c0de0000-0000-4000-8000-00000000000c",
+            "ingredients": [],
+            "kind": "milk_type",
+            "name": "Oat",
+            "price": 900,
+            "replaces": null,
+            "sized": [],
+            "swap_category_id": null,
+            "swap_category_slug": null
+          }
+        },
+        {
+          "channel_price": null,
+          "view": {
+            "effect": "swaps",
+            "group_id": "<generated id>",
+            "id": "c0de0000-0000-4000-8000-00000000000d",
+            "ingredients": [],
+            "kind": "milk_type",
+            "name": "Skim",
+            "price": 0,
+            "replaces": null,
+            "sized": [],
+            "swap_category_id": null,
+            "swap_category_slug": null
+          }
+        }
+      ]
+    },
+    "status": 200
+  },
+  "/recipes/addons/c0de0000-0000-4000-8000-00000000000e": {
+    "body": [
+      {
+        "addon_item_id": "c0de0000-0000-4000-8000-00000000000e",
+        "id": "<generated id>",
+        "ingredient_name": "Vanilla syrup",
+        "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000b",
+        "quantity_used": 15.0,
+        "unit": "ml",
+        "usable_quantity": 15.0
+      }
+    ],
+    "status": 200
+  },
+  "/recipes/drinks/c0de0000-0000-4000-8000-000000000005": {
+    "body": [
+      {
+        "id": "<generated id>",
+        "ingredient_name": "Espresso bean",
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+        "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+        "quantity_used": 18.0,
+        "size_label": "Large",
+        "unit": "g"
+      },
+      {
+        "id": "<generated id>",
+        "ingredient_name": "Whole milk",
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+        "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+        "quantity_used": 300.0,
+        "size_label": "Large",
+        "unit": "ml"
+      },
+      {
+        "id": "<generated id>",
+        "ingredient_name": "Espresso bean",
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+        "org_ingredient_id": "c0de0000-0000-4000-8000-00000000000a",
+        "quantity_used": 18.0,
+        "size_label": "Small",
+        "unit": "g"
+      },
+      {
+        "id": "<generated id>",
+        "ingredient_name": "Whole milk",
+        "menu_item_id": "c0de0000-0000-4000-8000-000000000005",
+        "org_ingredient_id": "c0de0000-0000-4000-8000-000000000009",
+        "quantity_used": 200.0,
+        "size_label": "Small",
+        "unit": "ml"
+      }
+    ],
+    "status": 200
+  }
+}
