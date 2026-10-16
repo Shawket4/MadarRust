@@ -103,7 +103,7 @@ macro_rules! swap_sizes {
     () => {
         "att AS (
             SELECT i.id AS item_id, i.name AS item_name, s.id AS size_id, s.label AS size_label,
-                   m.included_option_ids, sw.id AS group_id, sw.name AS group_name, sw.slug
+                   m.id AS mimg_id, m.option_allowlist, sw.id AS group_id, sw.name AS group_name, sw.slug
               FROM menu_items i
               JOIN menu_item_sizes s ON s.menu_item_id = i.id AND s.is_active
               JOIN menu_item_modifier_groups m ON m.menu_item_id = i.id
@@ -163,7 +163,7 @@ const RULES: &[Rule] = &[
         sql: "SELECT i.id, i.name, NULL::text,
                      'Some option groups offer all options (no list) while others are restricted: '
                      || 'old tills hide the unrestricted groups'' options ('
-                     || string_agg(g.name, ', ' ORDER BY g.name) FILTER (WHERE m.included_option_ids IS NULL)
+                     || string_agg(g.name, ', ' ORDER BY g.name) FILTER (WHERE NOT m.option_allowlist)
                      || ')',
                      i.id, NULL::uuid
                 FROM menu_items i
@@ -171,7 +171,7 @@ const RULES: &[Rule] = &[
                 JOIN modifier_groups g ON g.id = m.group_id AND g.legacy_addon_type IS NOT NULL
                WHERE i.org_id = $1 AND i.deleted_at IS NULL
                GROUP BY i.id, i.name
-              HAVING bool_or(m.included_option_ids IS NULL) AND bool_or(m.included_option_ids IS NOT NULL)
+              HAVING bool_or(NOT m.option_allowlist) AND bool_or(m.option_allowlist)
                ORDER BY i.name",
     },
     Rule {
@@ -220,7 +220,7 @@ const RULES: &[Rule] = &[
                      SELECT 1 FROM modifier_options o
                        JOIN ln r ON r.owner_type = 'modifier_option' AND r.owner_id = o.id
                       WHERE o.group_id = a.group_id AND o.is_active
-                        AND (a.included_option_ids IS NULL OR o.id = ANY(a.included_option_ids))
+                        AND (NOT a.option_allowlist OR EXISTS (SELECT 1 FROM menu_item_modifier_group_options xo WHERE xo.mimg_id = a.mimg_id AND xo.option_id = o.id))
                         AND r.ingredient_id = b.ingredient_id)
              ORDER BY a.item_name, a.size_label"
         ),
@@ -333,7 +333,7 @@ const RULES: &[Rule] = &[
                   FROM att a
                   JOIN ln b ON b.owner_type = 'item_size' AND b.owner_id = a.size_id AND b.slug = a.slug
                   JOIN modifier_options o ON o.group_id = a.group_id AND o.is_active
-                       AND (a.included_option_ids IS NULL OR o.id = ANY(a.included_option_ids))
+                       AND (NOT a.option_allowlist OR EXISTS (SELECT 1 FROM menu_item_modifier_group_options xo WHERE xo.mimg_id = a.mimg_id AND xo.option_id = o.id))
                   JOIN first_line fl ON fl.owner_id = o.id
                   LEFT JOIN fam fb ON fb.u = lower(b.unit)
                   LEFT JOIN fam fr ON fr.u = lower(fl.unit)
@@ -353,7 +353,7 @@ const RULES: &[Rule] = &[
                        AND g.legacy_addon_type NOT IN ('milk_type', 'coffee_type')
                        AND g.effect <> 'swaps'
                   JOIN modifier_options o ON o.group_id = g.id AND o.is_active
-                       AND (m.included_option_ids IS NULL OR o.id = ANY(m.included_option_ids))
+                       AND (NOT m.option_allowlist OR EXISTS (SELECT 1 FROM menu_item_modifier_group_options xo WHERE xo.mimg_id = m.id AND xo.option_id = o.id))
                   JOIN ln r ON r.owner_type = 'modifier_option' AND r.owner_id = o.id
                        AND r.slug IN ('milk', 'coffee_bean')
                   JOIN ln b ON b.owner_type = 'item_size' AND b.owner_id = s.id AND b.slug = r.slug

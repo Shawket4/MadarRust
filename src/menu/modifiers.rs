@@ -1392,10 +1392,10 @@ pub(crate) async fn group_usage(
                 COALESCE(m.is_required_override, g.is_required), \
                 COALESCE(m.min_override, g.min_selections), \
                 COALESCE(m.max_override, g.max_selections), \
-                m.legacy_origin, m.included_option_ids, \
+                m.legacy_origin, mimg_included_options(m.id, m.option_allowlist), \
                 (SELECT count(*) FROM modifier_options o \
                   WHERE o.group_id = g.id AND o.is_active \
-                    AND (m.included_option_ids IS NULL OR o.id = ANY(m.included_option_ids)))::int \
+                    AND (NOT m.option_allowlist OR EXISTS (SELECT 1 FROM menu_item_modifier_group_options xo WHERE xo.mimg_id = m.id AND xo.option_id = o.id)))::int \
          FROM menu_item_modifier_groups m \
          JOIN menu_items i ON i.id = m.menu_item_id AND i.deleted_at IS NULL \
          JOIN modifier_groups g ON g.id = m.group_id \
@@ -1439,7 +1439,7 @@ pub(crate) async fn group_usage(
              JOIN org_ingredients oi ON oi.id = rl.ingredient_id \
              JOIN ingredient_categories ic ON ic.id = oi.category_id AND ic.slug = $2 \
              JOIN modifier_options o ON o.group_id = m.group_id AND o.is_active \
-                  AND (m.included_option_ids IS NULL OR o.id = ANY(m.included_option_ids)) \
+                  AND (NOT m.option_allowlist OR EXISTS (SELECT 1 FROM menu_item_modifier_group_options xo WHERE xo.mimg_id = m.id AND xo.option_id = o.id)) \
              WHERE m.group_id = $1 \
                AND (o.replaces_ingredient_id = rl.ingredient_id \
                     OR EXISTS (SELECT 1 FROM recipe_lines ol \

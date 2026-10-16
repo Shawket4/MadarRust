@@ -666,7 +666,7 @@ async fn build_studio_aggregate(
         "SELECT mimg.id, mg.id, mg.name, mg.name_translations, mg.selection_type, \
                 mg.legacy_addon_type, mg.min_selections, mg.max_selections, mg.is_required, \
                 mimg.sort, mimg.min_override, mimg.max_override, mimg.is_required_override, \
-                mimg.included_option_ids \
+                mimg_included_options(mimg.id, mimg.option_allowlist) \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups mg ON mg.id = mimg.group_id \
          WHERE mimg.menu_item_id = $1 AND mg.id IS DISTINCT FROM $2 \
@@ -1602,7 +1602,7 @@ pub async fn duplicate_item(
               is_required_override, included_option_ids, legacy_origin) \
          SELECT $1, mimg.group_id, mimg.sort, mimg.min_override, mimg.max_override, \
                 mimg.is_required_override, \
-                COALESCE(mimg.included_option_ids, mimg_all_option_ids(mimg.group_id)), \
+                COALESCE(mimg_included_options(mimg.id, mimg.option_allowlist), mimg_all_option_ids(mimg.group_id)), \
                 COALESCE(mimg.legacy_origin, \
                          mimg_default_origin(mimg.group_id, mimg.is_required_override)) \
          FROM menu_item_modifier_groups mimg \

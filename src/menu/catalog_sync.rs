@@ -481,7 +481,7 @@ async fn load_modifier_groups(
                 COALESCE(mimg.min_override, mg.min_selections) AS min, \
                 COALESCE(mimg.max_override, mg.max_selections) AS max, \
                 COALESCE(mimg.is_required_override, mg.is_required) AS is_required, \
-                mg.legacy_addon_type, mimg.included_option_ids, mimg.sort, \
+                mg.legacy_addon_type, mimg_included_options(mimg.id, mimg.option_allowlist) AS included_option_ids, mimg.sort, \
                 mg.effect, mg.swap_category_id, sc.slug \
          FROM menu_item_modifier_groups mimg \
          JOIN modifier_groups mg ON mg.id = mimg.group_id \
