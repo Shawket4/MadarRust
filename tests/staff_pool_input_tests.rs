@@ -183,7 +183,14 @@ async fn the_shared_input_is_the_servers(pool: PgPool) {
         let view = &catalog.item(c.item).expect("loaded").view;
         let input = comp_input(view, &c.line);
         if let Some(r) = recorded.iter().find(|r| r.name == c.name) {
-            assert_eq!(&r.item, view, "{}: the loader's view", c.name);
+            // The recorded view carries one size no database can hold since DB
+            // Phase 2.4: a label only a LEGACY branch override named (inactive,
+            // unpriced; the old loader's UNION branch). Prod's views never
+            // produced it; it is set aside here, the vector file stays as
+            // shipped, and the comp input below is still compared in full.
+            let mut want = r.item.clone();
+            want.sizes.retain(|z| z.price.is_some() || z.is_active);
+            assert_eq!(&want, view, "{}: the loader's view", c.name);
             assert_eq!(r.line, c.line, "{}", c.name);
             assert_eq!(input, r.expected, "{}: the input", c.name);
         } else if std::env::var("MADAR_WRITE_STAFF_INPUT_VECTORS").is_err() {

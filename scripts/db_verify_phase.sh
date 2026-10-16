@@ -14,7 +14,8 @@
 #      the migration just before the phase (whatever the source lacked), ANALYZE;
 #   2. BEFORE: db_reconcile.sql, db_rls_visibility.sql, explain_hot_paths.sql;
 #   3. apply the phase's migrations (timed, one line per migration);
-#   4. run the phase's backfills twice (the second run must change 0 rows);
+#   4. run the phase's backfills twice (the second run must change 0 rows), and
+#      for Phase 2 reconcile every report switched to the rollups (2.6);
 #   5. AFTER: the same three; diff reconcile (must be empty except the phase's
 #      expected new metrics), diff visible rows (must be empty), plan table;
 #   6. the phase's check script (must print nothing).
@@ -22,7 +23,8 @@
 # ./db-verify-p<phase>-<timestamp>). The clone is kept for inspection; drop it
 # with `dropdb <source-db>_verify_p<phase>`.
 #
-# Needs: psql, createdb, dropdb, sqlx (0.8.x) on PATH; PGPASSWORD etc. as usual.
+# Needs: psql, createdb, dropdb, sqlx (0.8.x) on PATH; PGPASSWORD etc. as usual;
+# cargo (Phase 2 runs the sales-rollup-backfill and report-rollup-reconcile bins).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -78,6 +80,19 @@ head -5 "$out/migration_times.tsv" | sed 's/^/     /'
 # Phase backfills (each idempotent; the second run must report 0 changes).
 backfill() {
   case "$phase" in
+    2) # 2.6: the report rollups' history, twice (the second must do nothing),
+       # then every switched report old vs new, per org per day.
+       DATABASE_URL="$url" cargo run -q --bin sales-rollup-backfill > "$out/backfill_run1.tsv"
+       DATABASE_URL="$url" cargo run -q --bin sales-rollup-backfill > "$out/backfill_run2.tsv"
+       case "$(cat "$out/backfill_run2.tsv")" in
+         "covered 0 new days, recomputed 0 days"*) echo "OK rollup backfill idempotent ($(cat "$out/backfill_run1.tsv"))" ;;
+         *) echo "!! second rollup backfill did work: $(cat "$out/backfill_run2.tsv")"; return 1 ;;
+       esac
+       if DATABASE_URL="$url" cargo run -q --bin report-rollup-reconcile > "$out/report_reconcile.txt" 2>&1; then
+         echo "OK report reconciliation: $(tail -1 "$out/report_reconcile.txt")"
+       else
+         echo "!! report reconciliation failed:"; tail -20 "$out/report_reconcile.txt"; return 1
+       fi ;;
     5) for i in 1 2; do q -f scripts/db_phase5_backfill.sql > "$out/backfill_run$i.tsv"; done
        if grep -qv $'\t0$' "$out/backfill_run2.tsv"; then
          echo "!! second backfill run changed rows:"; cat "$out/backfill_run2.tsv"; return 1
@@ -85,7 +100,7 @@ backfill() {
     *) : ;;
   esac
 }
-backfill
+backfill || exit 1
 
 q -c "ANALYZE" >/dev/null
 echo "== AFTER"

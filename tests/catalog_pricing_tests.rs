@@ -1360,6 +1360,25 @@ async fn the_server_prices_the_fixture_as_pinned(pool: PgPool) {
 
 // ── madar-catalog: the rule, the feed and the vectors ────────────────────────
 
+/// Shipped vector cases (madar-shared v0.8.1) whose captured INPUT holds data no
+/// database can hold since DB Phase 2.4, so this server's answer for them now
+/// differs from the shipped one while the rule is unchanged. Regenerating the
+/// vectors (MADAR_WRITE_CATALOG_VECTORS=1) is a madar-shared release; until
+/// then every other case must equal the shipped answer exactly.
+const SHIPPED_LEGACY_ONLY: &[&str] = &[
+    // An item-level branch price on an item WITH sizes: lands on no one_size row.
+    "latte_inactive_size_falls_back_to_the_branch_item_price",
+    "latte_no_size_is_the_branch_item_price",
+    "latte_oat_no_size",
+    "latte_size_only_the_branch_prices",
+    "latte_unknown_size",
+    // A size-scoped optional field ("cream on Large only"): the backfill dropped the scope.
+    "latte_small_cream_is_large_only",
+    // An add-on in no group: every option has a group now (the backfill's), so
+    // the swap target carries that group's category.
+    "latte_skim_no_group",
+];
+
 const VECTORS: &str = "../madar-shared/crates/madar-catalog/vectors/catalog_vectors.json";
 
 /// Every item of the fixture, by the key the vectors name it.
@@ -1633,11 +1652,41 @@ async fn the_rule_the_feed_and_the_vectors_agree_with_the_server(pool: PgPool) {
         std::fs::write(dump, &written).unwrap();
     }
     let shipped: Value = serde_json::from_str(madar_catalog::vectors::CATALOG).unwrap();
+    // The shipped vectors' INPUTS (item views, feed rows) were captured from the
+    // legacy tables and still carry the LEGACY_ONLY data, which no database can
+    // hold since DB Phase 2.4; regenerating them is a madar-shared release (an
+    // owner call). The rule is what must not drift: every other case's
+    // expected answer is the shipped one, exactly.
+    let ours = serde_json::to_value(&vectors).unwrap();
+    let by_name = |v: &Value| -> std::collections::BTreeMap<String, Value> {
+        v["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| (c["name"].as_str().unwrap().to_string(), c["expected"].clone()))
+            .collect()
+    };
+    let (ours, shipped) = (by_name(&ours), by_name(&shipped));
+    let differ: Vec<&String> = shipped
+        .iter()
+        .filter(|(name, want)| ours.get(*name) != Some(*want))
+        .map(|(name, _)| name)
+        .collect();
     assert_eq!(
-        serde_json::to_value(&vectors).unwrap(),
-        shipped,
-        "madar-catalog's vectors are not what this server writes: regenerate them \
+        differ,
+        SHIPPED_LEGACY_ONLY
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .iter()
+            .collect::<Vec<_>>(),
+        "madar-catalog's vectors are not what this server computes: regenerate \
          (MADAR_WRITE_CATALOG_VECTORS=1) and release madar-shared"
+    );
+    assert_eq!(
+        ours.keys().collect::<Vec<_>>(),
+        shipped.keys().collect::<Vec<_>>(),
+        "the same cases on both sides"
     );
 }
 
