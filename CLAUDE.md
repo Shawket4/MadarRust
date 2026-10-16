@@ -268,6 +268,27 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   every `client_seen::legacy_hit`, plus `compat_usage::count_internal` at each
   server read of a compat view. A shim with 0 hits for 30 days is a removal
   candidate.
+- **Flat RLS (Phase 2.1).** A tenant table's policy is
+  `(org_id = (SELECT current_setting('app.org_id', true)::uuid)) IS TRUE`, on the
+  row's own NOT NULL `org_id`, never a sub-select through a parent. `IS TRUE`
+  on purpose: the same rows, but the planner cannot make it an index condition
+  (a bare `=` gets a 1/n_distinct estimate that is far too low for a big tenant
+  and BitmapAnds the whole org's index). A new tenant child table gets org_id
+  (the trio above) and this policy. `scripts/db_rls_visibility.sql` diffs what
+  every org sees before/after a policy change.
+- **Uniqueness of client keys and refs is PER ORG** (Phase 2.3):
+  `(org_id, idempotency_key)`, `(org_id, client_ref)`, `(org_id, order_ref |
+  ticket_ref | delivery_ref)`. Codes repeat across orgs, so a lookup by a key or
+  a ref always names the org (or runs under RLS).
+- **Every database has prod's catalog shape** (Phase 2.4): the legacy catalog
+  names (`addon_items`, `menu_item_recipes`, the branch override lists, …) are
+  read-only security-invoker VIEWS over the unified tables; their old tables are
+  in schema `archive`. Seed tests through `tests/common/legacy_catalog.rs`, never
+  by writing those names. Writes to them answer 410 `SHIM_WRITE_REMOVED`.
+- **Public routes take `PublicDb`** (Phase 2.5), never the owner pool: resolve
+  the org from what the caller supplied that the DB vouches for (branch, table,
+  slug, card / pass / booking token) with `PublicDb::resolver()`, then do
+  everything else on `PublicDb::scoped(org)` (RLS). Merchant handlers take `Db`.
 - **Sales reports read closed days from rollups** (Phase 2.6, `src/reports/sales.rs`):
   `/reports/branches/{id}/sales`, the daily/monthly timeseries and the org
   comparison add up `sales_daily_sold*` for whole closed, covered, clean days and
@@ -277,6 +298,10 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   figure in one of these reports needs a column in the rollup, its recompute, and
   a run of `report-rollup-reconcile`; a new table whose rows change those figures
   needs the dirty trigger. Verify on a copy: `scripts/verify_report_rollups.sh <db>`.
+- **Verifying a phase on a prod copy is one command:**
+  `scripts/db_verify_phase.sh <2|3|5> <source-db>` (clones the source, never
+  writes it; reconcile, per-org visible rows, plans, backfills twice, the
+  phase's check script). See `docs/release-2026-10-17.md`.
 - **Checks to run on a prod copy:** `scripts/db_reconcile.sql` (per-org counts
   and sums, diff before/after: must be empty), `scripts/db_phase1_check.sql`
   (prints only problems), `scripts/explain_hot_paths.sql` (plan timings),
