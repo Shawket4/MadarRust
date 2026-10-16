@@ -444,11 +444,14 @@ pub(crate) async fn create_open_ticket_inner(
 
     // Idempotent re-fire: same ticket key → return the existing ticket.
     if let Some(key) = body.idempotency_key {
-        let existing: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM open_tickets WHERE idempotency_key = $1")
-                .bind(key)
-                .fetch_optional(pool.get_ref())
-                .await?;
+        // Per org (the key is unique per org since DB Phase 2.3).
+        let existing: Option<Uuid> = sqlx::query_scalar!(
+            "SELECT id FROM open_tickets WHERE org_id = $1 AND idempotency_key = $2",
+            actor.org_id,
+            key
+        )
+        .fetch_optional(pool.get_ref())
+        .await?;
         if let Some(id) = existing {
             let view = open_ticket_view(pool.get_ref(), id).await?;
             return Ok(HttpResponse::Ok().json(view));
@@ -690,10 +693,13 @@ pub(crate) async fn add_round_inner(
     // (its ack may have been lost). Only a genuinely new round falls through to the
     // conflict gate, so the client can safely treat that 409 as a real rejection.
     if let Some(key) = body.idempotency_key {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM open_ticket_rounds WHERE idempotency_key = $1)",
+        // Per org (the key is unique per org since DB Phase 2.3).
+        let exists: bool = sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM open_ticket_rounds
+                WHERE org_id = $1 AND idempotency_key = $2) AS "exists!""#,
+            org_id,
+            key
         )
-        .bind(key)
         .fetch_one(pool.get_ref())
         .await?;
         if exists {

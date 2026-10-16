@@ -1940,7 +1940,7 @@ pub async fn create_delivery_order(
         .and_then(|s| Uuid::parse_str(s).ok());
     if let Some(key) = idem
         && let Some(existing) =
-            super::staff::fetch_delivery_order_by_idem(pool.get_ref(), key).await?
+            super::staff::fetch_delivery_order_by_idem(pool.get_ref(), body.branch_id, key).await?
     {
         return Ok(HttpResponse::Ok().json(existing));
     }
@@ -2298,7 +2298,7 @@ pub async fn create_delivery_order(
             drop(tx);
             if let Some(key) = idem
                 && let Some(existing) =
-                    super::staff::fetch_delivery_order_by_idem(pool.get_ref(), key).await?
+                    super::staff::fetch_delivery_order_by_idem(pool.get_ref(), body.branch_id, key).await?
             {
                 return Ok(HttpResponse::Ok().json(existing));
             }

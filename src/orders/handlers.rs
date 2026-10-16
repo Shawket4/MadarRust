@@ -2766,17 +2766,20 @@ async fn create_order_once(
     // so the OFFLINE receipt is byte-identical to the synced reprint and concurrent
     // devices never collide. Stored VERBATIM when present; absent (dashboard/legacy)
     // → the server mints the deterministic <BRANCH>-<YYMMDD>-<SHIFT6>-<NNN> fallback.
-    // The global UNIQUE(order_ref) index backstops either path.
+    // The per-org UNIQUE (org_id, order_ref) index backstops either path.
     let order_ref = match &body.order_ref {
         // R5: the same ref minted by a DIFFERENT device (two devices sharing a
         // code offline) is kept, suffixed with that device; the same device and
         // ref is an idempotent duplicate (handled at the unique violation below).
         Some(r) => {
-            let clash: Option<Option<Uuid>> =
-                sqlx::query_scalar("SELECT device_id FROM orders WHERE order_ref = $1")
-                    .bind(r)
-                    .fetch_optional(&mut *tx)
-                    .await?;
+            // Per org: the ref is unique per org since DB Phase 2.3.
+            let clash: Option<Option<Uuid>> = sqlx::query_scalar!(
+                "SELECT device_id FROM orders WHERE org_id = $1 AND order_ref = $2",
+                actor.org_id,
+                r
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
             match (clash, body.device_id) {
                 (Some(other), Some(mine)) if other != Some(mine) => {
                     madar_ids::order_ref::with_device_suffix(r, &mine.simple().to_string())
@@ -2934,14 +2937,16 @@ async fn create_order_once(
             if db.code().as_deref() == Some("23505")
                 && db
                     .constraint()
-                    .is_some_and(|c| c.contains("idempotency") || c.contains("order_ref")) =>
+                    // "idem": `uq_orders_org_idem` since DB Phase 2.3 (and the
+                    // global `orders_idempotency_key_idx` before it).
+                    .is_some_and(|c| c.contains("idem") || c.contains("order_ref")) =>
         {
             drop(tx);
             // Idempotent replay: a prior attempt already committed this order. Match
             // it by idempotency_key OR by the client-minted order_ref — a device
             // whose ref_seq counter rewound after a reinstall/restore re-sends with a
-            // NEW idempotency key but a REUSED order_ref, which trips the global
-            // UNIQUE(order_ref). Return the existing order, not a money-losing 409
+            // NEW idempotency key but a REUSED order_ref, which trips the per-org
+            // UNIQUE (org_id, order_ref). Return the existing order, not a money-losing 409
             // that the offline client would dead-letter into a lost sale.
             if let Some(key) = body.idempotency_key
                 && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
