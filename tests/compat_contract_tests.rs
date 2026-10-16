@@ -151,3 +151,166 @@ fn the_registry_is_consistent() {
         assert!(!s.sunset_condition.is_empty() && !s.replaces.is_empty());
     }
 }
+
+// ── The old shapes still served, pinned ──────────────────────────────────────
+//
+// One catalogue, seeded the way prod holds it (the unified tables, through the
+// shared legacy_catalog helpers), served by every old-shape READ route. The
+// whole body of each answer is pinned in tests/fixtures/compat/old_shapes.json
+// (timestamps blanked). The pin was recorded from the code BEFORE Phase 3
+// moved these reads (Phase 2: the public views), so this test is the
+// old-versus-new contract check: `MADAR_WRITE_COMPAT_SHAPES=1` rewrites it,
+// and only a deliberate contract change may do that.
+
+#[allow(dead_code)]
+mod common;
+
+use actix_web::{App, test as atest, web};
+use common::legacy_catalog as lc;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+const PIN: &str = "tests/fixtures/compat/old_shapes.json";
+
+const fn fid(n: u128) -> Uuid {
+    Uuid::from_u128(0xc0de_0000_0000_4000_8000_0000_0000_0000 | n)
+}
+const ORG: Uuid = fid(1);
+const BRANCH: Uuid = fid(2);
+const ADMIN: Uuid = fid(3);
+const CAT: Uuid = fid(4);
+const LATTE: Uuid = fid(5);
+const TEA: Uuid = fid(6);
+const S_SMALL: Uuid = fid(7);
+const S_LARGE: Uuid = fid(8);
+const MILK: Uuid = fid(9);
+const BEAN: Uuid = fid(10);
+const SYRUP: Uuid = fid(11);
+const OAT: Uuid = fid(12);
+const SKIM: Uuid = fid(13);
+const VANILLA: Uuid = fid(14);
+const CREAM_OPT: Uuid = fid(15);
+const CREAM_ING: Uuid = fid(16);
+
+async fn seed_catalog(pool: &PgPool) {
+    sqlx::raw_sql(&format!(
+        "INSERT INTO organizations (id, name, slug) VALUES ('{ORG}', 'Compat', 'compat-shapes');
+         INSERT INTO branches (id, org_id, name, code) VALUES ('{BRANCH}', '{ORG}', 'Main', 'MAIN');
+         INSERT INTO users (id, org_id, name, email, password_hash, role)
+              VALUES ('{ADMIN}', '{ORG}', 'Admin', 'admin@compat.test', 'x', 'org_admin');
+         INSERT INTO categories (id, org_id, name) VALUES ('{CAT}', '{ORG}', 'Coffee');
+         INSERT INTO menu_items (id, org_id, category_id, name, base_price)
+              VALUES ('{LATTE}', '{ORG}', '{CAT}', 'Latte', 4000), ('{TEA}', '{ORG}', '{CAT}', 'Tea', 2000);
+         INSERT INTO menu_item_sizes (id, menu_item_id, label, price, sort)
+              VALUES ('{S_SMALL}', '{LATTE}', 'Small', 4000, 0), ('{S_LARGE}', '{LATTE}', 'Large', 5000, 1);
+         INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit) VALUES
+              ('{MILK}', '{ORG}', 'Whole milk', 'ml', 0.05), ('{BEAN}', '{ORG}', 'Espresso bean', 'g', 0.9),
+              ('{SYRUP}', '{ORG}', 'Vanilla syrup', 'ml', 0.2), ('{CREAM_ING}', '{ORG}', 'Cream', 'ml', 0.3);"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    lc::item_recipe(pool, LATTE, "Small", MILK, 200, "ml").await;
+    lc::item_recipe(pool, LATTE, "Small", BEAN, 18, "g").await;
+    lc::item_recipe(pool, LATTE, "Large", MILK, 300, "ml").await;
+    lc::item_recipe(pool, LATTE, "Large", BEAN, 18, "g").await;
+    lc::addon(pool, lc::Addon::new(ORG, "Oat", "milk_type", 800).id(OAT)).await;
+    lc::addon(pool, lc::Addon::new(ORG, "Skim", "milk_type", 0).id(SKIM)).await;
+    lc::addon(pool, lc::Addon::new(ORG, "Vanilla", "extra", 500).id(VANILLA)).await;
+    lc::addon_ingredient(pool, VANILLA, SYRUP, 15, "ml").await;
+    lc::optional_field(pool, lc::Optional::new(LATTE, "Whipped cream", 300).id(CREAM_OPT).recipe(CREAM_ING, 40, "ml")).await;
+    lc::addon_slot(pool, ORG, LATTE, "milk_type", true, 1, Some(1)).await;
+    lc::allowed_addons(pool, LATTE, &[OAT, VANILLA]).await;
+    lc::branch_menu_override(pool, BRANCH, TEA, Some(2200), true).await;
+    lc::branch_size_override(pool, BRANCH, LATTE, "Large", 5300).await;
+    lc::branch_addon_override(pool, BRANCH, OAT, Some(900), true).await;
+    lc::channel_menu_override(pool, BRANCH, TEA, "outside", Some(2500), Some(true)).await;
+    lc::channel_addon_override(pool, BRANCH, VANILLA, "outside", Some(600), None).await;
+}
+
+/// Timestamps change every run; ids are fixed or derived.
+fn blank_times(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            for (k, x) in m.iter_mut() {
+                if k.ends_with("_at") || k == "created" || k == "updated" {
+                    *x = serde_json::Value::String("<time>".into());
+                } else {
+                    blank_times(x);
+                }
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(blank_times),
+        _ => {}
+    }
+}
+
+#[sqlx::test]
+async fn the_old_shapes_are_served_exactly_as_before(pool: PgPool) {
+    seed_catalog(&pool).await;
+    let secret = madar_rust::auth::jwt::JwtSecret("secret".to_string());
+    let token = madar_rust::auth::jwt::create_token(
+        &secret,
+        ADMIN,
+        Some(ORG),
+        madar_rust::models::UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
+    let app = atest::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret))
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .configure(madar_rust::menu::routes::configure)
+            .configure(madar_rust::recipes::routes::configure)
+            .configure(madar_rust::delivery::routes::configure)
+            .configure(madar_rust::bundles::configure),
+    )
+    .await;
+    let routes = [
+        format!("/menu-items?org_id={ORG}&full=true"),
+        format!("/menu-items?org_id={ORG}&full=true&branch_id={BRANCH}"),
+        format!("/menu-items/{LATTE}"),
+        format!("/menu-items/{LATTE}/addon-slots"),
+        format!("/menu-items/{LATTE}/optionals"),
+        format!("/addon-items?org_id={ORG}"),
+        format!("/addon-items?org_id={ORG}&branch_id={BRANCH}"),
+        format!("/addon-items/catalog?org_id={ORG}"),
+        format!("/branch-menu-overrides?branch_id={BRANCH}"),
+        format!("/branch-addon-overrides?branch_id={BRANCH}"),
+        format!("/delivery/channel-overrides?branch_id={BRANCH}"),
+        format!("/delivery/channel-addon-overrides?branch_id={BRANCH}"),
+        format!("/recipes/drinks/{LATTE}"),
+        format!("/recipes/addons/{VANILLA}"),
+        format!("/public/branches/{BRANCH}/menu?channel=dine_in&preview=true"),
+        "/bundles".to_string(),
+    ];
+    let mut now = serde_json::Map::new();
+    for r in routes {
+        let req = atest::TestRequest::get()
+            .uri(&r)
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .to_request();
+        let resp = atest::call_service(&app, req).await;
+        let status = resp.status().as_u16();
+        let body = atest::read_body(resp).await;
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::String(String::from_utf8_lossy(&body).into()));
+        blank_times(&mut v);
+        now.insert(r, serde_json::json!({ "status": status, "body": v }));
+    }
+    let now = serde_json::Value::Object(now);
+    if std::env::var("MADAR_WRITE_COMPAT_SHAPES").is_ok() {
+        std::fs::create_dir_all("tests/fixtures/compat").unwrap();
+        std::fs::write(PIN, serde_json::to_string_pretty(&now).unwrap() + "\n").unwrap();
+        return;
+    }
+    let pinned: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(PIN).expect("pin recorded")).unwrap();
+    for (route, want) in pinned.as_object().unwrap() {
+        assert_eq!(&now[route], want, "{route}");
+    }
+    assert_eq!(now, pinned);
+}
