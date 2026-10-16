@@ -218,16 +218,6 @@
           "required": true
         },
         "responses": {
-          "201": {
-            "description": "Addon item created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AddonItem"
-                }
-              }
-            }
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -270,6 +260,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -474,9 +474,6 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Addon item deleted"
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -519,6 +516,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -572,16 +579,6 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Addon item updated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AddonItem"
-                }
-              }
-            }
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -624,6 +621,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5075,16 +5082,6 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Addon override upserted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BranchAddonOverride"
-                }
-              }
-            }
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -5127,6 +5124,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5178,9 +5185,6 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Addon override cleared — reverts to the org default"
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -5223,6 +5227,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -25102,19 +25116,6 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "List addon overrides",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/AddonOverride"
-                  }
-                }
-              }
-            }
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -25157,6 +25158,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -25210,16 +25221,6 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Addon override upserted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AddonOverride"
-                }
-              }
-            }
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -25262,6 +25263,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -25317,9 +25328,6 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Addon override deleted"
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -25362,6 +25370,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -40099,16 +40117,6 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Addon ingredient upserted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AddonIngredient"
-                }
-              }
-            }
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -40151,6 +40159,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -40201,9 +40219,6 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Addon ingredient deleted"
-          },
           "400": {
             "description": "Bad request — validation failed or malformed input",
             "content": {
@@ -40246,6 +40261,16 @@
           },
           "409": {
             "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -66427,94 +66452,6 @@
           "quantity_used": {
             "type": "number",
             "format": "double"
-          }
-        }
-      },
-      "AddonOverride": {
-        "type": "object",
-        "required": [
-          "id",
-          "menu_item_id",
-          "addon_item_id",
-          "addon_item_name",
-          "ingredient_name",
-          "ingredient_unit",
-          "quantity_used",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "addon_item_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "addon_item_name": {
-            "type": "string"
-          },
-          "combo_addon_item_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "combo_addon_item_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "ingredient_name": {
-            "type": "string"
-          },
-          "ingredient_unit": {
-            "type": "string"
-          },
-          "menu_item_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "org_ingredient_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "quantity_used": {
-            "type": "number",
-            "format": "double"
-          },
-          "replaces_ingredient_name": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "replaces_org_ingredient_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
-          },
-          "size_label": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "updated_at": {
-            "type": "string",
-            "format": "date-time"
           }
         }
       },

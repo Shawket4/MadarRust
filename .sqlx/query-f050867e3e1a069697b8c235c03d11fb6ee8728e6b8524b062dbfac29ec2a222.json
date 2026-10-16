@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"n!\" FROM pg_class\n                        WHERE relnamespace = 'public'::regnamespace AND relkind = 'r'\n                          AND relname = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f050867e3e1a069697b8c235c03d11fb6ee8728e6b8524b062dbfac29ec2a222"
+}

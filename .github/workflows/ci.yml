@@ -19,7 +19,8 @@ jobs:
     timeout-minutes: 120
     services:
       postgres:
-        image: postgres:15
+        # Production runs 17.x (DB_ARCHITECTURE_AUDIT_2026-10-16 L9).
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -66,7 +67,8 @@ jobs:
             -c "CREATE ROLE sufrix NOLOGIN" || echo "role sufrix already present"
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest,sqlx-cli
+          # sqlx-cli pinned to the sqlx the crate uses (0.8; Cargo.toml).
+          tool: cargo-nextest,sqlx-cli@0.8.6
       # Every #[sqlx::test] database is copied from template1. Migrated once
       # here, each test's database is born with the schema and sqlx replays
       # nothing (the same trick as the local test cluster, see CLAUDE.md).
@@ -87,13 +89,115 @@ jobs:
           cargo run --quiet --bin export-openapi -- /tmp/openapi.json
           diff -q openapi.json /tmp/openapi.json || { echo "::error::openapi.json is stale: run cargo run --bin export-openapi and commit it"; exit 1; }
 
+  # ── Compile-time SQL: the committed .sqlx cache is current ───────────────────
+  # The `query!` macros are checked offline against `.sqlx/` everywhere else
+  # (SQLX_OFFLINE in the test job, Docker, the Mac). This job proves that cache
+  # matches the code AND a database migrated from scratch: a query that no
+  # longer type-checks, or a `.sqlx` entry nobody regenerated, fails here.
+  # After changing SQL: `cargo sqlx prepare --workspace -- --all-targets` against
+  # a migrated database, and commit `.sqlx/`.
+  sqlx-prepare:
+    name: sqlx prepare --check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/madar_ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.8.6
+      - name: Migrate madar_ci from scratch
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres \
+            -c "CREATE ROLE sufrix NOLOGIN" -c "CREATE DATABASE madar_ci"
+          sqlx migrate run
+      - name: cargo sqlx prepare --check
+        run: cargo sqlx prepare --workspace --check -- --all-targets
+
+  # ── Schema drift: migrations/ vs the production schema ───────────────────────
+  # Builds the schema twice: from migrations/ alone, and from the prod schema
+  # dump (deploy/schema/prod_schema_*.sql) migrated to head. Their normalized
+  # catalogs (scripts/schema_catalog.sql) must differ by EXACTLY
+  # deploy/schema/drift_expected.txt — today the hand-applied menu shim and a
+  # stray _sqlx_test schema. Anything else is drift: a migration that does
+  # something different on prod than on a fresh database. To accept a new
+  # expected drift, rerun these steps and commit the new file.
+  schema-drift:
+    name: schema drift vs prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    env:
+      PGPASSWORD: postgres
+      PG: postgres://postgres:postgres@localhost:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli@0.8.6
+      - name: Postgres 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update && sudo apt-get install -y postgresql-client-17
+      - name: Build both schemas
+        run: |
+          set -euo pipefail
+          psql "$PG/postgres" -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE sufrix NOLOGIN" \
+            -c "CREATE DATABASE drift_fresh TEMPLATE template0" \
+            -c "CREATE DATABASE drift_prod TEMPLATE template0"
+          psql "$PG/drift_prod" -X -q -v ON_ERROR_STOP=1 -f deploy/schema/prod_schema_2026-09-05.sql
+          sqlx migrate run --database-url "$PG/drift_prod"
+          sqlx migrate run --database-url "$PG/drift_fresh"
+      - name: Diff against the expected drift
+        run: |
+          set -euo pipefail
+          psql "$PG/drift_fresh" -X -At -f scripts/schema_catalog.sql > /tmp/fresh.txt
+          psql "$PG/drift_prod"  -X -At -f scripts/schema_catalog.sql > /tmp/prod.txt
+          { diff /tmp/fresh.txt /tmp/prod.txt || true; } | grep '^[<>]' > /tmp/drift.txt || true
+          grep -v '^#' deploy/schema/drift_expected.txt > /tmp/expected.txt
+          if ! diff -u /tmp/expected.txt /tmp/drift.txt; then
+            echo "::error::schema drift between migrations/ and prod changed (lines above: - expected, + found)"
+            exit 1
+          fi
+          echo "✅ only the expected drift ($(wc -l < /tmp/drift.txt) lines)"
+
   # ── Mutation testing: adaptive on PRs (only the changed lines) ──────────────
   mutants:
     name: mutants
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:15
+        # Production runs 17.x (DB_ARCHITECTURE_AUDIT_2026-10-16 L9).
+        image: postgres:17
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

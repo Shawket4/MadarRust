@@ -233,6 +233,7 @@ impl Catalog {
     }
 
     async fn load_items(&mut self, conn: &mut PgConnection, ids: &[Uuid]) -> Result<(), AppError> {
+        crate::compat_usage::count_internal("orders::catalog_view::items");
         let branch = self.branch;
         let rows: Vec<(Uuid, String, serde_json::Value, Option<i32>, bool)> = sqlx::query_as(
             "SELECT mi.id, mi.name, mi.name_translations, bmo.price_override,
@@ -540,6 +541,7 @@ impl Catalog {
         conn: &mut PgConnection,
         ids: &[Uuid],
     ) -> Result<(), AppError> {
+        crate::compat_usage::count_internal("orders::catalog_view::options");
         type OptRow = (
             Uuid,
             String,
@@ -702,6 +704,7 @@ async fn load_recipes(
     conn: &mut PgConnection,
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<RecipeRow>>, AppError> {
+    crate::compat_usage::count_internal("orders::catalog_view::recipes");
     let rows: Vec<(
         Uuid,
         String,

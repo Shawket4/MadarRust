@@ -109,6 +109,9 @@ fn keyed<T: serde::Serialize>(
 /// `upsert` row has gone stale (a time-based live rule that has aged out before
 /// the sweeper emitted its delete).
 pub fn projects_sql(ty: &str) -> Option<&'static str> {
+    if ty == "addon_item" {
+        crate::compat_usage::count_internal("sync::pull::projection::addon_item");
+    }
     Some(match ty {
         "category" => {
             "EXISTS (SELECT 1 FROM categories x WHERE x.id = $ID AND sync_live_category(x))"

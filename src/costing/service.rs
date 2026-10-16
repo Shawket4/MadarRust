@@ -281,6 +281,7 @@ async fn sku_costs_impl<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
+    crate::compat_usage::count_internal("costing::sku_costs");
     #[derive(sqlx::FromRow)]
     struct Row {
         menu_item_id: Uuid,
@@ -407,6 +408,7 @@ pub async fn org_addon_costs(
     org_id: Uuid,
     branch_id: Option<Uuid>,
 ) -> Result<Vec<AddonCost>, AppError> {
+    crate::compat_usage::count_internal("costing::org_addon_costs");
     #[derive(sqlx::FromRow)]
     struct Row {
         addon_item_id: Uuid,

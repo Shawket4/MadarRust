@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO compat_usage (kind, site, day, org_id, hits, first_at, last_at)\n         SELECT * FROM UNNEST($1::text[], $2::text[], $3::date[], $4::uuid[],\n                              $5::int8[], $6::timestamptz[], $7::timestamptz[])\n         ON CONFLICT (kind, site, day, org_id) DO UPDATE\n            SET hits = compat_usage.hits + EXCLUDED.hits,\n                last_at = GREATEST(compat_usage.last_at, EXCLUDED.last_at)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TextArray",
+        "DateArray",
+        "UuidArray",
+        "Int8Array",
+        "TimestamptzArray",
+        "TimestamptzArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b3011f422ceb43d20314dc505e4e4e2172fc6731c5fdb9ba4811c9987fa302ad"
+}

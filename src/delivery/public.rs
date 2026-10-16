@@ -534,6 +534,7 @@ pub(crate) async fn load_public_menu(
     branch_id: Uuid,
     channel: Option<&str>,
 ) -> Result<DeliveryMenu, AppError> {
+    crate::compat_usage::count_internal("delivery::public::menu");
     // The channel's active discount (customer-facing), if any.
     // A dine-in bill carries no channel discount: the waiter's or the
     // cashier's discount is applied on the bill itself, at the till.
@@ -1070,6 +1071,7 @@ async fn load_addon_catalog(
     // the chain falls through to the branch override and the catalogue.
     channel: Option<&str>,
 ) -> Result<Vec<DeliveryAddonOption>, AppError> {
+    crate::compat_usage::count_internal("delivery::public::addon_catalog");
     // Resolve the override chain in SQL and drop options whose channel
     // availability is false.
     let rows: Vec<(Uuid, String, serde_json::Value, String, i32, bool)> = sqlx::query_as(
@@ -1114,6 +1116,7 @@ async fn load_optional_fields(
     pool: &PgPool,
     item_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<DeliveryOptionalField>>, AppError> {
+    crate::compat_usage::count_internal("delivery::public::optional_fields");
     let mut by_item: std::collections::HashMap<Uuid, Vec<DeliveryOptionalField>> =
         std::collections::HashMap::new();
     if item_ids.is_empty() {
@@ -1158,6 +1161,7 @@ async fn load_default_milk(
     pool: &PgPool,
     item_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Uuid>, AppError> {
+    crate::compat_usage::count_internal("delivery::public::default_milk");
     let mut by_item: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     if item_ids.is_empty() {
         return Ok(by_item);

@@ -138,11 +138,20 @@ pub fn legacy_hit_for_org(kind: &'static str, site: &'static str, org_id: Option
 
 fn note(hit: LegacyHit) {
     tracing::info!(target: "madar.legacy", kind = hit.kind, site = hit.site.unwrap_or(""), "legacy_hit");
-    let _ = HITS.try_with(|hits| {
-        if let Ok(mut v) = hits.lock() {
-            v.push(hit);
-        }
-    });
+    // In a request the middleware counts it (with the org it resolves);
+    // outside one (jobs, tests) it is counted here.
+    let site = hit.site.unwrap_or("");
+    let (kind, org) = (hit.kind, hit.org_id);
+    if HITS
+        .try_with(|hits| {
+            if let Ok(mut v) = hits.lock() {
+                v.push(hit);
+            }
+        })
+        .is_err()
+    {
+        crate::compat_usage::count(kind, site, org.or_else(crate::db::current_org));
+    }
 }
 
 /// Run `fut` with hit collection on and return what it recorded (tests, jobs).
@@ -515,6 +524,10 @@ pub async fn record(
         .as_ref()
         .and_then(|c| c.org_id())
         .or_else(|| hits.iter().find_map(|h| h.org_id));
+    // Every hit is a use of its shim (`compat_usage`), throttled or not.
+    for h in &hits {
+        crate::compat_usage::count(h.kind, h.site.unwrap_or(""), h.org_id.or(org));
+    }
     if let (Some(pool), Some(org_id)) = (pool, org) {
         let device_id = DeviceHeader::from_request_headers(res.request());
         let branch_id = claims.as_ref().and_then(|c| c.branch_id());

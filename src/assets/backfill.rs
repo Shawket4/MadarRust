@@ -420,7 +420,7 @@ async fn verify_phase(pool: &PgPool, opts: &BackfillOptions) -> Result<(), AppEr
         let applied = if item.table == "recipe_step_presets" {
             let slug = item.id.clone();
             sqlx::query(
-                "UPDATE recipe_step_presets SET animation_group_id = $1 \
+                "UPDATE recipe_step_presets SET animation_group_id = $1, updated_at = now() \
                  WHERE slug = $2 AND (animation_group_id IS NULL OR animation_group_id = $1)",
             )
             .bind(group_id)

@@ -1786,6 +1786,8 @@ pub(crate) async fn close_till_inner(
         .await?;
     }
     tx.commit().await?;
+    // The till's business days, rolled up again (not read yet; Phase 2).
+    crate::rollups::after_till_close(pool, till_id).await;
 
     let closed = fetch_till_or_404(pool, till_id).await?;
     publish(

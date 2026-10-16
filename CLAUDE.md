@@ -31,12 +31,13 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
 ## Technology Stack
 - **Language**: Rust (Edition 2024)
 - **Web Framework**: Actix-Web 4
-- **Database**: PostgreSQL (via `sqlx` 0.7)
+- **Database**: PostgreSQL 17 (via `sqlx` 0.8)
 - **Async Runtime**: Tokio
 - **API Documentation**: OpenAPI / Swagger (via `utoipa` 5.5)
 - **Serialization**: Serde, JSON
 
 ## Development Workflow
+- **Faster builds: always `. scripts/dev-env.sh` first** in the shell that runs cargo (agents included). It turns on sccache (a compile cache shared by every worktree and agent) and, on Linux, the mold linker (much faster links of the big test binaries). Each part activates only when its tool is installed, so it is safe everywhere. Install once per machine: `cargo install --locked sccache`; Linux also `apt install mold clang`. Several worktrees or agents building at once: also give each its own `CARGO_TARGET_DIR`; sccache then shares the compiled dependencies between them. Never put the wrapper or linker in `.cargo/config.toml`: a machine or CI image without them would stop building.
 - **Build**: `cargo build`
 - **Run**: `cargo run`
 - **Test**: `scripts/run_tests.sh` (everything) or `scripts/run_tests.sh orders menu` (named suites). Use it rather than a bare `cargo nextest run` — see "Where the tests live" and "Running the test suite fast" below for the two reasons why.
@@ -239,6 +240,39 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   into the madar-shared checkout beside this one) and ships with a
   madar-shared tag; `tests/fixtures/catalog_pricing/server_capture.json` is the
   pre-move pin and changes only for a deliberate change of the rule.
+
+### Database rules (DB architecture Phase 0/1, 2026-10-16 — `DB_ARCHITECTURE_AUDIT_2026-10-16.md`)
+- **Compile-time SQL.** New and touched queries use `query!` / `query_as!` /
+  `query_scalar!`. Builds are offline (`SQLX_OFFLINE=true` reads `.sqlx/`). After
+  changing SQL, against a database migrated from scratch:
+  `cargo sqlx prepare --workspace -- --all-targets` (sqlx-cli **0.8.x**, like the
+  crate) and commit `.sqlx/`. CI's `sqlx prepare --check` job fails otherwise.
+- **Tenant children carry `org_id`**, filled by a `BEFORE INSERT` trigger
+  `fill_org_id` from the parent when the insert names none (so insert code needs
+  no change), with `CHECK (org_id IS NOT NULL)` and composite FKs
+  `(org_id, parent_id) → parent (org_id, id)`. A NEW child table of these gets
+  the same trio in its migration.
+- **`CREATE INDEX CONCURRENTLY`** = its own migration file whose FIRST line is
+  `-- no-transaction`, holding exactly one statement (a test enforces both). A
+  failed build's INVALID index is dropped on the next boot by
+  `migrate_guard` before the migration is retried.
+- **Discriminator CHECKs.** `sync_changes.type` is madar-sync's `ALL_TYPES` and
+  `inventory_movements.source_type` is the list `record_movement` callers use. A
+  new sync type or movement source extends that CHECK in the same change, or its
+  writes fail (`tests/db_phase1_tests.rs` catches the sync one).
+- **The minimum-client gate (`version_gate`) is inert** until the owner inserts
+  a `client_version_policy` row by hand. Never seed one, never add a default
+  minimum: tills are not forced to update by a deploy. Even with a row, writes a
+  till holds offline (replay, orders, cash, refunds, till close) always pass.
+- **Shim usage** is counted in `compat_usage` (per kind, site, day, org):
+  every `client_seen::legacy_hit`, plus `compat_usage::count_internal` at each
+  server read of a compat view. A shim with 0 hits for 30 days is a removal
+  candidate.
+- **Checks to run on a prod copy:** `scripts/db_reconcile.sql` (per-org counts
+  and sums, diff before/after: must be empty), `scripts/db_phase1_check.sql`
+  (prints only problems), `scripts/explain_hot_paths.sql` (plan timings),
+  `scripts/schema_catalog.sql` (the drift catalog). Deploys dump prod to
+  `/opt/madar-rust/db-backups` (last 10) before the new container migrates.
 
 ### Realtime
 `src/realtime` publishes per-branch events consumers subscribe to, e.g.

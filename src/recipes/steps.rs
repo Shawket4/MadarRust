@@ -237,7 +237,7 @@ pub async fn reconcile(pool: &PgPool, dir: &Path) -> Result<(), sqlx::Error> {
         {
             Ok(o) => {
                 sqlx::query(
-                    "UPDATE recipe_step_presets SET animation_group_id = $1 WHERE slug = $2",
+                    "UPDATE recipe_step_presets SET animation_group_id = $1, updated_at = now() WHERE slug = $2",
                 )
                 .bind(o.group_id)
                 .bind(&s.slug)

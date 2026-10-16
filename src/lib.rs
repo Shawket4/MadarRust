@@ -20,6 +20,7 @@ pub mod branches;
 pub mod bundles;
 pub mod cache;
 pub mod client_seen;
+pub mod compat_usage;
 pub mod clock;
 pub mod combos;
 pub mod costing;
@@ -42,6 +43,7 @@ pub mod loyalty;
 pub mod mcp;
 pub mod menu;
 pub mod menu_unification;
+pub mod migrate_guard;
 pub mod models;
 pub mod observability;
 pub mod openapi;
@@ -61,6 +63,7 @@ pub mod recipes;
 pub mod refunds;
 pub mod reports;
 pub mod reservations;
+pub mod rollups;
 pub mod secrets;
 pub mod staff;
 pub mod staff_pool;
@@ -75,3 +78,8 @@ pub mod tz;
 pub mod units;
 pub mod uploads;
 pub mod users;
+pub mod version_gate;
+
+/// Every migration under `migrations/`, embedded at compile time. The server
+/// applies them on boot (`main.rs`), after `migrate_guard`.
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
