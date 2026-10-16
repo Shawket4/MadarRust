@@ -3,6 +3,8 @@
 //! the same resolver, as the live route. Each test here is one way the old
 //! hard-coded role → op match used to disagree with that table.
 
+mod common;
+
 use actix_web::{App, test, web};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -2269,15 +2271,7 @@ async fn a_replayed_modifier_priced_below_nothing_is_refused_even_inside_a_posit
     let bearer = token(teller, org, UserRole::Teller);
 
     let addon = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO addon_items (id, org_id, name, default_price, type, is_active) \
-         VALUES ($1, $2, 'Extra shot', 500, 'generic', true)",
-    )
-    .bind(addon)
-    .bind(org)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::addon_item(&pool, Some(addon), org, "Extra shot", "generic", 500).await;
 
     let op = serde_json::json!({
         "op": "create_order",

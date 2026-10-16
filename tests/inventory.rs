@@ -942,7 +942,6 @@ async fn test_catalog_unit_change_rebases_recipes(pool: PgPool) {
     .await
     .unwrap();
     sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size',$1,$2,18,'g')").bind(size).bind(ing).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, ingredient_name, ingredient_unit, quantity_used, org_ingredient_id) VALUES ($1,'one_size','Flour','g',18,$2)").bind(mi).bind(ing).execute(&pool).await.unwrap();
     let token = generate_org_admin_token(user_id, org_id);
 
     let resp = test::call_service(
@@ -1001,7 +1000,6 @@ async fn test_yield_change_rebases_recipe_quantities(pool: PgPool) {
     .await
     .unwrap();
     sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size',$1,$2,200,'g')").bind(size).bind(ing).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, size_label, ingredient_name, ingredient_unit, quantity_used, org_ingredient_id) VALUES ($1,'one_size','Chicken','g',200,$2)").bind(item).bind(ing).execute(&pool).await.unwrap();
 
     let resp = test::call_service(
         &app,

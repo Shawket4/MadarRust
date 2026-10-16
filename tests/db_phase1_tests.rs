@@ -3,6 +3,8 @@
 //! rollups, the compat counters, the CONCURRENTLY-index boot guard, the
 //! transient-error classifier and the (inert) minimum-client gate.
 
+mod common;
+
 use actix_web::{App, HttpResponse, test as atest, web};
 use madar_rust::version_gate::{self, Policy, Verdict};
 use sqlx::PgPool;
@@ -77,14 +79,13 @@ async fn seed(pool: &PgPool, label: &str) -> Seed {
     .execute(pool)
     .await
     .unwrap();
+    let addon = common::legacy_catalog::addon_item(pool, None, org, "Oat", "milk_type", 20).await;
     sqlx::query(
-        "WITH a AS (INSERT INTO addon_items (org_id, name, type, default_price)
-                    VALUES ($2, 'Oat', 'milk_type', 20) RETURNING id)
-         INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
-         SELECT $1, a.id, 'Oat', 20, 1, 20 FROM a",
+        "INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
+         VALUES ($1, $2, 'Oat', 20, 1, 20)",
     )
     .bind(item)
-    .bind(org)
+    .bind(addon)
     .execute(pool)
     .await
     .unwrap();

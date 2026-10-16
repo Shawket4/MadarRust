@@ -250,14 +250,7 @@ async fn a_combo_off_online_is_refused_at_intake(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query(
-        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, is_available) VALUES ($1, $2, false)",
-    )
-    .bind(s.branch)
-    .bind(s.fries)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::branch_menu_override(&pool, s.branch, s.fries, None, false).await;
     let (st, b) = send(
         &app,
         test::TestRequest::post()
@@ -273,11 +266,7 @@ async fn a_combo_off_online_is_refused_at_intake(pool: PgPool) {
     assert_eq!(b["vars"]["reason"], "slot_empty");
 
     // No picks: refused, not defaulted.
-    sqlx::query("DELETE FROM branch_menu_overrides WHERE branch_id = $1")
-        .bind(s.branch)
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::clear_all_branch_menu_overrides(&pool, Some(s.branch)).await;
     let (st, b) = send(
         &app,
         test::TestRequest::post()
@@ -350,14 +339,7 @@ async fn the_best_deal_is_applied_online_and_booked_on_the_order(pool: PgPool) {
 #[sqlx::test]
 async fn an_unavailable_choice_is_refused_at_intake(pool: PgPool) {
     let s = online_shop(&pool).await;
-    sqlx::query(
-        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, is_available) VALUES ($1, $2, false)",
-    )
-    .bind(s.branch)
-    .bind(s.cola)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::branch_menu_override(&pool, s.branch, s.cola, None, false).await;
     let app = app!(pool);
     let (st, m) = send(
         &app,

@@ -158,17 +158,7 @@ pub async fn item(pool: &PgPool, org: Uuid, cat: Uuid, name: &str, price: i32) -
 /// 10 g of `ing` per unit of `item` at `size` (the legacy recipe rows the
 /// cost path and the stock deduction read).
 pub async fn recipe(pool: &PgPool, item: Uuid, ing: Uuid, size: Option<&str>, grams: i32) {
-    sqlx::query(
-        "INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) \
-         VALUES ($1, $2, $3, $4, 'Beans', 'g')",
-    )
-    .bind(item)
-    .bind(ing)
-    .bind(grams)
-    .bind(size.unwrap_or("one_size"))
-    .execute(pool)
-    .await
-    .unwrap();
+    super::legacy_catalog::item_recipe(pool, item, size.unwrap_or("one_size"), ing, grams, "g").await;
 }
 
 pub async fn grant_legacy(pool: &PgPool) {
@@ -356,14 +346,7 @@ pub async fn shop(pool: &PgPool) -> Shop {
     recipe(pool, latte, beans, Some("Large"), 14).await;
 
     let oat = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Oat milk', 'extra', 1500)",
-    )
-    .bind(oat)
-    .bind(org)
-    .execute(pool)
-    .await
-    .unwrap();
+    super::legacy_catalog::addon_item(pool, Some(oat), org, "Oat milk", "extra", 1500).await;
 
     let combo = combo_item(pool, org, mains, "Lunch deal", 15000).await;
     let slot_main = slot(pool, org, combo, "Main", 0, 1, 1, Some(burger)).await;

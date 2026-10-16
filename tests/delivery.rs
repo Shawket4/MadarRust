@@ -1,6 +1,8 @@
 //! Delivery tests. Pure-helper unit tests live here; the heavy #[sqlx::test]
 //! integration + e2e suite is appended in `integration_tests` below.
 
+mod common;
+
 use chrono::NaiveTime;
 use madar_rust::delivery::*;
 
@@ -601,23 +603,11 @@ mod it {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1,$2,$3,'one_size','Ing','g')")
-            .bind(item)
-            .bind(ing)
-            .bind(qty)
-            .execute(pool)
-            .await
-            .unwrap();
+        crate::common::legacy_catalog::item_recipe(pool, item, "one_size", ing, qty, "g").await;
         ing
     }
     async fn seed_branch_override(pool: &PgPool, branch: Uuid, item: Uuid, price: i32) {
-        sqlx::query("INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available) VALUES ($1,$2,$3,true)")
-            .bind(branch)
-            .bind(item)
-            .bind(price)
-            .execute(pool)
-            .await
-            .unwrap();
+        crate::common::legacy_catalog::branch_menu_override(pool, branch, item, Some(price), true).await;
     }
     async fn seed_channel_override(
         pool: &PgPool,
@@ -627,15 +617,7 @@ mod it {
         price: Option<i32>,
         available: Option<bool>,
     ) {
-        sqlx::query("INSERT INTO branch_channel_menu_overrides (branch_id, menu_item_id, channel, price_override, is_available) VALUES ($1,$2,$3::delivery_channel,$4,$5)")
-            .bind(branch)
-            .bind(item)
-            .bind(channel)
-            .bind(price)
-            .bind(available)
-            .execute(pool)
-            .await
-            .unwrap();
+        crate::common::legacy_catalog::channel_menu_override(pool, branch, item, channel, price, available).await;
     }
     async fn perms(pool: &PgPool) {
         madar_rust::permissions::seeder::seed_role_permissions(pool)
@@ -2800,15 +2782,7 @@ mod it {
     }
 
     async fn seed_addon(pool: &PgPool, org: Uuid, price: i32) -> Uuid {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1,$2,'Extra','extra',$3)")
-            .bind(id)
-            .bind(org)
-            .bind(price)
-            .execute(pool)
-            .await
-            .unwrap();
-        id
+        crate::common::legacy_catalog::addon_item(pool, None, org, "Extra", "extra", price).await
     }
 
     async fn seed_addon_typed(
@@ -2818,17 +2792,7 @@ mod it {
         addon_type: &str,
         price: i32,
     ) -> Uuid {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1,$2,$3,$4,$5)")
-            .bind(id)
-            .bind(org)
-            .bind(name)
-            .bind(addon_type)
-            .bind(price)
-            .execute(pool)
-            .await
-            .unwrap();
-        id
+        crate::common::legacy_catalog::addon_item(pool, None, org, name, addon_type, price).await
     }
 
     /// Give `item` a recipe milk ingredient (org_ingredients.category='milk') and
@@ -2841,12 +2805,7 @@ mod it {
             .execute(pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1,$2,200,'one_size','Milk','ml')")
-            .bind(item)
-            .bind(ing)
-            .execute(pool)
-            .await
-            .unwrap();
+        crate::common::legacy_catalog::item_recipe(pool, item, "one_size", ing, 200, "ml").await;
         ing
     }
 
@@ -2859,12 +2818,7 @@ mod it {
         name: &str,
     ) -> Uuid {
         let addon = seed_addon_typed(pool, org, name, "milk_type", 0).await;
-        sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,200,'Milk','ml')")
-            .bind(addon)
-            .bind(ing)
-            .execute(pool)
-            .await
-            .unwrap();
+        crate::common::legacy_catalog::addon_ingredient(pool, addon, ing, 200, "ml").await;
         addon
     }
 
@@ -2875,20 +2829,9 @@ mod it {
         price: i32,
         size_label: Option<&str>,
     ) -> Uuid {
-        let id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO menu_item_optional_fields (id, menu_item_id, name, price, size_label, is_active) \
-             VALUES ($1,$2,$3,$4,$5,true)",
-        )
-        .bind(id)
-        .bind(item)
-        .bind(name)
-        .bind(price)
-        .bind(size_label)
-        .execute(pool)
-        .await
-        .unwrap();
-        id
+        // A size scope is not representable on an option (the backfill dropped it).
+        let _ = size_label;
+        crate::common::legacy_catalog::optional_field(pool, crate::common::legacy_catalog::Optional::new(item, name, price)).await
     }
 
     #[sqlx::test]
@@ -2909,13 +2852,9 @@ mod it {
         let cream = seed_addon_typed(&pool, org, "Whipped Cream", "extra", 80).await;
 
         // Channel override: oat milk costs 130 on in_mall (channel beats default 100).
-        sqlx::query("INSERT INTO branch_channel_addon_overrides (branch_id, addon_item_id, channel, price_override) VALUES ($1,$2,'in_mall'::delivery_channel,$3)")
-            .bind(branch).bind(oat).bind(130)
-            .execute(&pool).await.unwrap();
+        crate::common::legacy_catalog::channel_addon_override(&pool, branch, oat, "in_mall", Some(130), None).await;
         // Channel disables whipped cream on in_mall → excluded from the catalog.
-        sqlx::query("INSERT INTO branch_channel_addon_overrides (branch_id, addon_item_id, channel, is_available) VALUES ($1,$2,'in_mall'::delivery_channel,false)")
-            .bind(branch).bind(cream)
-            .execute(&pool).await.unwrap();
+        crate::common::legacy_catalog::channel_addon_override(&pool, branch, cream, "in_mall", None, Some(false)).await;
 
         // A per-item optional field (still item-scoped, kept).
         seed_optional(&pool, item, "Extra Hot", 0, None).await;
@@ -2982,9 +2921,10 @@ mod it {
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0]["name"], "Extra Hot");
 
-        // No unified rows seeded → modifier_groups is present but empty (the
-        // customizer's fallback signal).
-        assert_eq!(it["modifier_groups"].as_array().unwrap().len(), 0);
+        // Prod's shape (DB Phase 2.4): the optional field IS an option of the
+        // item's own attached `Options` group, so that group is listed too.
+        let groups = it["modifier_groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{it}");
     }
 
     /// The unified per-item modifier groups (menu-unification): constraints come
@@ -3431,14 +3371,12 @@ mod it {
         };
         let ethiopian_beans = bean("Ethiopian beans").await;
         let decaf_beans = bean("Decaf beans").await;
-        sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1,$2,18,'one_size','Ethiopian beans','g')")
-            .bind(v60).bind(ethiopian_beans).execute(&pool).await.unwrap();
+        crate::common::legacy_catalog::item_recipe(&pool, v60, "one_size", ethiopian_beans, 18, "g").await;
         let option = |name: &'static str, price: i32, ing: Uuid| {
             let pool = pool.clone();
             async move {
                 let addon = seed_addon_typed(&pool, org, name, "coffee_type", price).await;
-                sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,18,$3,'g')")
-                    .bind(addon).bind(ing).bind(name).execute(&pool).await.unwrap();
+                crate::common::legacy_catalog::addon_ingredient(&pool, addon, ing, 18, "g").await;
                 addon
             }
         };
@@ -3448,8 +3386,7 @@ mod it {
         let sugar = Uuid::new_v4();
         sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Sugar', 'g'::inventory_unit, 5, ingredient_category_id($2, 'general'))")
             .bind(sugar).bind(org).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1,$2,10,'one_size','Sugar','g')")
-            .bind(v60).bind(sugar).execute(&pool).await.unwrap();
+        crate::common::legacy_catalog::item_recipe(&pool, v60, "one_size", sugar, 10, "g").await;
 
         let app = app!(&pool);
         let menu = |ch: &'static str| {
@@ -3524,8 +3461,7 @@ mod it {
         assert_eq!(q["items_total"], 6000 + 1000, "{q}");
 
         // A channel price replaces the rule's charge, as intake does.
-        sqlx::query("INSERT INTO branch_channel_addon_overrides (branch_id, addon_item_id, channel, price_override) VALUES ($1, $2, 'in_mall', 4000)")
-            .bind(branch).bind(decaf).execute(&pool).await.unwrap();
+        crate::common::legacy_catalog::channel_addon_override(&pool, branch, decaf, "in_mall", Some(4000), None).await;
         let (_, m) = send(&app, menu("in_mall")).await;
         let decaf_pricing = m["option_pricing"]
             .as_array()
@@ -3549,9 +3485,7 @@ mod it {
         let addon = seed_addon(&pool, org, 100).await; // branch-effective default 100
 
         // Channel addon override: 300 for in_mall.
-        sqlx::query("INSERT INTO branch_channel_addon_overrides (branch_id, addon_item_id, channel, price_override) VALUES ($1,$2,'in_mall'::delivery_channel,$3)")
-            .bind(branch).bind(addon).bind(300)
-            .execute(&pool).await.unwrap();
+        crate::common::legacy_catalog::channel_addon_override(&pool, branch, addon, "in_mall", Some(300), None).await;
 
         let app = app!(&pool);
         let body = intake_body(
@@ -3571,8 +3505,7 @@ mod it {
         assert_eq!(b["subtotal"], 800);
 
         // Mark the addon unavailable for the channel → intake rejects.
-        sqlx::query("UPDATE branch_channel_addon_overrides SET is_available = false WHERE branch_id=$1 AND addon_item_id=$2")
-            .bind(branch).bind(addon).execute(&pool).await.unwrap();
+        crate::common::legacy_catalog::channel_addon_override(&pool, branch, addon, "in_mall", Some(300), Some(false)).await;
         let (st2, _) = send(
             &app,
             test::TestRequest::post()
@@ -3606,10 +3539,13 @@ mod it {
             })),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{o}");
-        assert_eq!(o["price_override"], 250);
+        // Retired: in production the channel override relations are read-only
+        // views over menu_price_overrides. 410 SHIM_WRITE_REMOVED.
+        assert_eq!(st.as_u16(), 410, "{o}");
+        assert_eq!(o["code"], "SHIM_WRITE_REMOVED");
+        crate::common::legacy_catalog::channel_addon_override(&pool, branch, addon, "outside", Some(250), Some(true)).await;
 
-        // list
+        // list (still served)
         let (lst, list) = send(
             &app,
             auth(
@@ -3625,7 +3561,12 @@ mod it {
 
         // delete
         let (del, _) = send(&app, auth(test::TestRequest::delete().uri(&format!("/delivery/channel-addon-overrides?branch_id={branch}&addon_item_id={addon}&channel=outside")), &token)).await;
-        assert_eq!(del, StatusCode::NO_CONTENT);
+        assert_eq!(del.as_u16(), 410, "the delete is retired too");
+        sqlx::query("DELETE FROM menu_price_overrides WHERE target_id = $1")
+            .bind(addon)
+            .execute(&pool)
+            .await
+            .unwrap();
         let (_, list2) = send(
             &app,
             auth(

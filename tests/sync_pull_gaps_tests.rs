@@ -2,6 +2,8 @@
 //! B"): addon items, effective permissions, delivery prep minutes, order lines
 //! for reprint, per-channel menu prices — and the payment-availability event on
 //! its own realtime topic.
+mod common;
+
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -101,18 +103,16 @@ fn keys(v: &Value, out: &mut Vec<String>) {
 #[sqlx::test]
 async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
     let s = shop(&pool).await;
-    let addon: Uuid = sqlx::query_scalar(
-        "INSERT INTO addon_items (org_id, name, type, default_price) VALUES ($1, 'Oat milk', 'milk', 1500) RETURNING id",
+    // Written as prod holds it (the legacy names are views since DB Phase 2.4).
+    let addon = common::legacy_catalog::addon_item(&pool, None, s.org, "Oat milk", "milk", 1500).await;
+    let oat: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_ingredients (org_id, name, unit) VALUES ($1, 'Oat', 'l') RETURNING id",
     )
     .bind(s.org)
     .fetch_one(&pool)
     .await
     .unwrap();
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, 0.25, 'Oat', 'l')")
-        .bind(addon)
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, addon, oat, 0.25, "l").await;
 
     let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
     let a = row(&full, "addon_item", addon).expect("the addon is in the snapshot");
@@ -126,22 +126,13 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
     );
 
     // A branch override: new price, then switched off — each an incremental change.
-    sqlx::query("INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override) VALUES ($1, $2, 1800)")
-        .bind(s.branch)
-        .bind(addon)
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::branch_addon_override(&pool, s.branch, addon, Some(1800), true).await;
     let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
         .await
         .unwrap();
     let c = change(&inc, "addon_item", addon).expect("override re-emits the addon");
     assert_eq!(c.data.as_ref().unwrap()["default_price"], 1800);
-    sqlx::query("UPDATE branch_addon_overrides SET is_available = false WHERE branch_id = $1")
-        .bind(s.branch)
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::branch_addon_override(&pool, s.branch, addon, Some(1800), false).await;
     let inc2 = pull_core(&pool, s.org, &req(s.branch), inc.next)
         .await
         .unwrap();
@@ -155,16 +146,17 @@ async fn an_addon_item_rides_the_feed_branch_effective(pool: PgPool) {
     );
 
     // An ingredient edit re-emits; a delete is a delete.
-    sqlx::query("UPDATE addon_item_ingredients SET quantity_used = 0.3 WHERE addon_item_id = $1")
-        .bind(addon)
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, addon, oat, 0.3, "l").await;
     let inc3 = pull_core(&pool, s.org, &req(s.branch), inc2.next)
         .await
         .unwrap();
     assert!(change(&inc3, "addon_item", addon).is_some());
-    sqlx::query("DELETE FROM addon_items WHERE id = $1")
+    sqlx::query("DELETE FROM recipe_lines WHERE owner_type = 'modifier_option' AND owner_id = $1")
+        .bind(addon)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM modifier_options WHERE id = $1")
         .bind(addon)
         .execute(&pool)
         .await

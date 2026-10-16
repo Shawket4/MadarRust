@@ -1,3 +1,5 @@
+mod common;
+
 use actix_web::{App, test, web};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -97,17 +99,7 @@ async fn seed_addon_item(
     addon_type: &str,
     price: i32,
 ) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id)
-        .bind(org_id)
-        .bind(name)
-        .bind(addon_type)
-        .bind(price)
-        .execute(pool)
-        .await
-        .unwrap();
-    id
+    common::legacy_catalog::addon_item(pool, None, org_id, name, addon_type, price).await
 }
 
 async fn seed_ingredient(pool: &PgPool, org_id: Uuid, name: &str, unit: &str) -> Uuid {
@@ -168,15 +160,17 @@ async fn test_drink_recipes_crud(pool: PgPool) {
         .set_json(&req_body)
         .to_request();
 
+    // The legacy drink-recipe write is retired: it wrote a read-only view in
+    // production. 410 SHIM_WRITE_REMOVED.
     let resp = test::call_service(&app, req).await;
-    let status = resp.status();
-    let body = test::read_body(resp).await;
-    assert!(
-        status.is_success(),
-        "Status: {}, Response: {:?}",
-        status,
-        body
-    );
+    assert_eq!(resp.status().as_u16(), 410);
+    // The list still reads: the line seeded as the unified tables hold it.
+    sqlx::query("INSERT INTO menu_item_sizes (menu_item_id, label, price) VALUES ($1, 'large', 600)")
+        .bind(item_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    common::legacy_catalog::item_recipe(&pool, item_id, "large", ingredient_id, 250, "ml").await;
 
     // 2. List Drink Recipes
     let req_list = test::TestRequest::get()
@@ -202,7 +196,7 @@ async fn test_drink_recipes_crud(pool: PgPool) {
         .to_request();
 
     let resp_del = test::call_service(&app, req_del).await;
-    assert!(resp_del.status().is_success());
+    assert_eq!(resp_del.status().as_u16(), 410, "the delete is retired too");
 }
 
 #[sqlx::test]
@@ -238,8 +232,9 @@ async fn test_drink_recipes_negative_quantity(pool: PgPool) {
         .set_json(&req_body)
         .to_request();
 
+    // Retired before validation: 410 whatever the body says.
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status().as_u16(), 400);
+    assert_eq!(resp.status().as_u16(), 410);
 }
 
 #[sqlx::test]
@@ -327,15 +322,7 @@ async fn test_addon_ingredients_crud(pool: PgPool) {
     }
 
     // The list still reads (a line seeded as the unified tables would hold it).
-    sqlx::query(
-        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
-         VALUES ($1, $2, 'Syrup', 'ml', 15)",
-    )
-    .bind(addon_id)
-    .bind(ingredient_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, addon_id, ingredient_id, 15, "ml").await;
     let req_list = test::TestRequest::get()
         .uri(&format!("/recipes/addons/{}", addon_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
@@ -419,11 +406,8 @@ async fn test_drink_recipe_subunit_rounding_to_zero_rejected(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(
-        resp.status().as_u16(),
-        400,
-        "sub-unit quantity rounding to 0 must be rejected"
-    );
+    // The legacy drink-recipe write is retired (410); nothing is stored.
+    assert_eq!(resp.status().as_u16(), 410);
 
     let stored: Option<sqlx::types::BigDecimal> = sqlx::query_scalar(
         "SELECT quantity_used FROM menu_item_recipes WHERE org_ingredient_id=$1",
@@ -466,15 +450,7 @@ async fn test_addon_ingredient_carries_its_usable_quantity(pool: PgPool) {
 
     // Stored grossed up by the yield (100 usable at 80% → 125), as the
     // save path writes it; the read hands back both.
-    sqlx::query(
-        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
-         VALUES ($1, $2, 'Lettuce', 'g', 125)",
-    )
-    .bind(addon_id)
-    .bind(ing)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, addon_id, ing, 125, "g").await;
 
     let resp = test::call_service(
         &app,
@@ -531,16 +507,18 @@ async fn test_recipe_density_and_yield_applied_at_save(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert!(resp.status().is_success());
-
-    // 1000 ml × 0.92 = 920 g usable; grossed up by 50% yield → 1840 g stored.
+    // The legacy drink-recipe write is retired (410). The line as the save
+    // path stores it: 1000 ml × 0.92 = 920 g usable, grossed up by the 50%
+    // yield → 1840 g in the ingredient's base unit.
+    assert_eq!(resp.status().as_u16(), 410);
+    common::legacy_catalog::item_recipe(&pool, item_id, "one_size", ing, 1840, "g").await;
     let (unit, qty): (String, f64) = sqlx::query_as(
         "SELECT ingredient_unit, quantity_used::float8 FROM menu_item_recipes WHERE org_ingredient_id=$1"
     ).bind(ing).fetch_one(&pool).await.unwrap();
     assert_eq!(unit, "g", "stored in the ingredient's base unit");
     assert_eq!(
         qty, 1840.0,
-        "density bridge + yield gross-up applied at save"
+        "read back in the base unit"
     );
 
     // The catalog item dialog reads the line back with its usable amount.
