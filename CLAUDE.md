@@ -37,6 +37,7 @@ The Flutter side additionally needs `melos run bridge` when the FRB surface chan
 - **Serialization**: Serde, JSON
 
 ## Development Workflow
+- **Faster builds: always `. scripts/dev-env.sh` first** in the shell that runs cargo (agents included). It turns on sccache (a compile cache shared by every worktree and agent) and, on Linux, the mold linker (much faster links of the big test binaries). Each part activates only when its tool is installed, so it is safe everywhere. Install once per machine: `cargo install --locked sccache`; Linux also `apt install mold clang`. Several worktrees or agents building at once: also give each its own `CARGO_TARGET_DIR`; sccache then shares the compiled dependencies between them. Never put the wrapper or linker in `.cargo/config.toml`: a machine or CI image without them would stop building.
 - **Build**: `cargo build`
 - **Run**: `cargo run`
 - **Test**: `scripts/run_tests.sh` (everything) or `scripts/run_tests.sh orders menu` (named suites). Use it rather than a bare `cargo nextest run` — see "Where the tests live" and "Running the test suite fast" below for the two reasons why.
