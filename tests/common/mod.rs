@@ -51,6 +51,7 @@ pub mod analytics;
 pub mod assets;
 pub mod combos;
 pub mod employees;
+pub mod legacy_catalog;
 pub mod members;
 pub mod shops;
 pub mod sizes;
