@@ -301,55 +301,50 @@ async fn test_addon_ingredients_crud(pool: PgPool) {
 
     let token = generate_org_admin_token(user_id, org_id);
 
-    // 1. Upsert Addon Ingredient
+    // The writes are retired (a read-only view in production): 410.
     let req_body = UpsertAddonIngredientRequest {
         org_ingredient_id: Some(ingredient_id),
         ingredient_name: "Syrup".to_string(),
         ingredient_unit: "ml".to_string(),
         quantity_used: 15.0,
     };
+    for req in [
+        test::TestRequest::post()
+            .uri(&format!("/recipes/addons/{}", addon_id))
+            .set_json(&req_body),
+        test::TestRequest::delete().uri(&format!(
+            "/recipes/addons/{}?ingredient_name=Syrup",
+            addon_id
+        )),
+    ] {
+        let resp = test::call_service(
+            &app,
+            req.insert_header(("Authorization", format!("Bearer {}", token)))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 410);
+    }
 
-    let req = test::TestRequest::post()
-        .uri(&format!("/recipes/addons/{}", addon_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&req_body)
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    let status = resp.status();
-    let body = test::read_body(resp).await;
-    assert!(
-        status.is_success(),
-        "Status: {}, Response: {:?}",
-        status,
-        body
-    );
-
-    // 2. List Addon Ingredients
+    // The list still reads (a line seeded as the unified tables would hold it).
+    sqlx::query(
+        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
+         VALUES ($1, $2, 'Syrup', 'ml', 15)",
+    )
+    .bind(addon_id)
+    .bind(ingredient_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let req_list = test::TestRequest::get()
         .uri(&format!("/recipes/addons/{}", addon_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
-
     let resp_list = test::call_service(&app, req_list).await;
-    let list_status = resp_list.status();
-    let list_body = test::read_body(resp_list).await;
-    assert!(list_status.is_success());
-    let recipes: Vec<AddonIngredient> = serde_json::from_slice(&list_body).unwrap();
+    assert!(resp_list.status().is_success());
+    let recipes: Vec<AddonIngredient> = test::read_body_json(resp_list).await;
     assert_eq!(recipes.len(), 1);
     assert_eq!(recipes[0].ingredient_name, "Syrup");
-
-    // 3. Delete Addon Ingredient
-    let req_del = test::TestRequest::delete()
-        .uri(&format!(
-            "/recipes/addons/{}?ingredient_name=Syrup",
-            addon_id
-        ))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request();
-
-    let resp_del = test::call_service(&app, req_del).await;
-    assert!(resp_del.status().is_success());
 }
 
 #[sqlx::test]
@@ -469,25 +464,17 @@ async fn test_addon_ingredient_carries_its_usable_quantity(pool: PgPool) {
         .unwrap();
     let token = generate_org_admin_token(user_id, org_id);
 
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!("/recipes/addons/{addon_id}"))
-            .insert_header(("Authorization", format!("Bearer {token}")))
-            .set_json(UpsertAddonIngredientRequest {
-                org_ingredient_id: Some(ing),
-                ingredient_name: "Lettuce".to_string(),
-                ingredient_unit: "g".to_string(),
-                quantity_used: 100.0,
-            })
-            .to_request(),
+    // Stored grossed up by the yield (100 usable at 80% → 125), as the
+    // save path writes it; the read hands back both.
+    sqlx::query(
+        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
+         VALUES ($1, $2, 'Lettuce', 'g', 125)",
     )
-    .await;
-    assert!(resp.status().is_success());
-    let row: serde_json::Value = test::read_body_json(resp).await;
-    assert_eq!(row["quantity_used"], serde_json::json!(125.0));
-    assert_eq!(row["usable_quantity"], serde_json::json!(100.0));
-    assert!(row.get("yield_pct").is_none(), "not on the wire");
+    .bind(addon_id)
+    .bind(ing)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let resp = test::call_service(
         &app,
@@ -498,6 +485,7 @@ async fn test_addon_ingredient_carries_its_usable_quantity(pool: PgPool) {
     )
     .await;
     let rows: Vec<AddonIngredient> = test::read_body_json(resp).await;
+    assert_eq!(rows[0].quantity_used, bigdecimal::BigDecimal::from(125));
     assert_eq!(rows[0].usable_quantity, 100.0);
 }
 

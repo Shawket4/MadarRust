@@ -1704,13 +1704,14 @@ pub(crate) async fn create_order_inner(
             if let Some(t) = ticket.as_deref_mut() {
                 t.floor = SettledFloor::default();
             }
-            let res = create_order_once(
+            // Boxed: the sale's future is large (see `sync::handlers::replay`).
+            let res = Box::pin(create_order_once(
                 pool.clone(),
                 web::Json(body.clone()),
                 actor.clone(),
                 hub,
                 ticket.as_deref_mut(),
-            )
+            ))
             .await;
             match res {
                 Err(e)

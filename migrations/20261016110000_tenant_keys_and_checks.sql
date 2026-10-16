@@ -87,11 +87,12 @@ SELECT pg_temp.p1_add('sync_changes', 'sync_changes_org_branch_fk',
 -- Every `source_type` the code writes (record_movement callers, 2026-10-16:
 -- order, refund, waste, stocktake, transfer, purchase, goods_receipt,
 -- delivery_order). NULL stays allowed (manual adjustments carry none).
+-- 'seed' is the opening stock the test fixtures post straight into the ledger.
 -- A NEW source_type must be added here in the same change, or its insert fails.
 SELECT pg_temp.p1_add('inventory_movements', 'inventory_movements_source_type_check',
     $$CHECK (source_type IS NULL OR source_type IN (
         'order', 'refund', 'waste', 'stocktake', 'transfer', 'purchase',
-        'goods_receipt', 'delivery_order'))$$);
+        'goods_receipt', 'delivery_order', 'seed'))$$);
 -- madar-sync's ALL_TYPES (madar-shared v0.8.1). A NEW sync type must be added
 -- here in the same change: `sync_changes_type_is_madar_sync_all_types` in
 -- tests/db_phase1_tests.rs fails until it is.

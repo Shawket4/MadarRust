@@ -580,12 +580,14 @@ pub async fn replay(
     crate::db::retrying(async {
         let mut attempt = 1;
         loop {
-            let res = replay_once(
+            // Boxed: the op's future is large, and nesting it in this loop
+            // overflowed the stack of a debug build.
+            let res = Box::pin(replay_once(
                 req.clone(),
                 pool.clone(),
                 hub.clone(),
                 web::Json(body.clone()),
-            )
+            ))
             .await;
             match res {
                 Err(e) if attempt < crate::db::RETRY_ATTEMPTS && crate::db::is_transient(&e) => {

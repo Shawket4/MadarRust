@@ -425,6 +425,55 @@ pub const AUTHENTICATED: &[(&str, &str, &str)] = &[
         "DELETE",
         "/tills/{till_id}",
         "tombstone: 410 TILL_ENTITY_REMOVED for everyone",
+    ),    (
+        "POST",
+        "/addon-items",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "PATCH",
+        "/addon-items/{id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "DELETE",
+        "/addon-items/{id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "PUT",
+        "/branch-addon-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "DELETE",
+        "/branch-addon-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "GET",
+        "/menu-items/{id}/overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "POST",
+        "/menu-items/{id}/overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "DELETE",
+        "/menu-items/{id}/overrides/{override_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "POST",
+        "/recipes/addons/{addon_item_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),
+    (
+        "DELETE",
+        "/recipes/addons/{addon_item_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
     ),
 ];
 

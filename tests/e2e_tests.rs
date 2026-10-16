@@ -563,24 +563,15 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     )
     .await;
 
-    // Create Addon item: Vanilla Syrup (syrup)
-    let vanilla_addon: AddonItem = test::read_body_json(
-        test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri("/addon-items")
-                .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-                .set_json(serde_json::json!({
-                    "org_id": org_id,
-                    "name": "Vanilla Syrup",
-                    "addon_type": "syrup",
-                    "default_price": 50
-                }))
-                .to_request(),
-        )
-        .await,
+    // Add-on item: Vanilla Syrup (syrup). Seeded straight into the legacy
+    // catalog: its write route is retired (a read-only view in production).
+    let vanilla_addon_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO addon_items (org_id, name, type, default_price) VALUES ($1, 'Vanilla Syrup', 'syrup', 50) RETURNING id",
     )
-    .await;
+    .bind(org_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     // STEP 3.3: Configure Inventory Catalog Items (ingredients)
     let espresso_beans: OrgIngredient = test::read_body_json(
@@ -718,22 +709,16 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
     .await;
     assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
 
-    // Vanilla Syrup addon: 15ml vanilla flavor
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!("/recipes/addons/{}", vanilla_addon.id))
-            .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-            .set_json(serde_json::json!({
-                "org_ingredient_id": vanilla_flavor.id,
-                "ingredient_name": "Vanilla Flavor",
-                "ingredient_unit": "ml",
-                "quantity_used": 15.0
-            }))
-            .to_request(),
+    // Vanilla Syrup addon: 15ml vanilla flavor (seeded: the write route is retired).
+    sqlx::query(
+        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
+         VALUES ($1, $2, 'Vanilla Flavor', 'ml', 15)",
     )
-    .await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    .bind(vanilla_addon_id)
+    .bind(vanilla_flavor.id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // STEP 3.6: Start POS operations - Open Shift
     let shift: Shift = test::read_body_json(
@@ -771,7 +756,7 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
                 "menu_item_id": espresso_id,
                 "size_label": "medium",
                 "quantity": 1,
-                "addons": [{ "addon_item_id": vanilla_addon.id, "quantity": 1 }],
+                "addons": [{ "addon_item_id": vanilla_addon_id, "quantity": 1 }],
                 "optional_field_ids": [],
                 "bundle_components": []
             }

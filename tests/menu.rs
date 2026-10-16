@@ -764,6 +764,9 @@ async fn test_addon_slots_success(pool: PgPool) {
 
 #[sqlx::test]
 async fn test_addon_items_crud(pool: PgPool) {
+    // The legacy add-on catalog is read-only in production (a view over the
+    // modifier tables), so its writes are retired: 410 SHIM_WRITE_REMOVED.
+    // The list keeps answering for old tills.
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(pool.clone()))
@@ -774,10 +777,9 @@ async fn test_addon_items_crud(pool: PgPool) {
 
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "org_admin").await;
-    grant_permission(&pool, "org_admin", "menu_items", "create").await;
-    grant_permission(&pool, "org_admin", "menu_items", "update").await;
-    grant_permission(&pool, "org_admin", "menu_items", "delete").await;
     grant_permission(&pool, "org_admin", "menu_items", "read").await;
+    let id = seed_addon_item(&pool, org_id, "Extra Cheese", "Topping", 200).await;
+    let token = generate_org_admin_token(user_id, org_id);
 
     let req_body = CreateAddonItemRequest {
         org_id,
@@ -786,39 +788,6 @@ async fn test_addon_items_crud(pool: PgPool) {
         addon_type: "Topping".to_string(),
         default_price: 200,
     };
-
-    let token = generate_org_admin_token(user_id, org_id);
-
-    // Create
-    let req = test::TestRequest::post()
-        .uri("/addon-items")
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&req_body)
-        .to_request();
-
-    let resp = test::call_service(&app, req).await;
-    let status = resp.status();
-    let body = test::read_body(resp).await;
-    assert!(
-        status.is_success(),
-        "Status: {}, Response: {:?}",
-        status,
-        body
-    );
-    let item: AddonItem = serde_json::from_slice(&body).unwrap();
-    assert_eq!(item.name, "Extra Cheese");
-
-    // List
-    let req_list = test::TestRequest::get()
-        .uri(&format!("/addon-items?org_id={}", org_id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .to_request();
-
-    let resp_list = test::call_service(&app, req_list).await;
-    let items: Vec<AddonItem> = test::read_body_json(resp_list).await;
-    assert_eq!(items.len(), 1);
-
-    // Update
     let req_update = UpdateAddonItemRequest {
         name_translations: None,
         name: Some("Super Cheese".to_string()),
@@ -826,24 +795,33 @@ async fn test_addon_items_crud(pool: PgPool) {
         default_price: None,
         is_active: None,
     };
-    let req_u = test::TestRequest::patch()
-        .uri(&format!("/addon-items/{}", item.id))
-        .insert_header(("Authorization", format!("Bearer {}", token)))
-        .set_json(&req_update)
-        .to_request();
+    for req in [
+        test::TestRequest::post().uri("/addon-items").set_json(&req_body),
+        test::TestRequest::patch()
+            .uri(&format!("/addon-items/{id}"))
+            .set_json(&req_update),
+        test::TestRequest::delete().uri(&format!("/addon-items/{id}")),
+    ] {
+        let resp = test::call_service(
+            &app,
+            req.insert_header(("Authorization", format!("Bearer {}", token)))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 410);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"], "SHIM_WRITE_REMOVED");
+    }
 
-    let resp_u = test::call_service(&app, req_u).await;
-    assert!(resp_u.status().is_success());
-    let u_item: AddonItem = test::read_body_json(resp_u).await;
-    assert_eq!(u_item.name, "Super Cheese");
-
-    // Delete
-    let req_del = test::TestRequest::delete()
-        .uri(&format!("/addon-items/{}", item.id))
+    // Nothing was written, and the list still reads.
+    let req_list = test::TestRequest::get()
+        .uri(&format!("/addon-items?org_id={}", org_id))
         .insert_header(("Authorization", format!("Bearer {}", token)))
         .to_request();
-    let resp_del = test::call_service(&app, req_del).await;
-    assert!(resp_del.status().is_success());
+    let resp_list = test::call_service(&app, req_list).await;
+    let items: Vec<AddonItem> = test::read_body_json(resp_list).await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "Extra Cheese");
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -1938,7 +1916,7 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
     assert_eq!(addons.len(), 1);
     assert_eq!(addons[0].default_price, 1000);
 
-    // Upsert a branch addon price.
+    // The writes are retired (a read-only view in production): 410.
     let body = BranchAddonOverrideInput {
         branch_id: branch,
         addon_item_id: addon,
@@ -1947,10 +1925,29 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
     };
     let resp =
         test::call_service(&app, auth_req!(put, "/branch-addon-overrides", token, body)).await;
-    assert!(resp.status().is_success());
-    let ov: BranchAddonOverride = test::read_body_json(resp).await;
-    assert_eq!(ov.price_override, Some(1500));
+    assert_eq!(resp.status().as_u16(), 410);
+    let resp = test::call_service(
+        &app,
+        auth_req!(
+            delete,
+            format!(
+                "/branch-addon-overrides?branch_id={}&addon_item_id={}",
+                branch, addon
+            ),
+            token
+        ),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 410);
 
+    // The reads still inject a branch price (an override as the unified
+    // tables would hold it, written here straight to the legacy relation).
+    sqlx::query("INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available) VALUES ($1, $2, 1500, true)")
+        .bind(branch)
+        .bind(addon)
+        .execute(&pool)
+        .await
+        .unwrap();
     let resp = test::call_service(&app, branch_addons(&token)).await;
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
     assert_eq!(
@@ -1970,14 +1967,13 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
     assert_eq!(addons[0].default_price, 1000, "org default unchanged");
 
-    // Disable at this branch → excluded from the branch addon list.
-    let body = BranchAddonOverrideInput {
-        branch_id: branch,
-        addon_item_id: addon,
-        price_override: Some(1500),
-        is_available: false,
-    };
-    test::call_service(&app, auth_req!(put, "/branch-addon-overrides", token, body)).await;
+    // Disabled at this branch → excluded from the branch addon list.
+    sqlx::query("UPDATE branch_addon_overrides SET is_available = false WHERE branch_id = $1 AND addon_item_id = $2")
+        .bind(branch)
+        .bind(addon)
+        .execute(&pool)
+        .await
+        .unwrap();
     let resp = test::call_service(&app, branch_addons(&token)).await;
     let addons: Vec<AddonItem> = test::read_body_json(resp).await;
     assert_eq!(addons.len(), 0, "branch-disabled addon is excluded");
@@ -1994,25 +1990,6 @@ async fn test_branch_addon_override_crud_and_injection(pool: PgPool) {
     let rows: Vec<BranchAddonOverride> = test::read_body_json(resp).await;
     assert_eq!(rows.len(), 1);
     assert!(!rows[0].is_available);
-
-    // Delete → reverts to the org default.
-    let resp = test::call_service(
-        &app,
-        auth_req!(
-            delete,
-            format!(
-                "/branch-addon-overrides?branch_id={}&addon_item_id={}",
-                branch, addon
-            ),
-            token
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), 204);
-    let resp = test::call_service(&app, branch_addons(&token)).await;
-    let addons: Vec<AddonItem> = test::read_body_json(resp).await;
-    assert_eq!(addons.len(), 1);
-    assert_eq!(addons[0].default_price, 1000);
 }
 
 // ── Server-side catalog: paginate / search / overridden filter + sort ─────────
