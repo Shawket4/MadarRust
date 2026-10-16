@@ -33,9 +33,9 @@ mkdir -p "$out"
 
 # Migration ranges: (last version BEFORE the phase, last version OF the phase).
 case "$phase" in
-  2) before=20261017010100; last=20261018299999; check=scripts/db_phase2_check.sql ;;
-  3) before=20261018299999; last=20261019299999; check=scripts/db_phase3_check.sql ;;
-  5) before=20261019299999; last=20261020299999; check=scripts/db_phase5_check.sql ;;
+  2) before=20261017010100; last=20261018999999; check=scripts/db_phase2_check.sql ;;
+  3) before=20261018999999; last=20261019999999; check=scripts/db_phase3_check.sql ;;
+  5) before=20261019999999; last=20261020999999; check=scripts/db_phase5_check.sql ;;
   *) echo "unknown phase $phase" >&2; exit 2 ;;
 esac
 
