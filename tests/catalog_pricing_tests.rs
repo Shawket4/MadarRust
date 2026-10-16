@@ -1417,7 +1417,13 @@ async fn the_server_prices_the_fixture_as_pinned(pool: PgPool) {
 
 // ── madar-catalog: the rule, the feed and the vectors ────────────────────────
 
-const VECTORS: &str = "../madar-shared/crates/madar-catalog/vectors/catalog_vectors.json";
+/// Where `MADAR_WRITE_CATALOG_VECTORS=1` writes: `MADAR_SHARED_DIR`, else the
+/// madar-shared checkout beside this repo.
+fn vectors_path() -> std::path::PathBuf {
+    let shared = std::env::var("MADAR_SHARED_DIR")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../madar-shared").into());
+    std::path::Path::new(&shared).join("crates/madar-catalog/vectors/catalog_vectors.json")
+}
 
 /// Every item of the fixture, by the key the vectors name it.
 fn fixture_items() -> Vec<(&'static str, Uuid)> {
@@ -1683,7 +1689,7 @@ async fn the_rule_the_feed_and_the_vectors_agree_with_the_server(pool: PgPool) {
     };
     let written = pretty(&serde_json::to_value(&vectors).unwrap());
     if std::env::var("MADAR_WRITE_CATALOG_VECTORS").is_ok() {
-        std::fs::write(VECTORS, &written).unwrap();
+        std::fs::write(vectors_path(), &written).unwrap();
         return;
     }
     if let Ok(dump) = std::env::var("MADAR_DUMP_CATALOG_VECTORS") {
