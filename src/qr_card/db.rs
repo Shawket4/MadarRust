@@ -68,7 +68,7 @@ pub async fn get_or_create_short_link(
     }
 
     // Slow path: create via Shlink, then cache.
-    let tags = vec![format!("madar"), format!("kind:{kind}")];
+    let tags = vec!["madar".to_string(), format!("kind:{kind}")];
     let short = provider
         .create_short_url(long_url, custom_slug, &tags)
         .await?;
