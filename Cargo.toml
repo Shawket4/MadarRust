@@ -295,3 +295,11 @@ path = "src/bin/authz_reconcile.rs"
 name = "sync-sweep-once"
 path = "src/bin/sync_sweep_once.rs"
 
+[[bin]]
+name = "sales-rollup-backfill"
+path = "src/bin/sales_rollup_backfill.rs"
+
+[[bin]]
+name = "report-rollup-reconcile"
+path = "src/bin/report_rollup_reconcile.rs"
+
