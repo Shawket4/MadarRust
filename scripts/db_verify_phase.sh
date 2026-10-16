@@ -29,6 +29,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 phase="${1:?phase (2|3|5)}"
+renames=""   # old=new table renames a phase makes (the same rows, a new name)
 src="${2:?source database}"
 out="${3:-db-verify-p${phase}-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$out"
@@ -37,7 +38,8 @@ mkdir -p "$out"
 case "$phase" in
   2) before=20261017010100; last=20261018999999; check=scripts/db_phase2_check.sql ;;
   3) before=20261018999999; last=20261019999999; check=scripts/db_phase3_check.sql ;;
-  5) before=20261019999999; last=20261020999999; check=scripts/db_phase5_check.sql ;;
+  5) before=20261019999999; last=20261020999999; check=scripts/db_phase5_check.sql
+     renames="loyalty_customers=loyalty_memberships" ;;
   *) echo "unknown phase $phase" >&2; exit 2 ;;
 esac
 
@@ -96,7 +98,8 @@ backfill() {
     5) for i in 1 2; do q -f scripts/db_phase5_backfill.sql > "$out/backfill_run$i.tsv"; done
        if grep -qv $'\t0$' "$out/backfill_run2.tsv"; then
          echo "!! second backfill run changed rows:"; cat "$out/backfill_run2.tsv"; return 1
-       fi ;;
+       fi
+       echo "OK backfills idempotent ($(wc -l < "$out/backfill_run2.tsv") backfills, second run changed 0 rows)" ;;
     *) : ;;
   esac
 }
@@ -121,11 +124,19 @@ else
 fi
 # Tables the phase CREATES have no "before": compare the tables that existed,
 # and list the new ones (with what each org sees in them) for the record.
-cut -f2 "$out/visible_before.tsv" | sort -u > "$out/tables_before.txt"
-awk -F'\t' 'NR==FNR { t[$1]; next } ($2 in t)' "$out/tables_before.txt" "$out/visible_after.tsv" > "$out/visible_after_existing.tsv"
+# A renamed table is compared under its new name.
+cp "$out/visible_before.tsv" "$out/visible_before_named.tsv"
+for r in $renames; do
+  awk -F'\t' -v OFS='\t' -v o="${r%%=*}" -v n="${r##*=}" '$2 == o { $2 = n } 1' \
+    "$out/visible_before_named.tsv" | sort > "$out/visible_before_named.tmp"
+  mv "$out/visible_before_named.tmp" "$out/visible_before_named.tsv"
+done
+sort -o "$out/visible_before_named.tsv" "$out/visible_before_named.tsv"
+cut -f2 "$out/visible_before_named.tsv" | sort -u > "$out/tables_before.txt"
+awk -F'\t' 'NR==FNR { t[$1]; next } ($2 in t)' "$out/tables_before.txt" "$out/visible_after.tsv" | sort > "$out/visible_after_existing.tsv"
 awk -F'\t' 'NR==FNR { t[$1]; next } !($2 in t)' "$out/tables_before.txt" "$out/visible_after.tsv" > "$out/visible_new_tables.tsv"
-if diff "$out/visible_before.tsv" "$out/visible_after_existing.tsv" > "$out/visible.diff"; then
-  echo "OK visible rows per org: identical ($(wc -l < "$out/visible_before.tsv") org x table)"
+if diff "$out/visible_before_named.tsv" "$out/visible_after_existing.tsv" > "$out/visible.diff"; then
+  echo "OK visible rows per org: identical ($(wc -l < "$out/visible_before.tsv") org x table${renames:+; renamed: $renames})"
 else
   echo "!! visible rows changed (see $out/visible.diff)"; fail=1
 fi
