@@ -7,6 +7,8 @@
 //! A LIVE sale of a deleted item is still refused: a till naming an item that
 //! no longer exists, for a sale happening now, is told to re-sync.
 
+mod common;
+
 use actix_web::{App, test, web};
 use madar_rust::auth::jwt::{JwtSecret, create_token};
 use madar_rust::models::UserRole;
@@ -266,19 +268,12 @@ async fn a_queued_sale_paid_by_a_tender_switched_off_since_still_lands(pool: PgP
 async fn a_queued_sale_with_an_extra_switched_off_since_still_lands(pool: PgPool) {
     let app = app!(pool);
     let s = shop(&pool).await;
-    let extra: Uuid = sqlx::query_scalar(
-        "INSERT INTO menu_item_optional_fields (menu_item_id, name, price) \
-         VALUES ($1, 'Extra shot', 100) RETURNING id",
+    // An optional field that has since been switched off.
+    let extra = common::legacy_catalog::optional_field(
+        &pool,
+        common::legacy_catalog::Optional::new(s.item, "Extra shot", 100).active(false),
     )
-    .bind(s.item)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    sqlx::query("UPDATE menu_item_optional_fields SET is_active = false WHERE id = $1")
-        .bind(extra)
-        .execute(&pool)
-        .await
-        .unwrap();
+    .await;
     let mut op = sale(&s, Uuid::new_v4());
     op["request"]["items"][0]["optional_field_ids"] = serde_json::json!([extra]);
     // (500 + the extra's 100) × 2, + 14%.

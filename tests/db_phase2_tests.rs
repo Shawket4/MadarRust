@@ -280,13 +280,18 @@ async fn the_legacy_catalog_is_prods_views_and_the_old_tables_are_archived(pool:
     .fetch_all(&pool)
     .await
     .unwrap();
-    // (archive also holds tables earlier migrations retired.)
-    let legacy: Vec<&String> = archived
-        .iter()
-        .filter(|t| t.contains("addon") || t.contains("menu_item_") || t.contains("branch_") && t.ends_with("overrides"))
-        .collect();
-    assert_eq!(legacy.len(), 12, "{archived:?}");
-    for t in &archived {
+    // `archive` also holds older retired tables (till_entities, …): check the 12.
+    let legacy = [
+        "addon_item_ingredients", "addon_items", "branch_addon_overrides",
+        "branch_channel_addon_overrides", "branch_channel_menu_overrides",
+        "branch_menu_overrides", "branch_menu_size_overrides", "menu_item_addon_overrides",
+        "menu_item_addon_slots", "menu_item_allowed_addons", "menu_item_optional_fields",
+        "menu_item_recipes",
+    ];
+    for t in legacy {
+        assert!(archived.iter().any(|a| a == t), "archive.{t} missing: {archived:?}");
+    }
+    for t in legacy {
         let can: bool = sqlx::query_scalar("SELECT has_table_privilege('madar_app', $1, 'SELECT')")
             .bind(format!("archive.{t}"))
             .fetch_one(&pool)

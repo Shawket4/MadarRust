@@ -558,7 +558,11 @@ BEGIN
     -- Combos module: one live deal rule (and a deleted one that must not project).
     INSERT INTO deal_rules (org_id, name, kind, qty, price) VALUES (org, 'Any 2 for 90', 'n_for_price', 2, 9000);
     INSERT INTO deal_rules (org_id, name, kind, qty, price, deleted_at) VALUES (org, 'Gone', 'n_for_price', 2, 9000, now());
-    INSERT INTO addon_items (org_id, name, type, default_price) VALUES (org, 'Oat milk', 'milk', 1500);
+    -- A legacy add-on (a view since DB Phase 2.4): its option in the type's group.
+    INSERT INTO modifier_groups (id, org_id, name, legacy_addon_type)
+      VALUES (md5(org::text || ':addon:milk')::uuid, org, 'milk', 'milk');
+    INSERT INTO modifier_options (group_id, name, price, legacy_source)
+      VALUES (md5(org::text || ':addon:milk')::uuid, 'Oat milk', 1500, 'addon');
     INSERT INTO customers (org_id, name, phone, phone_key) VALUES (org, 'Mona', '0100 123 4567', '01001234567');
     INSERT INTO staff_drinks (id, org_id, branch_id, menu_item_id, item_name, note, business_date, recorded_at)
       VALUES (gen_random_uuid(), org, br, NULL, 'Latte', 'for Sara, closing shift', current_date, now());

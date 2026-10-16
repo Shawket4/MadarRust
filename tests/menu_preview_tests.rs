@@ -68,7 +68,8 @@ async fn group(pool: &PgPool, org: Uuid, name: &str, ty: &str) -> Uuid {
     .unwrap()
 }
 
-/// A legacy addon + its unified option (same id), one ingredient line on both.
+/// An add-on option (its legacy row is the `addon_items` view over it) with one
+/// ingredient line. `org` and `ty` are carried by the group.
 async fn option(
     pool: &PgPool,
     org: Uuid,
@@ -79,11 +80,9 @@ async fn option(
     sort: i32,
     ing: (Uuid, &str, f64, &str),
 ) -> Uuid {
+    let _ = (org, ty);
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id).bind(org).bind(name).bind(ty).bind(price).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id).bind(ing.0).bind(ing.2).bind(ing.1).bind(ing.3).execute(pool).await.unwrap();
+    // The option IS the legacy add-on (`addon_items` is its compat view).
     sqlx::query("INSERT INTO modifier_options (id, group_id, name, price, sort) VALUES ($1, $2, $3, $4, $5)")
         .bind(id).bind(group).bind(name).bind(price).bind(sort).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('modifier_option', $1, $2, $3::numeric, $4)")
@@ -140,14 +139,12 @@ async fn fixture(pool: &PgPool) -> Fx {
     let can_size: Uuid = sqlx::query_scalar("INSERT INTO menu_item_sizes (menu_item_id, label, price, sort) VALUES ($1, 'Can', 170, 1) RETURNING id")
         .bind(item).fetch_one(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
-    for (ing, name, qty, unit) in [
+    for (ing, _name, qty, unit) in [
         (full_cream, "Full cream milk", 250.0, "g"),
         (house, "House beans", 18.0, "g"),
         (can, "Can", 1.0, "pcs"),
         (straw, "Straw", 1.0, "pcs"),
     ] {
-        sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, 'Can', $4, $5)")
-            .bind(item).bind(ing).bind(qty).bind(name).bind(unit).execute(pool).await.unwrap();
         sqlx::query("INSERT INTO recipe_lines (owner_type, owner_id, ingredient_id, quantity, unit) VALUES ('item_size', $1, $2, $3::numeric, $4)")
             .bind(can_size).bind(ing).bind(qty.to_string()).bind(unit).execute(pool).await.unwrap();
     }

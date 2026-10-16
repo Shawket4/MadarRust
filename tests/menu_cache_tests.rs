@@ -196,11 +196,20 @@ async fn with_the_cache_on_the_read_after_a_write_is_fresh(pool: PgPool) {
     assert_eq!(get!(&app, &s, "").as_array().map(Vec::len), Some(0));
 }
 
-/// Where the legacy catalog relations are still writable tables (every fresh
-/// database until Phase 2.4), writes to them bump nothing: the cache is OFF.
+/// Every database built from the migrations has prod's shape since DB Phase
+/// 2.4 (the legacy catalog relations are views), so the cache is usable. One
+/// where a legacy relation is still a writable table would see writes that
+/// bump nothing: the cache is OFF there.
 #[sqlx::test]
 async fn the_cache_is_off_where_legacy_relations_are_tables(pool: PgPool) {
-    let cache = MenuCache::with_ttl(Duration::from_secs(600));
-    assert!(!cache.usable(&pool).await);
+    assert!(MenuCache::with_ttl(Duration::from_secs(600)).usable(&pool).await);
+    // A database that still has the pre-2.4 shape (a writable legacy table).
+    sqlx::raw_sql(
+        "DROP VIEW branch_menu_overrides;
+         CREATE TABLE branch_menu_overrides (branch_id uuid, menu_item_id uuid);",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     assert!(!MenuCache::with_ttl(Duration::from_secs(600)).usable(&pool).await);
 }

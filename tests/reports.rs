@@ -409,12 +409,7 @@ async fn test_branch_sales_timeseries(pool: PgPool) {
         .await
         .unwrap();
     let addon_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Extra Cheese', 'ingredient', 50)")
-        .bind(addon_id)
-        .bind(org_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::addon_item(&pool, Some(addon_id), org_id, "Extra Cheese", "ingredient", 50).await;
     sqlx::query("INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, quantity, unit_price, line_total) VALUES ($1, $2, 'Extra Cheese', 3, 50, 150)")
         .bind(item_id)
         .bind(addon_id)
@@ -702,8 +697,7 @@ async fn test_branch_addon_sales(pool: PgPool) {
     let order_id = seed_order(&pool, branch_id, user_id, shift_id).await;
 
     let addon_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Extra Cheese', 'ingredient', 50)")
-        .bind(addon_id).bind(org_id).execute(&pool).await.unwrap();
+    common::legacy_catalog::addon_item(&pool, Some(addon_id), org_id, "Extra Cheese", "ingredient", 50).await;
 
     let category_id = Uuid::new_v4();
     sqlx::query("INSERT INTO categories (id, org_id, name) VALUES ($1, $2, 'Burgers')")
