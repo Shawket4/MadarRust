@@ -75,7 +75,6 @@ argon2             = "0.5"
 dotenvy            = "0.15"
 thiserror          = "2"
 tracing            = "0.1"
-tracing-actix-web  = "0.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures            = "0.3"
 image              = { version = "0.25", features = ["jpeg", "png", "gif", "webp", "bmp"] }
