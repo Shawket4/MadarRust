@@ -950,9 +950,9 @@ pub async fn list_menu_items(
                 mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
                 (
                     SELECT a.id::text
-                    FROM menu_item_recipes r
-                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    FROM compat.menu_item_recipes r
+                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
                     -- Deterministic: the group's display order (component_resolve agrees).
@@ -960,7 +960,7 @@ pub async fn list_menu_items(
                     LIMIT 1
                 ) AS default_milk_addon_id
          FROM menu_items mi
-         LEFT JOIN branch_menu_overrides bmo
+         LEFT JOIN compat.branch_menu_overrides bmo
                 ON bmo.menu_item_id = mi.id AND bmo.branch_id = $3
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
@@ -1106,7 +1106,7 @@ pub async fn list_menu_catalog(
     // matches nothing → identical to the plain org catalog.
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM menu_items mi
-         LEFT JOIN branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
+         LEFT JOIN compat.branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
            AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
@@ -1136,9 +1136,9 @@ pub async fn list_menu_catalog(
                 mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
                 (
                     SELECT a.id::text
-                    FROM menu_item_recipes r
-                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    FROM compat.menu_item_recipes r
+                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
                     -- Deterministic: the group's display order (component_resolve agrees).
@@ -1146,7 +1146,7 @@ pub async fn list_menu_catalog(
                     LIMIT 1
                 ) AS default_milk_addon_id
          FROM menu_items mi
-         LEFT JOIN branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
+         LEFT JOIN compat.branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
            AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
@@ -1436,9 +1436,9 @@ pub async fn update_menu_item(
                    created_at, updated_at, deleted_at, kind,
                    (
                        SELECT a.id::text
-                       FROM menu_item_recipes r
-                       JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                       JOIN addon_items a ON a.id = ai.addon_item_id
+                       FROM compat.menu_item_recipes r
+                       JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                       JOIN compat.addon_items a ON a.id = ai.addon_item_id
                        WHERE r.menu_item_id = menu_items.id
                          AND a.type = 'milk_type'
                        -- Deterministic: the group's display order (component_resolve agrees).
@@ -1745,8 +1745,8 @@ pub async fn list_addon_items(
     // branch-disabled addons are excluded. Without it ($3 NULL), the LEFT JOIN matches
     // nothing → the plain org list (legacy contract). A custom group's options
     // (type NULL) are not addons: see `AddonItem`.
-    const FILTER: &str = "FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao
+    const FILTER: &str = "FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao
                 ON bao.addon_item_id = a.id AND bao.branch_id = $3
          WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
@@ -1770,7 +1770,7 @@ pub async fn list_addon_items(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 COALESCE(bao.price_override, a.default_price) AS default_price,
                 a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
+                (SELECT org_ingredient_id FROM compat.addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          {FILTER}
          ORDER BY a.type ASC, a.created_at ASC
          LIMIT $5 OFFSET $6"
@@ -1877,8 +1877,8 @@ pub async fn list_addon_catalog(
         .filter(|s| !s.is_empty());
 
     let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
+        "SELECT COUNT(*) FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
          WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
@@ -1899,9 +1899,9 @@ pub async fn list_addon_catalog(
     let data = sqlx::query_as::<_, AddonItem>(&format!(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 a.default_price, a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
-         FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
+                (SELECT org_ingredient_id FROM compat.addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
+         FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
          WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
@@ -2246,7 +2246,7 @@ pub async fn list_optional_fields(
                org_ingredient_id, ingredient_name, ingredient_unit,
                quantity_used, size_label::text,
                is_active, created_at, updated_at
-        FROM menu_item_optional_fields
+        FROM compat.menu_item_optional_fields
         WHERE menu_item_id = $1
         ORDER BY name ASC
         "#,
@@ -2348,7 +2348,7 @@ async fn fetch_branch_size_overrides(
 ) -> Result<Vec<BranchSizeOverride>, AppError> {
     Ok(sqlx::query_as::<_, BranchSizeOverride>(
         "SELECT size_label::text AS size_label, price_override
-         FROM branch_menu_size_overrides
+         FROM compat.branch_menu_size_overrides
          WHERE branch_id = $1 AND menu_item_id = $2
          ORDER BY size_label",
     )
@@ -2405,7 +2405,7 @@ pub async fn list_branch_menu_overrides(
 
     let mut rows = sqlx::query_as::<_, BranchMenuOverride>(
         "SELECT branch_id, menu_item_id, price_override, is_available, updated_at
-         FROM branch_menu_overrides WHERE branch_id = $1",
+         FROM compat.branch_menu_overrides WHERE branch_id = $1",
     )
     .bind(query.branch_id)
     .fetch_all(pool.get_ref())
@@ -2414,7 +2414,7 @@ pub async fn list_branch_menu_overrides(
     // Attach each item's size overrides (single round trip, grouped by item).
     let size_rows = sqlx::query_as::<_, (Uuid, String, i32)>(
         "SELECT menu_item_id, size_label::text, price_override
-         FROM branch_menu_size_overrides WHERE branch_id = $1",
+         FROM compat.branch_menu_size_overrides WHERE branch_id = $1",
     )
     .bind(query.branch_id)
     .fetch_all(pool.get_ref())
@@ -2498,7 +2498,7 @@ pub async fn list_branch_addon_overrides(
 
     let rows = sqlx::query_as::<_, BranchAddonOverride>(
         "SELECT branch_id, addon_item_id, price_override, is_available, updated_at
-         FROM branch_addon_overrides WHERE branch_id = $1",
+         FROM compat.branch_addon_overrides WHERE branch_id = $1",
     )
     .bind(query.branch_id)
     .fetch_all(pool.get_ref())
@@ -2574,9 +2574,9 @@ async fn fetch_menu_item(pool: &PgPool, id: Uuid) -> Result<MenuItem, AppError> 
                 created_at, updated_at, deleted_at, kind,
                 (
                     SELECT a.id::text
-                    FROM menu_item_recipes r
-                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    FROM compat.menu_item_recipes r
+                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = menu_items.id
                       AND a.type = 'milk_type'
                     -- Deterministic: the group's display order (component_resolve agrees).
@@ -2610,7 +2610,7 @@ async fn fetch_all_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, 
 async fn fetch_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, AppError> {
     Ok(sqlx::query_as::<_, ItemSize>(
         "SELECT id, menu_item_id, label::text, price_override, is_active
-         FROM item_sizes
+         FROM compat.item_sizes
          WHERE menu_item_id = $1
          ORDER BY label ASC",
     )
@@ -2623,7 +2623,7 @@ async fn fetch_addon_slots(pool: &PgPool, item_id: Uuid) -> Result<Vec<AddonSlot
     Ok(sqlx::query_as::<_, AddonSlot>(
         "SELECT id, menu_item_id, addon_type, label, label_translations, is_required,
                 min_selections, max_selections, created_at
-         FROM menu_item_addon_slots
+         FROM compat.menu_item_addon_slots
          WHERE menu_item_id = $1
          ORDER BY created_at ASC",
     )
@@ -2634,7 +2634,7 @@ async fn fetch_addon_slots(pool: &PgPool, item_id: Uuid) -> Result<Vec<AddonSlot
 
 async fn fetch_allowed_addon_ids(pool: &PgPool, item_id: Uuid) -> Result<Vec<Uuid>, AppError> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT addon_item_id FROM menu_item_allowed_addons
+        "SELECT addon_item_id FROM compat.menu_item_allowed_addons
          WHERE menu_item_id = $1
          ORDER BY sort_order ASC, created_at ASC",
     )
@@ -2653,7 +2653,7 @@ async fn fetch_optional_fields(
                 org_ingredient_id, ingredient_name, ingredient_unit,
                 quantity_used, size_label::text,
                 is_active, created_at, updated_at
-         FROM menu_item_optional_fields
+         FROM compat.menu_item_optional_fields
          WHERE menu_item_id = $1 AND is_active = true
          ORDER BY name ASC",
     )
@@ -2669,7 +2669,7 @@ async fn fetch_item_recipes(pool: &PgPool, item_id: Uuid) -> Result<Vec<MenuItem
                   (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category,
                   r.size_label::text,
                   i.yield_pct::float8 AS yield_pct
-           FROM   menu_item_recipes r
+           FROM   compat.menu_item_recipes r
            LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
            WHERE  r.menu_item_id = $1"#,
     )
@@ -2700,9 +2700,9 @@ pub(crate) async fn addon_items_by_ids(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 COALESCE(bao.price_override, a.default_price) AS default_price,
                 a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
-         FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
+                (SELECT org_ingredient_id FROM compat.addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
+         FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
          WHERE a.org_id = $1 AND a.id = ANY($3) AND a.type IS NOT NULL",
     )
     .bind(org_id)
@@ -2711,7 +2711,7 @@ pub(crate) async fn addon_items_by_ids(
     .fetch_all(&mut *conn)
     .await?;
     let available: std::collections::HashMap<Uuid, bool> = sqlx::query_as::<_, (Uuid, bool)>(
-        "SELECT addon_item_id, is_available FROM branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = ANY($2)",
+        "SELECT addon_item_id, is_available FROM compat.branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = ANY($2)",
     )
     .bind(branch_id)
     .bind(ids)
@@ -2741,7 +2741,7 @@ pub(crate) async fn addon_items_by_ids(
     ) in sqlx::query_as::<_, IngRow>(
         "SELECT aii.addon_item_id, aii.org_ingredient_id, aii.quantity_used, aii.ingredient_name, \
                 aii.ingredient_unit, ic.id, ic.slug \
-           FROM addon_item_ingredients aii \
+           FROM compat.addon_item_ingredients aii \
            LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id \
            LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id \
           WHERE aii.addon_item_id = ANY($1) ORDER BY aii.addon_item_id, aii.ingredient_name",
@@ -2789,7 +2789,7 @@ async fn fetch_addon_ingredients(
     Ok(sqlx::query_as::<_, AddonItemIngredient>(
         "SELECT aii.org_ingredient_id, aii.quantity_used, aii.ingredient_name, aii.ingredient_unit,
                 ic.id AS category_id, ic.slug AS category_slug
-         FROM   addon_item_ingredients aii
+         FROM   compat.addon_item_ingredients aii
          LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id
          LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id
          WHERE  aii.addon_item_id = $1

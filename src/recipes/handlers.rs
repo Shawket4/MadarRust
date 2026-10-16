@@ -108,7 +108,7 @@ pub async fn list_drink_recipes(
                ingredient_name,
                ingredient_unit AS unit,
                quantity_used
-        FROM menu_item_recipes
+        FROM compat.menu_item_recipes
         WHERE menu_item_id = $1
         ORDER BY size_label, ingredient_name
         "#,
@@ -195,7 +195,7 @@ pub async fn list_addon_ingredients(
                aii.ingredient_unit AS unit,
                aii.quantity_used,
                oi.yield_pct::float8 AS yield_pct
-        FROM addon_item_ingredients aii
+        FROM compat.addon_item_ingredients aii
         LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id
         WHERE aii.addon_item_id = $1
         ORDER BY aii.ingredient_name
@@ -371,7 +371,7 @@ async fn require_addon_org(
     use crate::models::UserRole;
 
     let addon_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM addon_items WHERE id = $1")
+        sqlx::query_scalar("SELECT org_id FROM compat.addon_items WHERE id = $1")
             .bind(addon_item_id)
             .fetch_optional(pool)
             .await?

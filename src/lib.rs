@@ -20,6 +20,7 @@ pub mod branches;
 pub mod bundles;
 pub mod cache;
 pub mod client_seen;
+pub mod compat;
 pub mod compat_usage;
 pub mod clock;
 pub mod combos;

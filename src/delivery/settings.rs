@@ -644,7 +644,7 @@ pub async fn list_channel_overrides(
 
     let rows: Vec<ChannelMenuOverride> = sqlx::query_as(
         "SELECT branch_id, menu_item_id, channel::text, price_override, is_available \
-         FROM branch_channel_menu_overrides WHERE branch_id = $1 AND channel = $2::delivery_channel \
+         FROM compat.branch_channel_menu_overrides WHERE branch_id = $1 AND channel = $2::delivery_channel \
          ORDER BY menu_item_id",
     )
     .bind(query.branch_id)
@@ -728,7 +728,7 @@ pub async fn list_channel_addon_overrides(
 
     let rows: Vec<ChannelAddonOverride> = sqlx::query_as(
         "SELECT branch_id, addon_item_id, channel::text, price_override, is_available \
-         FROM branch_channel_addon_overrides WHERE branch_id = $1 AND channel = $2::delivery_channel \
+         FROM compat.branch_channel_addon_overrides WHERE branch_id = $1 AND channel = $2::delivery_channel \
          ORDER BY addon_item_id",
     )
     .bind(query.branch_id)
