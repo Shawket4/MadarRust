@@ -216,6 +216,45 @@ jobs:
 
           docker pull "$DEPLOY_IMAGE"
 
+          # ── Back up prod BEFORE the new container starts ──────────────────────
+          # The new binary applies its migrations on boot, so this dump is the
+          # rollback point for them. Custom format (pg_restore-able), dated,
+          # the last 10 kept. ANY failure here stops the deploy: the old
+          # container keeps running and nothing is migrated.
+          #
+          # Postgres runs on this host, not in compose; the backend reaches it
+          # as `host.docker.internal`, which only resolves inside a container.
+          # Same connection string the backend uses (from its own .env), with
+          # the host's name for the same server — as repair-demo-db.yml does.
+          BACKUP_DIR=/opt/madar-rust/db-backups
+          mkdir -p "$BACKUP_DIR"
+          chmod 700 "$BACKUP_DIR"
+          DB_URL=$(grep -E '^DATABASE_URL=' /opt/madar-rust/.env | head -1 | cut -d= -f2-)
+          DB_URL=${DB_URL%\"}; DB_URL=${DB_URL#\"}
+          DB_URL=${DB_URL%\'}; DB_URL=${DB_URL#\'}
+          DB_URL=${DB_URL//host.docker.internal/127.0.0.1}
+          [ -n "$DB_URL" ] || { echo "::error::DATABASE_URL not found in /opt/madar-rust/.env"; exit 1; }
+          STAMP=$(date -u +%Y%m%d_%H%M%S)
+          NAME="madar_pre_deploy_${STAMP}_${DEPLOY_IMAGE##*:}.dump"
+          TMP="$BACKUP_DIR/.${NAME}.partial"
+          # pg_dump must be at least the server's major version (prod: 17).
+          # Use the host's when it is new enough, else the postgres:17 image's
+          # (on the host network, so 127.0.0.1 is this host).
+          HOST_MAJOR=$(pg_dump --version 2>/dev/null | sed -nE 's/.* ([0-9]+)\..*/\1/p' || true)
+          if [ -n "$HOST_MAJOR" ] && [ "$HOST_MAJOR" -ge 17 ]; then
+            pg_dump --format=custom --file="$TMP" "$DB_URL"
+            pg_restore --list "$TMP" > /dev/null
+          else
+            docker run --rm --network host -v "$BACKUP_DIR:/backup" postgres:17 \
+              sh -c 'pg_dump --format=custom --file="/backup/$0" "$1" && pg_restore --list "/backup/$0" > /dev/null' \
+              ".${NAME}.partial" "$DB_URL"
+          fi
+          [ -s "$TMP" ] || { echo "::error::the pre-deploy dump is empty"; exit 1; }
+          mv "$TMP" "$BACKUP_DIR/$NAME"
+          echo "✅ pre-deploy backup $BACKUP_DIR/$NAME ($(du -h "$BACKUP_DIR/$NAME" | cut -f1))"
+          ls -1t "$BACKUP_DIR"/madar_pre_deploy_*.dump | tail -n +11 | xargs -r rm -f --
+          rm -f "$BACKUP_DIR"/.madar_pre_deploy_*.partial
+
           # Point `:latest` at what is actually deployed.
           #
           # The compose file falls back to `:latest` when BACKEND_IMAGE is unset,

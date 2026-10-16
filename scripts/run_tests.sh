@@ -21,6 +21,9 @@
 # Usage:
 #   scripts/run_tests.sh                 # everything
 #   scripts/run_tests.sh orders menu     # named suites (no `tests/` prefix)
+#   MADAR_TEST_ARCHIVE=/tmp/t.tar.zst scripts/run_tests.sh   # from a nextest archive
+#     (`cargo nextest archive --archive-file /tmp/t.tar.zst`): nothing is rebuilt,
+#     and another worktree sharing CARGO_TARGET_DIR cannot swap binaries mid-run.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -65,7 +68,12 @@ for t in "${targets[@]}"; do
   printf '%-34s ' "$t"
   # No colour: CI sets CARGO_TERM_COLOR=always, and an escape code in front
   # of "Summary" hid every suite's result from the grep below.
-  out="$(cargo nextest run --color never --failure-output final $t 2>&1)"
+  if [ -n "${MADAR_TEST_ARCHIVE:-}" ]; then
+    out="$(cargo nextest run --archive-file "$MADAR_TEST_ARCHIVE" --workspace-remap . \
+             --color never --failure-output final $t 2>&1)"
+  else
+    out="$(cargo nextest run --color never --failure-output final $t 2>&1)"
+  fi
   line="$(printf '%s' "$out" | grep -E '^ +Summary' | tail -1)"
   if [ -z "$line" ]; then
     echo "NO SUMMARY (see below)"

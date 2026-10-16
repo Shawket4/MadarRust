@@ -1,0 +1,287 @@
+# Expected schema drift: migrations/ from scratch (<) vs the prod schema dump migrated to head (>).
+# It is exactly the hand-applied deploy/menu_unification_shim.sql (12 legacy catalog tables
+# replaced by 11 read-only views, menu_item_addon_overrides dropped) plus the stray
+# _sqlx_test schema in prod. Phase 2.4 converges migrations with prod and empties this file.
+# Regenerate: see the schema-drift job in .github/workflows/ci.yml.
+> column _sqlx_test.databases.created_at timestamp with time zone not null default now()
+> column _sqlx_test.databases.db_name text not null
+> column _sqlx_test.databases.test_path text not null
+< column public.addon_item_ingredients.addon_item_id uuid not null
+< column public.addon_item_ingredients.created_at timestamp with time zone not null default now()
+< column public.addon_item_ingredients.id uuid not null default gen_random_uuid()
+< column public.addon_item_ingredients.ingredient_name text not null
+< column public.addon_item_ingredients.ingredient_unit text not null
+> column public.addon_item_ingredients.addon_item_id uuid
+> column public.addon_item_ingredients.created_at timestamp with time zone
+> column public.addon_item_ingredients.id uuid
+> column public.addon_item_ingredients.ingredient_name text
+> column public.addon_item_ingredients.ingredient_unit text
+< column public.addon_item_ingredients.quantity_used numeric(12,3) not null
+< column public.addon_item_ingredients.updated_at timestamp with time zone not null default now()
+< column public.addon_items.created_at timestamp with time zone not null default now()
+< column public.addon_items.default_price integer not null default 0
+< column public.addon_items.id uuid not null default gen_random_uuid()
+< column public.addon_items.is_active boolean not null default true
+< column public.addon_items.name text not null
+< column public.addon_items.name_translations jsonb not null default '{}'::jsonb
+< column public.addon_items.org_id uuid not null
+< column public.addon_items.type text not null
+< column public.addon_items.updated_at timestamp with time zone not null default now()
+> column public.addon_item_ingredients.quantity_used numeric(12,3)
+> column public.addon_item_ingredients.updated_at timestamp with time zone
+> column public.addon_items.created_at timestamp with time zone
+> column public.addon_items.default_price integer
+> column public.addon_items.id uuid
+> column public.addon_items.is_active boolean
+> column public.addon_items.name text
+> column public.addon_items.name_translations jsonb
+> column public.addon_items.org_id uuid
+> column public.addon_items.type text
+> column public.addon_items.updated_at timestamp with time zone
+< column public.branch_addon_overrides.addon_item_id uuid not null
+< column public.branch_addon_overrides.branch_id uuid not null
+< column public.branch_addon_overrides.is_available boolean not null default true
+> column public.branch_addon_overrides.addon_item_id uuid
+> column public.branch_addon_overrides.branch_id uuid
+> column public.branch_addon_overrides.is_available boolean
+< column public.branch_addon_overrides.updated_at timestamp with time zone not null default now()
+> column public.branch_addon_overrides.updated_at timestamp with time zone
+< column public.branch_channel_addon_overrides.addon_item_id uuid not null
+< column public.branch_channel_addon_overrides.branch_id uuid not null
+< column public.branch_channel_addon_overrides.channel delivery_channel not null
+> column public.branch_channel_addon_overrides.addon_item_id uuid
+> column public.branch_channel_addon_overrides.branch_id uuid
+> column public.branch_channel_addon_overrides.channel delivery_channel
+< column public.branch_channel_addon_overrides.updated_at timestamp with time zone not null default now()
+< column public.branch_channel_menu_overrides.branch_id uuid not null
+< column public.branch_channel_menu_overrides.channel delivery_channel not null
+> column public.branch_channel_addon_overrides.updated_at timestamp with time zone
+> column public.branch_channel_menu_overrides.branch_id uuid
+> column public.branch_channel_menu_overrides.channel delivery_channel
+< column public.branch_channel_menu_overrides.menu_item_id uuid not null
+> column public.branch_channel_menu_overrides.menu_item_id uuid
+< column public.branch_channel_menu_overrides.updated_at timestamp with time zone not null default now()
+> column public.branch_channel_menu_overrides.updated_at timestamp with time zone
+< column public.branch_menu_overrides.branch_id uuid not null
+< column public.branch_menu_overrides.is_available boolean not null default true
+< column public.branch_menu_overrides.menu_item_id uuid not null
+> column public.branch_menu_overrides.branch_id uuid
+> column public.branch_menu_overrides.is_available boolean
+> column public.branch_menu_overrides.menu_item_id uuid
+< column public.branch_menu_overrides.updated_at timestamp with time zone not null default now()
+< column public.branch_menu_size_overrides.branch_id uuid not null
+< column public.branch_menu_size_overrides.menu_item_id uuid not null
+< column public.branch_menu_size_overrides.price_override integer not null
+< column public.branch_menu_size_overrides.size_label text not null
+< column public.branch_menu_size_overrides.updated_at timestamp with time zone not null default now()
+> column public.branch_menu_overrides.updated_at timestamp with time zone
+> column public.branch_menu_size_overrides.branch_id uuid
+> column public.branch_menu_size_overrides.menu_item_id uuid
+> column public.branch_menu_size_overrides.price_override integer
+> column public.branch_menu_size_overrides.size_label text
+> column public.branch_menu_size_overrides.updated_at timestamp with time zone
+< column public.menu_item_addon_overrides.addon_item_id uuid not null
+< column public.menu_item_addon_overrides.combo_addon_item_id uuid
+< column public.menu_item_addon_overrides.created_at timestamp with time zone not null default now()
+< column public.menu_item_addon_overrides.id uuid not null default gen_random_uuid()
+< column public.menu_item_addon_overrides.ingredient_name text not null
+< column public.menu_item_addon_overrides.ingredient_unit text not null
+< column public.menu_item_addon_overrides.menu_item_id uuid not null
+< column public.menu_item_addon_overrides.org_ingredient_id uuid
+< column public.menu_item_addon_overrides.quantity_used numeric(12,3) not null
+< column public.menu_item_addon_overrides.replaces_org_ingredient_id uuid
+< column public.menu_item_addon_overrides.size_label text
+< column public.menu_item_addon_overrides.updated_at timestamp with time zone not null default now()
+< column public.menu_item_addon_slots.addon_type text not null
+< column public.menu_item_addon_slots.created_at timestamp with time zone not null default now()
+< column public.menu_item_addon_slots.id uuid not null default gen_random_uuid()
+< column public.menu_item_addon_slots.is_required boolean not null default false
+> column public.menu_item_addon_slots.addon_type text
+> column public.menu_item_addon_slots.created_at timestamp with time zone
+> column public.menu_item_addon_slots.id uuid
+> column public.menu_item_addon_slots.is_required boolean
+< column public.menu_item_addon_slots.label_translations jsonb not null default '{}'::jsonb
+> column public.menu_item_addon_slots.label_translations jsonb
+< column public.menu_item_addon_slots.menu_item_id uuid not null
+< column public.menu_item_addon_slots.min_selections integer not null default 0
+< column public.menu_item_allowed_addons.addon_item_id uuid not null
+< column public.menu_item_allowed_addons.created_at timestamp with time zone not null default now()
+< column public.menu_item_allowed_addons.menu_item_id uuid not null
+< column public.menu_item_allowed_addons.sort_order integer not null default 0
+> column public.menu_item_addon_slots.menu_item_id uuid
+> column public.menu_item_addon_slots.min_selections integer
+> column public.menu_item_allowed_addons.addon_item_id uuid
+> column public.menu_item_allowed_addons.created_at timestamp with time zone
+> column public.menu_item_allowed_addons.menu_item_id uuid
+> column public.menu_item_allowed_addons.sort_order integer
+< column public.menu_item_optional_fields.created_at timestamp with time zone not null default now()
+< column public.menu_item_optional_fields.id uuid not null default gen_random_uuid()
+> column public.menu_item_optional_fields.created_at timestamp with time zone
+> column public.menu_item_optional_fields.id uuid
+< column public.menu_item_optional_fields.is_active boolean not null default true
+< column public.menu_item_optional_fields.menu_item_id uuid not null
+< column public.menu_item_optional_fields.name text not null
+< column public.menu_item_optional_fields.name_translations jsonb not null default '{}'::jsonb
+> column public.menu_item_optional_fields.is_active boolean
+> column public.menu_item_optional_fields.menu_item_id uuid
+> column public.menu_item_optional_fields.name text
+> column public.menu_item_optional_fields.name_translations jsonb
+< column public.menu_item_optional_fields.price integer not null default 0
+> column public.menu_item_optional_fields.price integer
+< column public.menu_item_optional_fields.updated_at timestamp with time zone not null default now()
+> column public.menu_item_optional_fields.updated_at timestamp with time zone
+< column public.menu_item_recipes.created_at timestamp with time zone not null default now()
+< column public.menu_item_recipes.id uuid not null default gen_random_uuid()
+< column public.menu_item_recipes.ingredient_name text not null
+< column public.menu_item_recipes.ingredient_unit text not null
+< column public.menu_item_recipes.menu_item_id uuid not null
+> column public.menu_item_recipes.created_at timestamp with time zone
+> column public.menu_item_recipes.id uuid
+> column public.menu_item_recipes.ingredient_name text
+> column public.menu_item_recipes.ingredient_unit text
+> column public.menu_item_recipes.menu_item_id uuid
+< column public.menu_item_recipes.quantity_used numeric(12,3) not null
+< column public.menu_item_recipes.size_label text not null
+< column public.menu_item_recipes.updated_at timestamp with time zone not null default now()
+> column public.menu_item_recipes.quantity_used numeric(12,3)
+> column public.menu_item_recipes.size_label text
+> column public.menu_item_recipes.updated_at timestamp with time zone
+> constraint _sqlx_test.databases databases_pkey: PRIMARY KEY (db_name)
+< constraint public.addon_item_ingredients addon_item_ingredients_addon_item_id_fkey: FOREIGN KEY (addon_item_id) REFERENCES addon_items(id) ON DELETE CASCADE
+< constraint public.addon_item_ingredients addon_item_ingredients_org_ingredient_id_fkey: FOREIGN KEY (org_ingredient_id) REFERENCES org_ingredients(id) ON DELETE RESTRICT
+< constraint public.addon_item_ingredients addon_item_ingredients_pkey: PRIMARY KEY (id)
+< constraint public.addon_item_ingredients addon_item_ingredients_unique: UNIQUE (addon_item_id, ingredient_name)
+< constraint public.addon_items addon_items_org_id_fkey: FOREIGN KEY (org_id) REFERENCES organizations(id)
+< constraint public.addon_items addon_items_org_id_name_type_key: UNIQUE (org_id, name, type)
+< constraint public.addon_items addon_items_pkey: PRIMARY KEY (id)
+< constraint public.branch_addon_overrides branch_addon_overrides_addon_item_id_fkey: FOREIGN KEY (addon_item_id) REFERENCES addon_items(id) ON DELETE CASCADE
+< constraint public.branch_addon_overrides branch_addon_overrides_branch_id_fkey: FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+< constraint public.branch_addon_overrides branch_addon_overrides_pkey: PRIMARY KEY (branch_id, addon_item_id)
+< constraint public.branch_addon_overrides branch_addon_overrides_price_nonneg: CHECK (((price_override IS NULL) OR (price_override >= 0)))
+< constraint public.branch_channel_addon_overrides branch_channel_addon_overrides_addon_item_id_fkey: FOREIGN KEY (addon_item_id) REFERENCES addon_items(id) ON DELETE CASCADE
+< constraint public.branch_channel_addon_overrides branch_channel_addon_overrides_branch_id_fkey: FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+< constraint public.branch_channel_addon_overrides branch_channel_addon_overrides_pkey: PRIMARY KEY (branch_id, addon_item_id, channel)
+< constraint public.branch_channel_addon_overrides branch_channel_addon_overrides_price_nonneg: CHECK (((price_override IS NULL) OR (price_override >= 0)))
+< constraint public.branch_channel_menu_overrides branch_channel_menu_overrides_branch_id_fkey: FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+< constraint public.branch_channel_menu_overrides branch_channel_menu_overrides_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.branch_channel_menu_overrides branch_channel_menu_overrides_pkey: PRIMARY KEY (branch_id, menu_item_id, channel)
+< constraint public.branch_channel_menu_overrides branch_channel_menu_overrides_price_nonneg: CHECK (((price_override IS NULL) OR (price_override >= 0)))
+< constraint public.branch_menu_overrides branch_menu_overrides_branch_id_fkey: FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+< constraint public.branch_menu_overrides branch_menu_overrides_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.branch_menu_overrides branch_menu_overrides_pkey: PRIMARY KEY (branch_id, menu_item_id)
+< constraint public.branch_menu_overrides branch_menu_overrides_price_nonneg: CHECK (((price_override IS NULL) OR (price_override >= 0)))
+< constraint public.branch_menu_size_overrides branch_menu_size_overrides_branch_id_fkey: FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+< constraint public.branch_menu_size_overrides branch_menu_size_overrides_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.branch_menu_size_overrides branch_menu_size_overrides_pkey: PRIMARY KEY (branch_id, menu_item_id, size_label)
+< constraint public.branch_menu_size_overrides branch_menu_size_overrides_price_nonneg: CHECK ((price_override >= 0))
+< constraint public.menu_item_addon_overrides menu_item_addon_overrides_addon_item_id_fkey: FOREIGN KEY (addon_item_id) REFERENCES addon_items(id) ON DELETE CASCADE
+< constraint public.menu_item_addon_overrides menu_item_addon_overrides_combo_addon_item_id_fkey: FOREIGN KEY (combo_addon_item_id) REFERENCES addon_items(id) ON DELETE SET NULL
+< constraint public.menu_item_addon_overrides menu_item_addon_overrides_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.menu_item_addon_overrides menu_item_addon_overrides_org_ingredient_id_fkey: FOREIGN KEY (org_ingredient_id) REFERENCES org_ingredients(id) ON DELETE SET NULL
+< constraint public.menu_item_addon_overrides menu_item_addon_overrides_pkey: PRIMARY KEY (id)
+< constraint public.menu_item_addon_overrides menu_item_addon_overrides_replaces_org_ingredient_id_fkey: FOREIGN KEY (replaces_org_ingredient_id) REFERENCES org_ingredients(id) ON DELETE SET NULL
+< constraint public.menu_item_addon_slots menu_item_addon_slots_menu_item_id_addon_type_key: UNIQUE (menu_item_id, addon_type)
+< constraint public.menu_item_addon_slots menu_item_addon_slots_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.menu_item_addon_slots menu_item_addon_slots_pkey: PRIMARY KEY (id)
+< constraint public.menu_item_allowed_addons menu_item_allowed_addons_addon_item_id_fkey: FOREIGN KEY (addon_item_id) REFERENCES addon_items(id) ON DELETE CASCADE
+< constraint public.menu_item_allowed_addons menu_item_allowed_addons_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.menu_item_allowed_addons menu_item_allowed_addons_pkey: PRIMARY KEY (menu_item_id, addon_item_id)
+< constraint public.menu_item_optional_fields chk_optional_ingredient: CHECK ((((org_ingredient_id IS NULL) AND (ingredient_name IS NULL) AND (ingredient_unit IS NULL) AND (quantity_used IS NULL)) OR ((ingredient_name IS NOT NULL) AND (ingredient_unit IS NOT NULL) AND (quantity_used IS NOT NULL))))
+< constraint public.menu_item_optional_fields menu_item_optional_fields_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.menu_item_optional_fields menu_item_optional_fields_org_ingredient_id_fkey: FOREIGN KEY (org_ingredient_id) REFERENCES org_ingredients(id) ON DELETE SET NULL
+< constraint public.menu_item_optional_fields menu_item_optional_fields_pkey: PRIMARY KEY (id)
+< constraint public.menu_item_recipes menu_item_recipes_menu_item_id_fkey: FOREIGN KEY (menu_item_id) REFERENCES menu_items(id) ON DELETE CASCADE
+< constraint public.menu_item_recipes menu_item_recipes_org_ingredient_id_fkey: FOREIGN KEY (org_ingredient_id) REFERENCES org_ingredients(id) ON DELETE RESTRICT
+< constraint public.menu_item_recipes menu_item_recipes_pkey: PRIMARY KEY (id)
+< constraint public.menu_item_recipes menu_item_recipes_unique: UNIQUE (menu_item_id, size_label, ingredient_name)
+< constraint public.order_item_addons order_item_addons_addon_item_id_fkey: FOREIGN KEY (addon_item_id) REFERENCES addon_items(id)
+< constraint public.order_item_optionals order_item_optionals_optional_field_id_fkey: FOREIGN KEY (optional_field_id) REFERENCES menu_item_optional_fields(id) ON DELETE SET NULL
+> index _sqlx_test.databases: CREATE INDEX ON _sqlx_test.databases USING btree (created_at)
+> index _sqlx_test.databases: CREATE UNIQUE INDEX ON _sqlx_test.databases USING btree (db_name)
+< index public.addon_item_ingredients: CREATE UNIQUE INDEX ON public.addon_item_ingredients USING btree (addon_item_id, ingredient_name)
+< index public.addon_item_ingredients: CREATE UNIQUE INDEX ON public.addon_item_ingredients USING btree (id)
+< index public.addon_items: CREATE UNIQUE INDEX ON public.addon_items USING btree (id)
+< index public.addon_items: CREATE UNIQUE INDEX ON public.addon_items USING btree (org_id, name, type)
+< index public.branch_addon_overrides: CREATE INDEX ON public.branch_addon_overrides USING btree (addon_item_id)
+< index public.branch_addon_overrides: CREATE UNIQUE INDEX ON public.branch_addon_overrides USING btree (branch_id, addon_item_id)
+< index public.branch_channel_addon_overrides: CREATE INDEX ON public.branch_channel_addon_overrides USING btree (addon_item_id)
+< index public.branch_channel_addon_overrides: CREATE UNIQUE INDEX ON public.branch_channel_addon_overrides USING btree (branch_id, addon_item_id, channel)
+< index public.branch_channel_menu_overrides: CREATE INDEX ON public.branch_channel_menu_overrides USING btree (menu_item_id)
+< index public.branch_channel_menu_overrides: CREATE UNIQUE INDEX ON public.branch_channel_menu_overrides USING btree (branch_id, menu_item_id, channel)
+< index public.branch_menu_overrides: CREATE INDEX ON public.branch_menu_overrides USING btree (menu_item_id)
+< index public.branch_menu_overrides: CREATE UNIQUE INDEX ON public.branch_menu_overrides USING btree (branch_id, menu_item_id)
+< index public.branch_menu_size_overrides: CREATE INDEX ON public.branch_menu_size_overrides USING btree (menu_item_id)
+< index public.branch_menu_size_overrides: CREATE UNIQUE INDEX ON public.branch_menu_size_overrides USING btree (branch_id, menu_item_id, size_label)
+< index public.menu_item_addon_overrides: CREATE INDEX ON public.menu_item_addon_overrides USING btree (menu_item_id, addon_item_id)
+< index public.menu_item_addon_overrides: CREATE UNIQUE INDEX ON public.menu_item_addon_overrides USING btree (id)
+< index public.menu_item_addon_overrides: CREATE UNIQUE INDEX ON public.menu_item_addon_overrides USING btree (menu_item_id, addon_item_id, ingredient_name) WHERE ((size_label IS NULL) AND (combo_addon_item_id IS NULL))
+< index public.menu_item_addon_overrides: CREATE UNIQUE INDEX ON public.menu_item_addon_overrides USING btree (menu_item_id, addon_item_id, ingredient_name, combo_addon_item_id) WHERE ((size_label IS NULL) AND (combo_addon_item_id IS NOT NULL))
+< index public.menu_item_addon_overrides: CREATE UNIQUE INDEX ON public.menu_item_addon_overrides USING btree (menu_item_id, addon_item_id, ingredient_name, size_label) WHERE ((size_label IS NOT NULL) AND (combo_addon_item_id IS NULL))
+< index public.menu_item_addon_overrides: CREATE UNIQUE INDEX ON public.menu_item_addon_overrides USING btree (menu_item_id, addon_item_id, ingredient_name, size_label, combo_addon_item_id) WHERE ((size_label IS NOT NULL) AND (combo_addon_item_id IS NOT NULL))
+< index public.menu_item_addon_slots: CREATE INDEX ON public.menu_item_addon_slots USING btree (menu_item_id)
+< index public.menu_item_addon_slots: CREATE UNIQUE INDEX ON public.menu_item_addon_slots USING btree (id)
+< index public.menu_item_addon_slots: CREATE UNIQUE INDEX ON public.menu_item_addon_slots USING btree (menu_item_id, addon_type)
+< index public.menu_item_allowed_addons: CREATE INDEX ON public.menu_item_allowed_addons USING btree (menu_item_id)
+< index public.menu_item_allowed_addons: CREATE UNIQUE INDEX ON public.menu_item_allowed_addons USING btree (menu_item_id, addon_item_id)
+< index public.menu_item_optional_fields: CREATE INDEX ON public.menu_item_optional_fields USING btree (menu_item_id)
+< index public.menu_item_optional_fields: CREATE INDEX ON public.menu_item_optional_fields USING btree (org_ingredient_id) WHERE (org_ingredient_id IS NOT NULL)
+< index public.menu_item_optional_fields: CREATE UNIQUE INDEX ON public.menu_item_optional_fields USING btree (id)
+< index public.menu_item_recipes: CREATE INDEX ON public.menu_item_recipes USING btree (menu_item_id, size_label)
+< index public.menu_item_recipes: CREATE UNIQUE INDEX ON public.menu_item_recipes USING btree (id)
+< index public.menu_item_recipes: CREATE UNIQUE INDEX ON public.menu_item_recipes USING btree (menu_item_id, size_label, ingredient_name)
+< policy public.addon_item_ingredients tenant_isolation: cmd=* permissive=t roles=public using=(EXISTS ( SELECT 1 FROM addon_items p WHERE (p.id = addon_item_ingredients.addon_item_id))) check=
+< policy public.addon_items tenant_isolation: cmd=* permissive=t roles=public using=(org_id = ( SELECT (current_setting('app.org_id'::text, true))::uuid AS current_setting)) check=
+< policy public.branch_addon_overrides tenant_isolation: cmd=* permissive=t roles=public using=(branch_id IN ( SELECT b.id FROM branches b)) check=
+< policy public.branch_channel_addon_overrides tenant_isolation: cmd=* permissive=t roles=public using=(branch_id IN ( SELECT b.id FROM branches b)) check=
+< policy public.branch_channel_menu_overrides tenant_isolation: cmd=* permissive=t roles=public using=(branch_id IN ( SELECT b.id FROM branches b)) check=
+< policy public.branch_menu_overrides tenant_isolation: cmd=* permissive=t roles=public using=(branch_id IN ( SELECT b.id FROM branches b)) check=
+< policy public.branch_menu_size_overrides tenant_isolation: cmd=* permissive=t roles=public using=(branch_id IN ( SELECT b.id FROM branches b)) check=
+< policy public.menu_item_addon_overrides tenant_isolation: cmd=* permissive=t roles=public using=(EXISTS ( SELECT 1 FROM menu_items p WHERE (p.id = menu_item_addon_overrides.menu_item_id))) check=
+< policy public.menu_item_addon_slots tenant_isolation: cmd=* permissive=t roles=public using=(EXISTS ( SELECT 1 FROM menu_items p WHERE (p.id = menu_item_addon_slots.menu_item_id))) check=
+< policy public.menu_item_allowed_addons tenant_isolation: cmd=* permissive=t roles=public using=(EXISTS ( SELECT 1 FROM menu_items p WHERE (p.id = menu_item_allowed_addons.menu_item_id))) check=
+< policy public.menu_item_optional_fields tenant_isolation: cmd=* permissive=t roles=public using=(EXISTS ( SELECT 1 FROM menu_items p WHERE (p.id = menu_item_optional_fields.menu_item_id))) check=
+< policy public.menu_item_recipes tenant_isolation: cmd=* permissive=t roles=public using=(EXISTS ( SELECT 1 FROM menu_items p WHERE (p.id = menu_item_recipes.menu_item_id))) check=
+> relation _sqlx_test.databases kind=r rls=f force=f
+< relation public.addon_item_ingredients kind=r rls=t force=f
+< relation public.addon_items kind=r rls=t force=f
+> relation public.addon_item_ingredients kind=v rls=f force=f
+> relation public.addon_items kind=v rls=f force=f
+< relation public.branch_addon_overrides kind=r rls=t force=f
+> relation public.branch_addon_overrides kind=v rls=f force=f
+< relation public.branch_channel_addon_overrides kind=r rls=t force=f
+< relation public.branch_channel_menu_overrides kind=r rls=t force=f
+> relation public.branch_channel_addon_overrides kind=v rls=f force=f
+> relation public.branch_channel_menu_overrides kind=v rls=f force=f
+< relation public.branch_menu_overrides kind=r rls=t force=f
+< relation public.branch_menu_size_overrides kind=r rls=t force=f
+> relation public.branch_menu_overrides kind=v rls=f force=f
+> relation public.branch_menu_size_overrides kind=v rls=f force=f
+< relation public.menu_item_addon_overrides kind=r rls=t force=f
+< relation public.menu_item_addon_slots kind=r rls=t force=f
+< relation public.menu_item_allowed_addons kind=r rls=t force=f
+> relation public.menu_item_addon_slots kind=v rls=f force=f
+> relation public.menu_item_allowed_addons kind=v rls=f force=f
+< relation public.menu_item_optional_fields kind=r rls=t force=f
+> relation public.menu_item_optional_fields kind=v rls=f force=f
+< relation public.menu_item_recipes kind=r rls=t force=f
+> relation public.menu_item_recipes kind=v rls=f force=f
+> schema _sqlx_test
+> sequence _sqlx_test.database_ids
+< trigger public.addon_item_ingredients: CREATE TRIGGER sync_emit AFTER INSERT OR DELETE OR UPDATE ON public.addon_item_ingredients FOR EACH ROW EXECUTE FUNCTION sync_emit_addon_item_ingredients()
+< trigger public.addon_item_ingredients: CREATE TRIGGER trg_addon_item_ingredients_updated_at BEFORE UPDATE ON public.addon_item_ingredients FOR EACH ROW EXECUTE FUNCTION set_updated_at()
+< trigger public.addon_items: CREATE TRIGGER sync_emit AFTER INSERT OR DELETE OR UPDATE ON public.addon_items FOR EACH ROW EXECUTE FUNCTION sync_emit_addon_items()
+< trigger public.addon_items: CREATE TRIGGER trg_addon_items_updated_at BEFORE UPDATE ON public.addon_items FOR EACH ROW EXECUTE FUNCTION set_updated_at()
+< trigger public.branch_addon_overrides: CREATE TRIGGER sync_emit AFTER INSERT OR DELETE OR UPDATE ON public.branch_addon_overrides FOR EACH ROW EXECUTE FUNCTION sync_emit_branch_addon_overrides()
+< trigger public.menu_item_optional_fields: CREATE TRIGGER trg_miof_updated_at BEFORE UPDATE ON public.menu_item_optional_fields FOR EACH ROW EXECUTE FUNCTION set_updated_at()
+< trigger public.menu_item_recipes: CREATE TRIGGER trg_menu_item_recipes_updated_at BEFORE UPDATE ON public.menu_item_recipes FOR EACH ROW EXECUTE FUNCTION set_updated_at()
+> view public.addon_item_ingredients md5=2a800f6308bba24e531cc0604aa0ae46
+> view public.addon_items md5=066c8115cab5e2fb6a4a359ff6d5c38e
+> view public.branch_addon_overrides md5=9a11648fa19483884f36f7722e4a0056
+> view public.branch_channel_addon_overrides md5=6becbd39bd4cbc52aec5e7f5e5ebdc7c
+> view public.branch_channel_menu_overrides md5=95f1791880f83b00420c756b06e57fe4
+> view public.branch_menu_overrides md5=47113d2b3f6811db161df2beb0e86183
+> view public.branch_menu_size_overrides md5=9efd971e66c6b637889667fa1f336456
+> view public.menu_item_addon_slots md5=d114e3f5daa5c7b367c22430dcfc0f4d
+> view public.menu_item_allowed_addons md5=b9ab14628e365e1d60efd80fbe355a35
+> view public.menu_item_optional_fields md5=9f79efa175f4e54bb65a858a7ba966dc
+> view public.menu_item_recipes md5=439a84236b85d6edabb3cdfd34a5c3b9
