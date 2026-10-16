@@ -128,7 +128,7 @@ pub async fn list_drink_recipes(
     tag = "recipes",
     params(("menu_item_id" = Uuid, Path, description = "Menu item ID")),
     request_body = UpsertDrinkRecipeRequest,
-    responses((status = 200, description = "Drink recipe upserted", body = DrinkRecipe), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_drink_recipe(
@@ -137,52 +137,9 @@ pub async fn upsert_drink_recipe(
     menu_item_id: web::Path<Uuid>,
     body: web::Json<UpsertDrinkRecipeRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "recipes", "create").await?;
-    let org_id = require_menu_item_org(pool.get_ref(), &claims, *menu_item_id).await?;
-
-    if body.quantity_used <= 0.0 {
-        return Err(AppError::BadRequest(
-            "quantity_used must be greater than 0".into(),
-        ));
-    }
-
-    let (ingredient_unit, quantity_used) = normalize_recipe_unit(
-        pool.get_ref(),
-        org_id,
-        body.org_ingredient_id,
-        &body.ingredient_unit,
-        body.quantity_used,
-    )
-    .await?;
-
-    let row = sqlx::query_as::<_, DrinkRecipe>(
-        r#"
-        INSERT INTO menu_item_recipes
-            (menu_item_id, size_label, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (menu_item_id, size_label, ingredient_name)
-        DO UPDATE SET
-            org_ingredient_id = EXCLUDED.org_ingredient_id,
-            ingredient_unit   = EXCLUDED.ingredient_unit,
-            quantity_used     = EXCLUDED.quantity_used
-        RETURNING id, menu_item_id, size_label::text,
-                  org_ingredient_id,
-                  ingredient_name,
-                  ingredient_unit AS unit,
-                  quantity_used
-        "#,
-    )
-    .bind(*menu_item_id)
-    .bind(&body.size_label)
-    .bind(body.org_ingredient_id)
-    .bind(&body.ingredient_name)
-    .bind(&ingredient_unit)
-    .bind(quantity_used)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, menu_item_id, body);
+    Err(crate::compat_usage::shim_write_removed("POST /recipes/drinks/{menu_item_id}"))
 }
 
 // ── DELETE /recipes/drinks/:menu_item_id/:size ────────────────
@@ -196,7 +153,7 @@ pub async fn upsert_drink_recipe(
         ("size" = String, Path, description = "Size label")
     ),
     params(DeleteRecipeQuery),
-    responses((status = 204, description = "Drink recipe deleted"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_drink_recipe(
@@ -205,27 +162,9 @@ pub async fn delete_drink_recipe(
     path: web::Path<(Uuid, String)>,
     query: web::Query<DeleteRecipeQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "recipes", "delete").await?;
-
-    let (menu_item_id, size_label) = path.into_inner();
-    require_menu_item_org(pool.get_ref(), &claims, menu_item_id).await?;
-
-    sqlx::query(
-        r#"
-        DELETE FROM menu_item_recipes
-        WHERE menu_item_id    = $1
-          AND size_label      = $2
-          AND ingredient_name = $3
-        "#,
-    )
-    .bind(menu_item_id)
-    .bind(&size_label)
-    .bind(&query.ingredient_name)
-    .execute(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, path, query);
+    Err(crate::compat_usage::shim_write_removed("DELETE /recipes/drinks/{menu_item_id}/{size}"))
 }
 
 // ── GET /recipes/addons/:addon_item_id ────────────────────────

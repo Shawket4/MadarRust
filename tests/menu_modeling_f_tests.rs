@@ -673,10 +673,8 @@ fn sized_option_lines_replace_generic_ones_per_ingredient() {
 #[sqlx::test]
 async fn the_resolver_prefers_the_sized_option_amount_and_the_shim_hides_it(pool: PgPool) {
     let o = setup(&pool).await;
-    sqlx::raw_sql(include_str!("../deploy/menu_unification_shim.sql"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Every database has prod\'s catalog shape since DB Phase 2.4 (the
+    // legacy relations are the compat views): no shim to apply.
     let sauce = ingredient(&pool, o.org, "Mango sauce", "g", "general").await;
     let (it, _sizes) = item(&pool, o.org, o.cat, "Mango mojito", &["Cup", "Can"]).await;
     let group: Uuid = sqlx::query_scalar(

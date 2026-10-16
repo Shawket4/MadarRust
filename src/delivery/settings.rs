@@ -665,7 +665,7 @@ pub struct ChannelOverrideInput {
 
 #[utoipa::path(
     put, path = "/delivery/channel-overrides", tag = "delivery", request_body = ChannelOverrideInput,
-    responses((status = 200, body = ChannelMenuOverride), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_channel_override(
@@ -673,32 +673,9 @@ pub async fn upsert_channel_override(
     pool: crate::db::Db,
     body: web::Json<ChannelOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    validate_channel(&body.channel)?;
-    if body.price_override.is_some_and(|p| p < 0) {
-        return Err(AppError::BadRequest("price_override must be >= 0".into()));
-    }
-
-    let row: ChannelMenuOverride = sqlx::query_as(
-        "INSERT INTO branch_channel_menu_overrides
-            (branch_id, menu_item_id, channel, price_override, is_available, updated_at)
-         VALUES ($1, $2, $3::delivery_channel, $4, $5, now())
-         ON CONFLICT (branch_id, menu_item_id, channel) DO UPDATE SET
-             price_override = EXCLUDED.price_override,
-             is_available = EXCLUDED.is_available,
-             updated_at = now()
-         RETURNING branch_id, menu_item_id, channel::text, price_override, is_available",
-    )
-    .bind(body.branch_id)
-    .bind(body.menu_item_id)
-    .bind(&body.channel)
-    .bind(body.price_override)
-    .bind(body.is_available)
-    .fetch_one(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, body);
+    Err(crate::compat_usage::shim_write_removed("PUT /delivery/channel-overrides"))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -710,7 +687,7 @@ pub struct ChannelOverrideDeleteQuery {
 
 #[utoipa::path(
     delete, path = "/delivery/channel-overrides", tag = "delivery", params(ChannelOverrideDeleteQuery),
-    responses((status = 204, description = "Deleted"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_channel_override(
@@ -718,21 +695,9 @@ pub async fn delete_channel_override(
     pool: crate::db::Db,
     query: web::Query<ChannelOverrideDeleteQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-    validate_channel(&query.channel)?;
-
-    sqlx::query(
-        "DELETE FROM branch_channel_menu_overrides \
-         WHERE branch_id = $1 AND menu_item_id = $2 AND channel = $3::delivery_channel",
-    )
-    .bind(query.branch_id)
-    .bind(query.menu_item_id)
-    .bind(&query.channel)
-    .execute(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, query);
+    Err(crate::compat_usage::shim_write_removed("DELETE /delivery/channel-overrides"))
 }
 
 // ── Channel addon overrides (admin) ───────────────────────────
@@ -784,7 +749,7 @@ pub struct ChannelAddonOverrideInput {
 
 #[utoipa::path(
     put, path = "/delivery/channel-addon-overrides", tag = "delivery", request_body = ChannelAddonOverrideInput,
-    responses((status = 200, body = ChannelAddonOverride), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_channel_addon_override(
@@ -792,32 +757,9 @@ pub async fn upsert_channel_addon_override(
     pool: crate::db::Db,
     body: web::Json<ChannelAddonOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "addon_items", "update").await?;
-    require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    validate_channel(&body.channel)?;
-    if body.price_override.is_some_and(|p| p < 0) {
-        return Err(AppError::BadRequest("price_override must be >= 0".into()));
-    }
-
-    let row: ChannelAddonOverride = sqlx::query_as(
-        "INSERT INTO branch_channel_addon_overrides
-            (branch_id, addon_item_id, channel, price_override, is_available, updated_at)
-         VALUES ($1, $2, $3::delivery_channel, $4, $5, now())
-         ON CONFLICT (branch_id, addon_item_id, channel) DO UPDATE SET
-             price_override = EXCLUDED.price_override,
-             is_available = EXCLUDED.is_available,
-             updated_at = now()
-         RETURNING branch_id, addon_item_id, channel::text, price_override, is_available",
-    )
-    .bind(body.branch_id)
-    .bind(body.addon_item_id)
-    .bind(&body.channel)
-    .bind(body.price_override)
-    .bind(body.is_available)
-    .fetch_one(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, body);
+    Err(crate::compat_usage::shim_write_removed("PUT /delivery/channel-addon-overrides"))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -829,7 +771,7 @@ pub struct ChannelAddonOverrideDeleteQuery {
 
 #[utoipa::path(
     delete, path = "/delivery/channel-addon-overrides", tag = "delivery", params(ChannelAddonOverrideDeleteQuery),
-    responses((status = 204, description = "Deleted"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_channel_addon_override(
@@ -837,19 +779,7 @@ pub async fn delete_channel_addon_override(
     pool: crate::db::Db,
     query: web::Query<ChannelAddonOverrideDeleteQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "addon_items", "update").await?;
-    require_branch_access(pool.get_ref(), &claims, query.branch_id).await?;
-    validate_channel(&query.channel)?;
-
-    sqlx::query(
-        "DELETE FROM branch_channel_addon_overrides \
-         WHERE branch_id = $1 AND addon_item_id = $2 AND channel = $3::delivery_channel",
-    )
-    .bind(query.branch_id)
-    .bind(query.addon_item_id)
-    .bind(&query.channel)
-    .execute(pool.get_ref())
-    .await?;
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, query);
+    Err(crate::compat_usage::shim_write_removed("DELETE /delivery/channel-addon-overrides"))
 }

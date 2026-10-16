@@ -1223,8 +1223,12 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
         h, registry,
         "migration header and sync_source_tables() disagree"
     );
+    // A source that is now a compat VIEW (addon_items, addon_item_ingredients,
+    // branch_addon_overrides: DB Phase 2.4 gave every database prod's shape)
+    // carries no trigger; the unified tables under it emit `addon_item`.
     let missing = lines(&pool, "SELECT s.source_table FROM sync_source_tables() s
-        WHERE NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE (SELECT c.relkind FROM pg_class c WHERE c.oid = to_regclass('public.' || s.source_table)) IS DISTINCT FROM 'v'
+          AND NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
                            WHERE t.tgrelid = to_regclass('public.' || s.source_table) AND t.tgname = 'sync_emit'
                              AND p.proname = 'sync_emit_' || s.source_table)").await;
     assert!(missing.is_empty(), "tables without emitter: {missing:?}");

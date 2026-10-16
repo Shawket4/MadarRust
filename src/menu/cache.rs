@@ -43,9 +43,10 @@
 //! ## Where it is OFF
 //! The trigger only exists on the PROD shape of the catalog, where the legacy
 //! relations (`branch_menu_overrides`, `menu_item_recipes`, `addon_items`, …) are
-//! read-only views over the unified tables (`deploy/menu_unification_shim.sql`).
-//! On a database where they are still writable tables (fresh dev and test
-//! databases, until Phase 2.4), writes to them bump nothing, so the cache
+//! read-only views over the unified tables. Every database built from the
+//! migrations has that shape since DB Phase 2.4
+//! (`20261018200000_p2_converge_legacy_catalog`); one that somehow still has
+//! them as writable tables would see writes that bump nothing, so the cache
 //! switches itself off there ([`MenuCache::usable`]).
 //!
 //! `MENU_CACHE_TTL_SECS`: default 600 (a memory-only backstop; freshness comes
