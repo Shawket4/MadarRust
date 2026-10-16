@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "RESET jit",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "efb6addbeba8366fd1907172ca5a11392f94ec1e64b5d0b37de64bbb85c55bbc"
+}

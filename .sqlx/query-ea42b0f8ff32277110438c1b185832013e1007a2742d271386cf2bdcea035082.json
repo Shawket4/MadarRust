@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id, u.role::text AS \"role!\", (u.is_active AND u.deleted_at IS NULL) AS \"active!\",\n                      COALESCE(ARRAY(SELECT a.branch_id FROM user_branch_assignments a\n                                       JOIN branches b ON b.id = a.branch_id\n                                                      AND b.org_id = u.org_id AND b.deleted_at IS NULL\n                                      WHERE a.user_id = u.id), '{}') AS \"listed!: Vec<Uuid>\"\n                 FROM users u\n                WHERE u.org_id = $1 AND u.deleted_at IS NULL AND u.role <> 'super_admin'\n                  AND NOT u.is_guest_principal\n                ORDER BY u.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "listed!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "ea42b0f8ff32277110438c1b185832013e1007a2742d271386cf2bdcea035082"
+}

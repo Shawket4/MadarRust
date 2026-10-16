@@ -57,6 +57,7 @@ fn req(branch: Uuid) -> PullRequest {
         limit: None,
         ledger_page_size: None,
         snapshot_cursor: None,
+        protocol: None,
     }
 }
 

@@ -340,6 +340,7 @@ async fn run_scenario(pool: &PgPool, sc: &Scenario) -> Value {
         limit: None,
         ledger_page_size: None,
         snapshot_cursor: None,
+        protocol: None,
     };
     let full = madar_rust::sync::pull::pull_core(pool, org, &body, None)
         .await

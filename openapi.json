@@ -62513,6 +62513,102 @@
         ]
       }
     },
+    "/sync/replay/batch": {
+      "post": {
+        "tags": [
+          "sync"
+        ],
+        "summary": "POST /sync/replay/batch",
+        "operationId": "replay_batch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Each op's result, in order (the batch itself succeeded even when an op did not)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayBatchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/tills": {
       "get": {
         "tags": [
@@ -91008,6 +91104,15 @@
             "format": "int64",
             "description": "Page size for incremental pulls, 1..5000 (default 2000)."
           },
+          "protocol": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The sync protocol the till speaks (`sync::protocol`). Absent = v1, and\nthe response is exactly what v1 always got.",
+            "minimum": 0
+          },
           "snapshot_cursor": {
             "oneOf": [
               {
@@ -91075,6 +91180,14 @@
           "has_more": {
             "type": "boolean"
           },
+          "ledger_retention_hours": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "v2: how long (hours) a ledger row stays on the incremental feed; a\ncursor older than that is answered `resync_required`."
+          },
           "ledger_window": {
             "oneOf": [
               {
@@ -91091,6 +91204,15 @@
               "null"
             ],
             "format": "int64"
+          },
+          "protocol": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The negotiated sync protocol; only when the request named one.",
+            "minimum": 0
           },
           "resync_required": {
             "type": "boolean"
@@ -93901,6 +94023,119 @@
           }
         }
       },
+      "ReplayBatchRequest": {
+        "type": "object",
+        "required": [
+          "ops"
+        ],
+        "properties": {
+          "ops": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Queued ops, oldest first: each exactly the body `POST /sync/replay`\ntakes (`op`, the actor, `request`, optional `approval`, ...)."
+          },
+          "protocol": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The sync protocol the till speaks; 2 when absent (this route is v2).",
+            "minimum": 0
+          },
+          "stop_on_error": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Stop at the first op that does not succeed (default true)."
+          }
+        }
+      },
+      "ReplayBatchResponse": {
+        "type": "object",
+        "required": [
+          "protocol",
+          "results",
+          "applied"
+        ],
+        "properties": {
+          "applied": {
+            "type": "integer",
+            "description": "How many ops were applied.",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The negotiated sync protocol.",
+            "minimum": 0
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReplayBatchResult"
+            },
+            "description": "One per op, in order."
+          },
+          "stopped_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The index the batch stopped at, when it stopped early.",
+            "minimum": 0
+          },
+          "sync_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The highest `sync_seq` of the batch: a pull from here sees every op."
+          }
+        }
+      },
+      "ReplayBatchResult": {
+        "type": "object",
+        "required": [
+          "index",
+          "outcome"
+        ],
+        "properties": {
+          "body": {
+            "type": "object",
+            "description": "The single-op call's JSON body (its ack, or its error body)."
+          },
+          "index": {
+            "type": "integer",
+            "description": "The op's position in `ops`.",
+            "minimum": 0
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ReplayOutcome"
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The HTTP status the single-op call would have answered (absent when skipped).",
+            "minimum": 0
+          },
+          "sync_seq": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The single-op call's `X-Madar-Sync-Seq`, when it carried one."
+          }
+        }
+      },
       "ReplayFlag": {
         "type": "object",
         "description": "One offline act that was accepted despite failing the permission re-check\n(PERMISSIONS_ARCHITECTURE §4.4.5). The money already moved; this is the\nowner's notice, not a rollback.",
@@ -93972,6 +94207,14 @@
             "format": "uuid"
           }
         }
+      },
+      "ReplayOutcome": {
+        "type": "string",
+        "enum": [
+          "applied",
+          "failed",
+          "skipped"
+        ]
       },
       "ReplenishmentRow": {
         "type": "object",

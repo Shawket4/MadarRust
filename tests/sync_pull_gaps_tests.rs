@@ -61,6 +61,7 @@ fn req(branch: Uuid) -> PullRequest {
         limit: None,
         ledger_page_size: None,
         snapshot_cursor: None,
+        protocol: None,
     }
 }
 
@@ -798,6 +799,7 @@ fn paged(
         limit: None,
         ledger_page_size: Some(size),
         snapshot_cursor: cursor,
+        protocol: None,
     }
 }
 

@@ -878,6 +878,7 @@ async fn groups_and_options_carry_their_name_translations(pool: PgPool) {
             limit: None,
             ledger_page_size: None,
             snapshot_cursor: None,
+            protocol: None,
         },
         None,
     )

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH gap AS (\n                  SELECT l.branch_id, l.type, l.entity_id FROM sync_live_rows_since($1, $2) l\n                   WHERE NOT EXISTS (SELECT 1 FROM sync_changes c\n                                      WHERE c.branch_id = l.branch_id AND c.type = l.type\n                                        AND c.entity_id = l.entity_id))\n               SELECT count(*) AS \"n!\" FROM (SELECT sync_emit(branch_id, type, entity_id, 'upsert') FROM gap) x",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "43d450e29f2a8a1fde97e63de6d9f7a8f4a3fb50c466a38c3232e1710eb5555f"
+}

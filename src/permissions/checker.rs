@@ -81,14 +81,15 @@ async fn check_on(
     // Some(true) = active, Some(false) = disabled, None = no such row. We deny
     // only Some(false), so a missing row (service/integration tokens with no
     // corresponding stored user) still passes through.
-    let account: Option<(bool, Option<i64>)> = sqlx::query_as(
-        "SELECT (is_active AND deleted_at IS NULL), \
-                floor(extract(epoch FROM sessions_valid_after))::bigint \
-           FROM users WHERE id = $1",
+    let account = sqlx::query!(
+        r#"SELECT (is_active AND deleted_at IS NULL) AS "ok!",
+                  floor(extract(epoch FROM sessions_valid_after))::bigint AS valid_after
+             FROM users WHERE id = $1"#,
+        user_id
     )
-    .bind(user_id)
     .fetch_optional(&mut *conn)
-    .await?;
+    .await?
+    .map(|r| (r.ok, r.valid_after));
     if let Some((ok, valid_after)) = account {
         if !ok {
             return Err(AppError::Forbidden("Account is disabled".into()));

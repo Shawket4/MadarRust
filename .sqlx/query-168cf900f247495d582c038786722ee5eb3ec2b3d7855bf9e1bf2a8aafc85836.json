@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (is_active AND deleted_at IS NULL) AS \"ok!\",\n                  floor(extract(epoch FROM sessions_valid_after))::bigint AS valid_after\n             FROM users WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "valid_after",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "168cf900f247495d582c038786722ee5eb3ec2b3d7855bf9e1bf2a8aafc85836"
+}

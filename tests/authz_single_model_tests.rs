@@ -156,6 +156,7 @@ async fn the_teller_row_keeps_its_keys(pool: PgPool) {
         limit: None,
         ledger_page_size: None,
         snapshot_cursor: None,
+        protocol: None,
     };
     let resp = madar_rust::sync::pull::pull_core(&pool, o, &req, None)
         .await

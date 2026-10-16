@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT role::text AS \"role!\", resource::text AS \"resource!\", action::text AS \"action!\", granted\n             FROM role_permissions",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "resource!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "action!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "granted",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "2b9d45bb6ef2dfb9b6785ab8d351d4cf844a21db203a85b365734bc04fbd9ace"
+}

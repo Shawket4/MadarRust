@@ -33,7 +33,9 @@
 //! path; it is gone, because three answers to one question is how a per-user
 //! grant came to work online and be ignored offline.
 
+pub mod batch;
 pub mod handlers;
+pub mod protocol;
 pub mod pull;
 pub mod routes;
 

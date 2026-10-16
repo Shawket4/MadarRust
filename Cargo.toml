@@ -291,3 +291,7 @@ path = "src/bin/authz_parity.rs"
 name = "authz-reconcile"
 path = "src/bin/authz_reconcile.rs"
 
+[[bin]]
+name = "sync-sweep-once"
+path = "src/bin/sync_sweep_once.rs"
+
