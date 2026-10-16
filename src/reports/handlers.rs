@@ -1259,7 +1259,6 @@ pub async fn branch_addon_sales(
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
-    crate::compat_usage::count_internal("reports::branch_addon_sales");
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     let (branch_ids, _org) =
@@ -1271,18 +1270,20 @@ pub async fn branch_addon_sales(
             oia.addon_item_id,
             oia.addon_name,
             COALESCE((array_agg(oia.name_translations))[1], '{}'::jsonb) AS addon_name_translations,
-            COALESCE(ai.type, 'extra') AS addon_type,
+            COALESCE(mg.legacy_addon_type, 'extra') AS addon_type,
             SUM(oia.quantity)::bigint  AS quantity_sold,
             SUM(oia.line_total)::bigint AS revenue
         FROM order_item_addons oia
         JOIN order_items oi ON oi.id  = oia.order_item_id
         JOIN orders o       ON o.id   = oi.order_id
-        LEFT JOIN addon_items ai ON ai.id = oia.addon_item_id
+        -- An add-on's type is its group's legacy_addon_type (the old addon_items).
+        LEFT JOIN modifier_options mo ON mo.id = oia.addon_item_id AND mo.legacy_source = 'addon'
+        LEFT JOIN modifier_groups mg ON mg.id = mo.group_id
         WHERE o.branch_id = ANY($1)
           AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oia.addon_item_id, oia.addon_name, ai.type
+        GROUP BY oia.addon_item_id, oia.addon_name, mg.legacy_addon_type
         ORDER BY quantity_sold DESC, revenue DESC, oia.addon_name COLLATE "C"
         "#,
     )

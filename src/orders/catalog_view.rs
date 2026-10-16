@@ -233,14 +233,24 @@ impl Catalog {
     }
 
     async fn load_items(&mut self, conn: &mut PgConnection, ids: &[Uuid]) -> Result<(), AppError> {
-        crate::compat_usage::count_internal("orders::catalog_view::items");
         let branch = self.branch;
+        // On the unified tables (DB Phase 3.1), exactly what the old
+        // `branch_menu_overrides` rollup gave: the price is the item's
+        // `one_size` branch price, and the item is off at the branch when any
+        // of its sizes is explicitly off there.
         let rows: Vec<(Uuid, String, serde_json::Value, Option<i32>, bool)> = sqlx::query_as(
-            "SELECT mi.id, mi.name, mi.name_translations, bmo.price_override,
-                    COALESCE(bmo.is_available, true) = false
+            "SELECT mi.id, mi.name, mi.name_translations,
+                    (SELECT max(p.price) FROM menu_price_overrides p
+                       JOIN menu_item_sizes ms ON ms.id = p.target_id
+                      WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size'
+                        AND p.branch_id = $2 AND ms.menu_item_id = mi.id
+                        AND ms.label = 'one_size'),
+                    EXISTS (SELECT 1 FROM menu_price_overrides p
+                              JOIN menu_item_sizes ms ON ms.id = p.target_id
+                             WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size'
+                               AND p.branch_id = $2 AND ms.menu_item_id = mi.id
+                               AND p.is_available = false)
                FROM menu_items mi
-               LEFT JOIN branch_menu_overrides bmo
-                      ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
               WHERE mi.id = ANY($1) AND ($3 OR mi.deleted_at IS NULL)",
         )
         .bind(ids)
@@ -268,19 +278,18 @@ impl Catalog {
         // Every size, and every label only the branch prices.
         let sizes: Vec<(Uuid, String, Option<i32>, bool, Option<i32>, Option<i32>)> =
             sqlx::query_as(
-                "SELECT z.menu_item_id, z.label, z.price, z.is_active, bso.price_override, z.sort
+                // The size's own branch price (what `branch_menu_size_overrides`
+                // listed: a priced, non-`one_size` size override). A branch
+                // price is always on an existing size row now, so the old
+                // second branch (a label only the branch priced) is empty.
+                "SELECT z.menu_item_id, z.label, z.price, z.is_active,
+                        (SELECT max(p.price) FROM menu_price_overrides p
+                          WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size'
+                            AND p.branch_id = $2 AND p.target_id = z.id
+                            AND p.price IS NOT NULL AND z.label <> 'one_size'),
+                        z.sort
                FROM menu_item_sizes z
-               LEFT JOIN branch_menu_size_overrides bso
-                      ON bso.branch_id = $2 AND bso.menu_item_id = z.menu_item_id
-                     AND bso.size_label = z.label
               WHERE z.menu_item_id = ANY($1)
-             UNION ALL
-             SELECT bso.menu_item_id, bso.size_label, NULL, false, bso.price_override, NULL
-               FROM branch_menu_size_overrides bso
-              WHERE bso.branch_id = $2 AND bso.menu_item_id = ANY($1)
-                AND NOT EXISTS (SELECT 1 FROM menu_item_sizes z
-                                 WHERE z.menu_item_id = bso.menu_item_id
-                                   AND z.label = bso.size_label)
               ORDER BY 1, 6 NULLS LAST, 2",
             )
             .bind(ids)
@@ -292,12 +301,13 @@ impl Catalog {
         // as listed (active first, then sort, then label) among the recipe's
         // own labels — the order path's subquery, verbatim.
         let default_sizes: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+            // A recipe line of a size is recipe_lines (owner_type item_size) on
+            // that menu_item_sizes row (the old `menu_item_recipes` view).
             "SELECT m.id,
-                    (SELECT rr.size_label FROM menu_item_recipes rr
-                       LEFT JOIN menu_item_sizes sz
-                              ON sz.menu_item_id = rr.menu_item_id AND sz.label = rr.size_label
-                      WHERE rr.menu_item_id = m.id
-                      ORDER BY sz.is_active IS NOT TRUE, sz.sort NULLS LAST, rr.size_label
+                    (SELECT sz.label FROM recipe_lines rl
+                       JOIN menu_item_sizes sz ON sz.id = rl.owner_id
+                      WHERE rl.owner_type = 'item_size' AND sz.menu_item_id = m.id
+                      ORDER BY sz.is_active IS NOT TRUE, sz.sort NULLS LAST, sz.label
                       LIMIT 1)
                FROM unnest($1::uuid[]) AS m(id)",
         )
@@ -327,16 +337,16 @@ impl Catalog {
             bool,
         )> = sqlx::query_as(
             "SELECT a.menu_item_id, g.id, COALESCE(a.min_override, g.min_selections),
-                    COALESCE(a.is_required_override, g.is_required), a.included_option_ids,
+                    COALESCE(a.is_required_override, g.is_required), mimg_included_options(a.id, a.option_allowlist),
                     g.effect, g.legacy_addon_type,
-                    mo.id, ai.default_price, bao.price_override, mo.is_default,
-                    (mo.is_active AND ai.is_active AND COALESCE(bao.is_available, true))
+                    mo.id, mo.price, bao.price, mo.is_default,
+                    (mo.is_active AND COALESCE(bao.is_available, true))
                FROM menu_item_modifier_groups a
                JOIN modifier_groups g ON g.id = a.group_id AND g.is_active
-               JOIN modifier_options mo ON mo.group_id = g.id
-               JOIN addon_items ai ON ai.id = mo.id
-               LEFT JOIN branch_addon_overrides bao
-                      ON bao.addon_item_id = mo.id AND bao.branch_id = $2
+               JOIN modifier_options mo ON mo.group_id = g.id AND mo.legacy_source = 'addon'
+               LEFT JOIN menu_price_overrides bao
+                      ON bao.scope = 'branch' AND bao.target_type = 'modifier_option'
+                     AND bao.target_id = mo.id AND bao.branch_id = $2
               WHERE a.menu_item_id = ANY($1)
               ORDER BY a.menu_item_id, a.sort, g.name, g.id, mo.sort, mo.name, mo.id",
         )
@@ -383,11 +393,20 @@ impl Catalog {
             Option<String>,
             serde_json::Value,
         )> = sqlx::query_as(
-            "SELECT menu_item_id, id, name, price, org_ingredient_id, ingredient_name,
-                    ingredient_unit, quantity_used::float8, size_label::text, name_translations
-               FROM menu_item_optional_fields
-              WHERE menu_item_id = ANY($1) AND ($2 OR is_active = true)
-              ORDER BY menu_item_id, name, id",
+            // An optional field is a modifier option of legacy_source
+            // 'optional' in the item's per-item Options attachment, with its
+            // generic (sizeless) recipe line (the old `menu_item_optional_fields`).
+            "SELECT mimg.menu_item_id, mo.id, mo.name, mo.price, rl.ingredient_id, oi.name,
+                    rl.unit, rl.quantity::float8, NULL::text, mo.name_translations
+               FROM modifier_options mo
+               JOIN menu_item_modifier_groups mimg
+                    ON mimg.group_id = mo.group_id AND mimg.legacy_origin = 'options'
+               LEFT JOIN recipe_lines rl ON rl.owner_type = 'modifier_option'
+                    AND rl.owner_id = mo.id AND rl.size_label IS NULL
+               LEFT JOIN org_ingredients oi ON oi.id = rl.ingredient_id
+              WHERE mo.legacy_source = 'optional'
+                AND mimg.menu_item_id = ANY($1) AND ($2 OR mo.is_active = true)
+              ORDER BY mimg.menu_item_id, mo.name, mo.id",
         )
         .bind(ids)
         .bind(self.retired)
@@ -414,23 +433,29 @@ impl Catalog {
                 Vec::new()
             } else {
                 sqlx::query_as(
+                    // Unified tables (DB Phase 3.1): an add-on is a modifier
+                    // option of legacy_source 'addon', its type the group's
+                    // legacy_addon_type; its generic recipe line names the
+                    // ingredient it carries.
                     "WITH c AS (
-                         SELECT i.org_ingredient_id AS ing, i.addon_item_id AS id
-                           FROM addon_item_ingredients i WHERE i.org_ingredient_id = ANY($1)
+                         SELECT rl.ingredient_id AS ing, rl.owner_id AS id
+                           FROM recipe_lines rl
+                          WHERE rl.owner_type = 'modifier_option' AND rl.size_label IS NULL
+                            AND rl.ingredient_id = ANY($1)
                          UNION
                          SELECT mo.replaces_ingredient_id, mo.id
                            FROM modifier_options mo WHERE mo.replaces_ingredient_id = ANY($1)
                      )
-                     SELECT c.ing, a.id, a.name, COALESCE(a.type, ''),
-                            COALESCE(bao.price_override, a.default_price),
+                     SELECT c.ing, mo.id, mo.name, COALESCE(mg.legacy_addon_type, ''),
+                            COALESCE(bao.price, mo.price),
                             mo.group_id, mg.swap_category_id
                        FROM c
-                       JOIN addon_items a ON a.id = c.id
-                       LEFT JOIN modifier_options mo ON mo.id = a.id
-                       LEFT JOIN modifier_groups mg ON mg.id = mo.group_id
-                       LEFT JOIN branch_addon_overrides bao
-                              ON bao.addon_item_id = a.id AND bao.branch_id = $2
-                      ORDER BY c.ing, a.is_active DESC, mo.sort NULLS LAST, a.name, a.id",
+                       JOIN modifier_options mo ON mo.id = c.id AND mo.legacy_source = 'addon'
+                       JOIN modifier_groups mg ON mg.id = mo.group_id
+                       LEFT JOIN menu_price_overrides bao
+                              ON bao.scope = 'branch' AND bao.target_type = 'modifier_option'
+                             AND bao.target_id = mo.id AND bao.branch_id = $2
+                      ORDER BY c.ing, mo.is_active DESC, mo.sort NULLS LAST, mo.name, mo.id",
                 )
                 .bind(&base_ids)
                 .bind(branch)
@@ -541,7 +566,6 @@ impl Catalog {
         conn: &mut PgConnection,
         ids: &[Uuid],
     ) -> Result<(), AppError> {
-        crate::compat_usage::count_internal("orders::catalog_view::options");
         type OptRow = (
             Uuid,
             String,
@@ -558,18 +582,21 @@ impl Catalog {
         );
         // A custom group's option is sold like any other, with no add-on type.
         let rows: Vec<OptRow> = sqlx::query_as(
-            "SELECT a.id, a.name, a.name_translations,
-                    COALESCE(bao.price_override, a.default_price), COALESCE(a.type, ''),
+            // Unified tables (DB Phase 3.1): an add-on is a modifier option of
+            // legacy_source 'addon' (the old `addon_items`), its branch price a
+            // branch-scope menu_price_overrides row (`branch_addon_overrides`).
+            "SELECT mo.id, mo.name, mo.name_translations,
+                    COALESCE(bao.price, mo.price), COALESCE(g.legacy_addon_type, ''),
                     mo.group_id, g.effect, g.swap_category_id, c.slug,
                     ri.id, ri.name, ri.unit::text
-               FROM addon_items a
-               LEFT JOIN branch_addon_overrides bao
-                      ON bao.addon_item_id = a.id AND bao.branch_id = $2
-               LEFT JOIN modifier_options mo ON mo.id = a.id
-               LEFT JOIN modifier_groups g ON g.id = mo.group_id
+               FROM modifier_options mo
+               JOIN modifier_groups g ON g.id = mo.group_id
+               LEFT JOIN menu_price_overrides bao
+                      ON bao.scope = 'branch' AND bao.target_type = 'modifier_option'
+                     AND bao.target_id = mo.id AND bao.branch_id = $2
                LEFT JOIN ingredient_categories c ON c.id = g.swap_category_id
                LEFT JOIN org_ingredients ri ON ri.id = mo.replaces_ingredient_id
-              WHERE a.id = ANY($1)",
+              WHERE mo.id = ANY($1) AND mo.legacy_source = 'addon'",
         )
         .bind(ids)
         .bind(self.branch)
@@ -579,13 +606,16 @@ impl Catalog {
         // Ordered like the `/addon-items` payload: a swap option with several
         // lines swaps in its first.
         let lines: Vec<(Uuid, Option<Uuid>, f64, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT aii.addon_item_id, aii.org_ingredient_id, aii.quantity_used::float8,
-                    aii.ingredient_name, aii.ingredient_unit, c.slug
-               FROM addon_item_ingredients aii
-               LEFT JOIN org_ingredients i ON i.id = aii.org_ingredient_id
-               LEFT JOIN ingredient_categories c ON c.id = i.category_id
-              WHERE aii.addon_item_id = ANY($1)
-              ORDER BY aii.addon_item_id, aii.ingredient_name, aii.org_ingredient_id",
+            // An add-on's generic (sizeless) recipe lines (`addon_item_ingredients`).
+            "SELECT rl.owner_id, rl.ingredient_id, rl.quantity::float8,
+                    oi.name, rl.unit, c.slug
+               FROM recipe_lines rl
+               JOIN modifier_options mo ON mo.id = rl.owner_id AND mo.legacy_source = 'addon'
+               JOIN org_ingredients oi ON oi.id = rl.ingredient_id
+               LEFT JOIN ingredient_categories c ON c.id = oi.category_id
+              WHERE rl.owner_type = 'modifier_option' AND rl.size_label IS NULL
+                AND rl.owner_id = ANY($1)
+              ORDER BY rl.owner_id, oi.name, rl.ingredient_id",
         )
         .bind(ids)
         .fetch_all(&mut *conn)
@@ -704,7 +734,6 @@ async fn load_recipes(
     conn: &mut PgConnection,
     ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<RecipeRow>>, AppError> {
-    crate::compat_usage::count_internal("orders::catalog_view::recipes");
     let rows: Vec<(
         Uuid,
         String,
@@ -714,13 +743,16 @@ async fn load_recipes(
         String,
         Option<String>,
     )> = sqlx::query_as(
-        "SELECT r.menu_item_id, r.size_label, r.org_ingredient_id, r.quantity_used::float8,
-                r.ingredient_name, r.ingredient_unit, ic.slug
-           FROM menu_item_recipes r
-           LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-           LEFT JOIN ingredient_categories ic ON ic.id = i.category_id
-          WHERE r.menu_item_id = ANY($1)
-          ORDER BY r.menu_item_id, r.size_label, r.ingredient_name",
+        // A size's recipe: recipe_lines (owner_type item_size) on its
+        // menu_item_sizes row (the old `menu_item_recipes`).
+        "SELECT ms.menu_item_id, ms.label, rl.ingredient_id, rl.quantity::float8,
+                oi.name, rl.unit, ic.slug
+           FROM recipe_lines rl
+           JOIN menu_item_sizes ms ON ms.id = rl.owner_id
+           JOIN org_ingredients oi ON oi.id = rl.ingredient_id
+           LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id
+          WHERE rl.owner_type = 'item_size' AND ms.menu_item_id = ANY($1)
+          ORDER BY ms.menu_item_id, ms.label, oi.name",
     )
     .bind(ids)
     .fetch_all(&mut *conn)

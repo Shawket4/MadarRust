@@ -169,13 +169,16 @@ async fn load_status(pool: &PgPool, org_id: Uuid) -> Result<OnboardingStatus, Ap
                 AND mi.is_active)::bigint                             AS menu_items,
             (SELECT COUNT(*) FROM org_ingredients oi
               WHERE oi.org_id = o.id)::bigint                         AS ingredients,
-            (SELECT COUNT(DISTINCT r.menu_item_id)
-               FROM menu_item_recipes r
-               JOIN menu_items mi ON mi.id = r.menu_item_id
+            (SELECT COUNT(DISTINCT ms.menu_item_id)
+               FROM recipe_lines r
+               JOIN menu_item_sizes ms ON ms.id = r.owner_id AND r.owner_type = 'item_size'
+               JOIN menu_items mi ON mi.id = ms.menu_item_id
               WHERE mi.org_id = o.id AND mi.deleted_at IS NULL
                 AND mi.is_active)::bigint                             AS items_with_recipes,
-            (SELECT COUNT(*) FROM addon_items a
-              WHERE a.org_id = o.id AND a.is_active)::bigint          AS addon_items,
+            (SELECT COUNT(*) FROM modifier_options a
+               JOIN modifier_groups g ON g.id = a.group_id
+              WHERE g.org_id = o.id AND a.legacy_source = 'addon'
+                AND a.is_active)::bigint                              AS addon_items,
             (SELECT COUNT(*) FROM orders ord
                JOIN branches b ON b.id = ord.branch_id
               WHERE b.org_id = o.id)::bigint                          AS orders_placed

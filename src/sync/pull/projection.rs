@@ -168,8 +168,11 @@ pub fn projects_sql(ty: &str) -> Option<&'static str> {
         // with `type` NULL but is not an add-on: old tills cannot carry it
         // (`menu::handlers::AddonItem`). Its feed rows go out as deletes.
         "addon_item" => {
-            "EXISTS (SELECT 1 FROM addon_items x WHERE x.id = $ID AND x.type IS NOT NULL \
-                     AND sync_live_addon_item(x.id))"
+            // On the unified tables (DB Phase 3.1): an add-on is a modifier
+            // option of legacy_source 'addon' in a typed group.
+            "EXISTS (SELECT 1 FROM modifier_options x JOIN modifier_groups g ON g.id = x.group_id \
+                     WHERE x.id = $ID AND x.legacy_source = 'addon' \
+                       AND g.legacy_addon_type IS NOT NULL AND sync_live_addon_item(x.id))"
         }
         "customer" => {
             "EXISTS (SELECT 1 FROM customers x WHERE x.id = $ID AND sync_live_customer(x))"

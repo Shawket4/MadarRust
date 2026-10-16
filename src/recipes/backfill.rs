@@ -62,62 +62,45 @@ pub async fn backfill_recipe_units(
     let mut tx = pool.begin().await?;
     let mut summary = RecipeUnitSummary::default();
 
-    // (display name, candidate SELECT, per-row UPDATE). Each SELECT returns
-    // (id, recipe_unit, base_unit, quantity_used::float8, ingredient_name).
-    let tables: [(&str, &str, &str); 3] = [
-        (
-            "menu_item_recipes",
-            "SELECT r.id, r.ingredient_unit, oi.unit::text, r.quantity_used::float8, r.ingredient_name \
-             FROM menu_item_recipes r JOIN org_ingredients oi ON oi.id = r.org_ingredient_id \
-             WHERE oi.org_id = $1",
-            "UPDATE menu_item_recipes SET quantity_used = $1, ingredient_unit = $2 WHERE id = $3",
-        ),
-        (
-            "addon_item_ingredients",
-            "SELECT r.id, r.ingredient_unit, oi.unit::text, r.quantity_used::float8, r.ingredient_name \
-             FROM addon_item_ingredients r JOIN org_ingredients oi ON oi.id = r.org_ingredient_id \
-             WHERE oi.org_id = $1",
-            "UPDATE addon_item_ingredients SET quantity_used = $1, ingredient_unit = $2 WHERE id = $3",
-        ),
-        (
-            "menu_item_optional_fields",
-            "SELECT r.id, r.ingredient_unit, oi.unit::text, r.quantity_used::float8, r.ingredient_name \
-             FROM menu_item_optional_fields r JOIN org_ingredients oi ON oi.id = r.org_ingredient_id \
-             WHERE oi.org_id = $1 AND r.quantity_used IS NOT NULL AND r.ingredient_unit IS NOT NULL",
-            "UPDATE menu_item_optional_fields SET quantity_used = $1, ingredient_unit = $2 WHERE id = $3",
-        ),
-    ];
+    // Every recipe line of the org's ingredients. This used to walk the three
+    // legacy recipe tables, which are read-only views over recipe_lines on
+    // every database since DB Phase 2.4 (it could no longer write them): the
+    // one table covers item sizes, add-ons and optional fields alike.
+    let rows = sqlx::query!(
+        r#"SELECT r.id, r.unit, oi.unit::text AS "base_unit!", r.quantity::float8 AS "qty!",
+                  oi.name AS ingredient_name
+             FROM recipe_lines r JOIN org_ingredients oi ON oi.id = r.ingredient_id
+            WHERE oi.org_id = $1"#,
+        org_id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
 
-    for (name, select_sql, update_sql) in tables {
-        let rows: Vec<(Uuid, String, String, f64, String)> = sqlx::query_as(select_sql)
-            .bind(org_id)
-            .fetch_all(&mut *tx)
-            .await?;
-
-        for (id, recipe_unit, base_unit, qty, ing_name) in rows {
-            summary.scanned += 1;
-            if recipe_unit.eq_ignore_ascii_case(&base_unit) {
-                summary.already_base += 1;
-                continue;
+    for r in rows {
+        summary.scanned += 1;
+        if r.unit.eq_ignore_ascii_case(&r.base_unit) {
+            summary.already_base += 1;
+            continue;
+        }
+        match crate::units::convert(r.qty, &r.unit, &r.base_unit) {
+            Ok(nq) => {
+                sqlx::query!(
+                    "UPDATE recipe_lines SET quantity = ($1::float8)::numeric, unit = $2 WHERE id = $3",
+                    nq,
+                    &r.base_unit,
+                    r.id
+                )
+                .execute(&mut *tx)
+                .await?;
+                summary.converted += 1;
             }
-            match crate::units::convert(qty, &recipe_unit, &base_unit) {
-                Ok(nq) => {
-                    sqlx::query(update_sql)
-                        .bind(nq)
-                        .bind(&base_unit)
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
-                    summary.converted += 1;
-                }
-                Err(_) => summary.unconvertible.push(Unconvertible {
-                    table: name.to_string(),
-                    row_id: id,
-                    ingredient_name: ing_name,
-                    recipe_unit,
-                    base_unit,
-                }),
-            }
+            Err(_) => summary.unconvertible.push(Unconvertible {
+                table: "recipe_lines".to_string(),
+                row_id: r.id,
+                ingredient_name: r.ingredient_name,
+                recipe_unit: r.unit,
+                base_unit: r.base_unit,
+            }),
         }
     }
 

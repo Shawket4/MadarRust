@@ -186,9 +186,16 @@ async fn facts(
     categories: &[Uuid],
 ) -> Result<Vec<FactRow>, AppError> {
     Ok(sqlx::query_as(
-        "SELECT mi.id, mi.kind, mi.category_id, mi.is_active, COALESCE(bmo.is_available, true), mi.name \
+        // Off at the branch when any of its sizes is (the old
+        // branch_menu_overrides rollup), on the unified overrides.
+        "SELECT mi.id, mi.kind, mi.category_id, mi.is_active, \
+                NOT EXISTS (SELECT 1 FROM menu_price_overrides p \
+                              JOIN menu_item_sizes ms ON ms.id = p.target_id \
+                             WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size' \
+                               AND p.branch_id = $2 AND ms.menu_item_id = mi.id \
+                               AND p.is_available = false), \
+                mi.name \
            FROM menu_items mi \
-           LEFT JOIN branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2 \
           WHERE mi.org_id = $1 AND mi.deleted_at IS NULL \
             AND (mi.id = ANY($3) OR (mi.category_id = ANY($4) AND mi.kind = 'item'))",
     )

@@ -83,14 +83,15 @@ fn recipe_rollup(item_expr: &str, size_expr: &str) -> String {
         r#"
         SELECT CASE
             WHEN COUNT(r.id) = 0 THEN NULL
-            WHEN bool_or(r.org_ingredient_id IS NULL OR cc.cost IS NULL) THEN NULL
-            ELSE SUM(r.quantity_used * cc.cost)
+            WHEN bool_or(cc.cost IS NULL) THEN NULL
+            ELSE SUM(r.quantity * cc.cost)
         END AS rollup
-        FROM menu_item_recipes r
-        LEFT JOIN current_costs cc ON cc.id = r.org_ingredient_id
-        WHERE r.menu_item_id = {item_expr}
-          AND COALESCE(r.size_label::text, 'one_size')
-              = COALESCE({size_expr}::text, 'one_size')
+        -- A size's recipe lines (the old `menu_item_recipes`).
+        FROM recipe_lines r
+        JOIN menu_item_sizes ms ON ms.id = r.owner_id AND r.owner_type = 'item_size'
+        LEFT JOIN current_costs cc ON cc.id = r.ingredient_id
+        WHERE ms.menu_item_id = {item_expr}
+          AND ms.label = COALESCE({size_expr}::text, 'one_size')
         "#
     )
 }
@@ -149,12 +150,15 @@ pub async fn backfill_cost_snapshots(
             LEFT JOIN LATERAL (
                 SELECT CASE
                     WHEN COUNT(ai.id) = 0 THEN NULL
-                    WHEN bool_or(ai.org_ingredient_id IS NULL OR cc.cost IS NULL) THEN NULL
-                    ELSE SUM(ai.quantity_used * cc.cost)
+                    WHEN bool_or(cc.cost IS NULL) THEN NULL
+                    ELSE SUM(ai.quantity * cc.cost)
                 END AS rollup
-                FROM addon_item_ingredients ai
-                LEFT JOIN current_costs cc ON cc.id = ai.org_ingredient_id
-                WHERE ai.addon_item_id = a.addon_item_id
+                -- An add-on's generic lines (the old `addon_item_ingredients`).
+                FROM recipe_lines ai
+                JOIN modifier_options mo ON mo.id = ai.owner_id AND mo.legacy_source = 'addon'
+                LEFT JOIN current_costs cc ON cc.id = ai.ingredient_id
+                WHERE ai.owner_type = 'modifier_option' AND ai.size_label IS NULL
+                  AND ai.owner_id = a.addon_item_id
             ) ar ON TRUE
             WHERE o.branch_id = ANY($1)
         ) calc

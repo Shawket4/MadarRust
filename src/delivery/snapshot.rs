@@ -298,8 +298,13 @@ async fn channel_off(
         return Ok(false);
     };
     let off: Option<Option<bool>> = sqlx::query_scalar(
-        "SELECT is_available FROM branch_channel_menu_overrides \
-          WHERE branch_id = $1 AND menu_item_id = $2 AND channel = $3::delivery_channel",
+        // The channel rollup of the item's size overrides (the old
+        // `branch_channel_menu_overrides.is_available`): false when any size
+        // is off on the channel, NULL when none says.
+        "SELECT bool_and(p.is_available) FROM menu_price_overrides p \
+           JOIN menu_item_sizes ms ON ms.id = p.target_id \
+          WHERE p.scope = 'branch_channel' AND p.target_type = 'menu_item_size' \
+            AND p.branch_id = $1 AND ms.menu_item_id = $2 AND p.channel = $3::delivery_channel",
     )
     .bind(branch_id)
     .bind(item)
@@ -427,11 +432,23 @@ pub async fn resolve_cart_as(
                           bcmo.price_override AS channel_price,
                           bcmo.is_available  AS channel_available
                    FROM menu_items mi
-                   LEFT JOIN branch_menu_overrides bmo
-                          ON bmo.menu_item_id = mi.id AND bmo.branch_id = $2
-                   LEFT JOIN branch_channel_menu_overrides bcmo
-                          ON bcmo.menu_item_id = mi.id AND bcmo.branch_id = $2
-                         AND bcmo.channel = $3::delivery_channel
+                   -- The item-level rollups of the size-scoped overrides (the
+                   -- old branch_menu_overrides / branch_channel_menu_overrides).
+                   LEFT JOIN LATERAL (
+                       SELECT max(p.price) FILTER (WHERE ms.label = 'one_size') AS price_override,
+                              NOT bool_or(p.is_available = false) AS is_available
+                         FROM menu_price_overrides p
+                         JOIN menu_item_sizes ms ON ms.id = p.target_id
+                        WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size'
+                          AND p.branch_id = $2 AND ms.menu_item_id = mi.id) bmo ON true
+                   LEFT JOIN LATERAL (
+                       SELECT max(p.price) FILTER (WHERE ms.label = 'one_size') AS price_override,
+                              bool_and(p.is_available) AS is_available
+                         FROM menu_price_overrides p
+                         JOIN menu_item_sizes ms ON ms.id = p.target_id
+                        WHERE p.scope = 'branch_channel' AND p.target_type = 'menu_item_size'
+                          AND p.branch_id = $2 AND p.channel = $3::delivery_channel
+                          AND ms.menu_item_id = mi.id) bcmo ON true
                    WHERE mi.id = $1 AND mi.org_id = $4 AND mi.deleted_at IS NULL"#,
         )
         .bind(line.menu_item_id)
@@ -531,9 +548,12 @@ pub async fn resolve_cart_as(
         if !addons.is_empty() {
             let addon_ids: Vec<Uuid> = addons.iter().map(|a| a.addon_item_id).collect();
             let rows: Vec<(Uuid, Option<i32>, Option<bool>)> = sqlx::query_as(
-                "SELECT addon_item_id, price_override, is_available \
-                 FROM branch_channel_addon_overrides \
-                 WHERE branch_id = $1 AND channel = $2::delivery_channel AND addon_item_id = ANY($3)",
+                // An add-on's branch+channel override (`branch_channel_addon_overrides`).
+                "SELECT p.target_id, p.price, p.is_available \
+                 FROM menu_price_overrides p \
+                 JOIN modifier_options mo ON mo.id = p.target_id AND mo.legacy_source = 'addon' \
+                 WHERE p.scope = 'branch_channel' AND p.target_type = 'modifier_option' \
+                   AND p.branch_id = $1 AND p.channel = $2::delivery_channel AND p.target_id = ANY($3)",
             )
             .bind(branch_id)
             .bind(channel)
@@ -929,8 +949,10 @@ async fn resolve_size_price(
     effective_base: i32,
 ) -> Result<i32, AppError> {
     let catalog: Option<Option<i32>> = sqlx::query_scalar(
-        "SELECT price_override FROM item_sizes \
-         WHERE menu_item_id = $1 AND label::text = $2 AND is_active = true",
+        // A real size (not a sizeless item's one_size sentinel), as `item_sizes`.
+        "SELECT z.price FROM menu_item_sizes z \
+         WHERE z.menu_item_id = $1 AND z.label::text = $2 AND z.is_active = true \
+           AND NOT (z.label = 'one_size' AND z.id = (md5(z.menu_item_id::text || ':one_size'))::uuid)",
     )
     .bind(menu_item_id)
     .bind(size)
@@ -940,8 +962,12 @@ async fn resolve_size_price(
         return Err(AppError::BadRequest(format!("Unknown size '{size}'")));
     };
     let branch_size: Option<i32> = sqlx::query_scalar(
-        "SELECT price_override FROM branch_menu_size_overrides \
-         WHERE branch_id = $1 AND menu_item_id = $2 AND size_label::text = $3",
+        // A priced branch override on a real size (`branch_menu_size_overrides`).
+        "SELECT p.price FROM menu_price_overrides p \
+           JOIN menu_item_sizes ms ON ms.id = p.target_id \
+          WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size' AND p.branch_id = $1 \
+            AND ms.menu_item_id = $2 AND ms.label::text = $3 \
+            AND p.price IS NOT NULL AND ms.label <> 'one_size'",
     )
     .bind(branch_id)
     .bind(menu_item_id)
