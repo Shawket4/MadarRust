@@ -914,7 +914,7 @@ pub async fn analytics(
                                              ELSE points_balance END) > 0), \
                     COALESCE(SUM(GREATEST(points_balance, 0)), 0)::bigint, \
                     COALESCE(SUM(GREATEST(visits_balance, 0)), 0)::bigint \
-               FROM loyalty_customers WHERE org_id = $1 AND deleted_at IS NULL",
+               FROM loyalty_memberships WHERE org_id = $1 AND deleted_at IS NULL",
         )
         .bind(org_id)
         .bind(&currency)
@@ -1045,7 +1045,7 @@ pub async fn behavior(
     let pool = pool.get_ref();
 
     let total_members: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM loyalty_customers WHERE org_id = $1 AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM loyalty_memberships WHERE org_id = $1 AND deleted_at IS NULL",
     )
     .bind(org_id)
     .fetch_one(pool)
@@ -1053,7 +1053,7 @@ pub async fn behavior(
 
     let members_ever_redeemed: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT t.customer_id) FROM loyalty_transactions t \
-           JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = t.customer_id AND c.deleted_at IS NULL \
           WHERE t.org_id = $1 AND t.kind = 'redeem'",
     )
     .bind(org_id)
@@ -1085,7 +1085,7 @@ pub async fn behavior(
             SELECT t.customer_id, c.enrolled_at, \
                    COUNT(*) FILTER (WHERE t.kind = 'earn') AS earn_visits \
               FROM loyalty_transactions t \
-              JOIN loyalty_customers c ON c.id = t.customer_id \
+              JOIN loyalty_memberships c ON c.id = t.customer_id \
              WHERE t.org_id = $1 AND ($2::uuid[] IS NULL OR t.branch_id = ANY($2)) \
                AND c.deleted_at IS NULL \
                AND t.created_at >= $3 AND t.created_at < $4 \
@@ -1186,7 +1186,7 @@ pub async fn campaign_effectiveness(
                       AND lt.created_at <= w.sent_at + interval '30 days' \
                 ))::bigint \
            FROM loyalty_winbacks w \
-           JOIN loyalty_customers c ON c.id = w.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = w.customer_id AND c.deleted_at IS NULL \
           WHERE w.org_id = $1 AND w.sent_at >= $2 AND w.sent_at < $3",
     )
     .bind(org_id)
@@ -1204,7 +1204,7 @@ pub async fn campaign_effectiveness(
                       AND lt.created_at <= g.sent_at + interval '30 days' \
                 ))::bigint \
            FROM loyalty_birthday_greetings g \
-           JOIN loyalty_customers c ON c.id = g.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = g.customer_id AND c.deleted_at IS NULL \
           WHERE g.org_id = $1 AND g.sent_at >= $2 AND g.sent_at < $3",
     )
     .bind(org_id)
@@ -1246,7 +1246,7 @@ pub struct LiabilityTrendPoint {
 /// A weekly trend of the programme's liability, in the org's live currency
 /// (points or visits — never both; see [`PointsLiability`]).
 ///
-/// `loyalty_customers.points_balance`/`visits_balance` are CURRENT balances
+/// `loyalty_memberships.points_balance`/`visits_balance` are CURRENT balances
 /// with no history table, so this is not a snapshot of the outstanding
 /// balance at each week — it is each week's *net change* (earned minus
 /// redeemed, reversals netted in), read straight off the ledger. Summing
@@ -1309,7 +1309,7 @@ pub async fn liability_trend(
         "SELECT {week} AT TIME ZONE $5 AS week, \
                 COALESCE(SUM(t.points), 0)::bigint AS outstanding \
            FROM loyalty_transactions t \
-           JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = t.customer_id AND c.deleted_at IS NULL \
           WHERE t.org_id = $1 AND t.currency = $2 \
             AND t.created_at >= $3 AND t.created_at < $4 \
           GROUP BY week \

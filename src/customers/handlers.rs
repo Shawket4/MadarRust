@@ -257,7 +257,7 @@ const SELECT_CUSTOMER: &str = "SELECT c.id, c.name, c.phone, c.notes,
         COALESCE(s.n, 0) AS orders_count, COALESCE(s.spent, 0) AS total_spent,
         s.last_at AS last_order_at, c.created_at, c.updated_at
    FROM customers c
-   LEFT JOIN loyalty_customers m ON m.id = c.id AND m.deleted_at IS NULL
+   LEFT JOIN loyalty_memberships m ON m.id = c.id AND m.deleted_at IS NULL
    LEFT JOIN LATERAL (
         SELECT count(*) AS n,
                COALESCE(sum(o.total_amount) FILTER (WHERE o.status::text = 'completed'), 0)::bigint AS spent,
@@ -1260,7 +1260,7 @@ pub async fn erase_inner(
     // (`loyalty::model::purge_erased_pass`) — otherwise the phone would show
     // an erased person's last balance and barcode for ever.
     sqlx::query(
-        "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now()
+        "UPDATE loyalty_memberships m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now()
           WHERE m.id = ANY($1) AND m.org_id = $2
             AND NOT EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)",
     )

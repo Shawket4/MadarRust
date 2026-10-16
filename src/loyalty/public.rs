@@ -1004,7 +1004,7 @@ pub async fn apple_pass(
 
     // Record the serial so pass updates can find this member later.
     sqlx::query(
-        "UPDATE loyalty_customers SET apple_serial = $2, pass_updated_at = now() \
+        "UPDATE loyalty_memberships SET apple_serial = $2, pass_updated_at = now() \
          WHERE id = $1 AND apple_serial IS NULL",
     )
     .bind(member.id)

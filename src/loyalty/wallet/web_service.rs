@@ -171,7 +171,7 @@ pub async fn serials(
 
     let rows: Vec<(Uuid, Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
         "SELECT c.id, c.org_id, c.pass_updated_at FROM loyalty_pass_devices d \
-           JOIN loyalty_customers c ON c.id = d.customer_id \
+           JOIN loyalty_memberships c ON c.id = d.customer_id \
           WHERE d.device_library_id = $1 \
             AND (c.deleted_at IS NULL OR c.pass_voided_at IS NOT NULL) \
             AND ($2::timestamptz IS NULL OR c.pass_updated_at > $2)",
@@ -250,7 +250,7 @@ pub async fn latest_pass(
     // A retired card is served voided, for as long as its device keeps asking:
     // a 404 here would leave the last balance on screen for ever.
     let retired: bool = sqlx::query_scalar(
-        "SELECT pass_voided_at IS NOT NULL FROM loyalty_customers WHERE id = $1",
+        "SELECT pass_voided_at IS NOT NULL FROM loyalty_memberships WHERE id = $1",
     )
     .bind(member.id)
     .fetch_optional(pool.get_ref())

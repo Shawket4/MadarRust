@@ -805,7 +805,7 @@ async fn push_update_inner(pool: &PgPool, customer_id: Uuid) -> Result<(), AppEr
         // purchase and whoever asks first, rather than under either of them.
         apple::regenerate(pool, &member).await;
     }
-    sqlx::query("UPDATE loyalty_customers SET pass_updated_at = now() WHERE id = $1")
+    sqlx::query("UPDATE loyalty_memberships SET pass_updated_at = now() WHERE id = $1")
         .bind(customer_id)
         .execute(pool)
         .await?;

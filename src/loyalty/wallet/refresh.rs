@@ -112,7 +112,7 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
 pub async fn stale_passes(pool: &PgPool, limit: i64) -> Result<Vec<Uuid>, AppError> {
     let stale: Vec<Uuid> = sqlx::query_scalar(
         "SELECT c.id \
-           FROM loyalty_customers c \
+           FROM loyalty_memberships c \
            JOIN ( \
                SELECT o.id AS org_id, \
                       GREATEST( \

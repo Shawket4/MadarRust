@@ -1173,6 +1173,7 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
         include_str!("../migrations/20260922030000_staff_drinks_pool.sql"),
         include_str!("../migrations/20260925030000_customers_shared_key.sql"),
         include_str!("../migrations/20261005100000_combos.sql"),
+        include_str!("../migrations/20261020120000_p5_loyalty_memberships_rename.sql"),
     ]
     .iter()
     .flat_map(|sql| {
@@ -1193,9 +1194,10 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
     assert!(header.len() > 40, "header parsed: {header:?}");
     // Source tables a later migration dropped (its `-- SOURCE TABLES REMOVED`
     // block): the combos tables (20261004120000_remove_combos).
-    let removed: Vec<String> = [include_str!(
-        "../migrations/20261004120000_remove_combos.sql"
-    )]
+    let removed: Vec<String> = [
+        include_str!("../migrations/20261004120000_remove_combos.sql"),
+        include_str!("../migrations/20261020120000_p5_loyalty_memberships_rename.sql"),
+    ]
     .iter()
     .flat_map(|sql| {
         sql.lines()
@@ -1214,7 +1216,12 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
     .collect();
     assert_eq!(
         removed,
-        ["bundles", "bundle_components", "bundle_branch_availability"],
+        [
+            "bundles",
+            "bundle_components",
+            "bundle_branch_availability",
+            "loyalty_customers"
+        ],
         "removed-tables block parsed"
     );
     let header: Vec<String> = header

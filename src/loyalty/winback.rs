@@ -198,7 +198,7 @@ async fn nudge(pool: &PgPool, m: &Lapsed) -> Result<(), AppError> {
             "SELECT COALESCE(c.joined_branch_id, \
                     (SELECT id FROM branches WHERE org_id = $2 AND deleted_at IS NULL \
                       ORDER BY created_at LIMIT 1)) \
-               FROM loyalty_customers c WHERE c.id = $1",
+               FROM loyalty_memberships c WHERE c.id = $1",
         )
         .bind(m.id)
         .bind(m.org_id)
@@ -381,7 +381,7 @@ mod tests {
             .await
             .unwrap();
             sqlx::query(
-                "INSERT INTO loyalty_customers (id, org_id, member_token) VALUES ($1, $2, $3)",
+                "INSERT INTO loyalty_memberships (id, org_id, member_token) VALUES ($1, $2, $3)",
             )
             .bind(id)
             .bind(org)
