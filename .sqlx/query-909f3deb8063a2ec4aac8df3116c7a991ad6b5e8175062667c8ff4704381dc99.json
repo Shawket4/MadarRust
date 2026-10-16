@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rl.ingredient_id, rl.quantity::float8 AS \"qty!\",\n                  oi.name AS ingredient_name, rl.unit AS ingredient_unit,\n                  (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = oi.category_id) AS \"category!\"\n             FROM recipe_lines rl\n             JOIN menu_item_sizes ms ON ms.id = rl.owner_id\n             JOIN org_ingredients oi ON oi.id = rl.ingredient_id\n            WHERE rl.owner_type = 'item_size' AND ms.menu_item_id = $1\n              AND ms.label = COALESCE($2, (\n                  SELECT s2.label FROM recipe_lines r2\n                    JOIN menu_item_sizes s2 ON s2.id = r2.owner_id\n                   WHERE r2.owner_type = 'item_size' AND s2.menu_item_id = $1\n                   ORDER BY s2.label LIMIT 1))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ingredient_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "qty!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "ingredient_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "ingredient_unit",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "category!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "909f3deb8063a2ec4aac8df3116c7a991ad6b5e8175062667c8ff4704381dc99"
+}
