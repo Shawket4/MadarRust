@@ -80,16 +80,26 @@ async fn open_shift_row(pool: &PgPool, branch: Uuid, teller: Uuid) -> Uuid {
     .await
     .unwrap()
 }
-/// A role default, as the dashboard's role matrix would set it.
+/// A role default, as the dashboard's role matrix would set it (an upsert,
+/// like `PUT /permissions/roles`: every default row exists since migration
+/// 20261017000100 seeds them).
 async fn grant(pool: &PgPool, role: &str, resource: &str, action: &str) {
+    set_role_default(pool, role, resource, action, true).await
+}
+/// Take a role default away (the seeded defaults hold most cells already).
+async fn revoke(pool: &PgPool, role: &str, resource: &str, action: &str) {
+    set_role_default(pool, role, resource, action, false).await
+}
+async fn set_role_default(pool: &PgPool, role: &str, resource: &str, action: &str, granted: bool) {
     sqlx::query(
         "INSERT INTO role_permissions (role, resource, action, granted) \
-         VALUES ($1::user_role, $2::permission_resource, $3::permission_action, true) \
-         ON CONFLICT DO NOTHING",
+         VALUES ($1::user_role, $2::permission_resource, $3::permission_action, $4) \
+         ON CONFLICT (role, resource, action) DO UPDATE SET granted = EXCLUDED.granted",
     )
     .bind(role)
     .bind(resource)
     .bind(action)
+    .bind(granted)
     .execute(pool)
     .await
     .unwrap();
@@ -289,6 +299,7 @@ async fn a_revoked_void_does_not_get_through_by_being_queued(pool: PgPool) {
     let _shift = open_shift_row(&pool, branch, teller).await;
     grant(&pool, "teller", "open_tickets", "create").await;
     grant(&pool, "teller", "open_tickets", "update").await;
+    revoke(&pool, "teller", "open_tickets", "delete").await;
     let bearer = token(teller, org, UserRole::Teller);
 
     let r = fire_by_replay(&app, &bearer, teller, branch, item).await;
@@ -321,6 +332,7 @@ async fn a_revoked_void_does_not_get_through_by_being_queued(pool: PgPool) {
     // The check runs before the target is even looked up, so a revoked actor
     // is turned away without the order existing.
     grant(&pool, "teller", "orders", "update").await;
+    revoke(&pool, "teller", "orders", "delete").await;
     let void_order = serde_json::json!({
         "op": "void_order",
         "teller_id": teller,
@@ -876,6 +888,7 @@ async fn a_manager_approval_carries_a_void_the_teller_does_not_hold(pool: PgPool
     let _shift = open_shift_row(&pool, branch, teller).await;
     grant(&pool, "teller", "open_tickets", "create").await;
     grant(&pool, "teller", "open_tickets", "update").await;
+    revoke(&pool, "teller", "open_tickets", "delete").await;
     grant(&pool, "branch_manager", "open_tickets", "delete").await;
     let bearer = token(teller, org, UserRole::Teller);
 

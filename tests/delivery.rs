@@ -2492,6 +2492,9 @@ mod it {
     #[sqlx::test]
     async fn staff_action_requires_permission(pool: PgPool) {
         // NB: perms NOT seeded → teller has no delivery_orders grant.
+        // Every global role default is seeded by migration 20261017000100;
+        // this test needs the empty table it was written against.
+        sqlx::query("DELETE FROM role_permissions").execute(&pool).await.unwrap();
         let org = seed_org(&pool).await;
         let branch = seed_branch(&pool, org).await;
         let teller = seed_user(&pool, org, "teller").await;

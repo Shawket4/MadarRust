@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH dead AS (\n                  DELETE FROM sync_changes c\n                   WHERE c.type = ANY($1) AND c.changed_at < $2\n                     AND (c.branch_id, c.type, c.entity_id) IN (\n                           SELECT c2.branch_id, c2.type, c2.entity_id FROM sync_changes c2\n                            WHERE c2.type = ANY($1) AND c2.changed_at < $2\n                              AND NOT CASE c2.type\n                       WHEN 'till' THEN EXISTS (SELECT 1 FROM tills t WHERE t.id = c2.entity_id\n                            AND (t.status = 'open' OR t.closed_at >= $2 OR t.updated_at >= $2))\n                       WHEN 'cash_movement' THEN EXISTS (SELECT 1 FROM till_cash_movements m JOIN tills t ON t.id = m.till_id\n                            WHERE m.id = c2.entity_id AND (t.status = 'open' OR t.closed_at >= $2 OR m.created_at >= $2))\n                       WHEN 'order' THEN EXISTS (SELECT 1 FROM orders o WHERE o.id = c2.entity_id\n                            AND (o.updated_at >= $2 OR EXISTS (SELECT 1 FROM tills t WHERE t.id = o.till_id\n                                                                AND (t.status = 'open' OR t.closed_at >= $2))))\n                       WHEN 'refund' THEN EXISTS (SELECT 1 FROM order_refunds r WHERE r.id = c2.entity_id\n                            AND (r.created_at >= $2 OR EXISTS (SELECT 1 FROM tills t WHERE t.id = r.till_id\n                                                                AND (t.status = 'open' OR t.closed_at >= $2))))\n                       ELSE false END\n                            ORDER BY c2.seq LIMIT $3)\n                     AND NOT CASE c.type\n                       WHEN 'till' THEN EXISTS (SELECT 1 FROM tills t WHERE t.id = c.entity_id\n                            AND (t.status = 'open' OR t.closed_at >= $2 OR t.updated_at >= $2))\n                       WHEN 'cash_movement' THEN EXISTS (SELECT 1 FROM till_cash_movements m JOIN tills t ON t.id = m.till_id\n                            WHERE m.id = c.entity_id AND (t.status = 'open' OR t.closed_at >= $2 OR m.created_at >= $2))\n                       WHEN 'order' THEN EXISTS (SELECT 1 FROM orders o WHERE o.id = c.entity_id\n                            AND (o.updated_at >= $2 OR EXISTS (SELECT 1 FROM tills t WHERE t.id = o.till_id\n                                                                AND (t.status = 'open' OR t.closed_at >= $2))))\n                       WHEN 'refund' THEN EXISTS (SELECT 1 FROM order_refunds r WHERE r.id = c.entity_id\n                            AND (r.created_at >= $2 OR EXISTS (SELECT 1 FROM tills t WHERE t.id = r.till_id\n                                                                AND (t.status = 'open' OR t.closed_at >= $2))))\n                       ELSE false END\n                  RETURNING c.branch_id, c.seq)\n               SELECT branch_id AS \"branch_id!\", count(*) AS \"n!\", max(seq) AS \"max_seq!\"\n                 FROM dead GROUP BY branch_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "n!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "max_seq!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "d645163f2654ad0b15be6f66dd4ae750453ebe238472f32829c18337f01eb355"
+}

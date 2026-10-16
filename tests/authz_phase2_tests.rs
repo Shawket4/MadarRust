@@ -238,3 +238,37 @@ async fn a_core_deny_is_the_one_explained_difference_and_enforce_serves_the_new_
             .is_err()
     );
 }
+
+/// DB audit Phase 4: a disagreement is persisted to the counter the cut-over
+/// condition reads, and a repeat on the same day adds to the same row.
+#[sqlx::test]
+async fn a_disagreement_is_persisted_to_the_counter(pool: PgPool) {
+    seed(&pool).await;
+    let o = org(&pool).await;
+    let teller = user(&pool, o, "teller").await;
+    let mut conn = pool.acquire().await.unwrap();
+    for _ in 0..3 {
+        // Legacy says yes, the new model says no: payroll is not a teller's.
+        let _ = observe_in(Mode::Shadow, &mut conn, teller, "payroll", "read", Ok(())).await;
+    }
+    // Agreement is not counted.
+    let _ = observe_in(Mode::Shadow, &mut conn, teller, "orders", "create", Ok(())).await;
+    drop(conn);
+    madar_rust::authz::shadow::flush(&pool).await.unwrap();
+    let _ = {
+        let mut conn = pool.acquire().await.unwrap();
+        observe_in(Mode::Shadow, &mut conn, teller, "payroll", "read", Ok(())).await
+    };
+    madar_rust::authz::shadow::flush(&pool).await.unwrap();
+    let rows: Vec<(Option<Uuid>, String, String, bool, bool, i64)> = sqlx::query_as(
+        "SELECT org_id, resource, action, legacy, new, hits FROM authz_shadow_disagreements WHERE user_id = $1",
+    )
+    .bind(teller)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![(Some(o), "payroll".into(), "read".into(), true, false, 4)]
+    );
+}

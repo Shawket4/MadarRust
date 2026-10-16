@@ -214,6 +214,7 @@ paths(
         // ── POS catalog sync (Wave 2, new unified tables) ───────────
         crate::menu::catalog_sync::catalog_sync,
         crate::sync::pull::pull,
+        crate::sync::batch::replay_batch,
         // ── menu studio: modifiers + pricing (Wave 2, new tables) ───
         crate::menu::modifiers::list_groups,
         crate::menu::lint::get_menu_lint,

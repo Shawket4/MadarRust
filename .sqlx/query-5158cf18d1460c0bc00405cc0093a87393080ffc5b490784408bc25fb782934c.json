@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO role_permissions (role, resource, action, granted) VALUES ('org_admin'::user_role, 'orgs'::permission_resource, 'read'::permission_action, true) ON CONFLICT (role, resource, action) DO UPDATE SET granted = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "5158cf18d1460c0bc00405cc0093a87393080ffc5b490784408bc25fb782934c"
+}

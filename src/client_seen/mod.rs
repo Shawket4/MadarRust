@@ -84,6 +84,11 @@ pub const KIND_UPLOADS_LEGACY_PATH: &str = "uploads_legacy_path";
 pub const KIND_UPLOADS_LEGACY_REDIRECT: &str = "uploads_legacy_redirect";
 /// A per-endpoint offline mirror list read by a `pos/` or `kds/` client (§8a).
 pub const KIND_MIRROR_LIST_POS: &str = "mirror_list_pos";
+/// `/permissions/*`: the old role-matrix editor routes, the last readers and
+/// writers of the legacy `role_permissions` / `permissions` tables (DB audit
+/// Phase 4). No POS build ever called them; the parked archive migration
+/// `migrations/parked/*_authz_legacy_tables_archive.sql` waits on this kind.
+pub const KIND_PERMISSIONS_ROUTE: &str = "legacy_permissions_route";
 
 /// Optional header naming the branch a client works at (read for telemetry
 /// only, and only when it is a branch of the token's org).
@@ -167,6 +172,8 @@ pub fn route_kind(path: &str) -> Option<&'static str> {
         Some(KIND_REFUNDS_SHIFT_ROUTE)
     } else if path.starts_with("/reports/shifts/") {
         Some(KIND_REPORTS_SHIFTS_ROUTE)
+    } else if path == "/permissions" || path.starts_with("/permissions/") {
+        Some(KIND_PERMISSIONS_ROUTE)
     } else {
         None
     }

@@ -61,6 +61,10 @@ pub struct PullRequest {
     /// The `snapshot_cursor` of the previous page of a paged full snapshot.
     #[serde(default)]
     pub snapshot_cursor: Option<SnapshotCursor>,
+    /// The sync protocol the till speaks (`sync::protocol`). Absent = v1, and
+    /// the response is exactly what v1 always got.
+    #[serde(default)]
+    pub protocol: Option<u16>,
 }
 
 /// Where a paged full snapshot stands. Every page reads the same horizon and
@@ -141,6 +145,13 @@ pub struct PullResponse {
     /// `types` on each page lists what that page covers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_cursor: Option<SnapshotCursor>,
+    /// The negotiated sync protocol; only when the request named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<u16>,
+    /// v2: how long (hours) a ledger row stays on the incremental feed; a
+    /// cursor older than that is answered `resync_required`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_retention_hours: Option<i64>,
 }
 
 fn coded(code: &'static str, reason: &str) -> AppError {
@@ -233,7 +244,7 @@ pub async fn pull_core(
             "`ledger_page_size` / `snapshot_cursor` are only valid for a full pull",
         ));
     }
-    match since {
+    let mut resp = match since {
         Some(since) => incremental(pool, org_id, body.branch_id, since, limit).await,
         None => match body.ledger_page_size {
             Some(size) => {
@@ -249,7 +260,16 @@ pub async fn pull_core(
             }
             None => full(pool, org_id, body.branch_id, &types).await,
         },
+    }?;
+    // Protocol fields only for a till that named a protocol: v1 is unchanged.
+    if body.protocol.is_some() {
+        let p = crate::sync::protocol::negotiate(body.protocol);
+        resp.protocol = Some(p);
+        if p >= crate::sync::protocol::V2 {
+            resp.ledger_retention_hours = Some(sweeper::retention().num_hours());
+        }
     }
+    Ok(resp)
 }
 
 async fn incremental(

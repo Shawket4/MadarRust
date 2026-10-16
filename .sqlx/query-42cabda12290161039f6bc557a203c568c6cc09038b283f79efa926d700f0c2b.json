@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id, json_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text,\n                        'is_active', u.is_active, 'permissions', '[]'::json) AS \"row!\"\n                   FROM users u WHERE u.id = ANY($1) AND u.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "row!",
+        "type_info": "Json"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "42cabda12290161039f6bc557a203c568c6cc09038b283f79efa926d700f0c2b"
+}

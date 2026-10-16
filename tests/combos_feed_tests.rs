@@ -213,6 +213,7 @@ async fn every_feed_carries_each_slot_s_arabic_name(pool: PgPool) {
             limit: None,
             ledger_page_size: None,
             snapshot_cursor: None,
+            protocol: None,
         },
         None,
     )

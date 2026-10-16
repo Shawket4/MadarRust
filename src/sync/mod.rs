@@ -19,8 +19,9 @@
 //! action). Structural integrity — FKs, unique indexes, idempotency early-returns,
 //! org scoping, and the shift-must-be-open guard for orders — still holds.
 //!
-//! WHO MAY DO WHAT is decided in exactly one place: the permission tables
-//! (`role_permissions` + the per-user `permissions` overrides), consulted through
+//! WHO MAY DO WHAT is decided in exactly one place: the architecture E model
+//! (the person's role grants and overrides; the legacy `role_permissions` /
+//! `permissions` tables are no longer read, DB audit Phase 4), consulted through
 //! `permissions::checker::check_permission_for` against the op's EMBEDDED actor.
 //! Replay asks the table the same `(resource, action)` question the live route
 //! asks (`ReplayOp::required_permissions`), so a grant made in the dashboard works
@@ -32,7 +33,9 @@
 //! path; it is gone, because three answers to one question is how a per-user
 //! grant came to work online and be ignored offline.
 
+pub mod batch;
 pub mod handlers;
+pub mod protocol;
 pub mod pull;
 pub mod routes;
 

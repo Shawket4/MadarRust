@@ -629,6 +629,7 @@ async fn pos_metrics_vectors(pool: PgPool) {
         limit: None,
         ledger_page_size: None,
         snapshot_cursor: None,
+        protocol: None,
     };
     let full = madar_rust::sync::pull::pull_core(&pool, org, &body, None)
         .await

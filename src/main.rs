@@ -15,7 +15,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use madar_rust::openapi::ApiDoc;
 use madar_rust::{
-    ai, auth, bookings, customers, demo, loyalty, menu, permissions, qr_card, realtime, recipes,
+    ai, auth, bookings, customers, demo, loyalty, menu, qr_card, realtime, recipes,
     staff,
 };
 
@@ -112,16 +112,16 @@ async fn run() -> std::io::Result<()> {
         tracing::error!("step animation reconcile failed: {e}");
     }
 
-    tracing::info!("Seeding default role permissions into database...");
-    permissions::seeder::seed_role_permissions(&pool)
-        .await
-        .expect("Failed to seed default role permissions");
+    // No legacy reseed (DB audit Phase 4): the single model decides, and the
+    // global `role_permissions` rows a fresh database needs are seeded once by
+    // migration 20261017000100. `permissions::seeder` stays for test fixtures.
 
     // The capability catalogue follows the compiled registry; a reused id stops boot.
     if let Err(e) = madar_rust::authz::sync_catalogue(&pool).await {
         panic!("permission registry drift: {e}");
     }
     tracing::info!(mode = ?*madar_rust::authz::shadow::MODE, "permissions model");
+    madar_rust::authz::shadow::spawn_flusher(pool.clone());
 
     let pool = web::Data::new(pool);
     // Read pool handed to the /reports scope only (see configure call below).

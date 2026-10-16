@@ -75,6 +75,11 @@ fn classifies_legacy_routes_by_path() {
         "HR work shifts are not legacy"
     );
     assert_eq!(route_kind("/reports/tills/abc/summary"), None);
+    assert_eq!(
+        route_kind("/permissions/roles"),
+        Some(KIND_PERMISSIONS_ROUTE)
+    );
+    assert_eq!(route_kind("/auth/permissions"), None, "the live grid is not legacy");
 }
 
 #[core::prelude::v1::test]

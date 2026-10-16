@@ -204,6 +204,9 @@ async fn migrate_rest(pool: &PgPool) {
 /// round trip is proved on the schema the down script was written for.
 const REMOVE_COMBOS: i64 = 20261004120000;
 
+/// 20261017000100 seeds every global role default once (DB audit Phase 4).
+const SEED_ROLE_DEFAULTS: i64 = 20261017000100;
+
 async fn migrate_rest_before_combos_removal(pool: &PgPool) {
     subset(|v| v < REMOVE_COMBOS)
         .run(pool)
@@ -569,7 +572,13 @@ async fn permission_rows_follow_enum_rename(pool: PgPool) {
         "SELECT count(*) FROM role_permissions WHERE resource::text = 'shifts'",
     )
     .await;
-    migrate_rest(&pool).await;
+    // Up to, not including, the migration that seeds every global role
+    // default (20261017000100): it adds `tills` rows of its own, and this test
+    // is about the rename carrying the fixture's rows across.
+    subset(|v| v < SEED_ROLE_DEFAULTS)
+        .run(&pool)
+        .await
+        .expect("rework migrations");
     assert_eq!(
         i64_of(
             &pool,
@@ -923,6 +932,7 @@ async fn changefeed_backfill_restamped_to_business_time(pool: PgPool) {
         limit: None,
         ledger_page_size: None,
         snapshot_cursor: None,
+        protocol: None,
     };
     let resp = madar_rust::sync::pull::pull_core(&pool, org, &req, None)
         .await

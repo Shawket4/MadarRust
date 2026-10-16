@@ -435,28 +435,22 @@ pub async fn project(
             .await?
         }
         "teller" => {
-            let mut rows =
-            // `permissions`: the person's EFFECTIVE granted `resource:action` pairs
-            // (user override → role default), granted only, the same resolution as
-            // `GET /auth/permissions` — so a grant or a revocation reaches a till
-            // through the feed instead of at the next online sign-in.
-            by_sql(
-                conn,
-                "SELECT u.id, json_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text, \
-                        'is_active', u.is_active, \
-                        'permissions', COALESCE((SELECT json_agg(g.p ORDER BY g.p) FROM ( \
-                            SELECT rp.resource::text || ':' || rp.action::text AS p \
-                              FROM role_permissions rp \
-                             WHERE rp.role = u.role \
-                               AND COALESCE((SELECT pm.granted FROM permissions pm WHERE pm.user_id = u.id \
-                                              AND pm.resource = rp.resource AND pm.action = rp.action), rp.granted) \
-                            UNION \
-                            SELECT pm.resource::text || ':' || pm.action::text \
-                              FROM permissions pm WHERE pm.user_id = u.id AND pm.granted) g), '[]'::json)) \
-                   FROM users u WHERE u.id = ANY($1) AND u.deleted_at IS NULL",
-                ids,
+            // `permissions` is filled by `add_capabilities` below from the single
+            // model: the person's effective `resource:action` cells AT THIS
+            // BRANCH, granted only, sorted — the same strings old tills read.
+            // The placeholder keeps the key where pre-Phase-4 rows had it; the
+            // legacy tables are not read (DB audit Phase 4).
+            let mut rows: HashMap<Uuid, Value> = sqlx::query!(
+                r#"SELECT u.id, json_build_object('id', u.id, 'user_id', u.id, 'name', u.name, 'role', u.role::text,
+                        'is_active', u.is_active, 'permissions', '[]'::json) AS "row!"
+                   FROM users u WHERE u.id = ANY($1) AND u.deleted_at IS NULL"#,
+                ids
             )
-            .await?;
+            .fetch_all(&mut *conn)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.row))
+            .collect();
             // Architecture E: overwrite with the person's effective grants AT THIS
             // BRANCH, and add the capability view newer tills gate on.
             for (id, v) in rows.iter_mut() {

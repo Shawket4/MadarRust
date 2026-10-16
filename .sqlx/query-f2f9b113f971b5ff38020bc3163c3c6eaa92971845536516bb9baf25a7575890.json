@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sync_sweep_state (branch_id, checked_through_seq, checked_at)\n             VALUES ($1, COALESCE((SELECT max(seq) FROM sync_changes WHERE branch_id = $1), 0), $2)\n             ON CONFLICT (branch_id) DO UPDATE\n                SET checked_through_seq = EXCLUDED.checked_through_seq, checked_at = EXCLUDED.checked_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f2f9b113f971b5ff38020bc3163c3c6eaa92971845536516bb9baf25a7575890"
+}

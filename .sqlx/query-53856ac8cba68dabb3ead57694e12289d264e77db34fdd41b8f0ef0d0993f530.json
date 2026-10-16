@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH gone AS (\n              SELECT c.branch_id, c.type, c.entity_id FROM sync_changes c\n               WHERE c.op = 'upsert' AND c.type = ANY($1)\n                 AND NOT CASE c.type\n                       WHEN 'kitchen_ticket' THEN EXISTS (SELECT 1 FROM kitchen_tickets x\n                            WHERE x.id = c.entity_id AND x.branch_id = c.branch_id AND sync_live_kitchen_ticket(x))\n                       WHEN 'delivery' THEN EXISTS (SELECT 1 FROM delivery_orders x\n                            WHERE x.id = c.entity_id AND x.branch_id = c.branch_id AND sync_live_delivery(x))\n                       WHEN 'booking' THEN EXISTS (SELECT 1 FROM bookings x\n                            WHERE x.id = c.entity_id AND x.branch_id = c.branch_id AND sync_live_booking(x))\n                       ELSE true END)\n           SELECT count(*) AS \"n!\" FROM (SELECT sync_emit(branch_id, type, entity_id, 'delete') FROM gone) x",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "53856ac8cba68dabb3ead57694e12289d264e77db34fdd41b8f0ef0d0993f530"
+}

@@ -381,6 +381,11 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
 /// Routes any signed-in person may call without holding a capability.
 pub const AUTHENTICATED: &[(&str, &str, &str)] = &[
     (
+        "POST",
+        "/sync/replay/batch",
+        "transport only: each op runs through /sync/replay's own attribution and permission checks, and its 403 comes back in that op's result (the batch itself answers 200)",
+    ),
+    (
         "GET",
         "/auth/me",
         "the caller's own profile and tax context",

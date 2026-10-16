@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO authz_shadow_disagreements\n                 (day, org_id, user_id, resource, action, legacy, new, hits, first_seen, last_seen)\n             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n             ON CONFLICT (day, user_id, resource, action, legacy, new) DO UPDATE\n                SET hits = authz_shadow_disagreements.hits + EXCLUDED.hits,\n                    last_seen = GREATEST(authz_shadow_disagreements.last_seen, EXCLUDED.last_seen),\n                    org_id = COALESCE(authz_shadow_disagreements.org_id, EXCLUDED.org_id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Date",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Bool",
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6b9574acd52b1dac16f89b69551c43400643577187ab06bbeecf0b65f234cbdf"
+}
