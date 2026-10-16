@@ -135,23 +135,25 @@ pub struct TableOrderRequest {
     operation_id = "public_table",
     params(("id" = Uuid, Path, description = "Table ID, from the QR")),
     responses((status = 200, body = PublicTable), AppErrorResponse))]
-pub async fn table(pool: web::Data<PgPool>, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
-    let row: Option<(Uuid, Uuid, String, String)> = sqlx::query_as(
+pub async fn table(pdb: crate::db::PublicDb, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+    let row = sqlx::query!(
         "SELECT t.branch_id, b.org_id, t.label, b.name \
            FROM branch_tables t JOIN branches b ON b.id = t.branch_id \
           WHERE t.id = $1 AND t.is_active \
             AND b.is_active AND b.deleted_at IS NULL",
+        *id
     )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
+    .fetch_optional(pdb.resolver())
+    .await?
+    .map(|r| (r.branch_id, r.org_id, r.label, r.name));
     // A code for a table that has been removed, or whose branch is closed for
     // good, is a code on a wall somewhere. It gets the same nothing as a made-up
     // id rather than an explanation.
     let (branch_id, org_id, label, branch_name) =
         row.ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
     // Tables and their QR codes are the paid `floor` feature.
-    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Floor).await?;
+    crate::plan::public_gate_org(pdb.resolver(), org_id, madar_plan::Feature::Floor).await?;
+    let pool = pdb.scoped(org_id).await;
 
     let accepting = crate::tills::handlers::branch_has_open_till(pool.get_ref(), branch_id)
         .await
@@ -249,19 +251,15 @@ async fn live_bill(pool: &PgPool, table_id: Uuid) -> Result<Option<PublicTableBi
     params(("id" = Uuid, Path, description = "Table ID, from the QR")),
     responses((status = 200, body = crate::delivery::public::DeliveryMenu), AppErrorResponse))]
 pub async fn table_menu(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT t.branch_id, b.org_id FROM branch_tables t JOIN branches b ON b.id = t.branch_id \
-          WHERE t.id = $1 AND t.is_active AND b.is_active AND b.deleted_at IS NULL",
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-    let (branch_id, org_id) =
-        row.ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
-    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Floor).await?;
+    let (branch_id, org_id) = pdb
+        .table_branch_org(*id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
+    crate::plan::public_gate_org(pdb.resolver(), org_id, madar_plan::Feature::Floor).await?;
+    let pool = pdb.scoped(org_id).await;
     let menu =
         crate::delivery::public::load_public_menu(pool.get_ref(), org_id, branch_id, None).await?;
     Ok(HttpResponse::Ok().json(menu))
@@ -277,11 +275,10 @@ pub async fn table_menu(
     responses((status = 200, description = "The bill as it now stands",
                body = crate::tickets::OpenTicketView), AppErrorResponse))]
 pub async fn create_table_order(
-    // `web::Data<PgPool>`, NOT `Db`. `Db` is the TENANT-SCOPED pool and it
-    // extracts the org from verified claims — a public endpoint has none, so
-    // taking it here 401s before the handler runs. The org is established
-    // below, from the table, and the scoped handle is built from that.
-    base: web::Data<PgPool>,
+    // `PublicDb`, NOT `Db`: `Db` extracts the org from verified claims and a
+    // public endpoint has none. The org is established below, from the table,
+    // and the scoped handle is built from that.
+    pdb: crate::db::PublicDb,
     hub: web::Data<BranchEventHub>,
     body: web::Json<TableOrderRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -290,25 +287,20 @@ pub async fn create_table_order(
         return Err(AppError::BadRequest("Nothing to send".into()));
     }
 
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT t.branch_id, b.org_id FROM branch_tables t JOIN branches b ON b.id = t.branch_id \
-          WHERE t.id = $1 AND t.is_active AND b.is_active AND b.deleted_at IS NULL",
-    )
-    .bind(body.table_id)
-    .fetch_optional(base.get_ref())
-    .await?;
-    let (branch_id, org_id) =
-        row.ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
-    crate::plan::public_gate_org(base.get_ref(), org_id, madar_plan::Feature::Floor).await?;
+    let (branch_id, org_id) = pdb
+        .table_branch_org(body.table_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
+    crate::plan::public_gate_org(pdb.resolver(), org_id, madar_plan::Feature::Floor).await?;
     // The tenant scope comes from the TABLE — the only thing the customer
     // supplied that the database can vouch for — and every write below runs
     // inside it, so a table id cannot reach another shop's rows.
-    let pool = crate::db::Db::for_org(base.get_ref(), org_id).await;
+    let pool = pdb.scoped(org_id).await;
 
     // The customer is the actor. Not a placeholder for one: something opened
     // this bill and it was not a member of staff, so it is named as what it
     // was. See the migration for why this is a row rather than a NULL.
-    let guest = guest_principal(base.get_ref(), org_id).await?;
+    let guest = guest_principal(pool.get_ref(), org_id).await?;
     let actor = ActingContext::guest(guest, org_id);
     // The branch-open gate, explicitly. `ActingContext::guest` is not a replay
     // — see its note — so nothing is skipping this on our behalf, and a scan
@@ -331,7 +323,7 @@ pub async fn create_table_order(
     let customer_id: Option<Uuid> = match (body.customer_phone.as_deref(), customer_name.as_deref())
     {
         (Some(phone), Some(name)) if crate::phone::canonical(phone).is_some() => {
-            let mut conn = base.get_ref().acquire().await?;
+            let mut conn = pool.get_ref().acquire().await?;
             match crate::customers::handlers::resolve_or_create(
                 &mut conn,
                 org_id,

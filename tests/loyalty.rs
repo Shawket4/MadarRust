@@ -3372,7 +3372,10 @@ async fn leaving_the_programme_ends_the_card_and_keeps_the_books(pool: PgPool) {
         .status(),
         StatusCode::FORBIDDEN
     );
-    // Another tenant's admin cannot even see them.
+    // Another tenant's admin cannot even see them: under RLS (DB Phase 2.5)
+    // another shop's member is exactly a member that does not exist, which this
+    // idempotent delete answers 204, and nothing changes. (It used to be 404,
+    // which told another tenant the id was real.)
     let other = seed_org(&pool).await;
     let other_admin = seed_user(&pool, other, "org_admin").await;
     assert_eq!(
@@ -3382,8 +3385,16 @@ async fn leaving_the_programme_ends_the_card_and_keeps_the_books(pool: PgPool) {
         )
         .await
         .status(),
-        StatusCode::NOT_FOUND
+        StatusCode::NO_CONTENT
     );
+    let still: bool = sqlx::query_scalar(
+        "SELECT deleted_at IS NULL FROM loyalty_members_v WHERE id = $1",
+    )
+    .bind(member)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(still, "another tenant's delete must not touch the member");
 
     let admin_jwt = token(admin, org, UserRole::OrgAdmin, None);
     assert_eq!(

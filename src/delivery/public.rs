@@ -148,6 +148,19 @@ const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
     (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
     EXISTS(SELECT 1 FROM tills sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift"#;
 
+/// The tenant handle of a live branch, for the branch-keyed public routes
+/// (404 like a branch that does not exist otherwise).
+async fn scoped_for_branch(
+    pdb: &crate::db::PublicDb,
+    branch_id: Uuid,
+) -> Result<crate::db::Db, AppError> {
+    let org = pdb
+        .branch_org(branch_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    Ok(pdb.scoped(org).await)
+}
+
 /// A shop's branches that take online orders, with each channel's hours and settings.
 ///
 /// `org_id` names the shop. With `browse=true` every active branch is listed, for a read-only menu.
@@ -156,9 +169,10 @@ const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
     responses((status = 200, body = [PublicBranch]), AppErrorResponse)
 )]
 pub async fn public_branches(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     query: web::Query<PublicBranchesQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = pdb.scoped(query.org_id).await;
     // Online ordering, and the read-only `browse` menu, are the paid `online`
     // feature: a Free shop has no such page (404, never 403).
     crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
@@ -461,10 +475,11 @@ pub struct ChannelParam {
     responses((status = 200, body = DeliveryMenu), AppErrorResponse)
 )]
 pub async fn public_menu(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<Uuid>,
     query: web::Query<ChannelParam>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, *path).await?;
     let branch_id = path.into_inner();
     crate::plan::public_gate_branch(pool.get_ref(), branch_id, madar_plan::Feature::Online)
         .await?;
@@ -1479,10 +1494,11 @@ pub(crate) async fn compute_outside_fee(
     responses((status = 200, body = QuoteResponse), AppErrorResponse)
 )]
 pub async fn delivery_quote(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<Uuid>,
     query: web::Query<QuoteQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, *path).await?;
     let branch_id = path.into_inner();
     crate::plan::public_gate_branch(pool.get_ref(), branch_id, madar_plan::Feature::Online)
         .await?;
@@ -1627,6 +1643,8 @@ fn generate_otp_code() -> String {
     responses((status = 200, body = OtpRequestResponse), AppErrorResponse)
 )]
 pub async fn otp_request(
+    // The owner pool on purpose: a phone's OTP is not any shop's data
+    // (`delivery_otp` has no org), it proves a number for every shop at once.
     pool: web::Data<PgPool>,
     body: web::Json<OtpRequestInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -1686,6 +1704,8 @@ pub struct OtpVerifyResponse {
     responses((status = 200, body = OtpVerifyResponse), AppErrorResponse)
 )]
 pub async fn otp_verify(
+    // The owner pool on purpose: a phone's OTP is not any shop's data
+    // (`delivery_otp` has no org), it proves a number for every shop at once.
     pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
     body: web::Json<OtpVerifyInput>,
@@ -1771,11 +1791,12 @@ pub struct DeliveryOrderInput {
 )]
 pub async fn create_delivery_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     hub: web::Data<BranchEventHub>,
     body: web::Json<DeliveryOrderInput>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, body.branch_id).await?;
     crate::plan::public_gate_branch(pool.get_ref(), body.branch_id, madar_plan::Feature::Online)
         .await?;
     validate_channel(&body.channel)?;
@@ -2439,10 +2460,11 @@ struct OrderHistoryRow {
     responses((status = 200, body = [OrderHistorySummary]), AppErrorResponse)
 )]
 pub async fn guest_order_history(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     query: web::Query<GuestHistoryQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = pdb.scoped(query.org_id).await;
     crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
         .await?;
     let phone = normalize_phone(&query.phone)?;
@@ -2557,10 +2579,11 @@ pub struct GuestSavedLocation {
     responses((status = 200, body = [GuestSavedLocation]), AppErrorResponse)
 )]
 pub async fn guest_past_locations(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     query: web::Query<GuestLocationsQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = pdb.scoped(query.org_id).await;
     crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
         .await?;
     let phone = normalize_phone(&query.phone)?;
@@ -2643,9 +2666,14 @@ pub struct DeliveryTracking {
     responses((status = 200, body = DeliveryTracking), AppErrorResponse)
 )]
 pub async fn track_delivery_order(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
+    let org = sqlx::query_scalar!("SELECT org_id FROM delivery_orders WHERE id = $1", *path)
+        .fetch_optional(pdb.resolver())
+        .await?
+        .ok_or_else(|| AppError::NotFound("Order not found".into()))?;
+    let pool = pdb.scoped(org).await;
     let id = path.into_inner();
     let row: Option<DeliveryTracking> = sqlx::query_as(
         "SELECT d.id, d.org_id, b.name AS branch_name, d.delivery_ref, \

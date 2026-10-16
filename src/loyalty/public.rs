@@ -54,12 +54,21 @@ struct Scope {
 
 /// A card by its member token, for a PUBLIC page. A shop whose plan lacks
 /// loyalty has no cards to show: 404, like a token that matches nobody.
-async fn public_member(pool: &PgPool, token: &str) -> Result<MemberRow, AppError> {
-    let member = model::find_by_token(pool, token)
+///
+/// The token is the routing input: it is resolved on the owner pool, and the
+/// handle returned with the member is scoped to the member's org (RLS) for
+/// everything the handler does next.
+async fn public_member(
+    pdb: &crate::db::PublicDb,
+    token: &str,
+) -> Result<(MemberRow, crate::db::Db), AppError> {
+    let member = model::find_by_token(pdb.resolver(), token)
         .await?
         .ok_or_else(|| AppError::NotFound("Card not found".into()))?;
-    crate::plan::public_gate_org(pool, member.org_id, madar_plan::Feature::Loyalty).await?;
-    Ok(member)
+    crate::plan::public_gate_org(pdb.resolver(), member.org_id, madar_plan::Feature::Loyalty)
+        .await?;
+    let pool = pdb.scoped(member.org_id).await;
+    Ok((member, pool))
 }
 
 async fn resolve_scope(
@@ -306,11 +315,12 @@ async fn load_for_scope(
 /// will not re-fetch a URL it has seen, so a shop swapping its logo needs a
 /// different address or the old one lives on every card forever.
 pub async fn org_logo_badge(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, v) = path.into_inner();
-    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Loyalty).await?;
+    crate::plan::public_gate_org(pdb.resolver(), org_id, madar_plan::Feature::Loyalty).await?;
+    let pool = pdb.scoped(org_id).await;
     let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     cached_png_response((org_id, v, 512, 512), "That shop has no logo", move || {
         crate::orgs::branding::logo_badge(&brand, 512)
@@ -320,11 +330,12 @@ pub async fn org_logo_badge(
 
 /// One organisation's card photograph, cropped to a banner.
 pub async fn org_card_banner(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<(Uuid, String)>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, v) = path.into_inner();
-    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Loyalty).await?;
+    crate::plan::public_gate_org(pdb.resolver(), org_id, madar_plan::Feature::Loyalty).await?;
+    let pool = pdb.scoped(org_id).await;
     let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     // Google's hero is about 3:1 and much wider than Apple's strip; each wallet
     // gets a crop made for its own slot rather than one shape squeezed into both.
@@ -413,10 +424,11 @@ pub struct PublicReward {
 #[utoipa::path(get, path = "/public/loyalty/join-info", tag = "loyalty-public", operation_id = "loyalty_join_info", params(BranchQuery),
     responses((status = 200, body = JoinInfo), AppErrorResponse))]
 pub async fn join_info(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let scope = resolve_scope(pool.get_ref(), query.branch_id, query.org_id).await?;
+    let scope = resolve_scope(pdb.resolver(), query.branch_id, query.org_id).await?;
+    let pool = pdb.scoped(scope.org_id).await;
     let org_id = scope.org_id;
     let (settings, rewards) = load_for_scope(pool.get_ref(), &scope).await?;
 
@@ -524,11 +536,12 @@ pub struct JoinResult {
 #[utoipa::path(post, path = "/public/loyalty/join", tag = "loyalty-public", operation_id = "loyalty_join", request_body = JoinInput,
     responses((status = 200, body = JoinResult), AppErrorResponse))]
 pub async fn join(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     body: web::Json<JoinInput>,
 ) -> Result<HttpResponse, AppError> {
-    let scope = resolve_scope(pool.get_ref(), body.branch_id, body.org_id).await?;
+    let scope = resolve_scope(pdb.resolver(), body.branch_id, body.org_id).await?;
+    let pool = pdb.scoped(scope.org_id).await;
     let org_id = scope.org_id;
     let (settings, _) = load_for_scope(pool.get_ref(), &scope).await?;
     let birthday = settings
@@ -808,10 +821,10 @@ pub struct PastOrders {
     params(("token" = String, Path, description = "Member token from the pass barcode")),
     responses((status = 200, body = PastOrders), AppErrorResponse))]
 pub async fn card_orders(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let member = public_member(pool.get_ref(), token.as_str()).await?;
+    let (member, pool) = public_member(&pdb, token.as_str()).await?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -888,11 +901,11 @@ pub struct CardPreferences {
     request_body = CardPreferences,
     responses((status = 204, description = "Saved"), AppErrorResponse))]
 pub async fn set_preferences(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     token: web::Path<String>,
     body: web::Json<CardPreferences>,
 ) -> Result<HttpResponse, AppError> {
-    let member = public_member(pool.get_ref(), token.as_str()).await?;
+    let (member, pool) = public_member(&pdb, token.as_str()).await?;
     let locale = match body.locale.as_deref() {
         Some(l) if l.starts_with("ar") => Some("ar"),
         Some(_) => Some("en"),
@@ -922,10 +935,10 @@ pub async fn set_preferences(
     params(("token" = String, Path, description = "Member token from the pass barcode")),
     responses((status = 200, body = CardView), AppErrorResponse))]
 pub async fn card(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let member = public_member(pool.get_ref(), token.as_str()).await?;
+    let (member, pool) = public_member(&pdb, token.as_str()).await?;
     // The org default is the right scope here: a customer opening their card at
     // home is not standing in any particular branch.
     let settings = super::settings::load_scope(pool.get_ref(), member.org_id, None)
@@ -979,10 +992,10 @@ pub async fn card(
     params(("token" = String, Path, description = "Member token")),
     responses((status = 200, description = "Apple Wallet pass"), AppErrorResponse))]
 pub async fn apple_pass(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
-    let member = public_member(pool.get_ref(), token.as_str()).await?;
+    let (member, pool) = public_member(&pdb, token.as_str()).await?;
     // The same builder the device's own refetch uses, so the pass a customer
     // downloads and the pass their phone later pulls are the same shape — and
     // the same STORE, so both get the bytes that were built after the last
@@ -1023,12 +1036,12 @@ pub async fn apple_pass(
     params(("token" = String, Path, description = "Member token")),
     responses((status = 200, description = "Member QR as a PNG"), AppErrorResponse))]
 pub async fn card_qr(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
     // Resolve first: rendering a QR of an arbitrary string a caller supplied
     // would turn this into an open QR generator for anyone who found the URL.
-    let member = public_member(pool.get_ref(), token.as_str()).await?;
+    let (member, _pool) = public_member(&pdb, token.as_str()).await?;
     let png = crate::qr_card::render_qr_receipt_png(&member.member_token, 8)
         .map_err(|_| AppError::Internal)?;
     Ok(HttpResponse::Ok()

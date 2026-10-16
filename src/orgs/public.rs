@@ -71,17 +71,18 @@ pub struct BrandQuery {
     operation_id = "public_org_brand", params(BrandQuery),
     responses((status = 200, body = PublicBrand), AppErrorResponse))]
 pub async fn brand(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     query: web::Query<BrandQuery>,
 ) -> Result<HttpResponse, AppError> {
     // By id, this is the shop's own dashboard reading its name and logo (and
     // the default palette on Free): nothing a Free shop lacks. By slug, it is
     // a web address resolving to a shop, and a Free shop has none (404).
     let org_id = if query.slug.is_some() {
-        resolve_org(pool.get_ref(), &query).await?
+        resolve_org(pdb.resolver(), &query).await?
     } else {
-        resolve_org_unchecked(pool.get_ref(), &query).await?
+        resolve_org_unchecked(pdb.resolver(), &query).await?
     };
+    let pool = pdb.scoped(org_id).await;
     Ok(HttpResponse::Ok().json(public_brand(pool.get_ref(), org_id).await?))
 }
 
@@ -150,11 +151,11 @@ async fn resolve_org_unchecked(pool: &PgPool, query: &BrandQuery) -> Result<Uuid
     ) {
         (Some(id), _) => Ok(id),
         (None, Some(slug)) => {
-            sqlx::query_scalar::<_, Uuid>(
+            sqlx::query_scalar!(
                 "SELECT id FROM organizations \
                   WHERE slug = $1 AND is_active AND deleted_at IS NULL",
+                slug.trim().to_lowercase()
             )
-            .bind(slug.trim().to_lowercase())
             .fetch_optional(pool)
             .await?
             // Deliberately the same answer as a shop that does not exist. A
@@ -213,11 +214,11 @@ pub struct FaviconQuery {
     responses((status = 200, description = "Square PNG", content_type = "image/png"),
               AppErrorResponse))]
 pub async fn favicon(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     query: web::Query<FaviconQuery>,
 ) -> Result<HttpResponse, AppError> {
     let org_id = resolve_org(
-        pool.get_ref(),
+        pdb.resolver(),
         &BrandQuery {
             org_id: query.org_id,
             slug: query.slug.clone(),
@@ -230,6 +231,7 @@ pub async fn favicon(
         .find(|s| *s >= want)
         .unwrap_or(FAVICON_SIZES[FAVICON_SIZES.len() - 1]);
 
+    let pool = pdb.scoped(org_id).await;
     let brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
     let logo = brand
         .logo_url

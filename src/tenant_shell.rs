@@ -291,7 +291,7 @@ pub struct ShellQuery {
     ))]
 pub async fn shell(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     config: Option<web::Data<ShellConfig>>,
     menu_cache: Option<web::Data<MenuCache>>,
     query: web::Query<ShellQuery>,
@@ -315,9 +315,8 @@ pub async fn shell(
     let Some(slug) = slug_of_host(&host) else {
         return not_found_page(None);
     };
-    let pool = pool.get_ref();
     let org_id = match resolve_org(
-        pool,
+        pdb.resolver(),
         &BrandQuery {
             org_id: None,
             slug: Some(slug.clone()),
@@ -329,6 +328,9 @@ pub async fn shell(
         Err(AppError::NotFound(_)) => return not_found_page(None),
         Err(_) => return unavailable(),
     };
+    // Everything after the resolution reads the shop's rows under RLS.
+    let scoped = pdb.scoped(org_id).await;
+    let pool = scoped.get_ref();
     let origin = format!("https://{slug}.{SHOP_DOMAIN}");
     let Some(page) = classify(&full_path) else {
         let name = public_links_page(pool, org_id)

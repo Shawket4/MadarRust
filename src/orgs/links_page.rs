@@ -756,12 +756,12 @@ pub async fn put_links_page(
     operation_id = "public_org_links", params(BrandQuery),
     responses((status = 200, body = PublicLinksPage), AppErrorResponse))]
 pub async fn public_links(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     query: web::Query<BrandQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let pool = pool.get_ref();
-    let org_id = resolve_org(pool, &query).await?;
-    let page = public_links_page(pool, org_id).await?;
+    let org_id = resolve_org(pdb.resolver(), &query).await?;
+    let pool = pdb.scoped(org_id).await;
+    let page = public_links_page(pool.get_ref(), org_id).await?;
     Ok(HttpResponse::Ok()
         // A minute: short enough that a shop checking its own edit sees it,
         // long enough that a bio link shared to a crowd is one request each

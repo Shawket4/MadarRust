@@ -6,7 +6,6 @@
 //! order records.
 
 use actix_web::{HttpResponse, web};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
@@ -42,18 +41,16 @@ fn cart_lines(body: &PublicCartQuoteRequest) -> Result<Vec<CartLineInput>, AppEr
     request_body = PublicCartQuoteRequest,
     responses((status = 200, description = "The cart as the order will be priced", body = CartQuote), AppErrorResponse))]
 pub async fn branch_cart_quote(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     id: web::Path<Uuid>,
     body: web::Json<PublicCartQuoteRequest>,
 ) -> Result<HttpResponse, AppError> {
-    crate::plan::public_gate_branch(pool.get_ref(), *id, madar_plan::Feature::Online).await?;
-    let org_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT org_id FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-    let org_id = org_id.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    crate::plan::public_gate_branch(pdb.resolver(), *id, madar_plan::Feature::Online).await?;
+    let org_id = pdb
+        .branch_org(*id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let pool = pdb.scoped(org_id).await;
     use crate::delivery::{CHANNEL_IN_MALL, CHANNEL_OUTSIDE, CHANNEL_PICKUP, CHANNEL_UMBRELLA};
     let channel = body.channel.as_deref().unwrap_or(CHANNEL_PICKUP);
     if ![
@@ -87,19 +84,16 @@ pub async fn branch_cart_quote(
     request_body = PublicCartQuoteRequest,
     responses((status = 200, description = "The cart as the order will be priced", body = CartQuote), AppErrorResponse))]
 pub async fn table_cart_quote(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     id: web::Path<Uuid>,
     body: web::Json<PublicCartQuoteRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT t.branch_id, b.org_id FROM branch_tables t JOIN branches b ON b.id = t.branch_id \
-          WHERE t.id = $1 AND t.is_active AND b.is_active AND b.deleted_at IS NULL",
-    )
-    .bind(*id)
-    .fetch_optional(pool.get_ref())
-    .await?;
-    let (branch_id, org_id) = row.ok_or_else(|| AppError::NotFound("Table not found".into()))?;
-    crate::plan::public_gate_org(pool.get_ref(), org_id, madar_plan::Feature::Floor).await?;
+    let (branch_id, org_id) = pdb
+        .table_branch_org(*id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Table not found".into()))?;
+    crate::plan::public_gate_org(pdb.resolver(), org_id, madar_plan::Feature::Floor).await?;
+    let pool = pdb.scoped(org_id).await;
     let lines = cart_lines(&body)?;
     // A table is dine-in: no delivery sub-channel prices.
     let cart = resolve_cart_as(

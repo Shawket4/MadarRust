@@ -71,7 +71,7 @@ pub struct LookupRequest {
     security(("bearer_jwt" = [])))]
 pub async fn lookup(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<LookupRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -130,7 +130,7 @@ pub struct BirthdayPreview {
     security(("bearer_jwt" = [])))]
 pub async fn birthday_preview(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<LoyaltySettings>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -185,7 +185,7 @@ pub struct WalletStatus {
     security(("bearer_jwt" = [])))]
 pub async fn wallet_status(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -267,7 +267,7 @@ pub async fn wallet_status(
     security(("bearer_jwt" = [])))]
 pub async fn google_object(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -343,7 +343,7 @@ pub struct GoogleObjectDump {
     security(("bearer_jwt" = [])))]
 pub async fn google_refresh(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -471,7 +471,7 @@ pub struct AdjustRequest {
     security(("bearer_jwt" = [])))]
 pub async fn adjust(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<AdjustRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -558,7 +558,7 @@ pub struct MembersPage {
     security(("bearer_jwt" = [])))]
 pub async fn list_members(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<MembersQuery>,
 ) -> Result<HttpResponse, AppError> {
     // The same resolution the settings and rewards handlers use, from the same
@@ -662,7 +662,7 @@ pub async fn list_members(
     security(("bearer_jwt" = [])))]
 pub async fn delete_member(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -715,7 +715,7 @@ pub struct MemberDetail {
     responses((status = 200, body = MemberDetail), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn get_member(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     query: web::Query<MembersQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -821,7 +821,7 @@ pub struct LoyaltyAnalytics {
     security(("bearer_jwt" = [])))]
 pub async fn analytics(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
@@ -1016,7 +1016,7 @@ fn safe_ratio(num: i64, den: i64) -> f64 {
     security(("bearer_jwt" = [])))]
 pub async fn behavior(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
@@ -1150,7 +1150,7 @@ pub struct CampaignEffectiveness {
     security(("bearer_jwt" = [])))]
 pub async fn campaign_effectiveness(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
@@ -1267,7 +1267,7 @@ pub struct LiabilityTrend {
     security(("bearer_jwt" = [])))]
 pub async fn liability_trend(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =

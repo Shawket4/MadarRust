@@ -44,9 +44,10 @@ pub struct PublicBookingBranch {
 #[utoipa::path(get, path = "/public/booking-branches", tag = "bookings-public", params(OrgQuery),
     responses((status = 200, body = Vec<PublicBookingBranch>), AppErrorResponse))]
 pub async fn booking_branches(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     query: web::Query<OrgQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = pdb.scoped(query.org_id).await;
     // Bookings are the paid `bookings` feature: a Free shop has no such page.
     crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Bookings)
         .await?;
@@ -85,6 +86,31 @@ pub struct PublicBookingInfo {
     pub today: String,
 }
 
+/// The tenant handle of a live branch (404 like a missing one otherwise).
+async fn scoped_for_branch(
+    pdb: &crate::db::PublicDb,
+    branch_id: Uuid,
+) -> Result<crate::db::Db, AppError> {
+    let org = pdb
+        .branch_org(branch_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    Ok(pdb.scoped(org).await)
+}
+
+/// The tenant handle of the booking a manage token names (404 otherwise; the
+/// token's shape is checked again by `by_token`).
+async fn scoped_for_token(pdb: &crate::db::PublicDb, token: &str) -> Result<crate::db::Db, AppError> {
+    if token.len() != 32 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::NotFound("Booking not found".into()));
+    }
+    let org = sqlx::query_scalar!("SELECT org_id FROM bookings WHERE manage_token = $1", token)
+        .fetch_optional(pdb.resolver())
+        .await?
+        .ok_or_else(|| AppError::NotFound("Booking not found".into()))?;
+    Ok(pdb.scoped(org).await)
+}
+
 async fn branch_names(pool: &PgPool, branch_id: Uuid) -> Result<(String, String), AppError> {
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT b.name, o.name FROM branches b JOIN organizations o ON o.id = b.org_id \
@@ -103,9 +129,10 @@ async fn branch_names(pool: &PgPool, branch_id: Uuid) -> Result<(String, String)
     params(("id" = Uuid, Path, description = "Branch ID")),
     responses((status = 200, body = PublicBookingInfo), AppErrorResponse))]
 pub async fn booking_info(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, *id).await?;
     crate::plan::public_gate_branch(pool.get_ref(), *id, madar_plan::Feature::Bookings).await?;
     let (branch_name, org_name) = branch_names(pool.get_ref(), *id).await?;
     let s = load_settings(pool.get_ref(), *id).await?;
@@ -189,10 +216,11 @@ async fn public_gate(
     params(("id" = Uuid, Path, description = "Branch ID"), SlotsQuery),
     responses((status = 200, body = PublicSlots), AppErrorResponse))]
 pub async fn booking_slots(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     id: web::Path<Uuid>,
     query: web::Query<SlotsQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, *id).await?;
     let (s, tz) = public_gate(pool.get_ref(), *id, query.date, query.party_size).await?;
     let slots = day_availability(
         pool.get_ref(),
@@ -311,11 +339,12 @@ fn check_slot(
 #[utoipa::path(post, path = "/public/bookings", tag = "bookings-public", request_body = PublicBookingInput,
     responses((status = 201, body = PublicBookingView), AppErrorResponse))]
 pub async fn create_public_booking(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     hub: web::Data<BranchEventHub>,
     body: web::Json<PublicBookingInput>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, body.branch_id).await?;
     let tz = branch_tz(pool.get_ref(), body.branch_id).await?;
     let date = service_today(tz, body.starts_at);
     let (s, _) = public_gate(pool.get_ref(), body.branch_id, date, body.party_size).await?;
@@ -372,9 +401,10 @@ async fn by_token(pool: &PgPool, token: &str) -> Result<BookingView, AppError> {
     params(("token" = String, Path, description = "Manage token from the confirmation link")),
     responses((status = 200, body = PublicBookingView), AppErrorResponse))]
 pub async fn get_public_booking(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_token(&pdb, &token).await?;
     let view = by_token(pool.get_ref(), &token).await?;
     Ok(HttpResponse::Ok().json(public_view(pool.get_ref(), view).await?))
 }
@@ -396,11 +426,12 @@ pub struct PublicBookingChange {
     params(("token" = String, Path, description = "Manage token")),
     responses((status = 200, body = PublicBookingView), AppErrorResponse))]
 pub async fn update_public_booking(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     hub: web::Data<BranchEventHub>,
     token: web::Path<String>,
     body: web::Json<PublicBookingChange>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_token(&pdb, &token).await?;
     let cur = by_token(pool.get_ref(), &token).await?;
     let s = load_settings(pool.get_ref(), cur.branch_id).await?;
     let tz = branch_tz(pool.get_ref(), cur.branch_id).await?;
@@ -446,10 +477,11 @@ pub async fn update_public_booking(
     params(("token" = String, Path, description = "Manage token")),
     responses((status = 200, body = PublicBookingView), AppErrorResponse))]
 pub async fn cancel_public_booking(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     hub: web::Data<BranchEventHub>,
     token: web::Path<String>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_token(&pdb, &token).await?;
     let cur = by_token(pool.get_ref(), &token).await?;
     // A guest has no hand on the floor, so a seated party's booking is the
     // venue's to cancel; `cancel_inner` says so. A second tap on a booking
