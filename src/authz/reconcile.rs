@@ -306,7 +306,7 @@ fn hash(lines: &BTreeSet<String>) -> String {
 /// Why a person's access cannot be compared with the legacy tables, if it
 /// cannot.
 async fn new_authored(
-    pool: &PgPool,
+    conn: &mut sqlx::PgConnection,
     user_id: Uuid,
 ) -> Result<Option<&'static str>, AppError> {
     let r = sqlx::query!(
@@ -324,7 +324,7 @@ async fn new_authored(
                         AND g.source IS DISTINCT FROM 'template') AS "edited_role!""#,
         user_id
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(if r.hand_assignment {
         Some("assignment set in the access editor")
@@ -387,7 +387,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
             "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL ORDER BY id",
             org.id
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
         let roles = sqlx::query!(
             r#"SELECT r.key, r.template_key,
@@ -397,7 +397,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
                 WHERE r.org_id = $1 AND r.is_system AND r.deleted_at IS NULL"#,
             org.id
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut templates: HashMap<String, (Option<String>, CapSet)> = HashMap::new();
         let mut spec_drift = Vec::new();
@@ -426,7 +426,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
                 ORDER BY u.id"#,
             org.id
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
         let overrides = sqlx::query!(
             r#"SELECT p.user_id, p.resource::text AS "resource!", p.action::text AS "action!", p.granted
@@ -434,7 +434,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
                 WHERE u.org_id = $1"#,
             org.id
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?;
         let mut by_user: HashMap<Uuid, Vec<(String, String, bool)>> = HashMap::new();
         for o in overrides {
@@ -460,7 +460,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
             let Some(kind) = RoleKind::parse(&person.role) else {
                 continue;
             };
-            if let Some(why) = new_authored(pool, person.id).await? {
+            if let Some(why) = new_authored(&mut conn, person.id).await? {
                 res.new_authored.push((person.id, why));
                 continue;
             }

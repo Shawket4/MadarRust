@@ -543,6 +543,12 @@ async fn the_order_view_lists_refunds_with_their_lines(pool: PgPool) {
 #[sqlx::test]
 async fn a_refund_needs_the_refunds_permission_not_the_orders_one(pool: PgPool) {
     let app = app!(pool);
+    // The seeded teller default grants refunds (migration 20261017000100);
+    // this test is about a teller WITHOUT it.
+    sqlx::query("DELETE FROM role_permissions WHERE role = 'teller' AND resource = 'refunds'")
+        .execute(&pool)
+        .await
+        .unwrap();
     let org_id = seed_org(&pool).await;
     let branch_id = seed_branch(&pool, org_id).await;
     let teller_id = seed_user(&pool, org_id, "teller").await;

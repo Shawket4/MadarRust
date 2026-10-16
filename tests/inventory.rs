@@ -1156,6 +1156,9 @@ async fn test_inventory_settings_get_put(pool: PgPool) {
 #[sqlx::test]
 async fn test_inventory_settings_permission_denied(pool: PgPool) {
     let app = init_app!(pool);
+    // Every global role default is seeded by migration 20261017000100;
+    // this test needs the empty table it was written against.
+    sqlx::query("DELETE FROM role_permissions").execute(&pool).await.unwrap();
     let org_id = seed_org(&pool).await;
     let user_id = seed_user(&pool, org_id, "branch_manager").await;
     let token = generate_branch_manager_token(user_id, org_id);

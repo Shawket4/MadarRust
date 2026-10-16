@@ -197,7 +197,7 @@ async fn test_get_org(pool: PgPool) {
     let org: Org = test::read_body_json(resp).await;
     assert_eq!(org.id, org_id);
 
-    sqlx::query!("INSERT INTO role_permissions (role, resource, action, granted) VALUES ('org_admin'::user_role, 'orgs'::permission_resource, 'read'::permission_action, true)")
+    sqlx::query!("INSERT INTO role_permissions (role, resource, action, granted) VALUES ('org_admin'::user_role, 'orgs'::permission_resource, 'read'::permission_action, true) ON CONFLICT (role, resource, action) DO UPDATE SET granted = true")
         .execute(&pool)
         .await
         .unwrap();

@@ -433,7 +433,9 @@ mod http {
 
         let fake = Arc::new(FakeShortLinkProvider::new()) as Arc<dyn ShortLinkProvider>;
         let app = test::init_service(make_app(pool.clone(), fake)).await;
-        let tok = org_admin_token(Uuid::new_v4(), org_id);
+        // A token with no user row gets its role's spec default (DB audit
+        // Phase 4, the single model); the kitchen's lacks branches:read.
+        let tok = token(Uuid::new_v4(), org_id, UserRole::Kitchen);
 
         let req = test::TestRequest::get()
             .uri(&format!("/branches/{branch_id}/tables"))
@@ -556,10 +558,11 @@ mod http {
     #[sqlx::test]
     async fn test_org_qr_requires_permission(pool: PgPool) {
         let org_id = seed_org(&pool).await;
-        // No branches:read grant — permission check must block.
+        // No branches:read grant — permission check must block. (A token with
+        // no user row gets its role's spec default; the kitchen's lacks it.)
         let fake = Arc::new(FakeShortLinkProvider::new()) as Arc<dyn ShortLinkProvider>;
         let app = test::init_service(make_app(pool.clone(), fake)).await;
-        let tok = org_admin_token(Uuid::new_v4(), org_id);
+        let tok = token(Uuid::new_v4(), org_id, UserRole::Kitchen);
 
         let resp = test::call_service(
             &app,
