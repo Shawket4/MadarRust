@@ -9,7 +9,7 @@
 -- the owner pool (never on the request's connection, so a rolled-back handler
 -- cannot lose a hit and a failed write cannot fail a request).
 --
--- Operator telemetry, not tenant data: no RLS, no grant to madar_app. It holds
+-- Operator telemetry, not tenant data: no grant to madar_app. It holds
 -- ids only (no names), so a dump of it is not personal data beyond user ids.
 --
 --   "is the old model still disagreeing?"
@@ -32,3 +32,10 @@ CREATE TABLE IF NOT EXISTS authz_shadow_disagreements (
 
 CREATE INDEX IF NOT EXISTS authz_shadow_disagreements_org_day
     ON authz_shadow_disagreements (org_id, day);
+
+-- Every public table enforces row security (rls_tests). The owner pool that
+-- writes and reads this bypasses it; a tenant connection sees its own org's
+-- rows only, and none is granted anyway.
+ALTER TABLE authz_shadow_disagreements ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON authz_shadow_disagreements FOR ALL
+    USING (org_id = (SELECT current_setting('app.org_id', true)::uuid));

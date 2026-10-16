@@ -287,3 +287,7 @@ path = "src/lib.rs"
 name = "authz-parity"
 path = "src/bin/authz_parity.rs"
 
+[[bin]]
+name = "authz-reconcile"
+path = "src/bin/authz_reconcile.rs"
+

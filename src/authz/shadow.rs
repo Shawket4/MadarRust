@@ -1,12 +1,26 @@
-//! Running the old and new permission models side by side.
+//! The permission decision, and the legacy comparison that is kept as a
+//! diagnostic.
+//!
+//! DB audit Phase 4 switched the server to ONE model: architecture E decides,
+//! and the legacy tables (`role_permissions`, `permissions`) are not read on a
+//! request at all. The exhaustive reconciliation (`authz::reconcile`, the
+//! `authz-reconcile` binary) is what proved the two agree; it replaced the
+//! "30 days of shadow agreement" wait.
 //!
 //! `MADAR_AUTHZ_MODE`:
-//! - `shadow` (Phase 2): serve the LEGACY decision; compute the new one
-//!   and log any divergence (`madar.authz.shadow`).
-//! - `enforce` (Phase 3, the default): serve the NEW decision; log divergence the same way.
-//! - `legacy`: legacy only, no second computation (emergency switch).
+//! - unset, `single` or `enforce` (the default): the single model, no second
+//!   computation.
+//! - `compare`: serve the single model's decision, AND compute the legacy one
+//!   and count every disagreement in `authz_shadow_disagreements`. For an
+//!   operator who wants live evidence on top of the reconciliation; costs the
+//!   legacy queries on every check.
+//! - `shadow` / `legacy` (the pre-Phase-4 modes that SERVED the legacy
+//!   decision) are no longer honoured: the legacy tables stop being kept in
+//!   step with access-editor writes, so serving them would be serving stale
+//!   access. Boot logs an error and runs the single model.
 //!
-//! A failure to compute the new decision never fails a request in `shadow`.
+//! [`observe_in`] keeps its per-mode semantics for the comparison tooling and
+//! its tests.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,20 +31,68 @@ use uuid::Uuid;
 
 use super::{Scope, legacy};
 use crate::errors::AppError;
+use crate::models::UserRole;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
+    /// Serve legacy, no comparison (comparison tooling only).
     Legacy,
+    /// Serve legacy, compare (comparison tooling only).
     Shadow,
+    /// Serve the new model, compare and count (`MADAR_AUTHZ_MODE=compare`).
     Enforce,
+    /// Serve the new model; nothing legacy is read (the default).
+    Single,
 }
 
 pub static MODE: LazyLock<Mode> =
     LazyLock::new(|| match std::env::var("MADAR_AUTHZ_MODE").as_deref() {
-        Ok("legacy") => Mode::Legacy,
-        Ok("shadow") => Mode::Shadow,
-        _ => Mode::Enforce,
+        Ok("compare") => Mode::Enforce,
+        Ok(old @ ("legacy" | "shadow")) => {
+            tracing::error!(
+                target: "madar.authz.shadow",
+                mode = old,
+                "MADAR_AUTHZ_MODE={old} served the legacy permission model, which was retired in DB audit Phase 4; running the single model. Use `compare` to count disagreements."
+            );
+            Mode::Single
+        }
+        _ => Mode::Single,
     });
+
+/// The single model's answer for a legacy `resource:action` cell. A person
+/// with no user row (a token whose account was hard-deleted) gets the
+/// capability spec's default for the token's role: the role default the
+/// legacy table used to answer that case with.
+pub async fn decide(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    role: &UserRole,
+    resource: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    match new_decision(conn, user_id, resource, action).await? {
+        Some(true) => Ok(()),
+        Some(false) => Err(plan_denial(conn, user_id, resource, action)
+            .await
+            .unwrap_or_else(|| deny(resource, action))),
+        None if spec_role_default(role, resource, action) => Ok(()),
+        None => Err(deny(resource, action)),
+    }
+}
+
+/// Does the spec give `role` the cell by default (or as core)?
+pub fn spec_role_default(role: &UserRole, resource: &str, action: &str) -> bool {
+    let kind = match role {
+        UserRole::SuperAdmin => return true,
+        UserRole::OrgAdmin => super::RoleKind::OrgAdmin,
+        UserRole::BranchManager => super::RoleKind::BranchManager,
+        UserRole::Teller => super::RoleKind::Teller,
+        UserRole::Waiter => super::RoleKind::Waiter,
+        UserRole::Kitchen => super::RoleKind::Kitchen,
+    };
+    super::Cap::from_legacy(resource, action)
+        .is_some_and(|c| c.meta().defaults.contains(kind) || c.meta().core.contains(kind))
+}
 
 /// Divergences seen since start (exported for observability).
 pub static DIVERGENCES: AtomicU64 = AtomicU64::new(0);
@@ -248,7 +310,7 @@ pub async fn observe_in(
         _ => {}
     }
     match mode {
-        Mode::Enforce => match new {
+        Mode::Enforce | Mode::Single => match new {
             Ok(Some(true)) => Ok(()),
             Ok(Some(false)) => Err(plan_denial(conn, user_id, resource, action)
                 .await

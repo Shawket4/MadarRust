@@ -1,12 +1,10 @@
 use crate::{auth::jwt::Claims, errors::AppError, models::UserRole};
 use sqlx::PgPool;
 
-/// Check if a user has permission for a resource+action.
-/// Resolution order:
-///   1. super_admin → always granted
-///   2. per-user override in `permissions` table → use that value
-///   3. role default in `role_permissions` table → use that value
-///   4. not found → deny
+/// Check if a user has permission for a resource+action: the `resource:action`
+/// cell's capability in the single (architecture E) model, after the account
+/// checks. A super admin is always granted. The legacy tables are not read
+/// (see `authz::shadow` for the opt-in comparison).
 pub async fn check_permission(
     pool: &PgPool,
     claims: &Claims,
@@ -31,9 +29,9 @@ pub async fn check_permission(
 /// Like [`check_permission`] but for an EXPLICIT principal (user id + role) instead
 /// of the bearer's claims — used by `/sync/replay`, where the acting principal is
 /// the op's EMBEDDED author (the offline device's teller), not the token flushing
-/// the queue. Same resolution order (super_admin → per-user override → role default
-/// → deny), so a queued offline write can't bypass a per-user permission revocation
-/// that a live request would honor.
+/// the queue. Same resolution as a live request (the single model at the
+/// person's grants and overrides), so a queued offline write can't bypass a
+/// per-user revocation that a live request would honor.
 pub async fn check_permission_for(
     pool: &PgPool,
     user_id: uuid::Uuid,
@@ -104,8 +102,17 @@ async fn check_on(
         }
     }
 
-    let legacy = legacy_decision(conn, user_id, role, resource, action).await;
-    crate::authz::shadow::observe(conn, user_id, resource, action, legacy).await
+    // The single model (DB audit Phase 4). The legacy tables are read only
+    // when an operator asked for the live comparison (`MADAR_AUTHZ_MODE=compare`).
+    match *crate::authz::shadow::MODE {
+        crate::authz::shadow::Mode::Single => {
+            crate::authz::shadow::decide(conn, user_id, role, resource, action).await
+        }
+        mode => {
+            let legacy = legacy_decision(conn, user_id, role, resource, action).await;
+            crate::authz::shadow::observe_in(mode, conn, user_id, resource, action, legacy).await
+        }
+    }
 }
 
 /// Today's resolution as a boolean, for the side-by-side comparison.

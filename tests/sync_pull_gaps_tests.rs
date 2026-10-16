@@ -376,7 +376,14 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
     );
 
     // A role default changing re-emits every user of that role.
-    let (r2, a2) = role_granted[1].split_once(':').unwrap();
+    // The fixture's own non-core teller grant (every default is seeded since
+    // migration 20261017000100, so "the second row" is no longer it).
+    let flip = role_granted
+        .iter()
+        .find(|c| c.as_str() == "refunds:read")
+        .expect("the fixture's teller grant")
+        .clone();
+    let (r2, a2) = flip.split_once(':').unwrap();
     sqlx::query("UPDATE role_permissions SET granted = false WHERE role = 'teller' AND resource = $1::permission_resource AND action = $2::permission_action")
         .bind(r2)
         .bind(a2)
@@ -396,7 +403,7 @@ async fn a_tellers_effective_permissions_ride_the_feed(pool: PgPool) {
             .as_array()
             .unwrap()
             .iter()
-            .any(|p| p == role_granted[1].as_str())
+            .any(|p| p == flip.as_str())
     );
 }
 

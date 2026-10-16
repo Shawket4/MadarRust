@@ -8,6 +8,7 @@ pub mod acts;
 pub mod api;
 pub mod keys;
 pub mod load;
+pub mod reconcile;
 pub mod require;
 pub mod scope;
 pub mod shadow;
