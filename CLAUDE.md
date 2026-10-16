@@ -298,6 +298,27 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   figure in one of these reports needs a column in the rollup, its recompute, and
   a run of `report-rollup-reconcile`; a new table whose rows change those figures
   needs the dirty trigger. Verify on a copy: `scripts/verify_report_rollups.sh <db>`.
+- **The compat layer (Phase 3).** Every shim kept for old clients is one
+  entry in `src/compat::REGISTRY` (counter, what replaced it, sunset
+  condition, sites, parked contract). Old-shape read routes read `compat.*`
+  views, and only at registered sites; the server's own code reads the unified
+  tables. `tests/compat_contract_tests.rs` enforces both and pins every old
+  shape served, byte for byte. An item's option allowlist is
+  `menu_item_modifier_group_options` + `option_allowlist`; the array column is
+  still written (a trigger mirrors it) until its parked contract.
+- **Ledgers never go by cascade (Phase 5.7).** FKs from organizations/branches
+  into ledger tables RESTRICT; `DELETE /tills/{id}` stamps `tills.deleted_at`
+  (every till fetch/list leaves stamped ones out). A hard delete of an org
+  (only the demo sweeper) deletes its ledgers explicitly.
+- **Ref numbers come from `refs::next`** (Phase 5.3), never a bare counter
+  upsert: one `ref_counters` table, mirrored into the old per-scope table whose
+  row lock older binaries share.
+- **`loyalty_memberships`** is the membership table (Phase 5.5);
+  `loyalty_customers` is its updatable compat view. New SQL names the table.
+- **Dine-in lines are relational** (Phase 5.1): `open_ticket_items.quantity /
+  item_name / unit_price / size_label / modifier_names` plus
+  `open_ticket_item_addons` / `_optionals`, mirrored from `line` by trigger.
+  Read the columns; `line.input` stays the frozen request settle replays.
 - **Verifying a phase on a prod copy is one command:**
   `scripts/db_verify_phase.sh <2|3|5> <source-db>` (clones the source, never
   writes it; reconcile, per-org visible rows, plans, backfills twice, the
