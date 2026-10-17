@@ -41,6 +41,16 @@ const PURGE_STMTS: &[&str] = &[
     "DELETE FROM org_ingredients WHERE org_id = $1",
     // People + branches.
     "DELETE FROM user_branch_assignments WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
+    // The org's access model, explicitly and while the org row still exists:
+    // its triggers bump the org's authz epoch and log a grant event, which
+    // fails once the org row is gone (FK), so leaving these to the org's
+    // cascade made every purge of a demo org with users fail.
+    "DELETE FROM role_assignment_branches WHERE org_id = $1",
+    "DELETE FROM role_assignments WHERE org_id = $1",
+    "DELETE FROM user_overrides WHERE org_id = $1",
+    "DELETE FROM org_role_grants WHERE org_id = $1",
+    "DELETE FROM org_capability_policy WHERE org_id = $1",
+    "DELETE FROM org_roles WHERE org_id = $1",
     "DELETE FROM branches WHERE org_id = $1",
     "DELETE FROM users WHERE org_id = $1",
     // Finally the org (cascades org_payment_methods, modifier_groups →
