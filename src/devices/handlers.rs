@@ -239,13 +239,11 @@ pub async fn update_device(
     // more device in that branch: the plan's limits apply as to a new one.
     let reactivates = body.retired == Some(false) && current.retired_at.is_some();
     let moves = body.branch_id.is_some() && body.branch_id != current.branch_id;
-    if (reactivates || moves) && body.retired != Some(true) {
-        if let Some(b) = branch {
-            let mut tx = pool.get_ref().begin().await?;
-            crate::plan::check_activate(&mut tx, current.org_id, b, &current.kind, Some(*id))
-                .await?;
-            tx.commit().await?;
-        }
+    let needs_check = (reactivates || moves) && body.retired != Some(true);
+    if let (true, Some(b)) = (needs_check, branch) {
+        let mut tx = pool.get_ref().begin().await?;
+        crate::plan::check_activate(&mut tx, current.org_id, b, &current.kind, Some(*id)).await?;
+        tx.commit().await?;
     }
     if body.code.is_some() || body.branch_id.is_some() {
         let taken: bool = sqlx::query_scalar(

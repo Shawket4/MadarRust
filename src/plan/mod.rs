@@ -308,7 +308,8 @@ pub async fn replay_verdict(
     let Some(device) = device else {
         return Ok(ReplayVerdict::Accept);
     };
-    let row: Option<(bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> = sqlx::query_as(
+    type FlagRow = (bool, Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+    let row: Option<FlagRow> = sqlx::query_as(
         "SELECT plan_inactive, plan_inactive_at, plan_inactive_seen_at FROM devices WHERE id = $1",
     )
     .bind(device)
