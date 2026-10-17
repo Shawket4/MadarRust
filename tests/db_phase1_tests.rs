@@ -275,6 +275,42 @@ async fn an_unknown_movement_source_type_is_refused(pool: PgPool) {
     assert_eq!(err.as_database_error().and_then(|e| e.code()).as_deref(), Some("23514"));
 }
 
+/// 'import' (the 2026-10-04 stock import's 83 prod rows) is an allowed
+/// source type, and the CHECK is VALID: it holds for every row, not only new
+/// ones (prod had it NOT VALID because of exactly those rows).
+#[sqlx::test]
+async fn an_import_movement_is_allowed_and_the_check_is_valid(pool: PgPool) {
+    let s = seed(&pool, "A").await;
+    let ing: Uuid = sqlx::query_scalar(
+        "INSERT INTO org_ingredients (org_id, name, unit) VALUES ($1, 'Milk', 'ml') RETURNING id",
+    )
+    .bind(s.org)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO inventory_movements (branch_id, org_ingredient_id, type, quantity, source_type)
+         VALUES ($1, $2, 'adjustment_add', 1, 'import')",
+    )
+    .bind(s.branch)
+    .bind(ing)
+    .execute(&pool)
+    .await
+    .expect("an import movement");
+    let valid: bool = sqlx::query_scalar(
+        "SELECT convalidated FROM pg_constraint WHERE conname = 'inventory_movements_source_type_check'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(valid, "the CHECK is validated");
+    // Re-validating proves the existing rows (the import one included) hold.
+    sqlx::query("ALTER TABLE inventory_movements VALIDATE CONSTRAINT inventory_movements_source_type_check")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 #[sqlx::test]
 async fn sales_daily_recompute_is_idempotent_and_matches_the_ledger(pool: PgPool) {
     let s = seed(&pool, "A").await;
