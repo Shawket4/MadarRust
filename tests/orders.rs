@@ -4614,3 +4614,67 @@ async fn export_ingredient_cost_rounds_half_away_from_zero(pool: PgPool) {
     let body: serde_json::Value = test::read_body_json(resp).await;
     assert_eq!(body["ingredient_costs"][milk.to_string()], json!(13));
 }
+
+/// The export is streamed in chunks of orders: past a chunk boundary every
+/// order still comes once, newest first, with its own lines, add-ons and
+/// payments, and the body is one JSON object (data, then total, summary,
+/// ingredient_costs).
+#[sqlx::test]
+async fn export_streams_every_order_with_its_lines_past_a_chunk(pool: PgPool) {
+    let app = order_app!(pool);
+    let org_id = seed_org(&pool).await;
+    let branch_id = seed_branch(&pool, org_id).await;
+    let user_id = seed_user(&pool, org_id, "org_admin").await;
+    grant_permission(&pool, "org_admin", "orders", "read").await;
+    let token = generate_org_admin_token(user_id, org_id);
+    let shift_id = seed_shift(&pool, branch_id, user_id).await;
+    let n = 437; // two full chunks of 200 and a partial one
+    sqlx::raw_sql(&format!(
+        "INSERT INTO orders (id, branch_id, till_id, teller_id, order_number, payment_method, order_ref,
+                             subtotal, tax_amount, discount_amount, total_amount, status, created_at)
+         SELECT md5('o' || g)::uuid, '{branch_id}', '{shift_id}', '{user_id}', g, 'cash', 'EX-' || g,
+                100 + g, 0, 0, 100 + g, 'completed', now() - make_interval(mins => g)
+           FROM generate_series(1, {n}) g;
+         INSERT INTO order_items (id, order_id, item_name, unit_price, quantity, line_total)
+         SELECT md5('i' || g)::uuid, md5('o' || g)::uuid, 'Item ' || g, 100 + g, 1, 100 + g
+           FROM generate_series(1, {n}) g;
+         INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
+         SELECT md5('i' || g)::uuid, gen_random_uuid(), 'Oat ' || g, 5, 1, 5
+           FROM generate_series(1, {n}) g WHERE g % 3 = 0;
+         INSERT INTO order_payments (order_id, method, amount, till_id)
+         SELECT md5('o' || g)::uuid, 'cash', 100 + g, '{shift_id}' FROM generate_series(1, {n}) g;"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let req = test::TestRequest::get()
+        .uri("/orders/export")
+        .insert_header(("Authorization", format!("Bearer {}", token)))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert!(resp.status().is_success(), "got {:?}", resp.status());
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let keys: Vec<&str> = body.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    for k in ["data", "total", "generated_at", "summary", "ingredient_costs"] {
+        assert!(keys.contains(&k), "missing {k}: {keys:?}");
+    }
+    assert_eq!(body["total"], json!(n));
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), n as usize);
+    for (i, o) in data.iter().enumerate() {
+        let g = i as i64 + 1; // newest first: g = 1 is a minute ago
+        assert_eq!(o["order_number"], json!(g), "order {i} out of place");
+        let items = o["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["item_name"], json!(format!("Item {g}")));
+        assert_eq!(items[0]["order_id"], o["id"]);
+        let addons = items[0]["addons"].as_array().unwrap();
+        assert_eq!(addons.len(), usize::from(g % 3 == 0), "order {g}");
+        let pays = o["payments"].as_array().unwrap();
+        assert_eq!(pays.len(), 1);
+        assert_eq!(pays[0]["amount"], json!(100 + g));
+        assert_eq!(o["payment_legs"][0]["amount"], json!(100 + g));
+    }
+    assert_eq!(body["summary"]["completed"], json!(n));
+}

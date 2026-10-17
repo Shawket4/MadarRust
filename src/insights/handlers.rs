@@ -249,47 +249,83 @@ struct SalesRow {
     snapshot_cost: Option<i64>,
 }
 
-/// Aggregate non-voided item sales per SKU over a window.
+/// Aggregate non-voided item sales per SKU over the current window and, when
+/// given, the previous one, in ONE statement. Each window is inclusive at both
+/// ends, as before (an order at exactly `from` counts in both). Each branch's
+/// orders are read as one index range on (branch_id, created_at) covering both
+/// windows; the same line is aggregated once per window it falls in.
 async fn sales_agg(
     pool: &PgPool,
     branch_ids: &[Uuid],
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
-) -> Result<Vec<SalesRow>, AppError> {
-    let rows = sqlx::query_as::<_, SalesRow>(
+    prev: Option<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Result<(Vec<SalesRow>, Vec<SalesRow>), AppError> {
+    #[derive(sqlx::FromRow)]
+    struct WinRow {
+        win: i32,
+        #[sqlx(flatten)]
+        row: SalesRow,
+    }
+    let (prev_from, prev_to) = (prev.map(|p| p.0), prev.map(|p| p.1));
+    let rows = sqlx::query_as::<_, WinRow>(
         r#"
+        WITH lines AS (
+            SELECT o.created_at, oi.menu_item_id, oi.size_label, oi.item_name,
+                   oi.quantity, oi.line_total, oi.unit_cost
+              FROM unnest($1::uuid[]) b(id)
+             CROSS JOIN LATERAL (
+                   SELECT o.id, o.created_at FROM orders o
+                    WHERE o.branch_id = b.id
+                      AND o.status NOT IN ('voided', 'refunded')
+                      AND o.created_at >= COALESCE(LEAST($2::timestamptz, $4::timestamptz), '-infinity')
+                      AND o.created_at <= COALESCE($3::timestamptz, 'infinity')
+                   OFFSET 0) o
+              JOIN order_items oi ON oi.order_id = o.id
+             WHERE oi.menu_item_id IS NOT NULL
+               AND oi.line_kind <> 'combo'
+        )
         SELECT
-            oi.menu_item_id,
-            COALESCE(oi.size_label::text, 'one_size') AS size_label,
-            (array_agg(oi.item_name ORDER BY o.created_at DESC))[1] AS item_name,
+            x.win,
+            l.menu_item_id,
+            COALESCE(l.size_label::text, 'one_size') AS size_label,
+            (array_agg(l.item_name ORDER BY l.created_at DESC))[1] AS item_name,
             mi.category_id,
             c.name AS category_name,
-            SUM(oi.quantity)::bigint   AS quantity_sold,
-            SUM(oi.line_total)::bigint AS revenue,
+            SUM(l.quantity)::bigint   AS quantity_sold,
+            SUM(l.line_total)::bigint AS revenue,
             CASE
-                WHEN bool_or(oi.unit_cost IS NULL) THEN NULL
-                ELSE SUM(oi.unit_cost * oi.quantity)::bigint
+                WHEN bool_or(l.unit_cost IS NULL) THEN NULL
+                ELSE SUM(l.unit_cost * l.quantity)::bigint
             END AS snapshot_cost
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
-        JOIN menu_items mi ON mi.id = oi.menu_item_id
+        FROM lines l
+        CROSS JOIN LATERAL (
+            SELECT 1 AS win
+             WHERE ($2::timestamptz IS NULL OR l.created_at >= $2)
+               AND ($3::timestamptz IS NULL OR l.created_at <= $3)
+            UNION ALL
+            SELECT 2
+             WHERE $4::timestamptz IS NOT NULL
+               AND l.created_at >= $4 AND l.created_at <= $5
+        ) x
+        JOIN menu_items mi ON mi.id = l.menu_item_id
         LEFT JOIN categories c ON c.id = mi.category_id
-        WHERE o.branch_id = ANY($1)
-          AND o.status NOT IN ('voided', 'refunded')
-          AND oi.menu_item_id IS NOT NULL
-          AND oi.line_kind <> 'combo'
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oi.menu_item_id, COALESCE(oi.size_label::text, 'one_size'),
+        GROUP BY x.win, l.menu_item_id, COALESCE(l.size_label::text, 'one_size'),
                  mi.category_id, c.name
         "#,
     )
     .bind(branch_ids)
     .bind(from)
     .bind(to)
+    .bind(prev_from)
+    .bind(prev_to)
     .fetch_all(pool)
     .await?;
-    Ok(rows)
+    let (mut cur, mut prev_rows) = (Vec::new(), Vec::new());
+    for r in rows {
+        if r.win == 1 { cur.push(r.row) } else { prev_rows.push(r.row) }
+    }
+    Ok((cur, prev_rows))
 }
 
 /// The org's ACTIVE catalog SKUs (so zero-sale SKUs appear in the ledger —
@@ -790,16 +826,9 @@ async fn build_ledger(
 
     // Every input is independent — fetch concurrently (this runs on the
     // dashboard home page; serial awaits were pure added latency).
-    let prev_fut = async {
-        if prev_from.is_some() {
-            sales_agg(pool, branch_ids, prev_from, prev_to).await
-        } else {
-            Ok(Vec::new())
-        }
-    };
-    let (sales, prev, catalog, (target_pct, target_source), spikes, supp, outcomes, bars, skus) = tokio::try_join!(
-        sales_agg(pool, branch_ids, from, to),
-        prev_fut,
+    let prev_window = prev_from.zip(prev_to);
+    let (sales_both, catalog, (target_pct, target_source), spikes, supp, outcomes, bars, skus) = tokio::try_join!(
+        sales_agg(pool, branch_ids, from, to, prev_window),
         catalog_skus(pool, org_id),
         resolve_target(pool, org_id, branch_scope),
         cost_spikes(pool, org_id, from, to),
@@ -808,6 +837,7 @@ async fn build_ledger(
         kind_bars(pool, org_id, branch_scope),
         crate::costing::org_sku_costs(pool, org_id, branch_scope),
     )?;
+    let (sales, prev) = sales_both;
 
     // Current recipe rollups: the cost source under `current`, and the
     // recipe-incomplete signal under both bases.

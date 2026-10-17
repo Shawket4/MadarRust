@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH all_days AS (\n            SELECT generate_series(0, 6)::int AS day_of_week\n        ),\n        day_occurrences AS (\n            SELECT EXTRACT(dow FROM d)::int AS day_of_week, COUNT(*)::int AS occurrences\n            FROM generate_series(\n                COALESCE(\n                    ($2::timestamptz AT TIME ZONE $4)::date,\n                    (SELECT MIN((created_at AT TIME ZONE $4)::date) FROM orders WHERE branch_id = ANY($1))\n                ),\n                COALESCE(\n                    ($3::timestamptz AT TIME ZONE $4)::date,\n                    (SELECT MAX((created_at AT TIME ZONE $4)::date) FROM orders WHERE branch_id = ANY($1))\n                ),\n                interval '1 day'\n            ) d\n            GROUP BY 1\n        ),\n        aggregated AS (\n            SELECT\n                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,\n                COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,\n                COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))\n                         FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,\n                COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,\n                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,\n                COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax\n            FROM orders o\n            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id\n            WHERE o.branch_id = ANY($1)\n              AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n              AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n            GROUP BY 1\n        ),\n        line_items_agg AS (\n            SELECT\n                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,\n                COALESCE(SUM(oi.quantity), 0)::bigint AS line_items\n            FROM order_items oi\n            JOIN orders o ON o.id = oi.order_id\n            WHERE o.branch_id = ANY($1)\n              AND oi.line_kind <> 'combo'\n              AND o.status NOT IN ('voided', 'refunded')\n              AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n              AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n            GROUP BY 1\n        ),\n        addons_agg AS (\n            SELECT\n                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,\n                COALESCE(SUM(oia.quantity), 0)::bigint AS addons\n            FROM order_item_addons oia\n            JOIN order_items oi ON oi.id = oia.order_item_id\n            JOIN orders o ON o.id = oi.order_id\n            WHERE o.branch_id = ANY($1)\n              AND o.status NOT IN ('voided', 'refunded')\n              AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n              AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n            GROUP BY 1\n        ),\n        totals AS (\n            SELECT\n                COALESCE(SUM(revenue), 0) AS total_revenue,\n                COALESCE(SUM(orders),  0) AS total_orders\n            FROM aggregated\n        )\n        SELECT\n            w.day_of_week AS \"day_of_week!\",\n            COALESCE(a.orders,   0)::bigint AS \"orders!\",\n            COALESCE(a.revenue,  0)::bigint AS \"revenue!\",\n            COALESCE(a.voided,   0)::bigint AS \"voided!\",\n            COALESCE(a.discount, 0)::bigint AS \"discount!\",\n            COALESCE(a.tax,      0)::bigint AS \"tax!\",\n            COALESCE(li.line_items, 0)::bigint AS \"line_items!\",\n            COALESCE(ad.addons,     0)::bigint AS \"addons!\",\n            ROUND(COALESCE(a.revenue, 0)::numeric / GREATEST(1, COALESCE(o.occurrences, 1)))::bigint AS \"avg_revenue_per_day!\",\n            (COALESCE(a.orders,  0)::float8 / GREATEST(1, COALESCE(o.occurrences, 1))::float8)        AS \"avg_orders_per_day!\",\n            CASE WHEN t.total_revenue > 0\n                 THEN ROUND(COALESCE(a.revenue, 0)::numeric / t.total_revenue * 100, 1)::float8\n                 ELSE 0.0::float8 END                                       AS \"revenue_pct!\",\n            CASE WHEN t.total_orders > 0\n                 THEN ROUND(COALESCE(a.orders,  0)::numeric / t.total_orders  * 100, 1)::float8\n                 ELSE 0.0::float8 END                                       AS \"orders_pct!\"\n        FROM all_days w\n        CROSS JOIN totals t\n        LEFT JOIN aggregated a ON a.day_of_week = w.day_of_week\n        LEFT JOIN line_items_agg li ON li.day_of_week = w.day_of_week\n        LEFT JOIN addons_agg ad ON ad.day_of_week = w.day_of_week\n        LEFT JOIN day_occurrences o ON o.day_of_week = w.day_of_week\n        ORDER BY w.day_of_week ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "day_of_week!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "revenue!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "voided!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "discount!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "tax!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "line_items!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "addons!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "avg_revenue_per_day!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "avg_orders_per_day!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "revenue_pct!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "orders_pct!",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "8c50b5e19d1a1e2410016dfdc3bf800f34c1b6920ba05ada53b81b95dc9bd6a5"
+}

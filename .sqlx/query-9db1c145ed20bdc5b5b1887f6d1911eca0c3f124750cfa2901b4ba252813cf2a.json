@@ -1,0 +1,127 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH f AS MATERIALIZED (\n            SELECT o.id, o.order_ref, o.created_at, b.name AS branch_name,\n                   o.discount_amount, o.discount_type::text AS discount_type, o.discount_id,\n                   o.discount_kind, o.discount_percent_bps, o.discount_approval_id,\n                   COALESCE(o.discount_applied_by, o.teller_id) AS issuer\n              FROM orders o\n              JOIN branches b ON b.id = o.branch_id\n             WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4))\n               AND o.status::text NOT IN ('voided', 'refunded') AND o.discount_amount > 0\n               AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n               AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n        ),\n        by_reason AS (\n            SELECT COALESCE(d.name, f.discount_type, 'unspecified') AS label,\n                   COUNT(*)::bigint AS count, COALESCE(SUM(f.discount_amount), 0)::bigint AS amount,\n                   -- A named discount is its own words; a bare type or nothing is a code.\n                   MIN(CASE WHEN d.name IS NULL\n                            THEN COALESCE(f.discount_type, 'unspecified') END) AS code,\n                   row_number() OVER (ORDER BY COUNT(*) DESC, COALESCE(d.name, f.discount_type, 'unspecified')) AS rn\n              FROM f LEFT JOIN discounts d ON d.id = f.discount_id\n             GROUP BY COALESCE(d.name, f.discount_type, 'unspecified')\n        ),\n        by_issuer AS (\n            SELECT u.name AS label, COUNT(*)::bigint AS count,\n                   COALESCE(SUM(f.discount_amount), 0)::bigint AS amount,\n                   row_number() OVER (ORDER BY COUNT(*) DESC, u.name, u.id) AS rn\n              FROM f JOIN users u ON u.id = f.issuer\n             GROUP BY u.id, u.name\n        ),\n        by_kind AS (\n            SELECT COALESCE(f.discount_kind, 'unattributed') AS label,\n                   COUNT(*)::bigint AS count, COALESCE(SUM(f.discount_amount), 0)::bigint AS amount,\n                   row_number() OVER (ORDER BY COUNT(*) DESC, COALESCE(f.discount_kind, 'unattributed')) AS rn\n              FROM f\n             GROUP BY COALESCE(f.discount_kind, 'unattributed')\n        ),\n        entries AS (\n            SELECT f.*, d.name AS preset_name, u.name AS applied_by_name, au.name AS approved_by_name,\n                   EXISTS (SELECT 1 FROM authz_replay_flags fl\n                            WHERE fl.subject_id = f.id AND fl.capability LIKE 'orders.discount.%') AS flagged,\n                   row_number() OVER (ORDER BY f.created_at DESC) AS rn\n              FROM f\n              LEFT JOIN discounts d ON d.id = f.discount_id\n              LEFT JOIN users u ON u.id = f.issuer\n              LEFT JOIN approvals ap ON ap.id = f.discount_approval_id\n              LEFT JOIN users au ON au.id = ap.approver_user_id\n             ORDER BY f.created_at DESC\n             LIMIT 200\n        )\n        SELECT section AS \"section!\", rn AS \"rn!\", label, count, amount, code,\n               order_id, order_ref, branch_name, created_at, kind, preset_id, preset_name,\n               percent_bps, applied_by_name, approval_id, approved_by_name, flagged\n          FROM (\n            SELECT 0 AS section, 0::bigint AS rn, NULL::text AS label, COUNT(*)::bigint AS count,\n                   COALESCE(SUM(f.discount_amount), 0)::bigint AS amount, NULL::text AS code,\n                   NULL::uuid AS order_id, NULL::text AS order_ref, NULL::text AS branch_name,\n                   NULL::timestamptz AS created_at, NULL::text AS kind, NULL::uuid AS preset_id,\n                   NULL::text AS preset_name, NULL::int AS percent_bps, NULL::text AS applied_by_name,\n                   NULL::uuid AS approval_id, NULL::text AS approved_by_name, NULL::bool AS flagged\n              FROM f\n            UNION ALL\n            SELECT 1, rn, label, count, amount, code, NULL, NULL, NULL, NULL, NULL, NULL, NULL,\n                   NULL, NULL, NULL, NULL, NULL\n              FROM by_reason WHERE rn <= 10\n            UNION ALL\n            SELECT 2, rn, label, count, amount, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,\n                   NULL, NULL, NULL, NULL, NULL\n              FROM by_issuer WHERE rn <= 10\n            UNION ALL\n            SELECT 3, rn, label, count, amount, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,\n                   NULL, NULL, NULL, NULL, NULL\n              FROM by_kind\n            UNION ALL\n            SELECT 4, rn, NULL, NULL, discount_amount::bigint, NULL, id, order_ref, branch_name,\n                   created_at, discount_kind, discount_id, preset_name, discount_percent_bps,\n                   applied_by_name, discount_approval_id, approved_by_name, flagged\n              FROM entries\n          ) x\n         ORDER BY section, rn\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "section!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "rn!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "amount",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "order_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "order_ref",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "branch_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "preset_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 12,
+        "name": "preset_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "percent_bps",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 14,
+        "name": "applied_by_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "approval_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 16,
+        "name": "approved_by_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "flagged",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "9db1c145ed20bdc5b5b1887f6d1911eca0c3f124750cfa2901b4ba252813cf2a"
+}
