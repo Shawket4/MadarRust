@@ -473,9 +473,9 @@ pub async fn lint_org(pool: &PgPool, org_id: Uuid) -> Result<Vec<LintIssue>, App
 /// every debounced edit and `/menu/lint` on every page open; between catalogue
 /// writes they now cost one fingerprint query instead of every rule.
 /// `MENU_CACHE_TTL_SECS=0` (the menu cache off) turns this off too.
-static LINTS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<Uuid, (String, std::sync::Arc<Vec<LintIssue>>)>>,
-> = std::sync::LazyLock::new(Default::default);
+type LintsByOrg = std::collections::HashMap<Uuid, (String, std::sync::Arc<Vec<LintIssue>>)>;
+static LINTS: std::sync::LazyLock<std::sync::Mutex<LintsByOrg>> =
+    std::sync::LazyLock::new(Default::default);
 
 fn lint_cache_on() -> bool {
     std::env::var("MENU_CACHE_TTL_SECS").ok().as_deref() != Some("0")
