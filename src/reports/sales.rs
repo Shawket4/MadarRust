@@ -406,8 +406,18 @@ async fn live_modes(
 // ── rollups: closed days from sales_daily_sold*, the rest live ─────────────
 //
 // Every query starts from the same plan: `p` = sales_daily_plan(...), `w` =
-// its live intervals [lo, hi), `d` = its rollup days. The live half is the
-// original SQL with the window replaced by `w`.
+// its live intervals [lo, hi), `d` = its rollup days (one array per branch).
+// The live half is the original SQL with the window replaced by `w`.
+//
+// Both halves are read through `CROSS JOIN LATERAL (… OFFSET 0)`, never a
+// plain join on `w`/`d`. The planner sees the plan function as 1000 opaque
+// rows and cannot turn `created_at >= w.lo AND created_at < w.hi` into an
+// index range, so a plain join hash-joined against a SEQ SCAN of the org's
+// whole ledger (and of every rollup row of the org): ~5 ms per scan, up to
+// three scans per statement, for any window — slower than the live report.
+// The OFFSET 0 fence stops the subquery being flattened back into that join,
+// so each live interval is an index range on (branch_id, created_at) and each
+// branch's rollup days one index probe on the (branch_id, business_date) key.
 
 async fn rolled_totals(
     pool: &PgPool,
@@ -420,12 +430,16 @@ async fn rolled_totals(
         r#"
         WITH p AS (SELECT * FROM sales_daily_plan($1::uuid[], $2::timestamptz, $3::timestamptz, true)),
         w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),
-        d AS (SELECT p.branch_id, p.day FROM p WHERE p.day IS NOT NULL),
+        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         lo AS (
-            SELECT o.id, o.status, o.subtotal, o.discount_amount, o.tax_amount, o.total_amount,
-                   o.service_charge_amount, o.service_charge_waived_by, o.service_charge_waived_amount,
-                   o.delivery_fee, o.tip_amount, o.tip_is_cash, o.tip_payment_method, o.payment_method
-              FROM orders o JOIN w ON o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+            SELECT o.* FROM w CROSS JOIN LATERAL (
+                SELECT o.id, o.status, o.subtotal, o.discount_amount, o.tax_amount, o.total_amount,
+                       o.service_charge_amount, o.service_charge_waived_by, o.service_charge_waived_amount,
+                       o.delivery_fee, o.tip_amount, o.tip_is_cash, o.tip_payment_method, o.payment_method
+                  FROM orders o
+                 WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+                OFFSET 0
+            ) o
         ),
         live AS (
             SELECT
@@ -466,19 +480,18 @@ async fn rolled_totals(
                    COALESCE(SUM(s.delivery_fees), 0)::bigint AS delivery_fees,
                    COALESCE(SUM(s.tips), 0)::bigint AS tips,
                    COALESCE(SUM(s.cash_tips), 0)::bigint AS cash_tips
-              FROM sales_daily_sold s JOIN d ON s.branch_id = d.branch_id AND s.business_date = d.day
+              FROM d CROSS JOIN LATERAL (SELECT s.* FROM sales_daily_sold s WHERE s.branch_id = d.branch_id AND s.business_date = ANY(d.days) OFFSET 0) s
         ),
         line_items AS (
             SELECT COALESCE(SUM(q), 0)::bigint AS n FROM (
                 SELECT oi.quantity::bigint AS q
-                  FROM order_items oi
-                  JOIN orders o3 ON o3.id = oi.order_id
-                  JOIN w ON o3.branch_id = w.branch_id AND o3.created_at >= w.lo AND o3.created_at < w.hi
+                  FROM w CROSS JOIN LATERAL (SELECT o3.* FROM orders o3 WHERE o3.branch_id = w.branch_id AND o3.created_at >= w.lo AND o3.created_at < w.hi OFFSET 0) o3
+                  JOIN order_items oi ON oi.order_id = o3.id
                  WHERE o3.status NOT IN ('voided', 'refunded') AND oi.line_kind <> 'combo'
                    AND ($4::uuid[] IS NULL OR oi.menu_item_id != ALL($4::uuid[]))
                 UNION ALL
                 SELECT si.quantity
-                  FROM sales_daily_sold_item si JOIN d ON si.branch_id = d.branch_id AND si.business_date = d.day
+                  FROM d CROSS JOIN LATERAL (SELECT si.* FROM sales_daily_sold_item si WHERE si.branch_id = d.branch_id AND si.business_date = ANY(d.days) OFFSET 0) si
                  WHERE ($4::uuid[] IS NULL OR si.menu_item_id != ALL($4::uuid[]))
             ) x
         ),
@@ -486,13 +499,12 @@ async fn rolled_totals(
             SELECT json_object_agg(method, rev) AS j FROM (
                 SELECT method, SUM(amount)::bigint AS rev FROM (
                     SELECT op.method, op.amount::bigint AS amount
-                      FROM order_payments op
-                      JOIN orders o2 ON o2.id = op.order_id
-                      JOIN w ON o2.branch_id = w.branch_id AND o2.created_at >= w.lo AND o2.created_at < w.hi
+                      FROM w CROSS JOIN LATERAL (SELECT o2.* FROM orders o2 WHERE o2.branch_id = w.branch_id AND o2.created_at >= w.lo AND o2.created_at < w.hi OFFSET 0) o2
+                      JOIN order_payments op ON op.order_id = o2.id
                      WHERE o2.status NOT IN ('voided', 'refunded')
                     UNION ALL
                     SELECT sm.method, sm.amount
-                      FROM sales_daily_sold_method sm JOIN d ON sm.branch_id = d.branch_id AND sm.business_date = d.day
+                      FROM d CROSS JOIN LATERAL (SELECT sm.* FROM sales_daily_sold_method sm WHERE sm.branch_id = d.branch_id AND sm.business_date = ANY(d.days) OFFSET 0) sm
                 ) u GROUP BY method
             ) sub
         )
@@ -553,17 +565,16 @@ async fn rolled_top_items(
         r#"
         WITH p AS (SELECT * FROM sales_daily_plan($1::uuid[], $2::timestamptz, $3::timestamptz, true)),
         w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),
-        d AS (SELECT p.branch_id, p.day FROM p WHERE p.day IS NOT NULL),
+        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         rows AS (
             SELECT oi.menu_item_id, oi.item_name, oi.name_translations AS tr,
                    oi.quantity::bigint AS q, oi.line_total::bigint AS r
-              FROM order_items oi
-              JOIN orders o ON o.id = oi.order_id
-              JOIN w ON o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
+              JOIN order_items oi ON oi.order_id = o.id
              WHERE o.status NOT IN ('voided', 'refunded') AND oi.line_kind <> 'combo'
             UNION ALL
             SELECT si.menu_item_id, si.item_name, si.name_translations, si.quantity, si.revenue
-              FROM sales_daily_sold_item si JOIN d ON si.branch_id = d.branch_id AND si.business_date = d.day
+              FROM d CROSS JOIN LATERAL (SELECT si.* FROM sales_daily_sold_item si WHERE si.branch_id = d.branch_id AND si.business_date = ANY(d.days) OFFSET 0) si
         )
         SELECT menu_item_id AS "menu_item_id!", item_name AS "item_name!",
                COALESCE((array_agg(tr ORDER BY tr DESC))[1], '{}'::jsonb) AS "item_name_translations!",
@@ -594,17 +605,16 @@ async fn rolled_category_rows(
         r#"
         WITH p AS (SELECT * FROM sales_daily_plan($1::uuid[], $2::timestamptz, $3::timestamptz, true)),
         w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),
-        d AS (SELECT p.branch_id, p.day FROM p WHERE p.day IS NOT NULL),
+        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         rows AS (
             SELECT oi.menu_item_id, oi.item_name, oi.name_translations AS tr,
                    oi.quantity::bigint AS q, oi.line_total::bigint AS r
-              FROM order_items oi
-              JOIN orders o ON o.id = oi.order_id
-              JOIN w ON o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
+              JOIN order_items oi ON oi.order_id = o.id
              WHERE o.status NOT IN ('voided', 'refunded') AND oi.line_kind <> 'combo'
             UNION ALL
             SELECT si.menu_item_id, si.item_name, si.name_translations, si.quantity, si.revenue
-              FROM sales_daily_sold_item si JOIN d ON si.branch_id = d.branch_id AND si.business_date = d.day
+              FROM d CROSS JOIN LATERAL (SELECT si.* FROM sales_daily_sold_item si WHERE si.branch_id = d.branch_id AND si.business_date = ANY(d.days) OFFSET 0) si
         )
         SELECT
             m.category_id AS "category_id?",
@@ -640,17 +650,16 @@ async fn rolled_modes(
         r#"
         WITH p AS (SELECT * FROM sales_daily_plan($1::uuid[], $2::timestamptz, $3::timestamptz, true)),
         w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),
-        d AS (SELECT p.branch_id, p.day FROM p WHERE p.day IS NOT NULL),
+        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         rows AS (
             SELECT o.service_mode, 1::bigint AS n,
                    (o.total_amount - COALESCE(rf.refunded_amount, 0))::bigint AS rev
-              FROM orders o
-              JOIN w ON o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
               LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
              WHERE o.status::text NOT IN ('voided', 'refunded')
             UNION ALL
             SELECT sm.service_mode, sm.orders, sm.revenue
-              FROM sales_daily_sold_mode sm JOIN d ON sm.branch_id = d.branch_id AND sm.business_date = d.day
+              FROM d CROSS JOIN LATERAL (SELECT sm.* FROM sales_daily_sold_mode sm WHERE sm.branch_id = d.branch_id AND sm.business_date = ANY(d.days) OFFSET 0) sm
         )
         SELECT service_mode AS "service_mode!", SUM(n)::bigint AS "orders!",
                COALESCE(SUM(rev), 0)::bigint AS "revenue!"
@@ -692,7 +701,7 @@ pub async fn sales_timeseries(
         r#"
         WITH p AS (SELECT * FROM sales_daily_plan($1::uuid[], $2::timestamptz, $3::timestamptz, true, $4)),
         w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),
-        d AS (SELECT p.branch_id, p.day FROM p WHERE p.day IS NOT NULL),
+        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         per AS (
             SELECT date_trunc($5, o.created_at AT TIME ZONE $4) AS pv,
                    COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS orders,
@@ -703,32 +712,29 @@ pub async fn sales_timeseries(
                    COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
                    COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax,
                    0::bigint AS line_items, 0::bigint AS addons
-              FROM orders o
-              JOIN w ON o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
               LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
              GROUP BY 1
             UNION ALL
             SELECT date_trunc($5, o3.created_at AT TIME ZONE $4), 0, 0, 0, 0, 0, 0,
                    COALESCE(SUM(oi3.quantity), 0)::bigint, 0
-              FROM order_items oi3
-              JOIN orders o3 ON o3.id = oi3.order_id
-              JOIN w ON o3.branch_id = w.branch_id AND o3.created_at >= w.lo AND o3.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o3.* FROM orders o3 WHERE o3.branch_id = w.branch_id AND o3.created_at >= w.lo AND o3.created_at < w.hi OFFSET 0) o3
+              JOIN order_items oi3 ON oi3.order_id = o3.id
              WHERE oi3.line_kind <> 'combo' AND o3.status NOT IN ('voided', 'refunded')
              GROUP BY 1
             UNION ALL
             SELECT date_trunc($5, o4.created_at AT TIME ZONE $4), 0, 0, 0, 0, 0, 0, 0,
                    COALESCE(SUM(oia4.quantity), 0)::bigint
-              FROM order_item_addons oia4
-              JOIN order_items oi4 ON oi4.id = oia4.order_item_id
-              JOIN orders o4 ON o4.id = oi4.order_id
-              JOIN w ON o4.branch_id = w.branch_id AND o4.created_at >= w.lo AND o4.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o4.* FROM orders o4 WHERE o4.branch_id = w.branch_id AND o4.created_at >= w.lo AND o4.created_at < w.hi OFFSET 0) o4
+              JOIN order_items oi4 ON oi4.order_id = o4.id
+              JOIN order_item_addons oia4 ON oia4.order_item_id = oi4.id
              WHERE o4.status NOT IN ('voided', 'refunded')
              GROUP BY 1
             UNION ALL
             SELECT date_trunc($5, s.business_date::timestamp), SUM(s.sold_orders)::bigint,
                    SUM(s.revenue_net)::bigint, SUM(s.refunded_amount)::bigint, SUM(s.voided_orders)::bigint,
                    SUM(s.discount)::bigint, SUM(s.tax_net)::bigint, SUM(s.line_items)::bigint, SUM(s.addons)::bigint
-              FROM sales_daily_sold s JOIN d ON s.branch_id = d.branch_id AND s.business_date = d.day
+              FROM d CROSS JOIN LATERAL (SELECT s.* FROM sales_daily_sold s WHERE s.branch_id = d.branch_id AND s.business_date = ANY(d.days) OFFSET 0) s
              GROUP BY 1
         ),
         periods AS (
@@ -742,22 +748,21 @@ pub async fn sales_timeseries(
         -- the rollup half by its day rows (a row exists only for a day with one).
         present AS (
             SELECT DISTINCT date_trunc($5, o.created_at AT TIME ZONE $4) AS pv
-              FROM orders o JOIN w ON o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
             UNION
             SELECT DISTINCT date_trunc($5, s.business_date::timestamp)
-              FROM sales_daily_sold s JOIN d ON s.branch_id = d.branch_id AND s.business_date = d.day
+              FROM d CROSS JOIN LATERAL (SELECT s.* FROM sales_daily_sold s WHERE s.branch_id = d.branch_id AND s.business_date = ANY(d.days) OFFSET 0) s
         ),
         methods AS (
             SELECT pv, json_object_agg(method, rev) AS revenue_by_method FROM (
                 SELECT pv, method, SUM(amount)::bigint AS rev FROM (
                     SELECT date_trunc($5, o2.created_at AT TIME ZONE $4) AS pv, op2.method, op2.amount::bigint AS amount
-                      FROM order_payments op2
-                      JOIN orders o2 ON o2.id = op2.order_id
-                      JOIN w ON o2.branch_id = w.branch_id AND o2.created_at >= w.lo AND o2.created_at < w.hi
+                      FROM w CROSS JOIN LATERAL (SELECT o2.* FROM orders o2 WHERE o2.branch_id = w.branch_id AND o2.created_at >= w.lo AND o2.created_at < w.hi OFFSET 0) o2
+                      JOIN order_payments op2 ON op2.order_id = o2.id
                      WHERE o2.status NOT IN ('voided', 'refunded')
                     UNION ALL
                     SELECT date_trunc($5, sm.business_date::timestamp), sm.method, sm.amount
-                      FROM sales_daily_sold_method sm JOIN d ON sm.branch_id = d.branch_id AND sm.business_date = d.day
+                      FROM d CROSS JOIN LATERAL (SELECT sm.* FROM sales_daily_sold_method sm WHERE sm.branch_id = d.branch_id AND sm.business_date = ANY(d.days) OFFSET 0) sm
                 ) u GROUP BY 1, 2
             ) m GROUP BY pv
         )
@@ -1034,7 +1039,7 @@ async fn rolled_comparison(
         WITH br AS (SELECT b.id, b.name FROM branches b WHERE b.org_id = $1 AND b.deleted_at IS NULL),
         p AS (SELECT * FROM sales_daily_plan(ARRAY(SELECT id FROM br), $2::timestamptz, $3::timestamptz, true)),
         w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),
-        d AS (SELECT p.branch_id, p.day FROM p WHERE p.day IS NOT NULL),
+        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         live AS (
             SELECT o.branch_id,
                    COUNT(DISTINCT o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS total_orders,
@@ -1049,8 +1054,7 @@ async fn rolled_comparison(
                          AND COALESCE(o.tip_is_cash,
                                       COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
                    ), 0)::bigint AS cash_tips
-              FROM orders o
-              JOIN w ON o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi
+              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
               LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
              GROUP BY o.branch_id
         ),
@@ -1060,20 +1064,19 @@ async fn rolled_comparison(
                    SUM(s.revenue_net)::bigint AS total_revenue, SUM(s.gross_sales)::bigint AS gross_sales,
                    SUM(s.refunded_amount)::bigint AS refunded_amount, SUM(s.tips)::bigint AS tips,
                    SUM(s.cash_tips)::bigint AS cash_tips
-              FROM sales_daily_sold s JOIN d ON s.branch_id = d.branch_id AND s.business_date = d.day
+              FROM d CROSS JOIN LATERAL (SELECT s.* FROM sales_daily_sold s WHERE s.branch_id = d.branch_id AND s.business_date = ANY(d.days) OFFSET 0) s
              GROUP BY s.branch_id
         ),
         meth AS (
             SELECT branch_id, json_object_agg(method, rev) AS j FROM (
                 SELECT branch_id, method, SUM(amount)::bigint AS rev FROM (
                     SELECT o2.branch_id, op.method, op.amount::bigint AS amount
-                      FROM order_payments op
-                      JOIN orders o2 ON o2.id = op.order_id
-                      JOIN w ON o2.branch_id = w.branch_id AND o2.created_at >= w.lo AND o2.created_at < w.hi
+                      FROM w CROSS JOIN LATERAL (SELECT o2.* FROM orders o2 WHERE o2.branch_id = w.branch_id AND o2.created_at >= w.lo AND o2.created_at < w.hi OFFSET 0) o2
+                      JOIN order_payments op ON op.order_id = o2.id
                      WHERE o2.status NOT IN ('voided', 'refunded')
                     UNION ALL
                     SELECT sm.branch_id, sm.method, sm.amount
-                      FROM sales_daily_sold_method sm JOIN d ON sm.branch_id = d.branch_id AND sm.business_date = d.day
+                      FROM d CROSS JOIN LATERAL (SELECT sm.* FROM sales_daily_sold_method sm WHERE sm.branch_id = d.branch_id AND sm.business_date = ANY(d.days) OFFSET 0) sm
                 ) u GROUP BY 1, 2
             ) m GROUP BY branch_id
         )

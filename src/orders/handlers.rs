@@ -58,38 +58,59 @@ const ORDER_SELECT: &str =
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
      LEFT JOIN customers lc ON lc.id = o.loyalty_customer_id ";
 
-// ── Shared summary aggregate columns ──────────────────────────
-/// Aggregate columns hydrating [OrderSummary] (by name, via `FromRow`). Used by
-/// both the list and export summary queries; assumes `orders o` is LEFT JOINed
-/// to `delivery_orders d` (for the channel split). `exclude_idx`, when set, is
-/// the bind position of a uuid[] of menu_item ids left out of the
-/// `line_items` count ONLY — every money/count aggregate stays authoritative.
+// ── Shared summary aggregate ──────────────────────────────────
+/// The statement hydrating [OrderSummary] (by name, via `FromRow`) over every
+/// order matching `scope` + `filter`, plus `total` (`COUNT(*)` of the same
+/// rows, which the list returns as its `total`). Used by both the list and the
+/// export. `exclude_idx`, when set, is the bind position of a uuid[] of
+/// menu_item ids left out of the `line_items` count ONLY — every money/count
+/// aggregate stays authoritative.
 ///
 /// Money here is scoped by [`SOLD`], the SAME predicate the sales and shift
 /// reports use. These columns used to filter on `status = 'completed'`, which
 /// silently dropped orders still open on the KDS / on a waiter's ticket and made
 /// this strip disagree with every other screen for the same day.
-fn order_summary_cols(exclude_idx: Option<i32>) -> String {
+///
+/// This is an exact aggregate over the whole scope (all of a branch's history
+/// when no date filter is given), so its cost grows with the scope. It is kept
+/// as cheap as that allows: the matched rows are read once (the `SOLD` and
+/// channel tests evaluated once per row, not once per column), the count rides
+/// the same scan instead of a second query, and the line-item quantities are one
+/// index scan over the matched ids instead of one subquery per order.
+fn order_summary_sql(scope: &str, filter: &str, exclude_idx: Option<i32>) -> String {
     let exclude = exclude_idx
         .map(|i| format!(" AND oi.menu_item_id != ALL(${i}::uuid[])"))
         .unwrap_or_default();
     let sold = SOLD;
     format!(
-    "COALESCE(SUM(CASE WHEN o.{sold} THEN o.total_amount ELSE 0 END), 0) AS revenue,
-     COALESCE(SUM(CASE WHEN o.{sold} THEN 1 ELSE 0 END), 0) AS completed,
-     COALESCE(SUM(CASE WHEN o.status::text = 'voided' THEN 1 ELSE 0 END), 0) AS voided,
-     COALESCE(SUM(CASE WHEN o.{sold} THEN o.discount_amount ELSE 0 END), 0) AS discounts,
-     COALESCE(SUM(CASE WHEN o.{sold} THEN COALESCE(o.tip_amount, 0) ELSE 0 END), 0) AS tips,
-     COALESCE(SUM(CASE WHEN o.{sold} THEN o.delivery_fee ELSE 0 END), 0) AS delivery_fees,
-     COALESCE(SUM(CASE WHEN o.{sold} AND o.order_type = 'delivery' THEN 1 ELSE 0 END), 0) AS delivery_orders,
-     COALESCE(SUM(CASE WHEN o.{sold} AND o.order_type = 'delivery' THEN o.total_amount ELSE 0 END), 0) AS delivery_revenue,
-     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'in_mall' THEN 1 ELSE 0 END), 0) AS in_mall_orders,
-     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'in_mall' THEN o.total_amount ELSE 0 END), 0) AS in_mall_revenue,
-     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'in_mall' THEN o.delivery_fee ELSE 0 END), 0) AS in_mall_fees,
-     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
-     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN o.total_amount ELSE 0 END), 0) AS outside_revenue,
-     COALESCE(SUM(CASE WHEN o.{sold} AND d.channel::text = 'outside' THEN o.delivery_fee ELSE 0 END), 0) AS outside_fees,
-     COALESCE(SUM(CASE WHEN o.{sold} THEN (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id AND oi.line_kind <> 'combo'{exclude}) ELSE 0 END), 0)::bigint AS line_items"
+    "WITH f AS MATERIALIZED (
+         SELECT o.id, o.{sold} AS sold, o.status::text = 'voided' AS is_voided,
+                o.total_amount, o.discount_amount, o.tip_amount, o.delivery_fee, o.order_type,
+                d.channel::text AS channel
+           FROM orders o JOIN users u ON u.id = o.teller_id
+           LEFT JOIN users w ON w.id = o.waiter_id
+           LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
+          WHERE {scope} {filter}
+     )
+     SELECT COUNT(*)::bigint AS total,
+     COALESCE(SUM(CASE WHEN f.sold THEN f.total_amount ELSE 0 END), 0) AS revenue,
+     COALESCE(SUM(CASE WHEN f.sold THEN 1 ELSE 0 END), 0) AS completed,
+     COALESCE(SUM(CASE WHEN f.is_voided THEN 1 ELSE 0 END), 0) AS voided,
+     COALESCE(SUM(CASE WHEN f.sold THEN f.discount_amount ELSE 0 END), 0) AS discounts,
+     COALESCE(SUM(CASE WHEN f.sold THEN COALESCE(f.tip_amount, 0) ELSE 0 END), 0) AS tips,
+     COALESCE(SUM(CASE WHEN f.sold THEN f.delivery_fee ELSE 0 END), 0) AS delivery_fees,
+     COALESCE(SUM(CASE WHEN f.sold AND f.order_type = 'delivery' THEN 1 ELSE 0 END), 0) AS delivery_orders,
+     COALESCE(SUM(CASE WHEN f.sold AND f.order_type = 'delivery' THEN f.total_amount ELSE 0 END), 0) AS delivery_revenue,
+     COALESCE(SUM(CASE WHEN f.sold AND f.channel = 'in_mall' THEN 1 ELSE 0 END), 0) AS in_mall_orders,
+     COALESCE(SUM(CASE WHEN f.sold AND f.channel = 'in_mall' THEN f.total_amount ELSE 0 END), 0) AS in_mall_revenue,
+     COALESCE(SUM(CASE WHEN f.sold AND f.channel = 'in_mall' THEN f.delivery_fee ELSE 0 END), 0) AS in_mall_fees,
+     COALESCE(SUM(CASE WHEN f.sold AND f.channel = 'outside' THEN 1 ELSE 0 END), 0) AS outside_orders,
+     COALESCE(SUM(CASE WHEN f.sold AND f.channel = 'outside' THEN f.total_amount ELSE 0 END), 0) AS outside_revenue,
+     COALESCE(SUM(CASE WHEN f.sold AND f.channel = 'outside' THEN f.delivery_fee ELSE 0 END), 0) AS outside_fees,
+     (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi
+       WHERE oi.order_id = ANY(ARRAY(SELECT f2.id FROM f f2 WHERE f2.sold))
+         AND oi.line_kind <> 'combo'{exclude})::bigint AS line_items
+     FROM f"
     )
 }
 
@@ -4059,14 +4080,6 @@ pub async fn list_orders(
         data_idx,
         data_idx + 1
     );
-    let count_sql = format!(
-        "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id
-         LEFT JOIN users w ON w.id = o.waiter_id
-         LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
-         WHERE {} {}",
-        scope_condition, count_filter
-    );
-
     tracing::debug!(
         data_params = data_idx + 1,
         count_params = count_idx - 1,
@@ -4107,33 +4120,27 @@ pub async fn list_orders(
         }};
     }
 
-    let total: i64 = bind_filters!(sqlx::query_scalar(&count_sql).bind(scope_id))
-        .fetch_one(pool.get_ref())
-        .await?;
-
     // Exclusions ride the summary query only ($count_idx is the next free
     // placeholder after the shared filters, bound last below).
     let parsed_exclude_items = match &query.exclude_items {
         Some(raw) => parse_uuid_csv("exclude_items", raw)?,
         None => None,
     };
-    let summary_sql = format!(
-        "SELECT {} \
-         FROM orders o JOIN users u ON u.id = o.teller_id \
-         LEFT JOIN users w ON w.id = o.waiter_id \
-         LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
-         WHERE {} {}",
-        order_summary_cols(parsed_exclude_items.as_ref().map(|_| count_idx)),
+    // `total` (the count of every matching order) and the summary come from
+    // one scan of the matched rows (see `order_summary_sql`).
+    let summary_sql = order_summary_sql(
         scope_condition,
-        count_filter
+        &count_filter,
+        parsed_exclude_items.as_ref().map(|_| count_idx),
     );
 
-    let mut summary_q =
-        bind_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id));
+    let mut summary_q = bind_filters!(sqlx::query(&summary_sql).bind(scope_id));
     if let Some(ref v) = parsed_exclude_items {
         summary_q = summary_q.bind(v);
     }
-    let summary: OrderSummary = summary_q.fetch_one(pool.get_ref()).await?;
+    let summary_row = summary_q.fetch_one(pool.get_ref()).await?;
+    let total: i64 = sqlx::Row::try_get(&summary_row, "total")?;
+    let summary = <OrderSummary as sqlx::FromRow<'_, sqlx::postgres::PgRow>>::from_row(&summary_row)?;
 
     let data: Vec<Order> = bind_filters!(sqlx::query_as::<_, Order>(&data_sql).bind(scope_id))
         .bind(per_page)
@@ -5233,16 +5240,7 @@ pub async fn export_orders(
         )));
     }
 
-    let summary_sql = format!(
-        "SELECT {} \
-         FROM orders o JOIN users u ON u.id = o.teller_id \
-         LEFT JOIN users w ON w.id = o.waiter_id \
-         LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id \
-         WHERE {} {}",
-        order_summary_cols(None),
-        scope_condition,
-        filter
-    );
+    let summary_sql = order_summary_sql(scope_condition, &filter, None);
 
     let summary: OrderSummary =
         bind_export_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id))
