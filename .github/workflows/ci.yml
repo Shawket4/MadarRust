@@ -172,11 +172,11 @@ jobs:
       # applied, so `sqlx migrate run` on drift_prod never creates `madar_app`
       # and later migrations that GRANT to it fail. Roles are cluster-global
       # and live outside the dump: provision both, as prod already has them.
-      - name: Provision DB roles (madar_app, legacy sufrix)
+      # `sufrix` is created by the next step.
+      - name: Provision DB role madar_app
         run: |
           psql "$PG/postgres" -X -v ON_ERROR_STOP=1 \
-            -c "CREATE ROLE madar_app NOLOGIN NOBYPASSRLS" \
-            -c "CREATE ROLE sufrix NOLOGIN"
+            -c "CREATE ROLE madar_app NOLOGIN NOBYPASSRLS"
       - name: Build both schemas
         run: |
           set -euo pipefail
