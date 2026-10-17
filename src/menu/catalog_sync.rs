@@ -215,12 +215,17 @@ const VALID_CHANNELS: [&str; 4] = ["in_mall", "outside", "umbrella", "pickup"];
 /// Current catalog revision for an org (0 if never seeded — an unwritten org is
 /// revision 0 from the POS's perspective). Mirrors `menu::studio`.
 async fn current_catalog_revision(pool: &PgPool, org_id: Uuid) -> Result<i64, AppError> {
+    let cap = crate::fastpath::capture(None, Some(org_id));
     let rev: Option<i64> =
         sqlx::query_scalar("SELECT revision FROM catalog_revision WHERE org_id = $1")
             .bind(org_id)
             .fetch_optional(pool)
             .await?;
-    Ok(rev.unwrap_or(0))
+    let rev = rev.unwrap_or(0);
+    if let Some(cap) = cap {
+        crate::fastpath::put_catalog_revision(cap, org_id, rev);
+    }
+    Ok(rev)
 }
 
 // ── Endpoint: GET /catalog/sync ──────────────────────────────────────
@@ -263,12 +268,32 @@ pub async fn catalog_sync(
     }
 
     // Resolve org from the branch, and gate access: the caller's org must own it.
-    let org_id: Option<Uuid> = sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1")
-        .bind(q.branch_id)
-        .fetch_optional(pool.get_ref())
-        .await?;
+    // A live branch's org is remembered by the fast path; a deleted branch
+    // still resolves here, from the database, as it always has.
+    let org_id = match crate::fastpath::branch_org(q.branch_id) {
+        Some(org) => Some(org),
+        None => {
+            sqlx::query_scalar!("SELECT org_id FROM branches WHERE id = $1", q.branch_id)
+                .fetch_optional(pool.get_ref())
+                .await?
+        }
+    };
     let org_id = org_id.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     require_same_org(&claims, Some(org_id))?;
+
+    // OPT-A: a device already at the current revision is told so from memory
+    // (`fastpath::catalog_revision`, dropped on every `catalog_revision`
+    // notification and every write of the org on this instance).
+    if let Some(since) = q.since
+        && crate::fastpath::catalog_revision(org_id) == Some(since)
+    {
+        return Ok(HttpResponse::Ok().json(CatalogSyncResponse {
+            catalog_revision: since,
+            changed: false,
+            items: Vec::new(),
+            ingredients: Vec::new(),
+        }));
+    }
 
     let catalog_revision = current_catalog_revision(pool.get_ref(), org_id).await?;
 

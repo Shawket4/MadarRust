@@ -241,6 +241,42 @@ pub async fn resolve_station(
     .await?)
 }
 
+/// [`resolve_station`] for many lines in ONE query, in the order given: the
+/// same three rules, each a unique lookup (`(branch_id, menu_item_id)`,
+/// `(branch_id, category_id)`, one default station per branch), so the same
+/// station. A line without a menu item gets the branch default, as there.
+pub async fn resolve_stations(
+    tx: &mut Transaction<'_, Postgres>,
+    branch_id: Uuid,
+    menu_item_ids: &[Option<Uuid>],
+) -> Result<Vec<Option<Uuid>>, AppError> {
+    if menu_item_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query!(
+        r#"SELECT COALESCE(
+                  (SELECT misr.station_id FROM menu_item_station_routes misr
+                     JOIN kitchen_stations ks ON ks.id = misr.station_id
+                        AND ks.deleted_at IS NULL AND ks.is_active
+                    WHERE misr.branch_id = $1 AND misr.menu_item_id = u.mi),
+                  (SELECT csr.station_id FROM category_station_routes csr
+                     JOIN menu_items mi ON mi.category_id = csr.category_id
+                     JOIN kitchen_stations ks ON ks.id = csr.station_id
+                        AND ks.deleted_at IS NULL AND ks.is_active
+                    WHERE csr.branch_id = $1 AND mi.id = u.mi),
+                  (SELECT id FROM kitchen_stations
+                    WHERE branch_id = $1 AND is_default AND is_active AND deleted_at IS NULL)
+              ) AS station_id
+             FROM UNNEST($2::uuid[]) WITH ORDINALITY AS u(mi, ord)
+            ORDER BY u.ord"#,
+        branch_id,
+        menu_item_ids as &[Option<Uuid>],
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.station_id).collect())
+}
+
 /// Insert a kitchen ticket + its (station-frozen) items inside an existing tx,
 /// honoring the branch routing mode. Returns the new kitchen_ticket id, or `None`
 /// when nothing should hit the kitchen:
@@ -262,9 +298,11 @@ pub(crate) async fn emit_kitchen_ticket(
     }
 
     // Resolve + freeze the station for each line; in kds mode, drop unrouted lines.
+    // One query for every line (see `resolve_stations`).
+    let item_ids: Vec<Option<Uuid>> = lines.iter().map(|l| l.menu_item_id).collect();
+    let stations = resolve_stations(tx, ctx.branch_id, &item_ids).await?;
     let mut routed: Vec<(Option<Uuid>, &KitchenLine)> = Vec::with_capacity(lines.len());
-    for line in lines {
-        let station_id = resolve_station(tx, ctx.branch_id, line.menu_item_id).await?;
+    for (line, station_id) in lines.iter().zip(stations) {
         if mode == "kds" && station_id.is_none() {
             continue;
         }
@@ -321,44 +359,38 @@ pub(crate) async fn emit_kitchen_ticket(
         }
     };
 
-    for (station_id, line) in routed {
-        // A client-derived line id (idempotent) when present, else server-generated.
-        match line.kitchen_item_id {
-            Some(iid) => {
-                sqlx::query(
-                    "INSERT INTO kitchen_ticket_items \
-                        (id, kitchen_ticket_id, station_id, menu_item_id, line, qty, \
-                         open_ticket_item_id) \
-                     VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING",
-                )
-                .bind(iid)
-                .bind(ticket_id)
-                .bind(station_id)
-                .bind(line.menu_item_id)
-                .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
-                .bind(line.qty)
-                .bind(line.open_ticket_item_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-            None => {
-                sqlx::query(
-                    "INSERT INTO kitchen_ticket_items \
-                        (kitchen_ticket_id, station_id, menu_item_id, line, qty, \
-                         open_ticket_item_id) \
-                     VALUES ($1, $2, $3, $4, $5, $6)",
-                )
-                .bind(ticket_id)
-                .bind(station_id)
-                .bind(line.menu_item_id)
-                .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
-                .bind(line.qty)
-                .bind(line.open_ticket_item_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-        }
-    }
+    // Every line in ONE statement, in routing order. A client-derived line id
+    // (idempotent: a re-sent fire inserts nothing) when present, else a
+    // server-generated one (which cannot conflict). `org_id` is the ticket's,
+    // written here rather than looked up per row by `fill_org_id`.
+    let ids: Vec<Option<Uuid>> = routed.iter().map(|(_, l)| l.kitchen_item_id).collect();
+    let station: Vec<Option<Uuid>> = routed.iter().map(|(s, _)| *s).collect();
+    let menu_item: Vec<Option<Uuid>> = routed.iter().map(|(_, l)| l.menu_item_id).collect();
+    let line_json: Vec<serde_json::Value> = routed
+        .iter()
+        .map(|(_, l)| serde_json::to_value(l).unwrap_or(serde_json::Value::Null))
+        .collect();
+    let qty: Vec<i32> = routed.iter().map(|(_, l)| l.qty).collect();
+    let bill_line: Vec<Option<Uuid>> = routed.iter().map(|(_, l)| l.open_ticket_item_id).collect();
+    sqlx::query!(
+        "INSERT INTO kitchen_ticket_items \
+            (id, org_id, kitchen_ticket_id, station_id, menu_item_id, line, qty, open_ticket_item_id) \
+         SELECT COALESCE(u.id, gen_random_uuid()), $1, $2, u.station, u.menu_item, u.line, u.qty, u.bill_line \
+           FROM UNNEST($3::uuid[], $4::uuid[], $5::uuid[], $6::jsonb[], $7::int4[], $8::uuid[]) \
+                WITH ORDINALITY AS u(id, station, menu_item, line, qty, bill_line, ord) \
+          ORDER BY u.ord \
+         ON CONFLICT (id) DO NOTHING",
+        ctx.org_id,
+        ticket_id,
+        &ids as &[Option<Uuid>],
+        &station as &[Option<Uuid>],
+        &menu_item as &[Option<Uuid>],
+        &line_json,
+        &qty,
+        &bill_line as &[Option<Uuid>],
+    )
+    .execute(&mut **tx)
+    .await?;
     Ok(Some(ticket_id))
 }
 

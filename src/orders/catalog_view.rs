@@ -322,6 +322,12 @@ impl Catalog {
         // on — what madar-catalog's staff comp input reads (`staff`). Ordered
         // as the staff pool always read them: attachment sort, group name, id,
         // then option sort, name, id.
+        //
+        // The attachment's allow-list (`mimg_included_options`) is worked out
+        // once per attachment in the CTE, not once per joined OPTION row: as a
+        // select-list call it ran for every option of every group (72 times
+        // for a two-line sale on the prod copy, the largest share of a sale's
+        // database time). Same rows, same values, same order.
         let group_rows: Vec<(
             Uuid,
             Uuid,
@@ -335,25 +341,51 @@ impl Catalog {
             Option<i32>,
             bool,
             bool,
-        )> = sqlx::query_as(
-            "SELECT a.menu_item_id, g.id, COALESCE(a.min_override, g.min_selections),
-                    COALESCE(a.is_required_override, g.is_required), mimg_included_options(a.id, a.option_allowlist),
-                    g.effect, g.legacy_addon_type,
-                    mo.id, mo.price, bao.price, mo.is_default,
-                    (mo.is_active AND COALESCE(bao.is_available, true))
-               FROM menu_item_modifier_groups a
+        )> = sqlx::query!(
+            r#"WITH a AS MATERIALIZED (
+                    SELECT a.id, a.menu_item_id, a.group_id, a.sort, a.min_override,
+                           a.is_required_override,
+                           mimg_included_options(a.id, a.option_allowlist) AS included
+                      FROM menu_item_modifier_groups a
+                     WHERE a.menu_item_id = ANY($1))
+             SELECT a.menu_item_id AS "menu_item_id!", g.id AS "group_id!",
+                    COALESCE(a.min_override, g.min_selections) AS "min!",
+                    COALESCE(a.is_required_override, g.is_required) AS "required!",
+                    a.included AS "included?",
+                    g.effect AS "effect!", g.legacy_addon_type AS "legacy?",
+                    mo.id AS "option_id!", mo.price AS "price!", bao.price AS "branch_price?",
+                    mo.is_default AS "is_default!",
+                    (mo.is_active AND COALESCE(bao.is_available, true)) AS "on!"
+               FROM a
                JOIN modifier_groups g ON g.id = a.group_id AND g.is_active
                JOIN modifier_options mo ON mo.group_id = g.id AND mo.legacy_source = 'addon'
                LEFT JOIN menu_price_overrides bao
                       ON bao.scope = 'branch' AND bao.target_type = 'modifier_option'
                      AND bao.target_id = mo.id AND bao.branch_id = $2
-              WHERE a.menu_item_id = ANY($1)
-              ORDER BY a.menu_item_id, a.sort, g.name, g.id, mo.sort, mo.name, mo.id",
+              ORDER BY a.menu_item_id, a.sort, g.name, g.id, mo.sort, mo.name, mo.id"#,
+            ids,
+            branch,
         )
-        .bind(ids)
-        .bind(branch)
         .fetch_all(&mut *conn)
-        .await?;
+        .await?
+        .into_iter()
+        .map(|r| {
+            (
+                r.menu_item_id,
+                r.group_id,
+                r.min,
+                r.required,
+                r.included,
+                r.effect,
+                r.legacy,
+                r.option_id,
+                r.price,
+                r.branch_price,
+                r.is_default,
+                r.on,
+            )
+        })
+        .collect();
         let mut groups_of: HashMap<Uuid, Vec<GroupView>> = HashMap::new();
         for (item, gid, min, required, included, effect, legacy, oid, price, bp, default, on) in
             group_rows

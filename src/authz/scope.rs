@@ -67,9 +67,15 @@ pub async fn branch_scope(pool: &PgPool, claims: &Claims) -> Result<BranchScope,
     if claims.role == UserRole::SuperAdmin {
         return Ok(BranchScope::All);
     }
-    let mut conn = pool.acquire().await?;
-    let Some(loaded) = super::load::load(&mut conn, claims.user_id()).await? else {
-        return Ok(BranchScope::Only(vec![]));
+    let loaded = match super::load::cached(claims.user_id()).await {
+        Some(hit) => hit,
+        None => {
+            let mut conn = pool.acquire().await?;
+            let Some(loaded) = super::load::load(&mut conn, claims.user_id()).await? else {
+                return Ok(BranchScope::Only(vec![]));
+            };
+            loaded
+        }
     };
     if !loaded.principal.active {
         return Ok(BranchScope::Only(vec![]));
@@ -97,6 +103,26 @@ pub async fn branch_scope(pool: &PgPool, claims: &Claims) -> Result<BranchScope,
     Ok(BranchScope::Only(ids))
 }
 
+/// The org of a live (not deleted) branch. Remembered by the fast path until
+/// the branch's feed moves (`sync_emit` on any branch write, the delete
+/// trigger of migration `20261021310000_fastpath_notify`) or the org writes.
+pub async fn branch_org(pool: &PgPool, branch_id: Uuid) -> Result<Option<Uuid>, AppError> {
+    if let Some(org) = crate::fastpath::branch_org(branch_id) {
+        return Ok(Some(org));
+    }
+    let cap = crate::fastpath::capture(Some(branch_id), None);
+    let org: Option<Uuid> = sqlx::query_scalar!(
+        "SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL",
+        branch_id
+    )
+    .fetch_optional(pool)
+    .await?;
+    if let (Some(cap), Some(org)) = (cap, org) {
+        crate::fastpath::put_branch_org(cap, branch_id, org);
+    }
+    Ok(org)
+}
+
 /// 403 unless the caller works at `branch_id`; 404 when the branch is gone and
 /// 403 when it belongs to another org (both unchanged from the role-name
 /// version this replaces).
@@ -109,13 +135,9 @@ pub async fn require_branch_access(
         return Ok(());
     }
 
-    let branch_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(branch_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
-    let branch_org = branch_org.ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let branch_org = branch_org(pool, branch_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if claims.org_id() != Some(branch_org) {
         return Err(AppError::Forbidden(
             "Branch belongs to a different org".into(),

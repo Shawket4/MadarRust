@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO inventory_movements\n            (id, org_id, branch_id, org_ingredient_id, type, quantity,\n             unit_cost, reason, source_type, source_id, note, created_by,\n             unit_cost_exact)\n        SELECT u.id, $1, u.branch_id, u.ingredient, u.kind::inventory_movement_type, u.quantity,\n               u.unit_cost, u.reason, u.source_type, u.source_id, u.note, u.created_by,\n               u.exact\n          FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::text[], $6::float8[],\n                      $7::int8[], $8::text[], $9::text[], $10::uuid[], $11::text[],\n                      $12::uuid[], $13::numeric[])\n               WITH ORDINALITY AS u(id, branch_id, ingredient, kind, quantity,\n                                    unit_cost, reason, source_type, source_id, note,\n                                    created_by, exact, ord)\n         ORDER BY u.ord\n        RETURNING id, branch_stock_id AS \"branch_stock_id!\", balance_after::float8 AS \"balance_after!\",\n                  below_zero\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch_stock_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "balance_after!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "below_zero",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "Float8Array",
+        "Int8Array",
+        "TextArray",
+        "TextArray",
+        "UuidArray",
+        "TextArray",
+        "UuidArray",
+        "NumericArray"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null,
+      false
+    ]
+  },
+  "hash": "74f0df5d20584874ec3d91560886294a920669af7a49611a7648ea8ace646f9f"
+}

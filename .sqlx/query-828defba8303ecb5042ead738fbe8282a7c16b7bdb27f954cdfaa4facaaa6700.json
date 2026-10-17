@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO kitchen_ticket_items (id, org_id, kitchen_ticket_id, station_id, menu_item_id, line, qty, open_ticket_item_id) SELECT COALESCE(u.id, gen_random_uuid()), $1, $2, u.station, u.menu_item, u.line, u.qty, u.bill_line FROM UNNEST($3::uuid[], $4::uuid[], $5::uuid[], $6::jsonb[], $7::int4[], $8::uuid[]) WITH ORDINALITY AS u(id, station, menu_item, line, qty, bill_line, ord) ORDER BY u.ord ON CONFLICT (id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "UuidArray",
+        "JsonbArray",
+        "Int4Array",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "828defba8303ecb5042ead738fbe8282a7c16b7bdb27f954cdfaa4facaaa6700"
+}

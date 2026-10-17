@@ -3113,36 +3113,61 @@ async fn create_order_once(
             crate::bookings::handlers::complete_by_ticket(&mut *tx, t.open_ticket_id).await?;
     }
 
-    // Payment splits
-    if let Some(splits) = &body.payment_splits {
-        for split in splits {
-            if split.amount <= 0 {
-                return Err(AppError::BadRequest(
-                    "Split payment amounts must be greater than 0".into(),
-                ));
-            }
-            validate_payment_method(&mut *tx, org_id, &split.method).await?;
-            sqlx::query(
-                "INSERT INTO order_payments (order_id, method, amount, reference, is_cash) \
-                 VALUES ($1, $2, $3, $4, $5)",
+    // Payment legs: one statement for all of them (a split used to be one
+    // validation query and one INSERT per leg). The checks run first, in leg
+    // order, so the first bad leg is refused with the same message as before.
+    // `org_id` / `till_id` are the order's own, written here rather than looked
+    // up per row by `fill_org_id` / `order_payments_fill_till`.
+    let legs: Vec<(&str, i32, Option<&str>)> = match &body.payment_splits {
+        Some(splits) => {
+            let methods: Vec<String> = splits.iter().map(|s| s.method.clone()).collect();
+            let active: Vec<String> = sqlx::query_scalar!(
+                "SELECT name FROM org_payment_methods \
+                  WHERE org_id = $1 AND name = ANY($2::text[]) AND is_active = true",
+                org_id,
+                &methods,
             )
-            .bind(order.id)
-            .bind(&split.method)
-            .bind(split.amount)
-            .bind(&split.reference)
-            .bind(is_cash_of(&split.method))
-            .execute(&mut *tx)
+            .fetch_all(&mut *tx)
             .await?;
+            for split in splits {
+                if split.amount <= 0 {
+                    return Err(AppError::BadRequest(
+                        "Split payment amounts must be greater than 0".into(),
+                    ));
+                }
+                if !active.contains(&split.method) {
+                    return Err(AppError::BadRequest(format!(
+                        "Invalid or inactive payment_method: {}",
+                        split.method
+                    )));
+                }
+            }
+            splits
+                .iter()
+                .map(|s| (s.method.as_str(), s.amount, s.reference.as_deref()))
+                .collect()
         }
-    } else {
-        sqlx::query(
-            "INSERT INTO order_payments (order_id, method, amount, is_cash) \
-             VALUES ($1, $2, $3, $4)",
+        None => vec![(body.payment_method.as_str(), total_amount, None)],
+    };
+    {
+        let method: Vec<String> = legs.iter().map(|l| l.0.to_string()).collect();
+        let amount: Vec<i32> = legs.iter().map(|l| l.1).collect();
+        let reference: Vec<Option<String>> = legs.iter().map(|l| l.2.map(str::to_string)).collect();
+        let cash: Vec<bool> = legs.iter().map(|l| is_cash_of(l.0)).collect();
+        sqlx::query!(
+            "INSERT INTO order_payments (order_id, org_id, till_id, method, amount, reference, is_cash) \
+             SELECT $1, $2, $3, u.method, u.amount, u.reference, u.is_cash \
+               FROM UNNEST($4::text[], $5::int4[], $6::text[], $7::bool[]) \
+                    WITH ORDINALITY AS u(method, amount, reference, is_cash, ord) \
+              ORDER BY u.ord",
+            order.id,
+            org_id,
+            body.till_id,
+            &method,
+            &amount,
+            &reference as &[Option<String>],
+            &cash,
         )
-        .bind(order.id)
-        .bind(&body.payment_method)
-        .bind(total_amount)
-        .bind(is_cash_of(&body.payment_method))
         .execute(&mut *tx)
         .await?;
     }
@@ -3213,7 +3238,18 @@ async fn create_order_once(
     let mut row_of_input: std::collections::HashMap<usize, Uuid> = Default::default();
     // Every line's stock deductions, posted together after the lines (below).
     let mut sale_deductions: Vec<(Uuid, _)> = Vec::new();
-    for (row_index, resolved) in resolved_items.into_iter().enumerate() {
+
+    // Every row of the sale's lines is worked out first and then written in a
+    // few multi-row statements: the lines, their add-ons, their optional
+    // fields (one INSERT each, instead of one per row). The row ids are minted
+    // here — the column default is the same random v4 uuid, and a combo line
+    // already carries the id its parts point at — so each row is matched back
+    // by id. The values are the ones the per-row INSERTs wrote, computed by the
+    // same code; the response lists the rows in the same order.
+    let mut lines_in: Vec<LineRowIn> = Vec::with_capacity(resolved_items.len());
+    let mut addons_in: Vec<AddonRowIn> = Vec::new();
+    let mut optionals_in: Vec<OptionalRowIn> = Vec::new();
+    for (row_index, resolved) in resolved_items.iter().enumerate() {
         let input_index = row_input[row_index];
         let is_header = resolved.combo.kind == crate::combos::order_line::LineKind::Header;
         // The SIZE part of a staff comp comes off the line itself; the part a
@@ -3238,101 +3274,10 @@ async fn create_order_once(
         } else {
             summarize_line_costs(&resolved.deductions, resolved.quantity, has_uncosted_addon)
         };
-
-        let order_item = sqlx::query_as::<_, OrderItem>(
-            r#"INSERT INTO order_items
-                (order_id, menu_item_id, item_name, name_translations, size_label,
-                 unit_price, quantity, line_total, notes, deductions_snapshot,
-                 line_cost, unit_cost, cost_missing,
-                 price_flagged, is_reward, reward_units, reward_covered,
-                 staff_comp_minor, staff_drink_id,
-                 id, line_kind, combo_line_id, combo_slot_id, combo_slot_name,
-                 combo_unit_price, combo_share, combo_surcharge, deal_minor,
-                 combo_slot_name_translations)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                       $18, $19, COALESCE($20, gen_random_uuid()), $21, $22, $23, $24, $25, $26, $27, $28,
-                       $29)
-               RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
-                         unit_price, quantity, line_total, notes, deductions_snapshot,
-                         line_cost, unit_cost, cost_missing,
-                         is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id,
-                         line_kind, combo_line_id, combo_slot_id, combo_slot_name,
-                         combo_slot_name_translations,
-                         combo_unit_price, combo_share, combo_surcharge, deal_minor"#,
-        )
-        .bind(order.id)
-        .bind(resolved.menu_item_id)
-        .bind(&resolved.item_name)
-        .bind(&resolved.name_translations)
-        .bind(&resolved.size_label)
-        .bind(resolved.unit_price)
-        .bind(resolved.quantity)
-        .bind(line_total)
-        .bind(&resolved.notes)
-        .bind(snapshot)
-        .bind(costs.line_cost)
-        .bind(costs.unit_cost)
-        .bind(costs.cost_missing)
-        .bind(resolved.price_flagged)
-        .bind(resolved.is_reward)
-        .bind(resolved.reward_units)
-        .bind(resolved.reward_covered)
-        .bind(resolved.staff.as_ref().map_or(0, |l| l.applied))
-        .bind(resolved.staff.as_ref().map(|l| l.drink.id))
-        .bind(resolved.combo.id)
-        .bind(resolved.combo.kind.as_str())
-        .bind(resolved.combo.header_id)
-        .bind(resolved.combo.slot_id)
-        .bind(&resolved.combo.slot_name)
-        .bind(resolved.combo.unit_price)
-        .bind(resolved.combo.share)
-        .bind(resolved.combo.surcharge)
-        .bind(resolved.deal_minor)
-        .bind(resolved.combo.slot_name_translations_or_empty())
-        .fetch_one(&mut *tx)
-        .await?;
-        row_of_input.entry(input_index).or_insert(order_item.id);
-
-        // The staff drink's own row, in the sale's transaction: the comp and
-        // the record of it commit together or not at all.
-        if let (Some(line), Some(ctx)) = (&resolved.staff, &staff_ctx) {
-            use crate::staff_pool::order_line as sp;
-            if !staff_day_locked {
-                sp::lock_day(&mut tx, shift_branch_id, ctx.day).await?;
-                staff_day_locked = true;
-            }
-            let rang = resolved.charged_subtotal();
-            let recorded = sp::record_line(
-                &mut tx,
-                ctx,
-                actor.org_id,
-                shift_branch_id,
-                body.till_id,
-                order.id,
-                actor.teller_id,
-                body.device_id,
-                created_at,
-                actor.replay,
-                line,
-                resolved.menu_item_id,
-                &resolved.item_name,
-                resolved.size_label.as_deref(),
-                resolved.quantity,
-                (rang - line.applied).max(0),
-                costs.line_cost.and_then(|c| i32::try_from(c).ok()),
-            )
-            .await?;
-            if recorded.overspent {
-                warnings.push(format!(
-                    "{} is past today's staff drinks allowance — recorded and marked",
-                    resolved.item_name
-                ));
-            }
-            staff_flags.extend(recorded.flags);
-        }
+        let item_id = resolved.combo.id.unwrap_or_else(Uuid::new_v4);
+        row_of_input.entry(input_index).or_insert(item_id);
 
         // Addons
-        let mut addon_rows: Vec<OrderItemAddon> = Vec::new();
         for (addon_index, addon) in resolved.addons.iter().enumerate() {
             let addon_comp = resolved
                 .staff
@@ -3362,31 +3307,21 @@ async fn create_order_once(
                     Some(cost.round() as i64)
                 }
             };
-
-            let row = sqlx::query_as::<_, OrderItemAddon>(
-                r#"INSERT INTO order_item_addons
-                    (order_item_id, addon_item_id, addon_name, name_translations, unit_price, quantity, line_total, line_cost,
-                     staff_comp_minor)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                   RETURNING id, order_item_id, addon_item_id, addon_name, name_translations,
-                             unit_price, quantity, line_total, line_cost, staff_comp_minor"#,
-            )
-            .bind(order_item.id)
-            .bind(addon.addon_item_id)
-            .bind(&addon.addon_name)
-            .bind(&addon.name_translations)
-            .bind(addon.unit_price)
-            .bind(addon.quantity)
-            .bind(addon_line)
-            .bind(addon_cost)
-            .bind(addon_comp)
-            .fetch_one(&mut *tx)
-            .await?;
-            addon_rows.push(row);
+            addons_in.push(AddonRowIn {
+                id: Uuid::new_v4(),
+                order_item_id: item_id,
+                addon_item_id: addon.addon_item_id,
+                addon_name: addon.addon_name.clone(),
+                name_translations: addon.name_translations.clone(),
+                unit_price: addon.unit_price,
+                quantity: addon.quantity,
+                line_total: addon_line,
+                line_cost: addon_cost,
+                staff_comp_minor: addon_comp,
+            });
         }
 
         // Optionals
-        let mut optional_rows: Vec<OrderItemOptional> = Vec::new();
         for opt in &resolved.optionals {
             // Cost per parent-item unit (matches quantity_deducted semantics):
             // unit cost comes from the enriched deduction for this field.
@@ -3400,28 +3335,19 @@ async fn create_order_once(
                 // No ingredient linked ⟹ genuinely zero marginal cost.
                 _ => Some(0),
             };
-
-            let row = sqlx::query_as::<_, OrderItemOptional>(
-                r#"INSERT INTO order_item_optionals
-                    (order_item_id, optional_field_id, field_name, name_translations, price,
-                     org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                   RETURNING id, order_item_id, optional_field_id, field_name, name_translations, price,
-                             org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost"#,
-            )
-            .bind(order_item.id)
-            .bind(opt.optional_field_id)
-            .bind(&opt.field_name)
-            .bind(&opt.name_translations)
-            .bind(opt.price)
-            .bind(opt.org_ingredient_id)
-            .bind(&opt.ingredient_name)
-            .bind(&opt.ingredient_unit)
-            .bind(opt.quantity_used)
-            .bind(opt_cost)
-            .fetch_one(&mut *tx)
-            .await?;
-            optional_rows.push(row);
+            optionals_in.push(OptionalRowIn {
+                id: Uuid::new_v4(),
+                order_item_id: item_id,
+                optional_field_id: opt.optional_field_id,
+                field_name: opt.field_name.clone(),
+                name_translations: opt.name_translations.clone(),
+                price: opt.price,
+                org_ingredient_id: opt.org_ingredient_id,
+                ingredient_name: opt.ingredient_name.clone(),
+                ingredient_unit: opt.ingredient_unit.clone(),
+                quantity_used: opt.quantity_used,
+                cost: opt_cost,
+            });
         }
 
         // Inventory deductions are COLLECTED here and posted after the last
@@ -3438,10 +3364,101 @@ async fn create_order_once(
             sale_deductions.push((ing_id, deduction.clone()));
         }
 
+        lines_in.push(LineRowIn {
+            id: item_id,
+            menu_item_id: resolved.menu_item_id,
+            item_name: resolved.item_name.clone(),
+            name_translations: resolved.name_translations.clone(),
+            size_label: resolved.size_label.clone(),
+            unit_price: resolved.unit_price,
+            quantity: resolved.quantity,
+            line_total,
+            notes: resolved.notes.clone(),
+            deductions_snapshot: snapshot,
+            line_cost: costs.line_cost,
+            unit_cost: costs.unit_cost,
+            cost_missing: costs.cost_missing,
+            price_flagged: resolved.price_flagged,
+            is_reward: resolved.is_reward,
+            reward_units: resolved.reward_units,
+            reward_covered: resolved.reward_covered,
+            staff_comp_minor: resolved.staff.as_ref().map_or(0, |l| l.applied),
+            staff_drink_id: resolved.staff.as_ref().map(|l| l.drink.id),
+            line_kind: resolved.combo.kind.as_str().to_string(),
+            combo_line_id: resolved.combo.header_id,
+            combo_slot_id: resolved.combo.slot_id,
+            combo_slot_name: resolved.combo.slot_name.clone(),
+            combo_unit_price: resolved.combo.unit_price,
+            combo_share: resolved.combo.share,
+            combo_surcharge: resolved.combo.surcharge,
+            deal_minor: resolved.deal_minor,
+            combo_slot_name_translations: resolved.combo.slot_name_translations_or_empty(),
+        });
+    }
+
+    // The lines. A staff-pool line's own record is written right after its
+    // line and before the next one, as when every line was its own INSERT, so
+    // the lines go in runs that end at a staff line: the changefeed (the
+    // order's `sync_changes` row, bumped by each lines statement, and the
+    // staff drink's) sees its writes in the same order. Without staff lines
+    // (nearly every sale) that is one statement.
+    let mut item_rows: Vec<OrderItem> = Vec::with_capacity(lines_in.len());
+    let mut run_start = 0;
+    for i in 0..resolved_items.len() {
+        let staff_here = resolved_items[i].staff.is_some() && staff_ctx.is_some();
+        if !staff_here && i + 1 < resolved_items.len() {
+            continue;
+        }
+        item_rows.extend(insert_order_lines(&mut tx, org_id, order.id, &lines_in[run_start..=i]).await?);
+        run_start = i + 1;
+
+        // The staff drink's own row, in the sale's transaction: the comp and
+        // the record of it commit together or not at all.
+        let resolved = &resolved_items[i];
+        if let (Some(line), Some(ctx)) = (&resolved.staff, &staff_ctx) {
+            use crate::staff_pool::order_line as sp;
+            if !staff_day_locked {
+                sp::lock_day(&mut tx, shift_branch_id, ctx.day).await?;
+                staff_day_locked = true;
+            }
+            let rang = resolved.charged_subtotal();
+            let recorded = sp::record_line(
+                &mut tx,
+                ctx,
+                actor.org_id,
+                shift_branch_id,
+                body.till_id,
+                order.id,
+                actor.teller_id,
+                body.device_id,
+                created_at,
+                actor.replay,
+                line,
+                resolved.menu_item_id,
+                &resolved.item_name,
+                resolved.size_label.as_deref(),
+                resolved.quantity,
+                (rang - line.applied).max(0),
+                lines_in[i].line_cost.and_then(|c| i32::try_from(c).ok()),
+            )
+            .await?;
+            if recorded.overspent {
+                warnings.push(format!(
+                    "{} is past today's staff drinks allowance — recorded and marked",
+                    resolved.item_name
+                ));
+            }
+            staff_flags.extend(recorded.flags);
+        }
+    }
+    let mut addon_rows = insert_order_line_addons(&mut tx, org_id, &addons_in).await?;
+    let mut optional_rows = insert_order_line_optionals(&mut tx, org_id, &optionals_in).await?;
+    for item in item_rows {
+        let item_id = item.id;
         order_items_full.push(OrderItemFull {
-            item: order_item,
-            addons: addon_rows,
-            optionals: optional_rows,
+            item,
+            addons: addon_rows.remove(&item_id).unwrap_or_default(),
+            optionals: optional_rows.remove(&item_id).unwrap_or_default(),
             bundle_components: vec![],
         });
     }
@@ -3454,31 +3471,29 @@ async fn create_order_once(
     // `inventory_movements_apply` trigger). Posted in cart order, two sales at
     // one branch could lock the same ingredients in opposite orders and
     // deadlock; posted sorted by ingredient (stable, so one ingredient's
-    // entries keep their cart order) every sale locks in the same order.
+    // entries keep their cart order) every sale locks in the same order. One
+    // statement for all of them; its per-row trigger runs in this order.
     sale_deductions.sort_by_key(|(ing_id, _)| *ing_id);
-    for (ing_id, deduction) in &sale_deductions {
-        let ing_id = *ing_id;
-        // Post the sale to the ledger. The trigger upserts the branch
-        // balance (creating it on an ingredient's first sale here) and
-        // reports the resulting balance; negative is allowed but flagged.
-        let posted = crate::inventory::movements::record_movement(
-            &mut *tx,
-            crate::inventory::movements::MovementParams {
-                branch_id: body.branch_id,
-                org_ingredient_id: ing_id,
-                movement_type: "sale",
-                quantity: -deduction.quantity,
-                unit_cost: deduction
-                    .cost_per_unit
-                    .and_then(crate::inventory::movements::exact_cost),
-                reason: None,
-                source_type: Some("order"),
-                source_id: Some(order.id),
-                note: None,
-                created_by: Some(actor.teller_id),
-            },
-        )
-        .await?;
+    let movements: Vec<crate::inventory::movements::MovementParams> = sale_deductions
+        .iter()
+        .map(|(ing_id, deduction)| crate::inventory::movements::MovementParams {
+            branch_id: body.branch_id,
+            org_ingredient_id: *ing_id,
+            movement_type: "sale",
+            quantity: -deduction.quantity,
+            unit_cost: deduction
+                .cost_per_unit
+                .and_then(crate::inventory::movements::exact_cost),
+            reason: None,
+            source_type: Some("order"),
+            source_id: Some(order.id),
+            note: None,
+            created_by: Some(actor.teller_id),
+        })
+        .collect();
+    let posted_all =
+        crate::inventory::movements::record_movements(&mut *tx, Some(org_id), &movements).await?;
+    for ((_, deduction), posted) in sale_deductions.iter().zip(posted_all) {
         if posted.below_zero {
             warnings.push(format!(
                 "{} is oversold — stock is now {:.3} {}",
@@ -3623,6 +3638,312 @@ async fn create_order_once(
         loyalty_redemption_refused: redemption_refused,
         deals: order_deals,
     }))
+}
+
+// ── A sale's line rows, written in bulk ───────────────────────
+
+/// One `order_items` row of a sale, as `create_order_once` works it out.
+struct LineRowIn {
+    id: Uuid,
+    menu_item_id: Option<Uuid>,
+    item_name: String,
+    name_translations: serde_json::Value,
+    size_label: Option<String>,
+    unit_price: i32,
+    quantity: i32,
+    line_total: i32,
+    notes: Option<String>,
+    deductions_snapshot: serde_json::Value,
+    line_cost: Option<i64>,
+    unit_cost: Option<i64>,
+    cost_missing: bool,
+    price_flagged: bool,
+    is_reward: bool,
+    reward_units: i32,
+    reward_covered: i32,
+    staff_comp_minor: i32,
+    staff_drink_id: Option<Uuid>,
+    line_kind: String,
+    combo_line_id: Option<Uuid>,
+    combo_slot_id: Option<Uuid>,
+    combo_slot_name: Option<String>,
+    combo_unit_price: Option<i32>,
+    combo_share: i32,
+    combo_surcharge: i32,
+    deal_minor: i32,
+    combo_slot_name_translations: serde_json::Value,
+}
+
+struct AddonRowIn {
+    id: Uuid,
+    order_item_id: Uuid,
+    addon_item_id: Uuid,
+    addon_name: String,
+    name_translations: serde_json::Value,
+    unit_price: i32,
+    quantity: i32,
+    line_total: i32,
+    line_cost: Option<i64>,
+    staff_comp_minor: i32,
+}
+
+struct OptionalRowIn {
+    id: Uuid,
+    order_item_id: Uuid,
+    optional_field_id: Uuid,
+    field_name: String,
+    name_translations: serde_json::Value,
+    price: i32,
+    org_ingredient_id: Option<Uuid>,
+    ingredient_name: Option<String>,
+    ingredient_unit: Option<String>,
+    quantity_used: Option<f64>,
+    cost: Option<i64>,
+}
+
+/// Insert a run of a sale's lines in ONE statement and hand the stored rows
+/// back in the order given. `org_id` is the order's (written here instead of
+/// looked up per row by `fill_org_id`; the composite FK holds it to the order).
+/// The `sync_emit` statement trigger bumps the order's changefeed row once.
+async fn insert_order_lines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: Uuid,
+    order_id: Uuid,
+    rows: &[LineRowIn],
+) -> Result<Vec<OrderItem>, AppError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    macro_rules! col {
+        ($f:ident) => {
+            rows.iter().map(|r| r.$f.clone()).collect::<Vec<_>>()
+        };
+    }
+    let (id, menu_item_id, item_name, name_translations, size_label) =
+        (col!(id), col!(menu_item_id), col!(item_name), col!(name_translations), col!(size_label));
+    let (unit_price, quantity, line_total, notes, snapshot) =
+        (col!(unit_price), col!(quantity), col!(line_total), col!(notes), col!(deductions_snapshot));
+    let (line_cost, unit_cost, cost_missing, price_flagged, is_reward) =
+        (col!(line_cost), col!(unit_cost), col!(cost_missing), col!(price_flagged), col!(is_reward));
+    let (reward_units, reward_covered, staff_comp, staff_drink, line_kind) = (
+        col!(reward_units),
+        col!(reward_covered),
+        col!(staff_comp_minor),
+        col!(staff_drink_id),
+        col!(line_kind),
+    );
+    let (combo_line, combo_slot, combo_slot_name, combo_unit_price, combo_share) = (
+        col!(combo_line_id),
+        col!(combo_slot_id),
+        col!(combo_slot_name),
+        col!(combo_unit_price),
+        col!(combo_share),
+    );
+    let (combo_surcharge, deal_minor, combo_slot_tr) =
+        (col!(combo_surcharge), col!(deal_minor), col!(combo_slot_name_translations));
+    let stored = sqlx::query_as!(
+        OrderItem,
+        r#"INSERT INTO order_items
+               (id, order_id, org_id, menu_item_id, item_name, name_translations, size_label,
+                unit_price, quantity, line_total, notes, deductions_snapshot,
+                line_cost, unit_cost, cost_missing,
+                price_flagged, is_reward, reward_units, reward_covered,
+                staff_comp_minor, staff_drink_id,
+                line_kind, combo_line_id, combo_slot_id, combo_slot_name,
+                combo_unit_price, combo_share, combo_surcharge, deal_minor,
+                combo_slot_name_translations)
+           SELECT u.id, $1, $2, u.menu_item_id, u.item_name, u.name_translations, u.size_label,
+                  u.unit_price, u.quantity, u.line_total, u.notes, u.snapshot,
+                  u.line_cost, u.unit_cost, u.cost_missing,
+                  u.price_flagged, u.is_reward, u.reward_units, u.reward_covered,
+                  u.staff_comp, u.staff_drink,
+                  u.line_kind, u.combo_line, u.combo_slot, u.combo_slot_name,
+                  u.combo_unit_price, u.combo_share, u.combo_surcharge, u.deal_minor,
+                  u.combo_slot_tr
+             FROM UNNEST($3::uuid[], $4::uuid[], $5::text[], $6::jsonb[], $7::text[],
+                         $8::int4[], $9::int4[], $10::int4[], $11::text[], $12::jsonb[],
+                         $13::int8[], $14::int8[], $15::bool[],
+                         $16::bool[], $17::bool[], $18::int4[], $19::int4[],
+                         $20::int4[], $21::uuid[],
+                         $22::text[], $23::uuid[], $24::uuid[], $25::text[],
+                         $26::int4[], $27::int4[], $28::int4[], $29::int4[],
+                         $30::jsonb[])
+                  WITH ORDINALITY AS u(id, menu_item_id, item_name, name_translations, size_label,
+                                       unit_price, quantity, line_total, notes, snapshot,
+                                       line_cost, unit_cost, cost_missing,
+                                       price_flagged, is_reward, reward_units, reward_covered,
+                                       staff_comp, staff_drink,
+                                       line_kind, combo_line, combo_slot, combo_slot_name,
+                                       combo_unit_price, combo_share, combo_surcharge, deal_minor,
+                                       combo_slot_tr, ord)
+            ORDER BY u.ord
+           RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,
+                     unit_price, quantity, line_total, notes, deductions_snapshot,
+                     NULL::uuid AS "bundle_id", NULL::int4 AS "bundle_unit_price",
+                     line_cost, unit_cost, cost_missing,
+                     is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id,
+                     line_kind, combo_line_id, combo_slot_id, combo_slot_name,
+                     combo_slot_name_translations,
+                     combo_unit_price, combo_share, combo_surcharge, deal_minor"#,
+        order_id,
+        org_id,
+        &id,
+        &menu_item_id as &[Option<Uuid>],
+        &item_name,
+        &name_translations,
+        &size_label as &[Option<String>],
+        &unit_price,
+        &quantity,
+        &line_total,
+        &notes as &[Option<String>],
+        &snapshot,
+        &line_cost as &[Option<i64>],
+        &unit_cost as &[Option<i64>],
+        &cost_missing,
+        &price_flagged,
+        &is_reward,
+        &reward_units,
+        &reward_covered,
+        &staff_comp,
+        &staff_drink as &[Option<Uuid>],
+        &line_kind,
+        &combo_line as &[Option<Uuid>],
+        &combo_slot as &[Option<Uuid>],
+        &combo_slot_name as &[Option<String>],
+        &combo_unit_price as &[Option<i32>],
+        &combo_share,
+        &combo_surcharge,
+        &deal_minor,
+        &combo_slot_tr,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    in_input_order(&id, stored, |r| r.id)
+}
+
+/// Every add-on row of a sale in ONE statement, handed back per line in the
+/// order given.
+async fn insert_order_line_addons(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: Uuid,
+    rows: &[AddonRowIn],
+) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemAddon>>, AppError> {
+    let mut by_line: std::collections::HashMap<Uuid, Vec<OrderItemAddon>> = Default::default();
+    if rows.is_empty() {
+        return Ok(by_line);
+    }
+    let id: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let item: Vec<Uuid> = rows.iter().map(|r| r.order_item_id).collect();
+    let addon: Vec<Uuid> = rows.iter().map(|r| r.addon_item_id).collect();
+    let name: Vec<String> = rows.iter().map(|r| r.addon_name.clone()).collect();
+    let tr: Vec<serde_json::Value> = rows.iter().map(|r| r.name_translations.clone()).collect();
+    let price: Vec<i32> = rows.iter().map(|r| r.unit_price).collect();
+    let qty: Vec<i32> = rows.iter().map(|r| r.quantity).collect();
+    let total: Vec<i32> = rows.iter().map(|r| r.line_total).collect();
+    let cost: Vec<Option<i64>> = rows.iter().map(|r| r.line_cost).collect();
+    let comp: Vec<i32> = rows.iter().map(|r| r.staff_comp_minor).collect();
+    let stored = sqlx::query_as!(
+        OrderItemAddon,
+        r#"INSERT INTO order_item_addons
+               (id, org_id, order_item_id, addon_item_id, addon_name, name_translations, unit_price,
+                quantity, line_total, line_cost, staff_comp_minor)
+           SELECT u.id, $1, u.item, u.addon, u.name, u.tr, u.price, u.qty, u.total, u.cost, u.comp
+             FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::text[], $6::jsonb[], $7::int4[],
+                         $8::int4[], $9::int4[], $10::int8[], $11::int4[])
+                  WITH ORDINALITY AS u(id, item, addon, name, tr, price, qty, total, cost, comp, ord)
+            ORDER BY u.ord
+           RETURNING id, order_item_id, addon_item_id, addon_name, name_translations,
+                     unit_price, quantity, line_total, line_cost, staff_comp_minor"#,
+        org_id,
+        &id,
+        &item,
+        &addon,
+        &name,
+        &tr,
+        &price,
+        &qty,
+        &total,
+        &cost as &[Option<i64>],
+        &comp,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in in_input_order(&id, stored, |r| r.id)? {
+        by_line.entry(row.order_item_id).or_default().push(row);
+    }
+    Ok(by_line)
+}
+
+/// Every optional-field row of a sale in ONE statement, handed back per line
+/// in the order given.
+async fn insert_order_line_optionals(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: Uuid,
+    rows: &[OptionalRowIn],
+) -> Result<std::collections::HashMap<Uuid, Vec<OrderItemOptional>>, AppError> {
+    let mut by_line: std::collections::HashMap<Uuid, Vec<OrderItemOptional>> = Default::default();
+    if rows.is_empty() {
+        return Ok(by_line);
+    }
+    let id: Vec<Uuid> = rows.iter().map(|r| r.id).collect();
+    let item: Vec<Uuid> = rows.iter().map(|r| r.order_item_id).collect();
+    let field: Vec<Uuid> = rows.iter().map(|r| r.optional_field_id).collect();
+    let name: Vec<String> = rows.iter().map(|r| r.field_name.clone()).collect();
+    let tr: Vec<serde_json::Value> = rows.iter().map(|r| r.name_translations.clone()).collect();
+    let price: Vec<i32> = rows.iter().map(|r| r.price).collect();
+    let ing: Vec<Option<Uuid>> = rows.iter().map(|r| r.org_ingredient_id).collect();
+    let ing_name: Vec<Option<String>> = rows.iter().map(|r| r.ingredient_name.clone()).collect();
+    let ing_unit: Vec<Option<String>> = rows.iter().map(|r| r.ingredient_unit.clone()).collect();
+    // float8, cast to the numeric column exactly as the bound f64 used to be.
+    let used: Vec<Option<f64>> = rows.iter().map(|r| r.quantity_used).collect();
+    let cost: Vec<Option<i64>> = rows.iter().map(|r| r.cost).collect();
+    let stored = sqlx::query_as!(
+        OrderItemOptional,
+        r#"INSERT INTO order_item_optionals
+               (id, org_id, order_item_id, optional_field_id, field_name, name_translations, price,
+                org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost)
+           SELECT u.id, $1, u.item, u.field, u.name, u.tr, u.price,
+                  u.ing, u.ing_name, u.ing_unit, u.used, u.cost
+             FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::text[], $6::jsonb[], $7::int4[],
+                         $8::uuid[], $9::text[], $10::text[], $11::float8[], $12::int8[])
+                  WITH ORDINALITY AS u(id, item, field, name, tr, price, ing, ing_name, ing_unit,
+                                       used, cost, ord)
+            ORDER BY u.ord
+           RETURNING id, order_item_id, optional_field_id, field_name, name_translations, price,
+                     org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost"#,
+        org_id,
+        &id,
+        &item,
+        &field,
+        &name,
+        &tr,
+        &price,
+        &ing as &[Option<Uuid>],
+        &ing_name as &[Option<String>],
+        &ing_unit as &[Option<String>],
+        &used as &[Option<f64>],
+        &cost as &[Option<i64>],
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in in_input_order(&id, stored, |r| r.id)? {
+        by_line.entry(row.order_item_id).or_default().push(row);
+    }
+    Ok(by_line)
+}
+
+/// `rows` (a multi-row RETURNING) in the order of `ids`, which minted them.
+fn in_input_order<T>(ids: &[Uuid], rows: Vec<T>, id_of: impl Fn(&T) -> Uuid) -> Result<Vec<T>, AppError> {
+    let mut by_id: std::collections::HashMap<Uuid, T> =
+        rows.into_iter().map(|r| (id_of(&r), r)).collect();
+    ids.iter()
+        .map(|id| {
+            by_id.remove(id).ok_or_else(|| {
+                tracing::error!(row = %id, "a sale's line row was not written");
+                AppError::Internal
+            })
+        })
+        .collect()
 }
 
 // ── GET /orders ───────────────────────────────────────────────
@@ -4158,8 +4479,11 @@ pub async fn void_order_inner(
         return Ok(HttpResponse::Ok().json(current));
     };
 
-    // Reverse every sale deduction through the ledger (void_restock +).
-    for item in items {
+    // Reverse every sale deduction through the ledger (void_restock +), in
+    // line order, in one statement (`record_movements`: the same rows and the
+    // same per-row trigger order as one INSERT per deduction).
+    let mut restock: Vec<crate::inventory::movements::MovementParams> = Vec::new();
+    for item in &items {
         let Some(deductions) = item.item.deductions_snapshot.as_array() else {
             continue;
         };
@@ -4179,24 +4503,21 @@ pub async fn void_order_inner(
                 .and_then(crate::inventory::movements::exact_cost);
 
             // Reverse the sale deduction (back into stock) through the ledger.
-            crate::inventory::movements::record_movement(
-                &mut *tx,
-                crate::inventory::movements::MovementParams {
-                    branch_id: order.branch_id,
-                    org_ingredient_id: ing_id,
-                    movement_type: "void_restock",
-                    quantity: qty,
-                    unit_cost,
-                    reason: None,
-                    source_type: Some("order"),
-                    source_id: Some(order.id),
-                    note: Some("Void restock"),
-                    created_by: Some(actor.teller_id),
-                },
-            )
-            .await?;
+            restock.push(crate::inventory::movements::MovementParams {
+                branch_id: order.branch_id,
+                org_ingredient_id: ing_id,
+                movement_type: "void_restock",
+                quantity: qty,
+                unit_cost,
+                reason: None,
+                source_type: Some("order"),
+                source_id: Some(order.id),
+                note: Some("Void restock"),
+                created_by: Some(actor.teller_id),
+            });
         }
     }
+    crate::inventory::movements::record_movements(&mut *tx, None, &restock).await?;
 
     // The kitchen copy of a voided sale is voided with it and leaves the
     // screen: its lines are voided (off every station's queue) and the ticket
@@ -4483,8 +4804,13 @@ pub(crate) async fn fetch_order_by_idempotency_key(
     // an unscoped match would return (and echo back) another org's full order to
     // a caller that merely guessed/collided on the key. Scope by the actor's org
     // via the order's branch so the early-return can only ever surface our own.
+    // `o.org_id = $2` says the same thing (the composite FK holds an order's
+    // org_id to its branch's) in the form the per-org unique index
+    // `uq_orders_org_idem` can probe: with only the branch filter, every sale
+    // scanned that index's whole leaf level, a cost growing with the org's
+    // order count. The same holds for the order_ref and open_ticket lookups.
     let sql = format!(
-        "{} WHERE o.idempotency_key = $1 \
+        "{} WHERE o.idempotency_key = $1 AND o.org_id = $2 \
            AND o.branch_id IN (SELECT id FROM branches WHERE org_id = $2)",
         ORDER_SELECT
     );
@@ -4504,7 +4830,7 @@ pub(crate) async fn fetch_order_by_open_ticket(
     org_id: Uuid,
 ) -> Result<Option<Order>, AppError> {
     let sql = format!(
-        "{} WHERE o.open_ticket_id = $1 \
+        "{} WHERE o.open_ticket_id = $1 AND o.org_id = $2 \
            AND o.branch_id IN (SELECT id FROM branches WHERE org_id = $2)",
         ORDER_SELECT
     );
@@ -4526,7 +4852,7 @@ pub(crate) async fn fetch_order_by_order_ref(
     org_id: Uuid,
 ) -> Result<Option<Order>, AppError> {
     let sql = format!(
-        "{} WHERE o.order_ref = $1 \
+        "{} WHERE o.order_ref = $1 AND o.org_id = $2 \
            AND o.branch_id IN (SELECT id FROM branches WHERE org_id = $2)",
         ORDER_SELECT
     );

@@ -267,3 +267,121 @@ async fn a_used_connection_acquired_without_an_org_reads_nothing(pool: PgPool) {
     .unwrap();
     assert!(leaks.is_empty(), "tables readable with no org stamped: {leaks:?}");
 }
+
+/// The stamp is sent once per org CHANGE on a connection, not once per
+/// hand-out (OPT-A): the same org again sends nothing, another org (or none)
+/// is stamped, and every read still sees exactly its own shop.
+#[sqlx::test]
+async fn a_connection_already_carrying_the_org_is_not_restamped(pool: PgPool) {
+    let a = shop(&pool, 2).await;
+    let b = shop(&pool, 3).await;
+    let read = |s: &Shop| {
+        let pool = pool.clone();
+        let org = s.org;
+        async move {
+            db::scoped(None, async move {
+                let d = Db::for_org(&pool, org).await;
+                seen(d.get_ref(), org).await
+            })
+            .await
+        }
+    };
+    // Expected stamps: one per hand-out whose connection last carried another
+    // org (or was new). Which backend serves a read is the pool's choice, so
+    // the expectation follows the pids actually seen.
+    let mut last: HashMap<i32, Uuid> = HashMap::new();
+    let (mut expected, mut skipped) = (0u64, 0u64);
+    let before = db::stamps_sent();
+    for s in [&a, &a, &a, &b, &b, &a, &a, &b, &a, &a] {
+        let got = read(s).await;
+        check(&got, s, "interleaved");
+        match last.insert(got.pid, s.org) {
+            Some(prev) if prev == s.org => skipped += 1,
+            _ => expected += 1,
+        }
+    }
+    assert_eq!(
+        db::stamps_sent() - before,
+        expected,
+        "exactly one stamp per org change on a connection ({last:?})"
+    );
+    assert!(skipped > 0, "no hand-out reused a connection already carrying its org");
+
+    // And a hand-out with no org still clears it.
+    let shared = db::scoped(None, async { Db::for_org(&pool, a.org).await.into_inner() }).await;
+    let stamped: String = tokio::spawn(async move {
+        sqlx::query_scalar("SELECT current_setting('app.org_id', true)")
+            .fetch_one(&shared)
+            .await
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(stamped, "");
+}
+
+/// The stamp memo is keyed by a connection's heap identity, which a NEW
+/// connection can reuse after an old one closes. Close connections for real
+/// (the backend is terminated, so the pool's ping discards it and opens a new
+/// one) under alternating orgs until an identity is reused, and check that
+/// every read — in particular the first one for the OTHER org on the new
+/// connection — runs as exactly its own shop.
+#[sqlx::test]
+async fn a_new_connection_at_a_reused_address_is_stamped_for_its_own_org(pool: PgPool) {
+    let a = shop(&pool, 2).await;
+    let b = shop(&pool, 3).await;
+    let read = |s: &Shop| {
+        let pool = pool.clone();
+        let org = s.org;
+        async move {
+            db::scoped(None, async move {
+                let d = Db::for_org(&pool, org).await;
+                seen(d.get_ref(), org).await
+            })
+            .await
+        }
+    };
+    let reused_before = db::stamp_identities_reused();
+    let mut rounds = 0;
+    let mut pids = HashSet::new();
+    while db::stamp_identities_reused() == reused_before || rounds < 20 {
+        rounds += 1;
+        assert!(rounds < 2000, "no connection identity was ever reused");
+        let (first, second) = if rounds % 2 == 0 { (&a, &b) } else { (&b, &a) };
+        let got = read(first).await;
+        check(&got, first, "before the close");
+        pids.insert(got.pid);
+        // Kill that backend: the idle connection is now dead in the pool.
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(got.pid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // A new connection (after_connect under `second`), then `first` again.
+        let got = read(second).await;
+        check(&got, second, "new connection, other org");
+        pids.insert(got.pid);
+        let got = read(first).await;
+        check(&got, first, "back to the first org");
+        pids.insert(got.pid);
+        // And a new connection opened for the SAME org the dead one carried
+        // (a stale entry equal to the new org must not skip the stamp).
+        sqlx::query("SELECT pg_terminate_backend($1)")
+            .bind(got.pid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let got = read(first).await;
+        check(&got, first, "new connection, same org");
+        pids.insert(got.pid);
+    }
+    eprintln!(
+        "rounds={rounds} identities_reused={} distinct_backends={}",
+        db::stamp_identities_reused() - reused_before,
+        pids.len()
+    );
+    assert!(db::stamp_identities_reused() > reused_before);
+    assert!(pids.len() > 2, "connections were really replaced: {pids:?}");
+}

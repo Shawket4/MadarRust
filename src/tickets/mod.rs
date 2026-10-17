@@ -776,32 +776,47 @@ pub(crate) async fn fire_round(
     .fetch_one(&mut **tx)
     .await?;
 
-    let mut round_subtotal: i32 = 0;
-    let mut bill_line_ids: Vec<Uuid> = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let menu_item_id = line
-            .input
-            .get("menu_item_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok());
-        // `line_total` the column and `line_total` inside the snapshot are the
-        // same figure from the same struct; the CHECK on the table holds them to it.
-        // The id comes back so the kitchen copy can carry it: voiding this
-        // bill line has to be able to find the plate it ordered.
-        let item_id: Uuid = sqlx::query_scalar(
+    // Every line of the round in ONE statement (it was one INSERT per line),
+    // in the round's order. The ids are minted here (the column default is the
+    // same random v4 uuid) because the kitchen copy carries them: voiding this
+    // bill line has to be able to find the plate it ordered. `line_total` the
+    // column and `line_total` inside the snapshot are the same figure from the
+    // same struct; the CHECK on the table holds them to it. `org_id` is the
+    // ticket's, written here rather than looked up per row by `fill_org_id`.
+    let round_subtotal: i32 = lines.iter().map(|l| l.line_total).sum();
+    let bill_line_ids: Vec<Uuid> = lines.iter().map(|_| Uuid::new_v4()).collect();
+    if !lines.is_empty() {
+        let menu_item_ids: Vec<Option<Uuid>> = lines
+            .iter()
+            .map(|line| {
+                line.input
+                    .get("menu_item_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+            })
+            .collect();
+        let line_json: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|line| serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
+            .collect();
+        let line_totals: Vec<i32> = lines.iter().map(|l| l.line_total).collect();
+        sqlx::query!(
             "INSERT INTO open_ticket_items \
-                (open_ticket_id, round_id, menu_item_id, line, line_total) \
-             VALUES ($1, $2, $3, $4, $5) RETURNING id",
+                (id, org_id, open_ticket_id, round_id, menu_item_id, line, line_total) \
+             SELECT u.id, $1, $2, $3, u.menu_item_id, u.line, u.line_total \
+               FROM UNNEST($4::uuid[], $5::uuid[], $6::jsonb[], $7::int4[]) \
+                    WITH ORDINALITY AS u(id, menu_item_id, line, line_total, ord) \
+              ORDER BY u.ord",
+            org_id,
+            open_ticket_id,
+            round_id,
+            &bill_line_ids,
+            &menu_item_ids as &[Option<Uuid>],
+            &line_json,
+            &line_totals,
         )
-        .bind(open_ticket_id)
-        .bind(round_id)
-        .bind(menu_item_id)
-        .bind(serde_json::to_value(line).unwrap_or(serde_json::Value::Null))
-        .bind(line.line_total)
-        .fetch_one(&mut **tx)
+        .execute(&mut **tx)
         .await?;
-        bill_line_ids.push(item_id);
-        round_subtotal += line.line_total;
     }
 
     // Only the money moves on the bill. Readiness is the kitchen's to say and

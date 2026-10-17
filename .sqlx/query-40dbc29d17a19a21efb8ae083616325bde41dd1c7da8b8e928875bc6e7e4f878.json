@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(\n                  (SELECT misr.station_id FROM menu_item_station_routes misr\n                     JOIN kitchen_stations ks ON ks.id = misr.station_id\n                        AND ks.deleted_at IS NULL AND ks.is_active\n                    WHERE misr.branch_id = $1 AND misr.menu_item_id = u.mi),\n                  (SELECT csr.station_id FROM category_station_routes csr\n                     JOIN menu_items mi ON mi.category_id = csr.category_id\n                     JOIN kitchen_stations ks ON ks.id = csr.station_id\n                        AND ks.deleted_at IS NULL AND ks.is_active\n                    WHERE csr.branch_id = $1 AND mi.id = u.mi),\n                  (SELECT id FROM kitchen_stations\n                    WHERE branch_id = $1 AND is_default AND is_active AND deleted_at IS NULL)\n              ) AS station_id\n             FROM UNNEST($2::uuid[]) WITH ORDINALITY AS u(mi, ord)\n            ORDER BY u.ord",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "station_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "40dbc29d17a19a21efb8ae083616325bde41dd1c7da8b8e928875bc6e7e4f878"
+}

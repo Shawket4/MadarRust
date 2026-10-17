@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO open_ticket_items (id, org_id, open_ticket_id, round_id, menu_item_id, line, line_total) SELECT u.id, $1, $2, $3, u.menu_item_id, u.line, u.line_total FROM UNNEST($4::uuid[], $5::uuid[], $6::jsonb[], $7::int4[]) WITH ORDINALITY AS u(id, menu_item_id, line, line_total, ord) ORDER BY u.ord",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "JsonbArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5e02b103fa3c4e6e28dc206fe9c616c76ef16c59c0275215af0692ca5e109507"
+}

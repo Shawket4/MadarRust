@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO order_item_addons\n               (id, org_id, order_item_id, addon_item_id, addon_name, name_translations, unit_price,\n                quantity, line_total, line_cost, staff_comp_minor)\n           SELECT u.id, $1, u.item, u.addon, u.name, u.tr, u.price, u.qty, u.total, u.cost, u.comp\n             FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::text[], $6::jsonb[], $7::int4[],\n                         $8::int4[], $9::int4[], $10::int8[], $11::int4[])\n                  WITH ORDINALITY AS u(id, item, addon, name, tr, price, qty, total, cost, comp, ord)\n            ORDER BY u.ord\n           RETURNING id, order_item_id, addon_item_id, addon_name, name_translations,\n                     unit_price, quantity, line_total, line_cost, staff_comp_minor",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "order_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "addon_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "addon_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "name_translations",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "unit_price",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "quantity",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "line_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "line_cost",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "staff_comp_minor",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "JsonbArray",
+        "Int4Array",
+        "Int4Array",
+        "Int4Array",
+        "Int8Array",
+        "Int4Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "54125988f3edc674eccb8b54402ff375378b2052363f4c8505de09be84b98640"
+}
