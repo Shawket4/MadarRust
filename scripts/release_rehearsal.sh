@@ -14,6 +14,9 @@
 #                  $CARGO_TARGET_DIR or ./target). Build it first:
 #                  `SQLX_OFFLINE=true cargo build --release --bin madar-rust`.
 #   OLD_STATIC     static/ dir for the old binary (default: beside MADAR_OLD_BIN).
+#   MADAR_DUMP     the .dump the source was restored from. Needed only when the
+#                  source was restored without ACLs: its grants are applied to
+#                  the clone (the source itself is never touched).
 #
 # Steps (each gate prints OK or !!; exit 0 only when every gate passes):
 #   1. clone <source-db> -> <source-db>_rehearsal;
@@ -97,6 +100,21 @@ boot() {
 echo "== clone $src -> $clone"
 dropdb "${host_args[@]}" --if-exists "$clone" || exit 2
 createdb "${host_args[@]}" -T "$src" "$clone" || exit 2
+# The app's tenant role must hold prod's grants. A dump restored with
+# --no-acl (or -x) has none, and then nothing in this rehearsal means
+# anything (every tenant read fails): put prod's grants back from the dump.
+grants=$(q -c "SELECT count(*) FROM information_schema.role_table_grants WHERE grantee = 'madar_app'")
+if [ "$grants" = 0 ]; then
+  if [ -n "${MADAR_DUMP:-}" ] && [ -f "$MADAR_DUMP" ]; then
+    pg_restore -l "$MADAR_DUMP" | grep -E ' ACL ' > "$out/acl.list"
+    pg_restore -f "$out/acl.sql" -L "$out/acl.list" "$MADAR_DUMP"
+    q -q -f "$out/acl.sql" > "$out/acl_restore.log" 2>&1 || { echo "!! restoring the dump's grants failed (see acl_restore.log)"; exit 2; }
+    echo "   the copy had no madar_app grants (restored without ACLs): applied the dump's $(grep -c '^GRANT' "$out/acl.sql") GRANTs to the clone"
+  else
+    echo "!! $src has no grants for madar_app (restored with --no-acl?). Pass MADAR_DUMP=<the .dump file> so the clone gets prod's grants."
+    exit 2
+  fi
+fi
 before_ver=$(q -c "SELECT max(version) FROM _sqlx_migrations WHERE success")
 echo "   source is at migration $before_ver"
 
@@ -110,8 +128,8 @@ SELECT o.org_id, o.branch,
           ORDER BY (SELECT count(*) FROM menu_item_modifier_groups g WHERE g.menu_item_id = m.id) DESC, m.id LIMIT 1),
        COALESCE((SELECT a.id::text FROM addon_items a WHERE a.org_id = o.org_id ORDER BY a.id LIMIT 1), '-'),
        (SELECT u.id FROM users u WHERE u.org_id = o.org_id AND u.role = 'org_admin' ORDER BY u.created_at LIMIT 1),
-       COALESCE((SELECT t.id::text FROM tills t
-         WHERE t.branch_id = o.branch AND t.status = 'open'
+       COALESCE((SELECT t.id::text || ',' || t.branch_id::text FROM tills t
+         WHERE t.status = 'open'
            AND t.teller_id = (SELECT u.id FROM users u WHERE u.org_id = o.org_id AND u.role = 'org_admin'
                                ORDER BY u.created_at LIMIT 1)
          ORDER BY t.opened_at DESC LIMIT 1), '-'),
@@ -126,9 +144,9 @@ python3 - "$out/ctx.json" "$ORG" "$BRANCH" "$ITEM" "$ADDON" "$USER" "$TILL" "$SA
 import json, sys
 f, org, br, item, addon, user, till, sale = sys.argv[1:]
 addon = "" if addon == "-" else addon
-till = "" if till == "-" else till
+till, till_branch = (till.split(",") + [""])[:2] if till != "-" else ("", "")
 json.dump({"org": org, "branch": br, "item": item, "addon": addon or "00000000-0000-0000-0000-000000000000",
-           "user": user, "teller_till": till or None, "sale_items": json.loads(sale or "[]") or [item]},
+           "user": user, "teller_till": till or None, "till_branch": till_branch or None, "sale_items": json.loads(sale or "[]") or [item]},
           open(f, "w"), indent=1)
 PY
 TOKEN=$(py token "$JWT_SECRET" "$USER" "$ORG" org_admin)
@@ -150,6 +168,7 @@ echo "== BEFORE"
 q -f scripts/db_reconcile.sql      > "$out/reconcile_before.tsv"
 q -f scripts/db_rls_visibility.sql > "$out/visible_before.tsv"
 q -f scripts/explain_hot_paths.sql > "$out/plans_before.tsv"
+q -f scripts/db_phase1_check.sql   > "$out/db_phase1_check_before.tsv" 2>&1
 
 echo "== NEW binary ($NEW_BIN): migrations on boot, as in prod"
 if boot "$NEW_BIN" "$NEW_PORT" "$ROOT" "$out/boot_new.log"; then
@@ -200,7 +219,9 @@ q -f scripts/explain_hot_paths.sql > "$out/plans_after.tsv"
 #                 rows (the ledger tables themselves are compared and must not
 #                 move) and re-emits what a device still needs;
 #   compat_usage  counts the old-shape calls this rehearsal itself made.
-EXPECTED_TABLES="sync_changes compat_usage"
+#   sync_feed_watermarks  raised by that sweep for a branch whose old feed rows
+#                 it retired (a device behind it resyncs).
+EXPECTED_TABLES="sync_changes sync_feed_watermarks compat_usage"
 cat scripts/db_reconcile_expected_p*.txt 2>/dev/null > "$out/reconcile_expected.txt" || true
 filter() {
   awk -F'\t' -v skip="$EXPECTED_TABLES" 'BEGIN { n = split(skip, a, " "); for (i = 1; i <= n; i++) s[a[i]] } !($2 in s)' \
@@ -253,9 +274,18 @@ for c in scripts/db_phase1_check.sql scripts/db_phase2_check.sql scripts/db_phas
   [ -f "$c" ] || continue
   n=$(basename "$c" .sql)
   q -f "$c" > "$out/$n.tsv" 2>&1
-  [ ! -s "$out/$n.tsv" ]
-  gate $? "$n prints nothing"
-  [ -s "$out/$n.tsv" ] && head -20 "$out/$n.tsv" | sed 's/^/     /'
+  if [ -f "$out/${n}_before.tsv" ]; then
+    # Phase 1's checks ran before too: only a finding the deploy ADDED fails.
+    grep -v -x -F -f "$out/${n}_before.tsv" "$out/$n.tsv" > "$out/${n}_new.tsv" || true
+    [ ! -s "$out/${n}_new.tsv" ]
+    gate $? "$n: nothing new ($(wc -l < "$out/${n}_before.tsv") finding(s) already in the source, unchanged)"
+    sed 's/^/     already in the source: /' "$out/${n}_before.tsv"
+    [ -s "$out/${n}_new.tsv" ] && sed 's/^/     NEW: /' "$out/${n}_new.tsv"
+  else
+    [ ! -s "$out/$n.tsv" ]
+    gate $? "$n prints nothing"
+    [ -s "$out/$n.tsv" ] && head -20 "$out/$n.tsv" | sed 's/^/     /'
+  fi
 done
 
 echo "== API smoke (release binary)"

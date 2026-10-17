@@ -92,6 +92,10 @@ def pretty(b):
 # a view's now(); recipe lines), so the order of tied entries is not defined
 # by either and differs run to run. Only these may differ, and only in order.
 REORDER_OK = {"allowed_addon_ids", "recipes"}
+# Routes whose top-level list has the same tie on both binaries: /addon-items
+# orders by (type, created_at) and the add-ons were created in one batch;
+# /branch-addon-overrides has no ORDER BY at all.
+TOP_REORDER_OK = ("/addon-items?", "/branch-addon-overrides?")
 
 
 def canon(v, key=None):
@@ -105,11 +109,15 @@ def canon(v, key=None):
     return v
 
 
-def same_up_to_tie_order(ob, nb):
+def same_up_to_tie_order(ob, nb, path):
     try:
-        return canon(json.loads(ob)) == canon(json.loads(nb))
+        a, b = canon(json.loads(ob)), canon(json.loads(nb))
     except Exception:
         return False
+    if path.startswith(TOP_REORDER_OK) and isinstance(a, list) and isinstance(b, list):
+        k = lambda x: json.dumps(x, sort_keys=True)
+        a, b = sorted(a, key=k), sorted(b, key=k)
+    return a == b
 
 
 def compare(old, new):
@@ -121,7 +129,7 @@ def compare(old, new):
     for x, y in zip(a, b):
         ob = open(os.path.join(old, f"{x['n']:02d}.body"), "rb").read()
         nb = open(os.path.join(new, f"{y['n']:02d}.body"), "rb").read()
-        if x["status"] == y["status"] and ob != nb and same_up_to_tie_order(ob, nb):
+        if x["status"] == y["status"] and ob != nb and same_up_to_tie_order(ob, nb, x["pinned"]):
             tie.append(x["path"])
             continue
         if x["status"] != y["status"] or ob != nb:
@@ -134,7 +142,7 @@ def compare(old, new):
         note = f"; non-200 on both (same body): {len(non200)}" if non200 else ""
         ident = len(a) - len(tie)
         tnote = (f"; {len(tie)} identical except the order of tied entries in "
-                 f"{'/'.join(sorted(REORDER_OK))}") if tie else ""
+                 f"{'/'.join(sorted(REORDER_OK))} or of a route's tied rows") if tie else ""
         print(f"OK compat: {len(a)} old-shape routes vs v1.10.0: {ident} byte-identical{tnote}{note}")
         for t in tie:
             print(f"     tie order only: {t}")
@@ -155,8 +163,10 @@ def smoke(base, tok, ctx_file, out):
             print(f"!! smoke: {what} {detail}")
 
     branch = ctx["branch"]
-    # An open till of the signed-in user (the copy's, or one opened now).
+    # An open till of the signed-in user (the copy's, at its own branch, or one
+    # opened now at the busiest branch). Sales go to the till's branch.
     till = ctx.get("teller_till")
+    sale_branch = ctx.get("till_branch") or branch
     if not till:
         st, body = call(base, tok, "POST", f"/tills/branches/{branch}/open", {"opening_cash": 0, "edit_reason": "release rehearsal"})
         ok(st in (200, 201), "open a till", f"{st} {body[:300]!r}")
@@ -165,7 +175,7 @@ def smoke(base, tok, ctx_file, out):
     # 1. A counter sale through /orders.
     sale = None
     for item in ctx["sale_items"]:
-        body = {"branch_id": branch, "till_id": till, "payment_method": "cash",
+        body = {"branch_id": sale_branch, "till_id": till, "payment_method": "cash",
                 "items": [{"menu_item_id": item, "quantity": 2}], "idempotency_key": str(uuid.uuid4())}
         st, resp = call(base, tok, "POST", "/orders", body)
         if st in (200, 201):
@@ -175,7 +185,7 @@ def smoke(base, tok, ctx_file, out):
     ok(sale is not None, "POST /orders (a counter sale)", "" if sale else last)
     # 2. The same through an offline till's queue.
     if sale:
-        req = {"branch_id": branch, "till_id": till, "payment_method": "cash",
+        req = {"branch_id": sale_branch, "till_id": till, "payment_method": "cash",
                "items": [{"menu_item_id": sale[0], "quantity": 1}], "idempotency_key": str(uuid.uuid4())}
         st, resp = call(base, tok, "POST", "/sync/replay",
                         {"op": "create_order", "teller_id": ctx["user"], "request": req})
