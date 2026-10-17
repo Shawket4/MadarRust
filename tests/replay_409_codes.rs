@@ -110,6 +110,7 @@ macro_rules! app {
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
                 .configure(madar_rust::bookings::routes::configure)
+                .configure(madar_rust::tickets::routes::configure)
                 .configure(madar_rust::sync::routes::configure),
         )
         .await
@@ -400,8 +401,10 @@ async fn a_line_void_says_whether_it_is_on_record(pool: PgPool) {
 }
 
 /// The sweep rolls a late party to no-show while the waiter's seat and fire
-/// are still queued. Each is refused, with a code: the fire did NOT land, and
-/// a till that acked it lost the bill.
+/// are still queued. The seat is refused, with a code. The FIRE is not: the
+/// party is at the table and ate, so the replay fires the ticket without the
+/// booking link (as it drops a table it cannot claim) and the booking stays a
+/// no-show. See `a_replayed_fire_drops_a_booking_it_cannot_use` below.
 #[sqlx::test]
 async fn a_booking_that_is_no_longer_active_refuses_with_a_code(pool: PgPool) {
     let app = app!(pool);
@@ -441,17 +444,9 @@ async fn a_booking_that_is_no_longer_active_refuses_with_a_code(pool: PgPool) {
         "Conflict: Booking is no_show",
     );
     let key = Uuid::new_v4();
-    refused(
-        &replay(&app, &s.bearer, &fire(&s, key, Some(late))).await,
-        "BOOKING_NOT_ACTIVE",
-        "Conflict: Booking is no_show",
-    );
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM open_tickets WHERE idempotency_key = $1")
-        .bind(key)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(n, 0, "the refused fire is not on the server");
+    let r = replay(&app, &s.bearer, &fire(&s, key, Some(late))).await;
+    assert_eq!(r.0, 201, "the fire lands, without the booking: {}", r.1);
+    assert_eq!(r.1["booking_id"], Value::Null, "{}", r.1);
 
     let sat = book().await;
     assert_eq!(replay(&app, &s.bearer, &seat(sat)).await.0, 200);
@@ -465,6 +460,182 @@ async fn a_booking_that_is_no_longer_active_refuses_with_a_code(pool: PgPool) {
         "BOOKING_SEATED",
         "Conflict: The party was seated — cancel the booking if they left",
     );
+}
+
+/// A booking at `branch`, through the live route (`force`: no slot rules).
+async fn book_at<S>(app: &S, s: &Shop, branch: Uuid) -> Uuid
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let resp = test::call_service(
+        app,
+        test::TestRequest::post()
+            .uri("/bookings")
+            .insert_header(("Authorization", format!("Bearer {}", s.bearer)))
+            .set_json(json!({
+                "branch_id": branch, "party_size": 2,
+                "starts_at": chrono::Utc::now() + chrono::Duration::minutes(5),
+                "guest_name": "Ahmed", "guest_phone": "01000000001", "force": true, "table_ids": []
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let b: Value = test::read_body_json(resp).await;
+    Uuid::parse_str(b["id"].as_str().unwrap()).unwrap()
+}
+
+async fn booking_status(pool: &PgPool, b: Uuid) -> String {
+    sqlx::query_scalar("SELECT status::text FROM bookings WHERE id = $1")
+        .bind(b)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// `(ticket count, its booking_id)` for one fire's key.
+async fn tickets_for(pool: &PgPool, key: Uuid) -> (i64, Option<Uuid>) {
+    sqlx::query_as(
+        "SELECT COUNT(*), MAX(booking_id::text)::uuid FROM open_tickets WHERE idempotency_key = $1",
+    )
+    .bind(key)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The sweep moved a late party to no-show (or the fire names another
+/// branch's booking) before the waiter's offline fire arrived. The replay
+/// fires the ticket WITHOUT the booking link rather than losing the bill: the
+/// ticket exists, the booking is untouched, a duplicate is still one ticket,
+/// and the cashier's queued settle afterwards goes through.
+#[sqlx::test]
+async fn a_replayed_fire_drops_a_booking_it_cannot_use(pool: PgPool) {
+    let app = app!(pool);
+    let s = shop(&pool).await;
+
+    // No-show.
+    let late = book_at(&app, &s, s.branch).await;
+    let ns = json!({ "op": "no_show_booking", "teller_id": s.admin, "booking_id": late });
+    assert_eq!(replay(&app, &s.bearer, &ns).await.0, 200);
+    let key = Uuid::new_v4();
+    let op = fire(&s, key, Some(late));
+    let r = replay(&app, &s.bearer, &op).await;
+    assert_eq!(r.0, 201, "{}", r.1);
+    assert_eq!(r.1["booking_id"], Value::Null, "{}", r.1);
+    let ticket = Uuid::parse_str(r.1["id"].as_str().unwrap()).unwrap();
+    assert_eq!(tickets_for(&pool, key).await, (1, None), "fired, unlinked");
+    assert_eq!(
+        booking_status(&pool, late).await,
+        "no_show",
+        "no auto-seating"
+    );
+
+    // The same fire again (the till's retry): one ticket.
+    let again = replay(&app, &s.bearer, &op).await;
+    assert_eq!(again.0, 200, "{}", again.1);
+    assert_eq!(again.1["id"], ticket.to_string());
+    assert_eq!(tickets_for(&pool, key).await, (1, None), "still one ticket");
+
+    // The cashier's queued settle afterwards.
+    settle(&app, &s, ticket).await;
+    let status: String = sqlx::query_scalar("SELECT status::text FROM open_tickets WHERE id = $1")
+        .bind(ticket)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "settled");
+    assert_eq!(booking_status(&pool, late).await, "no_show");
+
+    // A booking at another branch of the org.
+    let other: Uuid =
+        sqlx::query_scalar("INSERT INTO branches (org_id, name) VALUES ($1, 'Other') RETURNING id")
+            .bind(s.org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let elsewhere = book_at(&app, &s, other).await;
+    let key = Uuid::new_v4();
+    let r = replay(&app, &s.bearer, &fire(&s, key, Some(elsewhere))).await;
+    assert_eq!(r.0, 201, "{}", r.1);
+    assert_eq!(r.1["booking_id"], Value::Null, "{}", r.1);
+    assert_eq!(tickets_for(&pool, key).await, (1, None));
+    assert_eq!(
+        booking_status(&pool, elsewhere).await,
+        "confirmed",
+        "untouched"
+    );
+    let ticket = Uuid::parse_str(r.1["id"].as_str().unwrap()).unwrap();
+    settle(&app, &s, ticket).await;
+
+    // A usable booking is still linked and seated on replay.
+    let ok = book_at(&app, &s, s.branch).await;
+    let key = Uuid::new_v4();
+    let r = replay(&app, &s.bearer, &fire(&s, key, Some(ok))).await;
+    assert_eq!(r.0, 201, "{}", r.1);
+    assert_eq!(r.1["booking_id"], ok.to_string());
+    assert_eq!(booking_status(&pool, ok).await, "seated");
+}
+
+/// The LIVE fire keeps refusing: a teller who is online is told at once.
+#[sqlx::test]
+async fn a_live_fire_under_a_dead_booking_is_still_a_409(pool: PgPool) {
+    let app = app!(pool);
+    let s = shop(&pool).await;
+    let live = |key: Uuid, b: Uuid| {
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {}", s.bearer)))
+            .set_json(json!({
+                "branch_id": s.branch,
+                "idempotency_key": key,
+                "round_idempotency_key": Uuid::new_v4(),
+                "booking_id": b,
+                "items": [{ "menu_item_id": s.item, "quantity": 1 }]
+            }))
+            .to_request()
+    };
+    let read = |resp: actix_web::dev::ServiceResponse| async move {
+        let status = resp.status().as_u16();
+        let body: Value = test::read_body_json(resp).await;
+        (status, body)
+    };
+
+    let late = book_at(&app, &s, s.branch).await;
+    let ns = json!({ "op": "no_show_booking", "teller_id": s.admin, "booking_id": late });
+    assert_eq!(replay(&app, &s.bearer, &ns).await.0, 200);
+    let key = Uuid::new_v4();
+    refused(
+        &read(test::call_service(&app, live(key, late)).await).await,
+        "BOOKING_NOT_ACTIVE",
+        "Conflict: Booking is no_show",
+    );
+    assert_eq!(
+        tickets_for(&pool, key).await,
+        (0, None),
+        "live refusal: nothing"
+    );
+
+    let other: Uuid =
+        sqlx::query_scalar("INSERT INTO branches (org_id, name) VALUES ($1, 'Other') RETURNING id")
+            .bind(s.org)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let elsewhere = book_at(&app, &s, other).await;
+    let key = Uuid::new_v4();
+    refused(
+        &read(test::call_service(&app, live(key, elsewhere)).await).await,
+        "BOOKING_OTHER_BRANCH",
+        "Conflict: Booking belongs to another branch",
+    );
+    assert_eq!(tickets_for(&pool, key).await, (0, None));
+    assert_eq!(booking_status(&pool, late).await, "no_show");
+    assert_eq!(booking_status(&pool, elsewhere).await, "confirmed");
 }
 
 /// The one 409 that means "already here": two copies of one fire (the till's

@@ -541,6 +541,54 @@ pub(crate) async fn create_open_ticket_inner(
     let table_id = if claimable { body.table_id } else { None };
     let label = table_label(&mut *tx, table_id).await?;
 
+    // Booking arbitration, the same rule on REPLAY: a booking the party can no
+    // longer be seated under — the sweep rolled the late party to no-show (or
+    // it was cancelled, completed, or is another branch's) before the waiter's
+    // queued fire arrived — is DROPPED rather than dead-lettering the fire. The
+    // party is at the table and ate; losing their bill (and the settle that
+    // follows) over a booking's state is the worse outcome. The ticket fires
+    // with no booking link and the booking is left exactly as it is: a no-show
+    // stays a no-show, nothing is auto-seated.
+    //
+    // LIVE keeps the 409 (`link_ticket`), so a teller who is online is told at
+    // once. Locked `FOR UPDATE` like `link_ticket`, so the verdict holds until
+    // commit.
+    let booking_id = match body.booking_id {
+        Some(b) if actor.replay => {
+            let cur: Option<(Uuid, String)> = sqlx::query!(
+                r#"SELECT branch_id, status::text AS "status!" FROM bookings WHERE id = $1 FOR UPDATE"#,
+                b
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|r| (r.branch_id, r.status));
+            let unusable = match &cur {
+                None => Some("unknown"),
+                Some((branch, _)) if *branch != body.branch_id => {
+                    Some(crate::bookings::handlers::codes::BOOKING_OTHER_BRANCH)
+                }
+                Some((_, status)) if !matches!(status.as_str(), "confirmed" | "seated") => {
+                    Some(crate::bookings::handlers::codes::BOOKING_NOT_ACTIVE)
+                }
+                _ => None,
+            };
+            match unusable {
+                Some(reason) => {
+                    tracing::warn!(
+                        booking_id = %b,
+                        branch_id = %body.branch_id,
+                        status = cur.as_ref().map(|(_, s)| s.as_str()),
+                        reason,
+                        "a replayed fire named a booking it cannot be seated under; fired without the booking link"
+                    );
+                    None
+                }
+                None => Some(b),
+            }
+        }
+        other => other,
+    };
+
     let open_ticket_id: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
         "INSERT INTO open_tickets \
             (org_id, branch_id, table_id, ticket_ref, opened_by, customer_name, notes, guest_count, \
@@ -564,7 +612,7 @@ pub(crate) async fn create_open_ticket_inner(
     .bind(body.discount_id)
     .bind(&body.discount_type)
     .bind(body.discount_value)
-    .bind(body.booking_id)
+    .bind(booking_id)
     .bind(policy.tax_rate)
     .bind(policy.tax_inclusive)
     .bind(policy.service_charge_rate)
@@ -604,7 +652,7 @@ pub(crate) async fn create_open_ticket_inner(
             t,
             crate::floor_ops::Holder::Ticket {
                 id: open_ticket_id,
-                booking_id: body.booking_id,
+                booking_id,
             },
             crate::floor_ops::party_size(body.guest_count),
             &hand,
@@ -612,7 +660,7 @@ pub(crate) async fn create_open_ticket_inner(
         .await?;
     }
     // A booked party sat down: the booking becomes `seated` with this ticket.
-    if let Some(b) = body.booking_id {
+    if let Some(b) = booking_id {
         crate::bookings::handlers::link_ticket(&mut tx, b, body.branch_id, open_ticket_id).await?;
     }
     let kt_id = Some(
@@ -651,7 +699,7 @@ pub(crate) async fn create_open_ticket_inner(
         if let Some(t) = table_id {
             publish_table_status(pool.get_ref(), hub, body.branch_id, t).await;
         }
-        if let Some(b) = body.booking_id {
+        if let Some(b) = booking_id {
             crate::bookings::publish_booking(pool.get_ref(), hub, "booking.changed", b).await;
         }
     }
