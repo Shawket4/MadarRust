@@ -692,7 +692,7 @@ pub(crate) async fn create_transfer_inner(
         ));
     }
 
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO table_transfer_requests \
             (id, org_id, branch_id, occupant_kind, occupant_id, from_table_id, \
              target_section_id, target_table_id, note, requested_by) \
@@ -709,7 +709,19 @@ pub(crate) async fn create_transfer_inner(
     .bind(&body.note)
     .bind(actor.teller_id)
     .execute(pool.get_ref())
-    .await?;
+    .await;
+    if let Err(e) = inserted {
+        // A second copy of this wish (a retry racing a LAN peer's backup)
+        // passed the id check above before the first committed. Same 409 and
+        // words as the plain unique violation, with a code saying it landed.
+        if crate::sync::codes::is_unique_violation(&e)
+            && let Some(view) = transfer_view(pool.get_ref(), body.id).await?
+            && view.occupant_id == body.occupant_id
+        {
+            return Err(crate::sync::codes::already_applied(e));
+        }
+        return Err(e.into());
+    }
 
     if let Some(hub) = hub {
         let mut events = FloorEvents::default();

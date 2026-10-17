@@ -430,8 +430,11 @@ pub async fn create_refund_inner(
     .fetch_one(&mut *tx)
     .await?;
     if remaining <= 0 {
-        return Err(AppError::Conflict(
-            "This order has already been refunded in full".into(),
+        // Not this refund: its own `client_ref` was answered 200 above. Some
+        // other refund took the rest, and this one did not apply.
+        return Err(crate::sync::codes::conflict(
+            "ORDER_FULLY_REFUNDED",
+            "This order has already been refunded in full",
         ));
     }
     if i64::from(body.amount) > remaining {

@@ -4414,10 +4414,13 @@ pub async fn void_order_inner(
     .fetch_one(pool.get_ref())
     .await?;
     if refunded > 0 {
-        return Err(AppError::Conflict(format!(
-            "{refunded} has already been refunded against this sale, so it cannot be voided \
-             — refund the remainder instead."
-        )));
+        return Err(crate::sync::codes::conflict(
+            "ORDER_REFUNDED",
+            format!(
+                "{refunded} has already been refunded against this sale, so it cannot be voided \
+                 — refund the remainder instead."
+            ),
+        ));
     }
     let voided_at = body.voided_at.unwrap_or_else(chrono::Utc::now);
     // Offline voids carry their real time; reject only a future device clock.

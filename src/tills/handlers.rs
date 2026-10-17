@@ -1461,9 +1461,12 @@ pub(crate) async fn add_cash_movement_inner(
                     "A correction must undo a movement on the same till".into(),
                 ));
             }
+            // Not by this correction: its own `client_ref` was answered 200
+            // above. Another correction undid it first; this one did not apply.
             Some((_, _, true)) => {
-                return Err(AppError::Conflict(
-                    "That movement has already been corrected".into(),
+                return Err(crate::sync::codes::conflict(
+                    "CASH_ALREADY_CORRECTED",
+                    "That movement has already been corrected",
                 ));
             }
             Some((_, original, _)) if original.checked_neg() != Some(body.amount) => {

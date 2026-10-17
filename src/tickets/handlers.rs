@@ -541,7 +541,7 @@ pub(crate) async fn create_open_ticket_inner(
     let table_id = if claimable { body.table_id } else { None };
     let label = table_label(&mut *tx, table_id).await?;
 
-    let open_ticket_id: Uuid = sqlx::query_scalar(
+    let open_ticket_id: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
         "INSERT INTO open_tickets \
             (org_id, branch_id, table_id, ticket_ref, opened_by, customer_name, notes, guest_count, \
              idempotency_key, discount_id, discount_type, discount_value, booking_id, \
@@ -571,7 +571,31 @@ pub(crate) async fn create_open_ticket_inner(
     .bind(policy.service_charge_taxable)
     .bind(attach_customer)
     .fetch_one(&mut *tx)
-    .await?;
+    .await;
+    let open_ticket_id: Uuid = match open_ticket_id {
+        Ok(id) => id,
+        // A second copy of this fire (the till's retry and its LAN peer's
+        // backup, replayed at once) passed the key check above before the
+        // first committed, and lost on the key. Same 409 and the same words
+        // as ever, with a code saying the fire IS on the server.
+        Err(e) if crate::sync::codes::is_unique_violation(&e) => {
+            drop(tx);
+            if let Some(key) = body.idempotency_key {
+                let landed: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM open_tickets WHERE org_id = $1 AND idempotency_key = $2)",
+                )
+                .bind(actor.org_id)
+                .bind(key)
+                .fetch_one(pool.get_ref())
+                .await?;
+                if landed {
+                    return Err(crate::sync::codes::already_applied(e));
+                }
+            }
+            return Err(e.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     if let Some(t) = table_id {
         let hand = crate::floor_ops::Hand::of(&mut *tx, actor.teller_id, body.branch_id).await?;
@@ -841,6 +865,21 @@ pub async fn void_open_ticket(
     .await
 }
 
+/// Codes on a bill's 409s (`sync::codes`): what a queued void meets.
+pub mod codes {
+    /// The bill was paid: a void of it, or of one of its lines, did not apply.
+    pub const TICKET_SETTLED: &str = "TICKET_SETTLED";
+    /// The bill was voided: a line void on it has nothing left to do.
+    pub const TICKET_VOIDED: &str = "TICKET_VOIDED";
+    /// The line was voided before the bill was paid: this void is on record.
+    pub const LINE_ALREADY_VOIDED: &str = "LINE_ALREADY_VOIDED";
+}
+
+/// "Cannot void a settled ticket", with its code.
+fn settled_ticket() -> AppError {
+    crate::sync::codes::conflict(codes::TICKET_SETTLED, "Cannot void a settled ticket")
+}
+
 /// Void core. A void is an EVENT — who, when, a categorised reason and a note
 /// — recorded on the bill exactly as an order void is, and it pulls the
 /// ticket's kitchen copies off the KDS (closed `voided`). Shared by the live
@@ -866,7 +905,7 @@ pub(crate) async fn void_open_ticket_inner(
         .await?
         .ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
     match view.status.as_str() {
-        "settled" => return Err(AppError::Conflict("Cannot void a settled ticket".into())),
+        "settled" => return Err(settled_ticket()),
         "voided" => return Ok(HttpResponse::Ok().json(view)),
         _ => {}
     }
@@ -901,7 +940,7 @@ pub(crate) async fn void_open_ticket_inner(
         let current = open_ticket_view(pool.get_ref(), *id).await?;
         return match current.as_ref().map(|v| v.status.as_str()) {
             Some("voided") => Ok(HttpResponse::Ok().json(current)),
-            _ => Err(AppError::Conflict("Cannot void a settled ticket".into())),
+            _ => Err(settled_ticket()),
         };
     }
     // Every round's kitchen ticket is voided with the bill and leaves the KDS.
@@ -1032,13 +1071,37 @@ pub(crate) async fn void_ticket_line_inner(
         .ok_or_else(|| AppError::NotFound("Open ticket not found".into()))?;
     // A settled bill's lines are an ORDER's now; a voided bill has no lines
     // left to take anything off.
+    //
+    // Same 409s and words as ever; the code says which. A line this void
+    // already took off before the bill was paid (its answer lost, the retry
+    // arriving after the settle) is `LINE_ALREADY_VOIDED`: the void IS on the
+    // server. On a voided bill no line is owed for, so the line's void has
+    // nothing left to do (`TICKET_VOIDED`).
     match view.status.as_str() {
         "settled" => {
-            return Err(AppError::Conflict(
-                "That bill is settled — a paid line is a refund, not a void".into(),
+            let already: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM open_ticket_items \
+                  WHERE id = $1 AND open_ticket_id = $2 AND voided_at IS NOT NULL)",
+            )
+            .bind(item_id)
+            .bind(id)
+            .fetch_one(pool.get_ref())
+            .await?;
+            return Err(crate::sync::codes::conflict(
+                if already {
+                    codes::LINE_ALREADY_VOIDED
+                } else {
+                    codes::TICKET_SETTLED
+                },
+                "That bill is settled — a paid line is a refund, not a void",
             ));
         }
-        "voided" => return Err(AppError::Conflict("That bill was voided".into())),
+        "voided" => {
+            return Err(crate::sync::codes::conflict(
+                codes::TICKET_VOIDED,
+                "That bill was voided",
+            ));
+        }
         _ => {}
     }
     if !actor.replay {

@@ -856,6 +856,20 @@ pub async fn cancel_booking(
     Ok(HttpResponse::Ok().json(view))
 }
 
+/// Codes on a booking's 409s (`sync::codes`). Each is a refusal: the seat,
+/// the no-show or the ticket fired under the booking did not apply.
+pub mod codes {
+    /// Cancelled, no-show or completed: not a booking anyone can be seated
+    /// under (or marked a no-show) any more.
+    pub const BOOKING_NOT_ACTIVE: &str = "BOOKING_NOT_ACTIVE";
+    /// A ticket fired under a booking of another branch.
+    pub const BOOKING_OTHER_BRANCH: &str = "BOOKING_OTHER_BRANCH";
+    /// Already seated, at other tables than this seat names.
+    pub const BOOKING_SEATED_ELSEWHERE: &str = "BOOKING_SEATED_ELSEWHERE";
+    /// Seated, so it cannot be a no-show.
+    pub const BOOKING_SEATED: &str = "BOOKING_SEATED";
+}
+
 /// `confirmed` → `no_show`. Shared with `/sync/replay`. Idempotent on
 /// `no_show`; anything else that is not `confirmed` is a 409 — a seated party
 /// showed up, and if they then left that is a cancellation (see the table
@@ -873,10 +887,16 @@ pub(crate) async fn no_show_inner(pool: &PgPool, id: Uuid) -> Result<HttpRespons
         .await?
         .ok_or_else(|| AppError::NotFound("Booking not found".into()))?;
     if n == 0 && view.status != "no_show" {
-        return Err(AppError::Conflict(match view.status.as_str() {
-            "seated" => "The party was seated — cancel the booking if they left".to_string(),
-            other => format!("Booking is already {other}"),
-        }));
+        return Err(match view.status.as_str() {
+            "seated" => crate::sync::codes::conflict(
+                codes::BOOKING_SEATED,
+                "The party was seated — cancel the booking if they left",
+            ),
+            other => crate::sync::codes::conflict(
+                codes::BOOKING_NOT_ACTIVE,
+                format!("Booking is already {other}"),
+            ),
+        });
     }
     Ok(HttpResponse::Ok().json(view))
 }
@@ -942,8 +962,9 @@ pub(crate) async fn seat_core(
                 let mut want = ids.clone();
                 want.sort();
                 if want != claimed_tables(&mut tx, id).await? {
-                    return Err(AppError::Conflict(
-                        "The party is already seated — move them on the floor".into(),
+                    return Err(crate::sync::codes::conflict(
+                        codes::BOOKING_SEATED_ELSEWHERE,
+                        "The party is already seated — move them on the floor",
                     ));
                 }
             }
@@ -954,7 +975,12 @@ pub(crate) async fn seat_core(
                 tables: Vec::new(),
             });
         }
-        other => return Err(AppError::Conflict(format!("Booking is {other}"))),
+        other => {
+            return Err(crate::sync::codes::conflict(
+                codes::BOOKING_NOT_ACTIVE,
+                format!("Booking is {other}"),
+            ));
+        }
     }
     if let Some(ids) = &body.table_ids {
         validate_tables(&mut tx, branch_id, ids).await?;
@@ -1119,12 +1145,16 @@ pub(crate) async fn link_ticket(
         return Err(AppError::NotFound("Booking not found".into()));
     };
     if b != branch_id {
-        return Err(AppError::Conflict(
-            "Booking belongs to another branch".into(),
+        return Err(crate::sync::codes::conflict(
+            codes::BOOKING_OTHER_BRANCH,
+            "Booking belongs to another branch",
         ));
     }
     if !matches!(status.as_str(), "confirmed" | "seated") {
-        return Err(AppError::Conflict(format!("Booking is {status}")));
+        return Err(crate::sync::codes::conflict(
+            codes::BOOKING_NOT_ACTIVE,
+            format!("Booking is {status}"),
+        ));
     }
     sqlx::query(
         "UPDATE bookings SET status = 'seated', seated_at = COALESCE(seated_at, now()), \

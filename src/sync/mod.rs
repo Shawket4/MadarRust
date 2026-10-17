@@ -34,6 +34,7 @@
 //! grant came to work online and be ignored offline.
 
 pub mod batch;
+pub mod codes;
 pub mod handlers;
 pub mod protocol;
 pub mod pull;
