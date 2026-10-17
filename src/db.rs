@@ -396,13 +396,84 @@ fn shared_registry() -> &'static std::sync::Mutex<std::collections::HashMap<Stri
     R.get_or_init(Default::default)
 }
 
+// ── Stamp once per org change, not once per hand-out ─────────────────────
+//
+// A request acquires the shared pool many times (every autocommit query is an
+// acquire; the order path does ~16), and each hand-out used to re-send
+// `set_config('app.org_id', …)` even when the connection already carried that
+// org. The org a live connection was last stamped with is remembered here, and
+// a hand-out for the SAME org (including '' for none) skips the round trip;
+// any other org is stamped as before. The isolation argument is unchanged: what
+// the session holds is exactly what this map says, because
+//   * the map is updated only after the stamp succeeded, and cleared for the
+//     connection before a stamp is attempted (a failed stamp leaves it unknown,
+//     so the next hand-out stamps);
+//   * a NEW connection is always stamped (`after_connect` forgets first: a
+//     connection can reuse a closed one's identity);
+//   * nothing else sets `app.org_id` at session level on these connections
+//     (the transaction-local sets in migrations run on the owner pool, and a
+//     `set_config(…, true)` reverts at its transaction's end anyway).
+
+/// A live connection's identity: the address of its boxed state, which never
+/// moves while the connection lives (the `PgConnection` handle itself moves
+/// between the pool's queues). Checked at compile time to be exactly that one
+/// pointer, so a sqlx release that changes the layout stops the build here.
+fn conn_key(conn: &sqlx::PgConnection) -> usize {
+    const _: () = assert!(
+        std::mem::size_of::<sqlx::PgConnection>() == std::mem::size_of::<usize>()
+            && std::mem::align_of::<sqlx::PgConnection>() == std::mem::align_of::<usize>()
+    );
+    // SAFETY: `PgConnection` is a single `Box<PgConnectionInner>` (asserted:
+    // pointer-sized and -aligned), so its bytes are that box's non-null
+    // pointer; reading them as a `usize` reads initialized memory and
+    // dereferences nothing.
+    unsafe { std::ptr::read(conn as *const sqlx::PgConnection as *const usize) }
+}
+
+fn stamped() -> std::sync::MutexGuard<'static, std::collections::HashMap<usize, String>> {
+    static S: OnceLock<std::sync::Mutex<std::collections::HashMap<usize, String>>> =
+        OnceLock::new();
+    S.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+static STAMPS_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `set_config('app.org_id', …)` round trips sent so far (tests).
+#[doc(hidden)]
+pub fn stamps_sent() -> u64 {
+    STAMPS_SENT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 async fn stamp(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
     let org = current_org().map(|o| o.to_string()).unwrap_or_default();
+    let key = conn_key(conn);
+    {
+        let mut m = stamped();
+        if m.get(&key) == Some(&org) {
+            return Ok(());
+        }
+        m.remove(&key);
+    }
+    STAMPS_SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     sqlx::query("SELECT set_config('app.org_id', $1, false)")
-        .bind(org)
-        .execute(conn)
+        .bind(&org)
+        .execute(&mut *conn)
         .await?;
+    let mut m = stamped();
+    if m.len() >= 10_000 {
+        // Entries of closed connections; forgetting live ones only costs a stamp.
+        m.clear();
+    }
+    m.insert(key, org);
     Ok(())
+}
+
+/// A connection just opened: whatever was remembered for its identity
+/// belonged to a closed one.
+fn forget(conn: &sqlx::PgConnection) {
+    stamped().remove(&conn_key(conn));
 }
 
 /// The shared `madar_app` pool on `base`'s database.
@@ -428,6 +499,7 @@ fn shared_pool(base: &PgPool) -> PgPool {
         .max_lifetime(Duration::from_secs(1800))
         .after_connect(move |conn, _meta| {
             Box::pin(async move {
+                forget(conn);
                 session_setup(conn, !login_as_app).await?;
                 stamp(conn).await
             })
