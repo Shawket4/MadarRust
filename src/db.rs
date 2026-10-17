@@ -471,9 +471,23 @@ async fn stamp(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
 }
 
 /// A connection just opened: whatever was remembered for its identity
-/// belonged to a closed one.
+/// belonged to a closed one (heap addresses are reused). Every connection of
+/// the shared pool passes here before it is handed out for the first time
+/// (sqlx runs `after_connect` on each new connection and drops it if the hook
+/// fails), so a stale entry is always overwritten before it can be read; a
+/// closed connection's own entry needs no removal.
 fn forget(conn: &sqlx::PgConnection) {
-    stamped().remove(&conn_key(conn));
+    if stamped().remove(&conn_key(conn)).is_some() {
+        REUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+static REUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// New connections that reused a closed connection's identity (tests).
+#[doc(hidden)]
+pub fn stamp_identities_reused() -> u64 {
+    REUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The shared `madar_app` pool on `base`'s database.
