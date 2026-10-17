@@ -39,6 +39,29 @@ where
     .await?)
 }
 
+/// Of `records`, the attendance records that exist and are NOT dated inside
+/// an approved, paid or closed period of their org: [`is_closed`] for each
+/// record's own `(org, business_date)`, in one statement for a batch.
+pub async fn open_records<'e, E>(
+    conn: E,
+    records: &[Uuid],
+) -> Result<std::collections::HashSet<Uuid>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let open: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT a.id FROM attendance_records a \
+          WHERE a.id = ANY($1) \
+            AND NOT EXISTS (SELECT 1 FROM payroll_periods \
+                             WHERE org_id = a.org_id AND status IN ({CLOSED}) \
+                               AND start_date <= a.business_date AND end_date >= a.business_date)"
+    ))
+    .bind(records)
+    .fetch_all(conn)
+    .await?;
+    Ok(open.into_iter().collect())
+}
+
 /// The first day on or after `day` that is not inside an approved, paid or
 /// closed period: where a new pay line lands by default (minor default M27),
 /// so a line added after an early approval goes to next month's pay instead

@@ -698,120 +698,172 @@ pub(crate) async fn day_adjustments(
     timezone: &str,
     settings: &AttendanceSettings,
 ) -> Result<DayAdjustments, AppError> {
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        kind: String,
-        is_half_day: bool,
-        leave_half: Option<String>,
-        work_shift_id: Option<Uuid>,
-        is_paid: Option<bool>,
-        crosses: bool,
-        from0: Option<DateTime<Utc>>,
-        from1: Option<DateTime<Utc>>,
-        to0: Option<DateTime<Utc>>,
-        to1: Option<DateTime<Utc>>,
-    }
+    let mut one = day_adjustments_many(
+        pool,
+        &[AdjustmentsKey {
+            employee_id,
+            business_date,
+            timezone,
+            settings,
+        }],
+    )
+    .await?;
+    Ok(one.pop().unwrap_or_default())
+}
 
-    let rows: Vec<Row> = sqlx::query_as(
+/// One `(employee, business date)` [`day_adjustments_many`] resolves, with the
+/// zone its request times are read in and the branch rules that price them.
+pub(crate) struct AdjustmentsKey<'a> {
+    pub employee_id: Uuid,
+    pub business_date: NaiveDate,
+    pub timezone: &'a str,
+    pub settings: &'a AttendanceSettings,
+}
+
+/// [`day_adjustments`] for many days in two statements (the approved requests
+/// and the pings), however many keys: the background sweep prices a batch of
+/// records at once. One result per key, in key order; each is exactly what
+/// [`day_adjustments`] returns for that key alone (it is this, with one key).
+pub(crate) async fn day_adjustments_many(
+    pool: &PgPool,
+    keys: &[AdjustmentsKey<'_>],
+) -> Result<Vec<DayAdjustments>, AppError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let employees: Vec<Uuid> = keys.iter().map(|k| k.employee_id).collect();
+    let dates: Vec<NaiveDate> = keys.iter().map(|k| k.business_date).collect();
+    let zones: Vec<String> = keys.iter().map(|k| k.timezone.to_string()).collect();
+
+    // Each request time is offered on the business date and the day after,
+    // in the key's own zone.
+    let rows = sqlx::query!(
         r#"
-        SELECT r.kind, r.is_half_day, r.leave_half, r.work_shift_id,
+        SELECT k.ord AS "ord!", r.kind, r.is_half_day, r.leave_half, r.work_shift_id,
                COALESCE(r.is_paid, lt.is_paid) AS is_paid,
-               COALESCE(r.kind = 'excuse' AND r.end_date = r.on_date + 1, false) AS crosses,
-               ($2::date + r.from_time) AT TIME ZONE $3     AS from0,
-               ($2::date + 1 + r.from_time) AT TIME ZONE $3 AS from1,
-               ($2::date + r.to_time) AT TIME ZONE $3       AS to0,
-               ($2::date + 1 + r.to_time) AT TIME ZONE $3   AS to1
-          FROM staff_requests r
+               COALESCE(r.kind = 'excuse' AND r.end_date = r.on_date + 1, false) AS "crosses!",
+               (k.d + r.from_time) AT TIME ZONE k.tz     AS from0,
+               (k.d + 1 + r.from_time) AT TIME ZONE k.tz AS from1,
+               (k.d + r.to_time) AT TIME ZONE k.tz       AS to0,
+               (k.d + 1 + r.to_time) AT TIME ZONE k.tz   AS to1
+          FROM unnest($1::uuid[], $2::date[], $3::text[]) WITH ORDINALITY AS k(emp, d, tz, ord)
+          JOIN staff_requests r ON r.employee_id = k.emp
           LEFT JOIN leave_types lt ON lt.id = r.leave_type_id
-         WHERE r.employee_id = $1
-           AND r.status = 'approved'
+         WHERE r.status = 'approved'
            -- Corrections are excluded on purpose: they REWRITE the punch on
            -- approval rather than forgive a window. Letting one through here
            -- would forgive the very lateness it just recorded.
            AND r.kind <> 'correction'
            AND ((r.kind IN ('leave', 'mission')
-                 AND r.on_date <= $2 AND COALESCE(r.end_date, r.on_date) >= $2)
-                OR (r.kind NOT IN ('leave', 'mission') AND r.on_date = $2))
+                 AND r.on_date <= k.d AND COALESCE(r.end_date, r.on_date) >= k.d)
+                OR (r.kind NOT IN ('leave', 'mission') AND r.on_date = k.d))
+         ORDER BY k.ord
         "#,
+        &employees,
+        &dates,
+        &zones,
     )
-    .bind(employee_id)
-    .bind(business_date)
-    .bind(timezone)
     .fetch_all(pool)
     .await?;
 
-    let default_paid = settings.excused_time_paid_default;
-    let mut adj = DayAdjustments::default();
     // Where the pings put the person that day (D2): approved time off counts
     // only the minutes actually away.
-    let pings: Vec<Ping> = sqlx::query_as(
-        "SELECT p.attendance_record_id, p.at, p.inside, a.check_out_at \
-           FROM attendance_pings p JOIN attendance_records a ON a.id = p.attendance_record_id \
-          WHERE a.employee_id = $1 AND a.business_date = $2 AND a.covered_employee_id IS NULL \
-          ORDER BY p.attendance_record_id, p.at",
+    let pings = sqlx::query!(
+        r#"
+        SELECT k.ord AS "ord!", p.attendance_record_id, p.at, p.inside, a.check_out_at
+          FROM unnest($1::uuid[], $2::date[]) WITH ORDINALITY AS k(emp, d, ord)
+          JOIN attendance_records a ON a.employee_id = k.emp AND a.business_date = k.d
+                                   AND a.covered_employee_id IS NULL
+          JOIN attendance_pings p ON p.attendance_record_id = a.id
+         ORDER BY k.ord, p.attendance_record_id, p.at
+        "#,
+        &employees,
+        &dates,
     )
-    .bind(employee_id)
-    .bind(business_date)
     .fetch_all(pool)
     .await?;
-    adj.away = away_runs(&pings);
-    for row in rows {
-        let timed = |candidates: [Option<DateTime<Utc>>; 2], paid: bool| TimedRequest {
-            candidates: candidates.into_iter().flatten().collect(),
-            work_shift_id: row.work_shift_id,
-            paid,
-        };
-        match row.kind.as_str() {
-            "late_arrival" => adj.late_arrivals.push(timed([row.to0, row.to1], true)),
-            "early_departure" => adj.early_departures.push(timed(
-                [row.from0, row.from1],
-                row.is_paid.unwrap_or(default_paid),
-            )),
-            "excuse" => {
-                let candidates = match (row.from0, row.from1, row.to0, row.to1) {
-                    (Some(f0), _, _, Some(t1)) if row.crosses => vec![(f0, t1)],
-                    (Some(f0), Some(f1), Some(t0), Some(t1)) => vec![(f0, t0), (f1, t1)],
-                    _ => vec![],
-                };
-                adj.excuses.push(WindowRequest {
-                    candidates,
-                    work_shift_id: row.work_shift_id,
-                    paid: row.is_paid.unwrap_or(default_paid),
-                });
-            }
-            "mission" => {
-                adj.on_leave = true;
-                adj.leave_paid = true;
-            }
-            "leave" => {
-                // A decided leave says paid or unpaid; an old one without an
-                // answer stays as it always read — paid.
-                let paid = row.is_paid.unwrap_or(true);
-                if row.is_half_day && settings.half_day_leave_counts != "whole_day" {
-                    let shifts = crate::staff::schedules::resolve_shifts_for(
-                        pool,
-                        employee_id,
-                        business_date,
-                        timezone,
-                    )
-                    .await?;
-                    let windows: Vec<_> = shifts
-                        .iter()
-                        .map(|s| (s.scheduled_start_at, s.scheduled_end_at))
-                        .collect();
-                    let half = row.leave_half.as_deref().unwrap_or("first");
-                    if let Some((from, to)) = half_day_window(&windows, half) {
-                        adj.half_off = Some(ExcusedWindow { from, to, paid });
-                    }
-                } else {
-                    adj.on_leave = true;
-                    adj.leave_paid = adj.leave_paid || paid;
-                }
-            }
-            _ => {}
-        }
+    let mut pings_of: HashMap<i64, Vec<Ping>> = HashMap::new();
+    for p in pings {
+        pings_of.entry(p.ord).or_default().push((
+            p.attendance_record_id,
+            p.at,
+            p.inside,
+            p.check_out_at,
+        ));
     }
-    Ok(adj)
+    let mut rows_of: HashMap<i64, Vec<_>> = HashMap::new();
+    for r in rows {
+        rows_of.entry(r.ord).or_default().push(r);
+    }
+
+    let mut out = Vec::with_capacity(keys.len());
+    for (i, key) in keys.iter().enumerate() {
+        let ord = i as i64 + 1;
+        let settings = key.settings;
+        let default_paid = settings.excused_time_paid_default;
+        let mut adj = DayAdjustments {
+            away: away_runs(pings_of.get(&ord).map(Vec::as_slice).unwrap_or(&[])),
+            ..Default::default()
+        };
+        for row in rows_of.remove(&ord).unwrap_or_default() {
+            let timed = |candidates: [Option<DateTime<Utc>>; 2], paid: bool| TimedRequest {
+                candidates: candidates.into_iter().flatten().collect(),
+                work_shift_id: row.work_shift_id,
+                paid,
+            };
+            match row.kind.as_str() {
+                "late_arrival" => adj.late_arrivals.push(timed([row.to0, row.to1], true)),
+                "early_departure" => adj.early_departures.push(timed(
+                    [row.from0, row.from1],
+                    row.is_paid.unwrap_or(default_paid),
+                )),
+                "excuse" => {
+                    let candidates = match (row.from0, row.from1, row.to0, row.to1) {
+                        (Some(f0), _, _, Some(t1)) if row.crosses => vec![(f0, t1)],
+                        (Some(f0), Some(f1), Some(t0), Some(t1)) => vec![(f0, t0), (f1, t1)],
+                        _ => vec![],
+                    };
+                    adj.excuses.push(WindowRequest {
+                        candidates,
+                        work_shift_id: row.work_shift_id,
+                        paid: row.is_paid.unwrap_or(default_paid),
+                    });
+                }
+                "mission" => {
+                    adj.on_leave = true;
+                    adj.leave_paid = true;
+                }
+                "leave" => {
+                    // A decided leave says paid or unpaid; an old one without an
+                    // answer stays as it always read — paid.
+                    let paid = row.is_paid.unwrap_or(true);
+                    if row.is_half_day && settings.half_day_leave_counts != "whole_day" {
+                        let shifts = crate::staff::schedules::resolve_shifts_for(
+                            pool,
+                            key.employee_id,
+                            key.business_date,
+                            key.timezone,
+                        )
+                        .await?;
+                        let windows: Vec<_> = shifts
+                            .iter()
+                            .map(|s| (s.scheduled_start_at, s.scheduled_end_at))
+                            .collect();
+                        let half = row.leave_half.as_deref().unwrap_or("first");
+                        if let Some((from, to)) = half_day_window(&windows, half) {
+                            adj.half_off = Some(ExcusedWindow { from, to, paid });
+                        }
+                    } else {
+                        adj.on_leave = true;
+                        adj.leave_paid = adj.leave_paid || paid;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(adj);
+    }
+    Ok(out)
 }
 
 /// One attendance ping as the day's pass reads it: `(record, at, inside,

@@ -614,6 +614,106 @@ async fn reconcile_derives_the_library_and_retires_what_stops_shipping(pool: PgP
     );
 }
 
+/// Query survey #3: boot reconciles the library on every deploy. A preset is
+/// written only when it changed — every write fires `sync_emit`, which
+/// re-emits each menu item using it to every till. A second boot must emit
+/// NOTHING; a real change (a renamed preset) still reaches the items using it.
+#[sqlx::test]
+async fn reconcile_writes_and_emits_only_what_changed(pool: PgPool) {
+    load_library(&pool).await;
+    let org_id = seed_org(&pool).await;
+    let branch_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, 'B')")
+        .bind(branch_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cat_id = seed_category(&pool, org_id, "Drinks").await;
+    let latte = seed_menu_item(&pool, org_id, cat_id, "Iced Latte", 500).await;
+    let tea = seed_menu_item(&pool, org_id, cat_id, "Tea", 300).await;
+    for (item, slug) in [(latte, "scoop_ice"), (tea, "stir")] {
+        sqlx::query(
+            "INSERT INTO menu_item_recipe_steps (org_id, menu_item_id, position, kind, preset_slug) \
+             VALUES ($1, $2, 1, 'preset', $3)",
+        )
+        .bind(org_id)
+        .bind(item)
+        .bind(slug)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let head = || async {
+        sqlx::query_scalar::<_, Option<i64>>("SELECT max(seq) FROM sync_changes")
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .unwrap_or(0)
+    };
+    let stamps = || async {
+        sqlx::query_as::<_, (String, chrono::DateTime<chrono::Utc>, Option<Uuid>)>(
+            "SELECT slug, updated_at, animation_group_id FROM recipe_step_presets ORDER BY slug",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+
+    // Boot again, twice: nothing written, nothing emitted.
+    let (seq0, before) = (head().await, stamps().await);
+    load_library(&pool).await;
+    load_library(&pool).await;
+    assert_eq!(head().await, seq0, "an unchanged library emits no feed rows");
+    assert_eq!(stamps().await, before, "and rewrites no preset");
+
+    // A real change: the shipped library with one preset renamed.
+    let dir = tempfile::tempdir().unwrap();
+    for e in std::fs::read_dir(SHIPPED).unwrap().flatten() {
+        std::fs::copy(e.path(), dir.path().join(e.file_name())).unwrap();
+    }
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("manifest.json")).unwrap())
+            .unwrap();
+    manifest["scoop_ice"]["name"] = serde_json::json!("Add the ice");
+    std::fs::write(dir.path().join("manifest.json"), manifest.to_string()).unwrap();
+    steps::reconcile(&pool, dir.path()).await.unwrap();
+
+    let emitted: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
+        "SELECT branch_id, type, entity_id FROM sync_changes WHERE seq > $1 ORDER BY seq",
+    )
+    .bind(seq0)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        emitted,
+        vec![(branch_id, "menu_item".to_string(), latte)],
+        "only the item using the renamed preset is re-sent"
+    );
+    let after = stamps().await;
+    let changed: Vec<&str> = before
+        .iter()
+        .zip(&after)
+        .filter(|(a, b)| a != b)
+        .map(|(a, _)| a.0.as_str())
+        .collect();
+    assert_eq!(changed, vec!["scoop_ice"], "only the renamed preset is written");
+    let renamed = steps::list_presets(&pool, false).await.unwrap();
+    assert_eq!(
+        renamed.iter().find(|p| p.slug == "scoop_ice").unwrap().name,
+        "Add the ice"
+    );
+
+    // Shipping the original again is a change back, written and emitted once.
+    let seq1 = head().await;
+    load_library(&pool).await;
+    assert!(head().await > seq1, "renaming it back reaches the till too");
+    let seq2 = head().await;
+    load_library(&pool).await;
+    assert_eq!(head().await, seq2, "and then it is quiet again");
+}
+
 #[sqlx::test]
 async fn steps_are_presets_or_typed_names_and_ride_the_menu_payload(pool: PgPool) {
     let app = test::init_service(

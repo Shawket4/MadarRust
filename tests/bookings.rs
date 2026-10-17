@@ -1373,3 +1373,137 @@ async fn a_voided_ticket_cancels_its_booking(pool: PgPool) {
     assert_eq!(booking_status(&pool, b2).await.0, "seated");
     assert_eq!(booking_status(&pool, b3).await.0, "cancelled");
 }
+
+/// Query survey #11: the arrivals and no-show steps read the branch's
+/// settings row directly (not through a join of every booking ever) and the
+/// steps scan the partial index of live bookings. The same bookings must move
+/// as under the previous statements, which are kept here verbatim and run
+/// first inside a transaction that is rolled back.
+#[sqlx::test]
+async fn sweep_moves_exactly_the_bookings_the_previous_statements_moved(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    // X: every knob set; Y: no hold, no grace, no reminder; Z: no settings row.
+    let mut branches = Vec::new();
+    for name in ["X", "Y", "Z"] {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO branches (id, org_id, name) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(org)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        branches.push(id);
+    }
+    let (x, y, z) = (branches[0], branches[1], branches[2]);
+    for (branch, hold, grace, lead) in [(x, 15, Some(30), Some(120)), (y, 0, None, None)] {
+        sqlx::query(
+            "INSERT INTO branch_booking_settings (branch_id, org_id, hold_minutes, auto_no_show_minutes, reminder_lead_minutes) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(branch)
+        .bind(org)
+        .bind(hold as i16)
+        .bind(grace.map(|g: i32| g as i16))
+        .bind(lead)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    // Starts every few minutes around every boundary (17 s off the whole
+    // minute, so the few milliseconds between the two runs never flip one),
+    // two lengths, and every status the steps read.
+    let mut n = 0;
+    for branch in [x, y, z] {
+        for start in [
+            -300, -130, -95, -61, -45, -31, -29, -20, -10, -1, 1, 5, 14, 16, 60, 600,
+        ] {
+            for len in [20, 90] {
+                for (status, notified) in [
+                    ("confirmed", false),
+                    ("confirmed", true),
+                    ("seated", false),
+                    ("cancelled", false),
+                ] {
+                    sqlx::query(
+                        "INSERT INTO bookings (org_id, branch_id, party_size, starts_at, ends_at, \
+                             guest_name, guest_phone, status, arriving_notified_at, created_at) \
+                         VALUES ($1, $2, 2, now() + make_interval(secs => $3), \
+                                 now() + make_interval(secs => $3 + $4), 'G', '2010', \
+                                 $5::booking_status, CASE WHEN $6 THEN now() END, \
+                                 now() - interval '1 day')",
+                    )
+                    .bind(org)
+                    .bind(branch)
+                    .bind(f64::from(start * 60 + 17))
+                    .bind(f64::from(len * 60))
+                    .bind(status)
+                    .bind(notified)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                    n += 1;
+                }
+            }
+        }
+    }
+    type Row = (Uuid, String, bool, bool, bool);
+    let snapshot = "SELECT id, status::text, arriving_notified_at IS NOT NULL, \
+                           no_show_at IS NOT NULL, completed_at IS NOT NULL \
+                      FROM bookings ORDER BY id";
+
+    // The previous statements, in the sweep's order (reminders and voided
+    // tickets are unchanged and touch nothing the others read).
+    let mut tx = pool.begin().await.unwrap();
+    for old in [
+        "UPDATE bookings b SET arriving_notified_at = now(), updated_at = now() \
+         FROM (SELECT b2.id, COALESCE(s.hold_minutes, 15) AS hold \
+               FROM bookings b2 LEFT JOIN branch_booking_settings s ON s.branch_id = b2.branch_id) h \
+         WHERE h.id = b.id AND b.status = 'confirmed' AND b.arriving_notified_at IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
+                            WHERE fb.id = b.branch_id AND fo.plan = 'free') \
+           AND b.starts_at - make_interval(mins => h.hold) <= now() \
+           AND b.starts_at + interval '30 minutes' > now()",
+        "UPDATE bookings b SET status = 'no_show', no_show_at = now(), updated_at = now() \
+         FROM (SELECT b2.id, s.auto_no_show_minutes AS grace \
+               FROM bookings b2 LEFT JOIN branch_booking_settings s ON s.branch_id = b2.branch_id) h \
+         WHERE h.id = b.id AND b.status = 'confirmed' \
+           AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
+                            WHERE fb.id = b.branch_id AND fo.plan = 'free') \
+           AND ((h.grace IS NOT NULL AND b.starts_at + make_interval(mins => h.grace) < now()) \
+                OR (h.grace IS NULL AND b.ends_at < now()))",
+        "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() \
+         WHERE b.status = 'seated' AND b.ends_at + interval '60 minutes' < now() \
+           AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
+                            WHERE fb.id = b.branch_id AND fo.plan = 'free') \
+           AND NOT EXISTS (SELECT 1 FROM open_tickets ot \
+                           WHERE ot.booking_id = b.id AND ot.status = 'open') \
+           AND (NOT EXISTS (SELECT 1 FROM open_tickets ot WHERE ot.booking_id = b.id) \
+                OR EXISTS (SELECT 1 FROM open_tickets ot \
+                           WHERE ot.booking_id = b.id AND ot.status = 'settled'))",
+    ] {
+        sqlx::query(old).execute(&mut *tx).await.unwrap();
+    }
+    let expected: Vec<Row> = sqlx::query_as(snapshot).fetch_all(&mut *tx).await.unwrap();
+    tx.rollback().await.unwrap();
+
+    madar_rust::bookings::jobs::run_tick(&pool, &BranchEventHub::new())
+        .await
+        .unwrap();
+    let got: Vec<Row> = sqlx::query_as(snapshot).fetch_all(&pool).await.unwrap();
+    assert_eq!(got.len(), n);
+    let moved = |rows: &[Row]| {
+        (
+            rows.iter().filter(|r| r.2).count(),
+            rows.iter().filter(|r| r.1 == "no_show").count(),
+            rows.iter().filter(|r| r.1 == "completed").count(),
+        )
+    };
+    let (arriving, no_show, completed) = moved(&got);
+    assert!(
+        arriving > 0 && no_show > 0 && completed > 0,
+        "{:?}",
+        moved(&got)
+    );
+    assert_eq!(got, expected, "the same bookings moved, the same way");
+}

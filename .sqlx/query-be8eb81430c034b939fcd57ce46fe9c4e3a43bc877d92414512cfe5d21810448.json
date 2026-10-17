@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE recipe_step_presets SET animation_group_id = $1, updated_at = now() WHERE slug = $2 AND animation_group_id IS DISTINCT FROM $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "be8eb81430c034b939fcd57ce46fe9c4e3a43bc877d92414512cfe5d21810448"
+}

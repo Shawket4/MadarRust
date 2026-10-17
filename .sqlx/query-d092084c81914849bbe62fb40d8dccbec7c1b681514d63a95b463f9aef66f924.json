@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings b SET arriving_notified_at = now(), updated_at = now() WHERE b.status = 'confirmed' AND b.arriving_notified_at IS NULL AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id WHERE fb.id = b.branch_id AND fo.plan = 'free') AND b.starts_at + interval '30 minutes' > now() AND b.starts_at - make_interval(mins => COALESCE( (SELECT s.hold_minutes FROM branch_booking_settings s WHERE s.branch_id = b.branch_id), 15)) <= now() RETURNING b.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d092084c81914849bbe62fb40d8dccbec7c1b681514d63a95b463f9aef66f924"
+}

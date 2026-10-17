@@ -177,10 +177,9 @@ pub async fn list_shifts(
         ..Default::default()
     };
     let p = h::list_tills_core(&req, pool.get_ref(), &claims, *branch_id, &query).await?;
-    let mut data = Vec::with_capacity(p.data.len());
-    for t in p.data {
-        data.push(legacy_shift(pool.get_ref(), t, LegacyJoins::TillAndBranch).await?);
-    }
+    // Old tills send no `page`/`per_page` and get every till: that default
+    // stays (a page size would silently shorten their past-shifts list).
+    let data = super::legacy::legacy_branch_shifts(pool.get_ref(), p.data).await;
     Ok(HttpResponse::Ok().json(PaginatedShifts {
         data,
         total: p.total,

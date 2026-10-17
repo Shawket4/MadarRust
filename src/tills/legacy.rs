@@ -121,6 +121,32 @@ pub async fn legacy_till_entity_id(pool: &sqlx::PgPool, branch_id: Uuid) -> Uuid
     .unwrap_or_else(|| synthesized_till_id(branch_id))
 }
 
+/// [`legacy_till_entity_id`] for many branches in one statement: the same rule
+/// per branch (oldest live default entity, else the synthesized id). A lookup
+/// error falls back to the synthesized ids, as the single lookup does.
+pub async fn legacy_till_entity_ids(
+    pool: &sqlx::PgPool,
+    branch_ids: &[Uuid],
+) -> std::collections::HashMap<Uuid, Uuid> {
+    let found = sqlx::query!(
+        "SELECT DISTINCT ON (e.branch_id) e.branch_id AS \"branch_id!\", e.id FROM archive.till_entities e \
+          WHERE e.branch_id = ANY($1) AND e.is_default AND e.deleted_at IS NULL \
+          ORDER BY e.branch_id, e.created_at",
+        branch_ids,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|r| (r.branch_id, r.id));
+    let mut out: std::collections::HashMap<Uuid, Uuid> = branch_ids
+        .iter()
+        .map(|b| (*b, synthesized_till_id(*b)))
+        .collect();
+    out.extend(found);
+    out
+}
+
 /// Which joins the pre-rename query behind a response made. The old backend
 /// built single-shift reads with the drawer join but no branch join
 /// (`branch_name: null`), the branch list with both, and the close /
@@ -157,6 +183,30 @@ pub async fn legacy_shift(
         till_id: Some(till_id),
         till_name: Some("Till 1".into()),
     })
+}
+
+/// The branch list's legacy `Shift`s (`LegacyJoins::TillAndBranch`), resolving
+/// the drawer entity once per distinct branch instead of once per till. Same
+/// rows, same order, same bytes as mapping [`legacy_shift`] over the list.
+pub async fn legacy_branch_shifts(pool: &sqlx::PgPool, tills: Vec<Till>) -> Vec<Shift> {
+    let mut branches: Vec<Uuid> = tills.iter().map(|t| t.branch_id).collect();
+    branches.sort_unstable();
+    branches.dedup();
+    let ids = legacy_till_entity_ids(pool, &branches).await;
+    tills
+        .into_iter()
+        .map(|till| {
+            let till_id = ids
+                .get(&till.branch_id)
+                .copied()
+                .unwrap_or_else(|| synthesized_till_id(till.branch_id));
+            Shift {
+                till,
+                till_id: Some(till_id),
+                till_name: Some("Till 1".into()),
+            }
+        })
+        .collect()
 }
 
 /// `uuid v5(NAMESPACE_OID, "madar-legacy-till:"+branch_id)`.

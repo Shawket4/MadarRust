@@ -1,0 +1,150 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT k.ord AS \"ord!\", a.org_id, a.employee_id, a.branch_id, a.work_shift_id, a.business_date,\n                a.status, a.covered_employee_id IS NOT NULL AS \"is_cover!\", a.cover_status,\n                a.late_minutes, COALESCE(a.worked_minutes, 0) AS \"worked_minutes!\",\n                COALESCE(a.overtime_minutes, 0) AS \"overtime_minutes!\", a.overtime_status,\n                COALESCE(dawam_night_minutes(a.scheduled_end_at, a.check_out_at, br.timezone::text, k.night_start, k.night_end), 0)::bigint\n                    AS \"night_overtime_minutes!\",\n                EXISTS (SELECT 1 FROM staff_holidays h WHERE h.org_id = a.org_id\n                         AND h.on_date = a.business_date AND h.decision = 'holiday') AS \"holiday!\",\n                a.scheduled_start_at, a.scheduled_end_at, a.check_in_at, a.check_out_at,\n                COALESCE((SELECT h.base_salary_piastres FROM employee_salary_history h\n                           WHERE h.employee_id = a.employee_id AND h.effective_from <= a.business_date\n                           ORDER BY h.effective_from DESC LIMIT 1), p.base_salary_piastres)\n                    AS base_salary_piastres,\n                ws.ot_day_multiplier AS \"shift_ot_day: rust_decimal::Decimal\", ws.ot_night_multiplier AS \"shift_ot_night: rust_decimal::Decimal\"\n           FROM unnest($1::uuid[], $2::time[], $3::time[]) WITH ORDINALITY\n                    AS k(record_id, night_start, night_end, ord)\n           JOIN attendance_records a ON a.id = k.record_id\n           JOIN branches br ON br.id = a.branch_id\n           LEFT JOIN employees p ON p.id = a.employee_id\n           LEFT JOIN work_shifts ws ON ws.id = a.work_shift_id\n          ORDER BY k.ord",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ord!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "org_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "employee_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "work_shift_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "business_date",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_cover!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "cover_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "late_minutes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "worked_minutes!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "overtime_minutes!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "overtime_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "night_overtime_minutes!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 14,
+        "name": "holiday!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 15,
+        "name": "scheduled_start_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "scheduled_end_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "check_in_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "check_out_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "base_salary_piastres",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 20,
+        "name": "shift_ot_day: rust_decimal::Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 21,
+        "name": "shift_ot_night: rust_decimal::Decimal",
+        "type_info": "Numeric"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TimeArray",
+        "TimeArray"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null,
+      true,
+      false,
+      null,
+      null,
+      true,
+      null,
+      null,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "e6b13089a19b0b1d85d3be5e9812957db6b1b3c201cb20f37d1fc8841ea7e37d"
+}

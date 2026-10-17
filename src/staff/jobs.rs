@@ -184,24 +184,26 @@ pub async fn tracking_went_quiet(pool: &PgPool) -> Result<(), AppError> {
 /// dashboard read the same row.
 #[doc(hidden)]
 pub async fn open_pay_periods(pool: &PgPool) -> Result<(), AppError> {
-    let orgs: Vec<(Uuid, i32, Option<String>)> = sqlx::query_as(&format!(
-        "SELECT o.id, COALESCE(s.period_start_day, 26),                 (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL                   ORDER BY b.created_at LIMIT 1)            FROM organizations o            LEFT JOIN attendance_settings s ON s.org_id = o.id AND s.branch_id IS NULL           WHERE {LIVE_ORG}"
+    let orgs: Vec<(Uuid, i32, NaiveDate)> = sqlx::query_as(&format!(
+        "SELECT o.id, COALESCE(s.period_start_day, 26), \
+                (now() AT TIME ZONE COALESCE( \
+                    (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id AND b.deleted_at IS NULL \
+                      ORDER BY b.created_at LIMIT 1), 'Africa/Cairo'))::date \
+           FROM organizations o \
+           LEFT JOIN attendance_settings s ON s.org_id = o.id AND s.branch_id IS NULL \
+          WHERE {LIVE_ORG}"
     ))
     .fetch_all(pool)
     .await?;
-    for (org_id, start_day, tz) in orgs {
-        let opened = async {
-            let today =
-                crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo"))
-                    .await?;
-            crate::staff::dawam::pay::ensure_period_for(
-                pool,
-                org_id,
-                today,
-                start_day.max(1) as u32,
-            )
-            .await
-        };
+    // Each org's "today" (in its first branch's zone) comes with the org
+    // list, not one statement per org.
+    for (org_id, start_day, today) in orgs {
+        let opened = crate::staff::dawam::pay::ensure_period_for(
+            pool,
+            org_id,
+            today,
+            start_day.max(1) as u32,
+        );
         if let Err(e) = opened.await {
             skipped("open_pay_periods", org_id, None, &e);
         }
@@ -218,18 +220,16 @@ const HOLIDAY_REMINDER_DAYS: i64 = 7;
 /// ticks run inside the week.
 #[doc(hidden)]
 pub async fn remind_holidays(pool: &PgPool) -> Result<(), AppError> {
-    let orgs: Vec<(Uuid, Option<String>)> = sqlx::query_as(&format!(
-        "SELECT o.id, (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id \
-                         AND b.deleted_at IS NULL ORDER BY b.created_at LIMIT 1) \
+    let orgs: Vec<(Uuid, NaiveDate)> = sqlx::query_as(&format!(
+        "SELECT o.id, (now() AT TIME ZONE COALESCE( \
+                (SELECT b.timezone::text FROM branches b WHERE b.org_id = o.id \
+                   AND b.deleted_at IS NULL ORDER BY b.created_at LIMIT 1), 'Africa/Cairo'))::date \
            FROM organizations o WHERE {LIVE_ORG}"
     ))
     .fetch_all(pool)
     .await?;
-    for (org_id, tz) in orgs {
+    for (org_id, today) in orgs {
         let told = async {
-            let today =
-                crate::staff::attendance::today_in(pool, tz.as_deref().unwrap_or("Africa/Cairo"))
-                    .await?;
             let due: Vec<_> = crate::staff::dawam::holidays::holidays_in(
                 pool,
                 org_id,
@@ -600,37 +600,70 @@ pub async fn mark_absences(pool: &PgPool) -> Result<(), AppError> {
         (Uuid, Uuid),
         crate::staff::attendance::AttendanceSettings,
     > = std::collections::HashMap::new();
-    for row in missing {
-        let off = async {
-            let key = (row.org_id, row.branch_id);
-            if let std::collections::hash_map::Entry::Vacant(e) = rules.entry(key) {
-                let s = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
-                e.insert(s);
+    let mut ready: Vec<&Missing> = Vec::with_capacity(missing.len());
+    for row in &missing {
+        let key = (row.org_id, row.branch_id);
+        if let std::collections::hash_map::Entry::Vacant(slot) = rules.entry(key) {
+            match load_settings(pool, row.org_id, Some(row.branch_id)).await {
+                Ok(s) => {
+                    slot.insert(s);
+                }
+                Err(e) => {
+                    skipped("mark_absences", row.org_id, Some(row.employee_id), &e);
+                    continue;
+                }
             }
-            let adjustments = crate::staff::attendance::adjustments_for(
+        }
+        ready.push(row);
+    }
+    let on_leave_of = |row: &Missing, adjustments: crate::staff::attendance::DayAdjustments| {
+        adjustments
+            .for_shift(
+                Some(row.scheduled_start_at),
+                Some(row.scheduled_end_at),
+                Some(row.work_shift_id),
+            )
+            .on_leave
+    };
+    // Every day's approved requests in one pass; if that fails, each day is
+    // resolved alone so only the bad one is skipped.
+    let keys: Vec<crate::staff::requests::AdjustmentsKey<'_>> = ready
+        .iter()
+        .map(|row| crate::staff::requests::AdjustmentsKey {
+            employee_id: row.employee_id,
+            business_date: row.business_date,
+            timezone: &row.tz,
+            settings: &rules[&(row.org_id, row.branch_id)],
+        })
+        .collect();
+    let batched: Option<Vec<bool>> = crate::staff::requests::day_adjustments_many(pool, &keys)
+        .await
+        .ok()
+        .map(|all| {
+            ready
+                .iter()
+                .zip(all)
+                .map(|(r, a)| on_leave_of(r, a))
+                .collect()
+        });
+    for (i, row) in ready.iter().enumerate() {
+        let on_leave = match &batched {
+            Some(all) => all[i],
+            None => match crate::staff::attendance::adjustments_for(
                 pool,
-                &rules[&key],
+                &rules[&(row.org_id, row.branch_id)],
                 row.employee_id,
                 row.business_date,
                 &row.tz,
             )
-            .await?;
-            Ok::<bool, AppError>(
-                adjustments
-                    .for_shift(
-                        Some(row.scheduled_start_at),
-                        Some(row.scheduled_end_at),
-                        Some(row.work_shift_id),
-                    )
-                    .on_leave,
-            )
-        };
-        let on_leave = match off.await {
-            Ok(v) => v,
-            Err(e) => {
-                skipped("mark_absences", row.org_id, Some(row.employee_id), &e);
-                continue;
-            }
+            .await
+            {
+                Ok(a) => on_leave_of(row, a),
+                Err(e) => {
+                    skipped("mark_absences", row.org_id, Some(row.employee_id), &e);
+                    continue;
+                }
+            },
         };
         if let Err(e) = sqlx::query(
             "INSERT INTO attendance_records \
@@ -705,12 +738,41 @@ async fn apply_pending_penalties(pool: &PgPool) -> Result<(), AppError> {
     .fetch_all(pool)
     .await?;
 
-    for row in rows {
-        let priced = async {
-            let settings = load_settings(pool, row.org_id, Some(row.branch_id)).await?;
-            penalties::recompute_record(pool, row.id, &settings).await
-        };
-        if let Err(e) = priced.await {
+    // A branch's rules are read once however many of its days are pending,
+    // and the whole batch is priced in a handful of statements.
+    let mut rules: std::collections::HashMap<
+        (Uuid, Uuid),
+        crate::staff::attendance::AttendanceSettings,
+    > = std::collections::HashMap::new();
+    let mut batch: Vec<&Pending> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let key = (row.org_id, row.branch_id);
+        if let std::collections::hash_map::Entry::Vacant(slot) = rules.entry(key) {
+            match load_settings(pool, row.org_id, Some(row.branch_id)).await {
+                Ok(s) => {
+                    slot.insert(s);
+                }
+                Err(e) => {
+                    skipped("apply_pending_penalties", row.org_id, Some(row.id), &e);
+                    continue;
+                }
+            }
+        }
+        batch.push(row);
+    }
+    let priced: Vec<(Uuid, &crate::staff::attendance::AttendanceSettings)> = batch
+        .iter()
+        .map(|r| (r.id, &rules[&(r.org_id, r.branch_id)]))
+        .collect();
+    if penalties::recompute_records(pool, &priced).await.is_ok() {
+        return Ok(());
+    }
+    // Something in the batch failed: price each day alone, so the one bad
+    // record is reported and skipped while everyone else's day is priced
+    // (E2E B-TEAM-4). Recomputing is idempotent, so a half-written batch is
+    // simply written again.
+    for (row, (id, settings)) in batch.iter().zip(&priced) {
+        if let Err(e) = penalties::recompute_record(pool, *id, settings).await {
             skipped("apply_pending_penalties", row.org_id, Some(row.id), &e);
         }
     }

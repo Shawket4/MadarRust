@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookings b SET status = 'no_show', no_show_at = now(), updated_at = now() WHERE b.status = 'confirmed' AND b.starts_at < now() AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id WHERE fb.id = b.branch_id AND fo.plan = 'free') AND COALESCE(b.starts_at + make_interval(mins => (SELECT s.auto_no_show_minutes FROM branch_booking_settings s WHERE s.branch_id = b.branch_id)), b.ends_at) < now() RETURNING b.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fab5043723612d8a14cd0ca2994f2eea359b96b547e7ef7f85626314a7a4dca9"
+}

@@ -1,0 +1,84 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT k.ord AS \"ord!\", r.kind, r.is_half_day, r.leave_half, r.work_shift_id,\n               COALESCE(r.is_paid, lt.is_paid) AS is_paid,\n               COALESCE(r.kind = 'excuse' AND r.end_date = r.on_date + 1, false) AS \"crosses!\",\n               (k.d + r.from_time) AT TIME ZONE k.tz     AS from0,\n               (k.d + 1 + r.from_time) AT TIME ZONE k.tz AS from1,\n               (k.d + r.to_time) AT TIME ZONE k.tz       AS to0,\n               (k.d + 1 + r.to_time) AT TIME ZONE k.tz   AS to1\n          FROM unnest($1::uuid[], $2::date[], $3::text[]) WITH ORDINALITY AS k(emp, d, tz, ord)\n          JOIN staff_requests r ON r.employee_id = k.emp\n          LEFT JOIN leave_types lt ON lt.id = r.leave_type_id\n         WHERE r.status = 'approved'\n           -- Corrections are excluded on purpose: they REWRITE the punch on\n           -- approval rather than forgive a window. Letting one through here\n           -- would forgive the very lateness it just recorded.\n           AND r.kind <> 'correction'\n           AND ((r.kind IN ('leave', 'mission')\n                 AND r.on_date <= k.d AND COALESCE(r.end_date, r.on_date) >= k.d)\n                OR (r.kind NOT IN ('leave', 'mission') AND r.on_date = k.d))\n         ORDER BY k.ord\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ord!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "is_half_day",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "leave_half",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "work_shift_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_paid",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "crosses!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "from0",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "from1",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "to0",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "to1",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "DateArray",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      false,
+      true,
+      true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "493bef5cb1891a5369394e66be379f5a916ef29a76d51810898c0bede9c13dd2"
+}

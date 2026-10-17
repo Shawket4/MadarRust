@@ -5104,3 +5104,173 @@ async fn payroll_conflicts_carry_codes_without_a_prefix(pool: PgPool) {
     assert_eq!(resp.status(), 200);
     refused(status("draft").await, "PAYROLL_PAID_NO_REOPEN").await;
 }
+
+/// Query survey #11: the attendance sweep prices its pending days as ONE
+/// batch (`penalties::recompute_records`). Every day must end up exactly as
+/// pricing it alone leaves it — branch rules, approved requests, pings, a
+/// waiver, a stale machine row, an approved month and a vanished record
+/// included — and the counts must agree.
+#[sqlx::test]
+async fn the_sweeps_batch_prices_every_day_exactly_as_pricing_each_alone(pool: PgPool) {
+    use madar_rust::staff::penalties::{recompute_record, recompute_records};
+    let f = seed(&pool).await;
+    // Branch B prices lateness its own way (RU-2).
+    sqlx::query(
+        "INSERT INTO attendance_settings (org_id, branch_id, rules_saved_at, working_days_per_month, \
+             late_deduction_tiers) VALUES ($1, $2, now(), 30, \
+             '[{\"from_minutes\":1,\"to_minutes\":30,\"kind\":\"minutes\",\"value\":30}]'::jsonb)",
+    )
+    .bind(f.org)
+    .bind(f.b)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // An approved month before this one.
+    let closed_day = f.start - Duration::days(10);
+    sqlx::query(
+        "INSERT INTO payroll_periods (org_id, name, start_date, end_date, status) \
+         VALUES ($1, 'Last month', $2, $3, 'generated')",
+    )
+    .bind(f.org)
+    .bind(f.start - Duration::days(20))
+    .bind(f.start - Duration::days(1))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let d = |n: i64| f.start + Duration::days(n);
+    let late_b = day(&pool, &f, f.bassem, f.b, d(0), "late", 9, 360, 10, 0).await;
+    let absent_a = day(&pool, &f, f.amal, f.a, d(0), "absent", 9, 480, 0, 0).await;
+    let late_a = day(&pool, &f, f.amal, f.a, d(1), "late", 9, 480, 20, 0).await;
+    let waived = day(&pool, &f, f.bassem, f.b, d(1), "late", 9, 480, 40, 0).await;
+    let stale = day(&pool, &f, f.amal, f.a, d(2), "present", 9, 480, 0, 0).await;
+    let on_leave = day(&pool, &f, f.bassem, f.b, d(2), "absent", 9, 480, 0, 0).await;
+    let excused = day(&pool, &f, f.amal, f.a, d(3), "late", 9, 480, 5, 0).await;
+    let closed = day(&pool, &f, f.amal, f.a, closed_day, "late", 9, 480, 40, 0).await;
+    let gone = Uuid::new_v4();
+    // Bassem's approved full-day leave on d(2); Amal's approved unpaid
+    // excuse 12:00–13:00 on d(3), spent outside the fence per her pings.
+    sqlx::query(
+        "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, end_date, status, is_paid, decided_at) \
+         VALUES ($1, $2, 'leave', $3, $3, 'approved', false, now())",
+    )
+    .bind(f.org)
+    .bind(f.bassem)
+    .bind(d(2))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO staff_requests (org_id, employee_id, kind, on_date, from_time, to_time, status, is_paid, decided_at) \
+         VALUES ($1, $2, 'excuse', $3, '12:00', '13:00', 'approved', false, now())",
+    )
+    .bind(f.org)
+    .bind(f.amal)
+    .bind(d(3))
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (hour, inside) in [(11, true), (12, false), (13, true)] {
+        sqlx::query(
+            "INSERT INTO attendance_pings (org_id, employee_id, attendance_record_id, at, inside) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(f.org)
+        .bind(f.amal)
+        .bind(excused)
+        .bind(d(3).and_hms_opt(hour, 0, 0).unwrap().and_utc())
+        .bind(inside)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // The rows each run starts from: a waived penalty (a decision: kept), a
+    // machine row the day no longer owes (retired) and the approved month's
+    // frozen row (left alone).
+    let reset = || async {
+        sqlx::query("DELETE FROM payroll_deductions WHERE org_id = $1")
+            .bind(f.org)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (rec, emp, date, amount, waived_at) in [
+            (waived, f.bassem, d(1), 999_i64, true),
+            (stale, f.amal, d(2), 777, false),
+            (closed, f.amal, closed_day, 1, false),
+        ] {
+            sqlx::query(
+                "INSERT INTO payroll_deductions (org_id, employee_id, amount_piastres, \
+                     original_amount_piastres, reason, effective_date, source, attendance_record_id, \
+                     waived_at, waive_reason) \
+                 VALUES ($1, $2, $3, $3, 'prior', $4, 'late_penalty', $5, \
+                         CASE WHEN $6 THEN now() END, CASE WHEN $6 THEN 'Bus strike' END)",
+            )
+            .bind(f.org)
+            .bind(emp)
+            .bind(amount)
+            .bind(date)
+            .bind(rec)
+            .bind(waived_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    type Row = (Uuid, String, Option<i64>, String, Option<String>, Option<Value>, bool);
+    let snapshot = || async {
+        sqlx::query_as::<_, Row>(
+            "SELECT attendance_record_id, source, amount_piastres, reason, reason_code, \
+                    reason_vars, waived_at IS NOT NULL \
+               FROM payroll_deductions WHERE org_id = $1 \
+              ORDER BY attendance_record_id, source",
+        )
+        .bind(f.org)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+
+    // The sweep hands every record the BUSINESS rules; each is priced under
+    // its own branch's.
+    let rules = madar_rust::staff::attendance::load_settings(&pool, f.org, None)
+        .await
+        .unwrap();
+    let ids = [
+        late_b, absent_a, late_a, waived, stale, on_leave, excused, closed, gone,
+    ];
+
+    reset().await;
+    let batch: Vec<_> = ids.iter().map(|id| (*id, &rules)).collect();
+    let batch_written = recompute_records(&pool, &batch).await.unwrap();
+    let batched = snapshot().await;
+
+    reset().await;
+    let mut alone_written = 0;
+    for id in ids {
+        alone_written += recompute_record(&pool, id, &rules).await.unwrap();
+    }
+    let alone = snapshot().await;
+
+    assert_eq!(batched, alone, "the batch prices every day as pricing it alone");
+    assert_eq!(batch_written, alone_written);
+
+    // And it is the real thing, not two empty runs agreeing.
+    let of = |rec: Uuid| -> Vec<(String, Option<i64>, bool)> {
+        batched
+            .iter()
+            .filter(|r| r.0 == rec)
+            .map(|r| (r.1.clone(), r.2, r.6))
+            .collect()
+    };
+    assert_eq!(of(late_b), vec![("late_penalty".into(), Some(1_389), false)]);
+    assert_eq!(of(absent_a), vec![("absence".into(), Some(23_077), false)]);
+    assert_eq!(of(waived), vec![("late_penalty".into(), Some(999), true)], "the waiver holds");
+    assert!(of(stale).is_empty(), "a row the day no longer owes is retired");
+    assert_eq!(of(closed), vec![("late_penalty".into(), Some(1), false)], "an approved month is frozen");
+    assert!(
+        of(excused).iter().any(|r| r.0 == "excused_unpaid" && r.1 > Some(0)),
+        "the unpaid excuse is priced from the pings: {:?}",
+        of(excused)
+    );
+}

@@ -86,7 +86,6 @@ pub fn spawn(pool: PgPool) {
 }
 
 /// One member who has been away long enough, and which nudge they are due.
-#[derive(sqlx::FromRow)]
 struct Lapsed {
     id: Uuid,
     org_id: Uuid,
@@ -101,6 +100,30 @@ struct Lapsed {
 
 #[doc(hidden)]
 pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
+    for m in due(pool).await? {
+        if let Err(e) = nudge(pool, &m).await {
+            // One member's failure is not the sweep's. The next tick retries
+            // them, because the row is only kept on a claim that succeeded.
+            tracing::warn!(customer_id = %m.id, error = %e, "loyalty: win-back failed");
+        }
+    }
+    Ok(())
+}
+
+/// Who this tick would nudge, as `(member, since, seq)`, in the order it
+/// would. The tests pin the selection with it.
+#[doc(hidden)]
+pub async fn due_members(
+    pool: &PgPool,
+) -> Result<Vec<(Uuid, chrono::DateTime<chrono::Utc>, i16)>, AppError> {
+    Ok(due(pool)
+        .await?
+        .into_iter()
+        .map(|m| (m.id, m.since, m.seq))
+        .collect())
+}
+
+async fn due(pool: &PgPool) -> Result<Vec<Lapsed>, AppError> {
     let after = days("LOYALTY_WINBACK_AFTER_DAYS", DEFAULT_AFTER_DAYS);
     let second = days(
         "LOYALTY_WINBACK_SECOND_AFTER_DAYS",
@@ -115,54 +138,53 @@ pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     // A member with no visit at all has not been missed — they were never had.
     // Someone who signed up and never came back is a different message from
     // this one, and sending them this one would be a lie.
-    let due: Vec<Lapsed> = sqlx::query_as(
-        "WITH seen AS ( \
-             SELECT c.id, c.org_id, c.name, c.locale, c.member_token, \
-                    GREATEST( \
-                      (SELECT max(t.created_at) FROM loyalty_transactions t \
-                        WHERE t.customer_id = c.id), \
-                      (SELECT max(o.created_at) FROM orders o \
-                        WHERE o.loyalty_customer_id = c.id) \
-                    ) AS since \
-               FROM loyalty_members_v c \
-               JOIN loyalty_settings s \
-                 ON s.org_id = c.org_id AND s.branch_id IS NULL \
-              WHERE s.enabled AND s.winback_enabled \
-                AND NOT EXISTS (SELECT 1 FROM organizations fo \
-                                 WHERE fo.id = c.org_id AND fo.plan = 'free') \
-                AND NOT c.marketing_opt_out \
-                AND c.deleted_at IS NULL), \
-         ranked AS ( \
-             SELECT seen.*, \
-                    CASE WHEN now() - since >= make_interval(days => $2::int) \
-                         THEN 2 ELSE 1 END::smallint AS seq, \
-                    row_number() OVER (PARTITION BY org_id ORDER BY since) AS rn \
-               FROM seen \
-              WHERE since IS NOT NULL \
-                AND now() - since >= make_interval(days => $1::int) \
-                AND now() - since <= make_interval(days => $3::int)) \
-         SELECT id, org_id, name, locale, member_token, since, seq \
-           FROM ranked r \
-          WHERE rn <= $4 \
-            AND NOT EXISTS ( \
-                SELECT 1 FROM loyalty_winbacks w \
-                 WHERE w.customer_id = r.id AND w.since = r.since AND w.seq = r.seq)",
+    //
+    // `seen` is MATERIALIZED: each member's last visit (two index lookups) is
+    // computed once per tick. Inlined, the planner re-evaluated `since` in up
+    // to four places per member (each `now() - since` test, the window's sort
+    // key and the output). Same members, same `since`, same `seq`.
+    let due: Vec<Lapsed> = sqlx::query_as!(
+        Lapsed,
+        r#"WITH seen AS MATERIALIZED (
+             SELECT c.id, c.org_id, c.name, c.locale, c.member_token,
+                    GREATEST(
+                      (SELECT max(t.created_at) FROM loyalty_transactions t
+                        WHERE t.customer_id = c.id),
+                      (SELECT max(o.created_at) FROM orders o
+                        WHERE o.loyalty_customer_id = c.id)
+                    ) AS since
+               FROM loyalty_members_v c
+               JOIN loyalty_settings s
+                 ON s.org_id = c.org_id AND s.branch_id IS NULL
+              WHERE s.enabled AND s.winback_enabled
+                AND NOT EXISTS (SELECT 1 FROM organizations fo
+                                 WHERE fo.id = c.org_id AND fo.plan = 'free')
+                AND NOT c.marketing_opt_out
+                AND c.deleted_at IS NULL),
+         ranked AS (
+             SELECT seen.*,
+                    CASE WHEN now() - since >= make_interval(days => $2::int)
+                         THEN 2 ELSE 1 END::smallint AS seq,
+                    row_number() OVER (PARTITION BY org_id ORDER BY since) AS rn
+               FROM seen
+              WHERE since IS NOT NULL
+                AND now() - since >= make_interval(days => $1::int)
+                AND now() - since <= make_interval(days => $3::int))
+         SELECT id AS "id!", org_id AS "org_id!", name AS "name!", locale AS "locale!",
+                member_token AS "member_token!", since AS "since!", seq AS "seq!"
+           FROM ranked r
+          WHERE rn <= $4
+            AND NOT EXISTS (
+                SELECT 1 FROM loyalty_winbacks w
+                 WHERE w.customer_id = r.id AND w.since = r.since AND w.seq = r.seq)"#,
+        after as i32,
+        second as i32,
+        max as i32,
+        cap,
     )
-    .bind(after as i32)
-    .bind(second as i32)
-    .bind(max as i32)
-    .bind(cap)
     .fetch_all(pool)
     .await?;
-
-    for m in due {
-        if let Err(e) = nudge(pool, &m).await {
-            // One member's failure is not the sweep's. The next tick retries
-            // them, because the row is only kept on a claim that succeeded.
-            tracing::warn!(customer_id = %m.id, error = %e, "loyalty: win-back failed");
-        }
-    }
-    Ok(())
+    Ok(due)
 }
 
 async fn nudge(pool: &PgPool, m: &Lapsed) -> Result<(), AppError> {
