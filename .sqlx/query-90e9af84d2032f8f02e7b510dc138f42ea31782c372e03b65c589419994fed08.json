@@ -1,0 +1,147 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH s AS MATERIALIZED (\n            SELECT s.id, s.branch_id, s.teller_id, s.opened_at, s.status::text AS status,\n                   s.opening_cash, s.closing_cash_declared, s.closing_cash_system,\n                   s.cash_discrepancy, s.closed_at,\n                   b.name AS branch_name, b.code AS branch_code, u.name AS teller_name,\n                   -- effective_timezone(s.branch_id), inlined\n                   CASE WHEN tzo.id IS NOT NULL\n                        THEN COALESCE(b.timezone::text, tzo.timezone::text, 'Africa/Cairo') END AS tz\n              FROM tills s\n              JOIN users u ON u.id = s.teller_id\n              JOIN branches b ON b.id = s.branch_id\n              LEFT JOIN organizations tzo ON tzo.id = b.org_id\n             WHERE s.branch_id = ANY($1) AND s.deleted_at IS NULL\n               AND ($2::timestamptz IS NULL OR s.opened_at >= $2)\n               AND ($3::timestamptz IS NULL OR s.opened_at <= $3)\n               AND (s.branch_id = ANY($4) OR s.teller_id = $5)\n             ORDER BY s.opened_at DESC, s.id\n             LIMIT $6\n        ),\n        ord AS MATERIALIZED (\n            SELECT o.till_id,\n                   SUM(pc.cash) FILTER (WHERE o.status::text <> 'voided') AS cash_payments,\n                   SUM(o.tip_amount) FILTER (\n                       WHERE COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true\n                         AND o.status::text <> 'voided') AS cash_tips,\n                   COUNT(*) FILTER (WHERE o.status::text NOT IN ('voided', 'refunded')) AS orders_count,\n                   SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))\n                       FILTER (WHERE o.status::text NOT IN ('voided', 'refunded')) AS net_sales\n              FROM orders o\n              LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id\n              LEFT JOIN LATERAL (\n                  SELECT SUM(op.amount) AS cash FROM order_payments op\n                   WHERE op.order_id = o.id AND COALESCE(op.is_cash, op.method = 'cash') = true\n              ) pc ON TRUE\n             WHERE o.till_id = ANY(ARRAY(SELECT id FROM s))\n             GROUP BY o.till_id\n        ),\n        ref AS MATERIALIZED (\n            SELECT r.till_id, SUM(r.amount) AS cash\n              FROM order_refunds r\n             WHERE r.till_id = ANY(ARRAY(SELECT id FROM s)) AND r.is_cash\n             GROUP BY r.till_id\n        ),\n        mv AS MATERIALIZED (\n            SELECT m.till_id,\n                SUM(m.amount) FILTER (WHERE bucket = 'pay_in')     AS pay_ins,\n               -SUM(m.amount) FILTER (WHERE bucket = 'pay_out')    AS pay_outs,\n               -SUM(m.amount) FILTER (WHERE bucket = 'safe_drop')  AS cash_drops,\n                SUM(m.amount) FILTER (WHERE bucket = 'correction') AS cash_adjustments\n            FROM (\n                SELECT m.till_id, m.amount,\n                       CASE WHEN m.kind = 'correction' AND c.kind IS NOT NULL\n                            THEN c.kind ELSE m.kind END AS bucket\n                FROM till_cash_movements m\n                LEFT JOIN till_cash_movements c ON c.id = m.corrects_id\n               WHERE m.till_id = ANY(ARRAY(SELECT id FROM s))\n            ) m\n            GROUP BY m.till_id\n        )\n        SELECT\n            s.id AS \"till_id!\",\n            (s.opened_at AT TIME ZONE s.tz)::date AS \"business_date!\",\n            s.branch_id AS \"branch_id!\",\n            s.branch_name AS \"branch_name!\",\n            s.branch_code AS \"branch_code!\",\n            s.teller_id AS \"teller_id!\",\n            s.teller_name AS \"teller_name!\",\n            s.opened_at AS \"opened_at!\",\n            s.status AS \"status!\",\n            s.opening_cash::bigint AS \"opening_cash!\",\n            (COALESCE(ord.cash_payments, 0) + COALESCE(ord.cash_tips, 0) - COALESCE(ref.cash, 0))::bigint AS \"net_cash_payment!\",\n            COALESCE(mv.pay_ins, 0)::bigint AS \"pay_ins!\",\n            COALESCE(mv.pay_outs, 0)::bigint AS \"pay_outs!\",\n            COALESCE(mv.cash_drops, 0)::bigint AS \"cash_drops!\",\n            COALESCE(mv.cash_adjustments, 0)::bigint AS \"cash_adjustments!\",\n            s.closing_cash_declared::bigint AS \"closing_cash_declared?\",\n            s.closing_cash_system::bigint AS \"closing_cash_system?\",\n            s.cash_discrepancy::bigint AS \"cash_discrepancy?\",\n            s.closed_at AS \"closed_at?\",\n            COALESCE(ord.orders_count, 0)::bigint AS \"orders_count!\",\n            COALESCE(ord.net_sales, 0)::bigint AS \"net_sales!\"\n        FROM s\n        LEFT JOIN ord ON ord.till_id = s.id\n        LEFT JOIN ref ON ref.till_id = s.id\n        LEFT JOIN mv ON mv.till_id = s.id\n        ORDER BY s.opened_at DESC, s.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "till_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "business_date!",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 2,
+        "name": "branch_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "branch_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "branch_code!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "teller_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "teller_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "opened_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "opening_cash!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "net_cash_payment!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "pay_ins!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "pay_outs!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "cash_drops!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 14,
+        "name": "cash_adjustments!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 15,
+        "name": "closing_cash_declared?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 16,
+        "name": "closing_cash_system?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 17,
+        "name": "cash_discrepancy?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 18,
+        "name": "closed_at?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "orders_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 20,
+        "name": "net_sales!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz",
+        "UuidArray",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "90e9af84d2032f8f02e7b510dc138f42ea31782c372e03b65c589419994fed08"
+}

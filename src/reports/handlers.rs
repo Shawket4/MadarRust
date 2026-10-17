@@ -2691,8 +2691,11 @@ pub async fn branch_till_sessions(
     // one that names nothing (or another correction) stays an adjustment.
     //
     // The page of tills is picked first (`s`); then each figure is ONE grouped
-    // pass over the page's rows (payments, orders, refunds, movements), joined
-    // back by till, instead of five correlated lookups per till.
+    // pass over the page's rows (orders with their cash legs, refunds,
+    // movements; each a materialized aggregate read by an
+    // index on `till_id = ANY(the page)`, which a generic prepared plan keeps,
+    // and is never re-run per till), joined back by till, instead of five
+    // correlated lookups per till.
     // (`o.status::text <> 'voided'` is `crate::orders::TENDERED` and
     // `o.status::text NOT IN ('voided', 'refunded')` is `crate::orders::SOLD`,
     // spelled out for the compile-time check.)
@@ -2703,10 +2706,14 @@ pub async fn branch_till_sessions(
             SELECT s.id, s.branch_id, s.teller_id, s.opened_at, s.status::text AS status,
                    s.opening_cash, s.closing_cash_declared, s.closing_cash_system,
                    s.cash_discrepancy, s.closed_at,
-                   b.name AS branch_name, b.code AS branch_code, u.name AS teller_name
+                   b.name AS branch_name, b.code AS branch_code, u.name AS teller_name,
+                   -- effective_timezone(s.branch_id), inlined
+                   CASE WHEN tzo.id IS NOT NULL
+                        THEN COALESCE(b.timezone::text, tzo.timezone::text, 'Africa/Cairo') END AS tz
               FROM tills s
               JOIN users u ON u.id = s.teller_id
               JOIN branches b ON b.id = s.branch_id
+              LEFT JOIN organizations tzo ON tzo.id = b.org_id
              WHERE s.branch_id = ANY($1) AND s.deleted_at IS NULL
                AND ($2::timestamptz IS NULL OR s.opened_at >= $2)
                AND ($3::timestamptz IS NULL OR s.opened_at <= $3)
@@ -2714,32 +2721,31 @@ pub async fn branch_till_sessions(
              ORDER BY s.opened_at DESC, s.id
              LIMIT $6
         ),
-        pay AS (
-            SELECT o.till_id, SUM(op.amount) AS cash
-              FROM s JOIN orders o ON o.till_id = s.id
-              JOIN order_payments op ON op.order_id = o.id
-             WHERE COALESCE(op.is_cash, op.method = 'cash') = true AND o.status::text <> 'voided'
-             GROUP BY o.till_id
-        ),
-        ord AS (
+        ord AS MATERIALIZED (
             SELECT o.till_id,
+                   SUM(pc.cash) FILTER (WHERE o.status::text <> 'voided') AS cash_payments,
                    SUM(o.tip_amount) FILTER (
                        WHERE COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
                          AND o.status::text <> 'voided') AS cash_tips,
                    COUNT(*) FILTER (WHERE o.status::text NOT IN ('voided', 'refunded')) AS orders_count,
                    SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
                        FILTER (WHERE o.status::text NOT IN ('voided', 'refunded')) AS net_sales
-              FROM s JOIN orders o ON o.till_id = s.id
+              FROM orders o
               LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+              LEFT JOIN LATERAL (
+                  SELECT SUM(op.amount) AS cash FROM order_payments op
+                   WHERE op.order_id = o.id AND COALESCE(op.is_cash, op.method = 'cash') = true
+              ) pc ON TRUE
+             WHERE o.till_id = ANY(ARRAY(SELECT id FROM s))
              GROUP BY o.till_id
         ),
-        ref AS (
+        ref AS MATERIALIZED (
             SELECT r.till_id, SUM(r.amount) AS cash
-              FROM s JOIN order_refunds r ON r.till_id = s.id
-             WHERE r.is_cash
+              FROM order_refunds r
+             WHERE r.till_id = ANY(ARRAY(SELECT id FROM s)) AND r.is_cash
              GROUP BY r.till_id
         ),
-        mv AS (
+        mv AS MATERIALIZED (
             SELECT m.till_id,
                 SUM(m.amount) FILTER (WHERE bucket = 'pay_in')     AS pay_ins,
                -SUM(m.amount) FILTER (WHERE bucket = 'pay_out')    AS pay_outs,
@@ -2749,14 +2755,15 @@ pub async fn branch_till_sessions(
                 SELECT m.till_id, m.amount,
                        CASE WHEN m.kind = 'correction' AND c.kind IS NOT NULL
                             THEN c.kind ELSE m.kind END AS bucket
-                FROM s JOIN till_cash_movements m ON m.till_id = s.id
+                FROM till_cash_movements m
                 LEFT JOIN till_cash_movements c ON c.id = m.corrects_id
+               WHERE m.till_id = ANY(ARRAY(SELECT id FROM s))
             ) m
             GROUP BY m.till_id
         )
         SELECT
             s.id AS "till_id!",
-            (s.opened_at AT TIME ZONE effective_timezone(s.branch_id))::date AS "business_date!",
+            (s.opened_at AT TIME ZONE s.tz)::date AS "business_date!",
             s.branch_id AS "branch_id!",
             s.branch_name AS "branch_name!",
             s.branch_code AS "branch_code!",
@@ -2765,7 +2772,7 @@ pub async fn branch_till_sessions(
             s.opened_at AS "opened_at!",
             s.status AS "status!",
             s.opening_cash::bigint AS "opening_cash!",
-            (COALESCE(pay.cash, 0) + COALESCE(ord.cash_tips, 0) - COALESCE(ref.cash, 0))::bigint AS "net_cash_payment!",
+            (COALESCE(ord.cash_payments, 0) + COALESCE(ord.cash_tips, 0) - COALESCE(ref.cash, 0))::bigint AS "net_cash_payment!",
             COALESCE(mv.pay_ins, 0)::bigint AS "pay_ins!",
             COALESCE(mv.pay_outs, 0)::bigint AS "pay_outs!",
             COALESCE(mv.cash_drops, 0)::bigint AS "cash_drops!",
@@ -2777,7 +2784,6 @@ pub async fn branch_till_sessions(
             COALESCE(ord.orders_count, 0)::bigint AS "orders_count!",
             COALESCE(ord.net_sales, 0)::bigint AS "net_sales!"
         FROM s
-        LEFT JOIN pay ON pay.till_id = s.id
         LEFT JOIN ord ON ord.till_id = s.id
         LEFT JOIN ref ON ref.till_id = s.id
         LEFT JOIN mv ON mv.till_id = s.id

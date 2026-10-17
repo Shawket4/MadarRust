@@ -250,10 +250,10 @@ struct SalesRow {
 }
 
 /// Aggregate non-voided item sales per SKU over the current window and, when
-/// given, the previous one, in ONE statement. Each window is inclusive at both
-/// ends, as before (an order at exactly `from` counts in both). Each branch's
-/// orders are read as one index range on (branch_id, created_at) covering both
-/// windows; the same line is aggregated once per window it falls in.
+/// given, the previous one, in ONE statement (one read of the lines, one
+/// grouping, each figure FILTERed by window) instead of the same aggregate
+/// twice. Each window is inclusive at both ends, as before (an order at
+/// exactly `from` counts in both).
 async fn sales_agg(
     pool: &PgPool,
     branch_ids: &[Uuid],
@@ -262,56 +262,75 @@ async fn sales_agg(
     prev: Option<(DateTime<Utc>, DateTime<Utc>)>,
 ) -> Result<(Vec<SalesRow>, Vec<SalesRow>), AppError> {
     #[derive(sqlx::FromRow)]
-    struct WinRow {
-        win: i32,
-        #[sqlx(flatten)]
-        row: SalesRow,
+    struct BothRow {
+        menu_item_id: Uuid,
+        size_label: String,
+        category_id: Option<Uuid>,
+        category_name: Option<String>,
+        cur_lines: i64,
+        cur_item_name: Option<String>,
+        cur_quantity: Option<i64>,
+        cur_revenue: Option<i64>,
+        cur_cost_missing: Option<bool>,
+        cur_cost: Option<i64>,
+        prev_lines: i64,
+        prev_item_name: Option<String>,
+        prev_quantity: Option<i64>,
+        prev_revenue: Option<i64>,
+        prev_cost_missing: Option<bool>,
+        prev_cost: Option<i64>,
     }
     let (prev_from, prev_to) = (prev.map(|p| p.0), prev.map(|p| p.1));
-    let rows = sqlx::query_as::<_, WinRow>(
+    let rows = sqlx::query_as::<_, BothRow>(
         r#"
-        WITH lines AS (
-            SELECT o.created_at, oi.menu_item_id, oi.size_label, oi.item_name,
-                   oi.quantity, oi.line_total, oi.unit_cost
-              FROM unnest($1::uuid[]) b(id)
-             CROSS JOIN LATERAL (
-                   SELECT o.id, o.created_at FROM orders o
-                    WHERE o.branch_id = b.id
-                      AND o.status NOT IN ('voided', 'refunded')
-                      AND o.created_at >= COALESCE(LEAST($2::timestamptz, $4::timestamptz), '-infinity')
-                      AND o.created_at <= COALESCE($3::timestamptz, 'infinity')
-                   OFFSET 0) o
-              JOIN order_items oi ON oi.order_id = o.id
-             WHERE oi.menu_item_id IS NOT NULL
+        WITH l AS (
+            SELECT oi.menu_item_id, oi.size_label,
+                   -- The latest line's name wins: a fixed-width UTC stamp (to the
+                   -- microsecond) in front of the name, so max() picks it without
+                   -- a sort per group.
+                   to_char(o.created_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS') || oi.item_name AS k,
+                   oi.quantity, oi.line_total, oi.unit_cost,
+                   (($2::timestamptz IS NULL OR o.created_at >= $2)
+                    AND ($3::timestamptz IS NULL OR o.created_at <= $3)) AS cur,
+                   ($4::timestamptz IS NOT NULL AND o.created_at >= $4 AND o.created_at <= $5) AS prev
+              FROM order_items oi
+              JOIN orders o ON o.id = oi.order_id
+             WHERE o.branch_id = ANY($1)
+               AND o.status NOT IN ('voided', 'refunded')
+               AND oi.menu_item_id IS NOT NULL
                AND oi.line_kind <> 'combo'
+               -- the union of both windows (the previous one ends where this starts)
+               AND ($2::timestamptz IS NULL OR o.created_at >= LEAST($2, $4))
+               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        ),
+        g AS (
+            SELECT
+                l.menu_item_id,
+                COALESCE(l.size_label::text, 'one_size') COLLATE "C" AS size_label,
+                COUNT(*) FILTER (WHERE l.cur) AS cur_lines,
+                substr(max(l.k COLLATE "C") FILTER (WHERE l.cur), 21) AS cur_item_name,
+                (SUM(l.quantity) FILTER (WHERE l.cur))::bigint AS cur_quantity,
+                (SUM(l.line_total) FILTER (WHERE l.cur))::bigint AS cur_revenue,
+                bool_or(l.unit_cost IS NULL) FILTER (WHERE l.cur) AS cur_cost_missing,
+                (SUM(l.unit_cost * l.quantity) FILTER (WHERE l.cur))::bigint AS cur_cost,
+                COUNT(*) FILTER (WHERE l.prev) AS prev_lines,
+                substr(max(l.k COLLATE "C") FILTER (WHERE l.prev), 21) AS prev_item_name,
+                (SUM(l.quantity) FILTER (WHERE l.prev))::bigint AS prev_quantity,
+                (SUM(l.line_total) FILTER (WHERE l.prev))::bigint AS prev_revenue,
+                bool_or(l.unit_cost IS NULL) FILTER (WHERE l.prev) AS prev_cost_missing,
+                (SUM(l.unit_cost * l.quantity) FILTER (WHERE l.prev))::bigint AS prev_cost
+            FROM l
+            -- COLLATE "C": the same groups (a deterministic collation's equality
+            -- is byte equality), without the locale's comparison.
+            GROUP BY l.menu_item_id, COALESCE(l.size_label::text, 'one_size') COLLATE "C"
         )
-        SELECT
-            x.win,
-            l.menu_item_id,
-            COALESCE(l.size_label::text, 'one_size') AS size_label,
-            (array_agg(l.item_name ORDER BY l.created_at DESC))[1] AS item_name,
-            mi.category_id,
-            c.name AS category_name,
-            SUM(l.quantity)::bigint   AS quantity_sold,
-            SUM(l.line_total)::bigint AS revenue,
-            CASE
-                WHEN bool_or(l.unit_cost IS NULL) THEN NULL
-                ELSE SUM(l.unit_cost * l.quantity)::bigint
-            END AS snapshot_cost
-        FROM lines l
-        CROSS JOIN LATERAL (
-            SELECT 1 AS win
-             WHERE ($2::timestamptz IS NULL OR l.created_at >= $2)
-               AND ($3::timestamptz IS NULL OR l.created_at <= $3)
-            UNION ALL
-            SELECT 2
-             WHERE $4::timestamptz IS NOT NULL
-               AND l.created_at >= $4 AND l.created_at <= $5
-        ) x
-        JOIN menu_items mi ON mi.id = l.menu_item_id
-        LEFT JOIN categories c ON c.id = mi.category_id
-        GROUP BY x.win, l.menu_item_id, COALESCE(l.size_label::text, 'one_size'),
-                 mi.category_id, c.name
+        -- The catalog join after grouping (an item's category is one row of
+        -- menu_items, so the groups are the old ones); the inner join still
+        -- drops lines whose item is gone, as before.
+        SELECT g.*, mi.category_id, c.name AS category_name
+          FROM g
+          JOIN menu_items mi ON mi.id = g.menu_item_id
+          LEFT JOIN categories c ON c.id = mi.category_id
         "#,
     )
     .bind(branch_ids)
@@ -321,9 +340,34 @@ async fn sales_agg(
     .bind(prev_to)
     .fetch_all(pool)
     .await?;
+    // The old statement's figures, per window: a group exists in a window when
+    // it had a line there; its cost is NULL when any of those lines had none.
     let (mut cur, mut prev_rows) = (Vec::new(), Vec::new());
     for r in rows {
-        if r.win == 1 { cur.push(r.row) } else { prev_rows.push(r.row) }
+        if r.cur_lines > 0 {
+            cur.push(SalesRow {
+                menu_item_id: r.menu_item_id,
+                size_label: r.size_label.clone(),
+                item_name: r.cur_item_name.unwrap_or_default(),
+                category_id: r.category_id,
+                category_name: r.category_name.clone(),
+                quantity_sold: r.cur_quantity.unwrap_or(0),
+                revenue: r.cur_revenue.unwrap_or(0),
+                snapshot_cost: if r.cur_cost_missing == Some(true) { None } else { r.cur_cost },
+            });
+        }
+        if r.prev_lines > 0 {
+            prev_rows.push(SalesRow {
+                menu_item_id: r.menu_item_id,
+                size_label: r.size_label,
+                item_name: r.prev_item_name.unwrap_or_default(),
+                category_id: r.category_id,
+                category_name: r.category_name,
+                quantity_sold: r.prev_quantity.unwrap_or(0),
+                revenue: r.prev_revenue.unwrap_or(0),
+                snapshot_cost: if r.prev_cost_missing == Some(true) { None } else { r.prev_cost },
+            });
+        }
     }
     Ok((cur, prev_rows))
 }
