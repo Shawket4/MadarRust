@@ -174,11 +174,15 @@ async fn an_addon_item_rides_the_feed_after_the_contract_shim(pool: PgPool) {
     let s = shop(&pool).await;
     // Every database has prod\'s catalog shape since DB Phase 2.4 (the
     // legacy relations are the compat views): no shim to apply.
-    let kind: String =
-        sqlx::query_scalar("SELECT relkind::text FROM pg_class WHERE relname = 'addon_items'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    // public's, by name: `archive.addon_items` (the archived table) and
+    // `compat.addon_items` share the relname, and an unqualified pg_class
+    // lookup returns whichever row the catalog's physical order puts first.
+    let kind: String = sqlx::query_scalar(
+        "SELECT relkind::text FROM pg_class WHERE oid = to_regclass('public.addon_items')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(kind, "v", "the shim turned the legacy table into a view");
 
     let group: Uuid = sqlx::query_scalar(

@@ -375,8 +375,16 @@ impl Problem {
     }
 
     /// Greedy construction, then local search. Pure: no I/O, no clock but the
-    /// search budget.
+    /// search's wall-clock safety valve.
     pub(crate) fn solve(&self) -> Vec<Suggestion> {
+        self.solve_within(Some(SEARCH_BUDGET))
+    }
+
+    /// `solve` with the wall-clock cap made explicit. With `None` the search
+    /// stops only on `SEARCH_MOVES` or a local optimum, so the answer is a
+    /// pure function of the problem (the clock cap cuts the search at a
+    /// different move on a slower machine).
+    pub(crate) fn solve_within(&self, budget: Option<StdDuration>) -> Vec<Suggestion> {
         let mut board = self.fresh_board();
         let mut props: Vec<Proposal> = Vec::new();
         if self.need.is_empty() {
@@ -385,7 +393,7 @@ impl Problem {
             self.fill_hourly(&mut board, &mut props);
         }
         self.move_off_cant_work(&mut board, &mut props);
-        self.improve(&mut board, &mut props);
+        self.improve(&mut board, &mut props, budget);
         props.into_iter().map(|p| self.dress(p)).collect()
     }
 
@@ -580,14 +588,15 @@ impl Problem {
     /// the objective (candidate scores − late-shift spread) improves.
     /// Deterministic order, a time and move budget.
     #[allow(clippy::needless_range_loop)] // props[i] is replaced in place
-    fn improve(&self, board: &mut Board, props: &mut [Proposal]) {
+    fn improve(&self, board: &mut Board, props: &mut [Proposal], budget: Option<StdDuration>) {
         let started = Instant::now();
+        let out_of_time = || budget.is_some_and(|b| started.elapsed() >= b);
         let mut moves = 0usize;
         let mut improved = true;
-        while improved && moves < SEARCH_MOVES && started.elapsed() < SEARCH_BUDGET {
+        while improved && moves < SEARCH_MOVES && !out_of_time() {
             improved = false;
             for i in 0..props.len() {
-                if moves >= SEARCH_MOVES || started.elapsed() >= SEARCH_BUDGET {
+                if moves >= SEARCH_MOVES || out_of_time() {
                     return;
                 }
                 // Reassign i.
@@ -634,7 +643,7 @@ impl Problem {
             // Swap the people of two same-class proposals on different days.
             for i in 0..props.len() {
                 for j in i + 1..props.len() {
-                    if moves >= SEARCH_MOVES || started.elapsed() >= SEARCH_BUDGET {
+                    if moves >= SEARCH_MOVES || out_of_time() {
                         return;
                     }
                     moves += 1;
@@ -2110,8 +2119,10 @@ mod tests {
                 p.pattern_need.insert((d, w), 1);
             }
         }
-        let a = p.solve();
-        let b = p.solve();
+        // No wall-clock cap: the cap cuts the search at a different move on a
+        // slower or busier machine, which is the only nondeterminism there is.
+        let a = p.solve_within(None);
+        let b = p.solve_within(None);
         assert_eq!(a, b);
         assert!(!a.is_empty());
         // Nobody twice on one slot, and no one person's two shifts overlap.

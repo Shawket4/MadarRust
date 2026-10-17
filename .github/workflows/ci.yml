@@ -167,6 +167,16 @@ jobs:
           sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update && sudo apt-get install -y postgresql-client-17
+      # The prod dump (pg_restore --no-privileges) carries the _sqlx_migrations
+      # rows that mark the role-creating migration (20260708000000_rls_role) as
+      # applied, so `sqlx migrate run` on drift_prod never creates `madar_app`
+      # and later migrations that GRANT to it fail. Roles are cluster-global
+      # and live outside the dump: provision both, as prod already has them.
+      - name: Provision DB roles (madar_app, legacy sufrix)
+        run: |
+          psql "$PG/postgres" -X -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE madar_app NOLOGIN NOBYPASSRLS" \
+            -c "CREATE ROLE sufrix NOLOGIN"
       - name: Build both schemas
         run: |
           set -euo pipefail
