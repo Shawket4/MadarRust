@@ -170,7 +170,7 @@ async fn scope_org(
     security(("bearer_jwt" = [])))]
 pub async fn get_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
@@ -204,7 +204,7 @@ pub async fn get_settings(
     security(("bearer_jwt" = [])))]
 pub async fn put_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<StaffPoolSettings>,
 ) -> Result<HttpResponse, AppError> {
     let incoming = body.into_inner();
@@ -278,7 +278,7 @@ pub async fn put_settings(
     responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn delete_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     // The capability is asked FIRST, before the shape of the request is

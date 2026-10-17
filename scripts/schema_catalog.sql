@@ -13,6 +13,10 @@ WITH ns AS (
     SELECT oid, nspname FROM pg_namespace
      WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
        AND nspname NOT LIKE 'pg\_temp\_%' AND nspname NOT LIKE 'pg\_toast\_temp\_%'
+       -- Retired tables kept for their data (never dropped). What a database
+       -- holds there depends on its history, not on the migrations: a fresh
+       -- build archives empty legacy tables that prod never had (Phase 2.4).
+       AND nspname <> 'archive'
 ), rel AS (
     SELECT c.oid, n.nspname, c.relname, c.relkind, c.relrowsecurity, c.relforcerowsecurity
       FROM pg_class c JOIN ns n ON n.oid = c.relnamespace

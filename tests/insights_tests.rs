@@ -8,6 +8,8 @@
 //! (`menu_item_sizes`, `recipe_lines`) are seeded alongside where the ledger
 //! reads them directly. In production the shim serves both from one source.
 
+mod common;
+
 use actix_web::{App, test, web};
 use serde_json::json;
 use sqlx::PgPool;
@@ -197,16 +199,7 @@ async fn seed_costed_recipe(pool: &PgPool, org_id: Uuid, item: Uuid, cost: f64) 
     .fetch_one(pool)
     .await
     .unwrap();
-    sqlx::query(
-        "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, \
-             ingredient_name, ingredient_unit, org_ingredient_id) \
-         VALUES ($1, 'one_size', 1.0, 'x', 'g', $2)",
-    )
-    .bind(item)
-    .bind(ing)
-    .execute(pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::item_recipe(pool, item, "one_size", ing, 1.0, "g").await;
     ing
 }
 

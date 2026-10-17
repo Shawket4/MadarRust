@@ -123,6 +123,18 @@ pub struct OrderNowContext {
     pub full: Option<OrderNowFull>,
 }
 
+/// The tenant handle of the shop a card token belongs to (the token is the
+/// routing input, resolved on the owner pool; everything after runs under RLS).
+async fn scoped_for_card(
+    pdb: &crate::db::PublicDb,
+    token: &str,
+) -> Result<crate::db::Db, AppError> {
+    let member = model::find_by_token(pdb.resolver(), token)
+        .await?
+        .ok_or_else(not_found)?;
+    Ok(pdb.scoped(member.org_id).await)
+}
+
 async fn member_by_token(pool: &PgPool, token: &str) -> Result<MemberRow, AppError> {
     let member = model::find_by_token(pool, token)
         .await?
@@ -169,12 +181,13 @@ async fn last_order(
     params(("token" = String, Path, description = "Member token (the card's QR)"), OrderNowQuery),
     responses((status = 200, description = "Masked without a valid device token for the customer's current phone; full with one", body = OrderNowContext), AppErrorResponse))]
 pub async fn context(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     token: web::Path<String>,
     query: web::Query<OrderNowQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let pool = pool.get_ref();
+    let scoped = scoped_for_card(&pdb, token.as_str()).await?;
+    let pool = scoped.get_ref();
     let member = member_by_token(pool, token.as_str()).await?;
     let brand = crate::orgs::branding::load(pool, member.org_id).await?;
     let last = last_order(pool, member.org_id, member.id).await?;
@@ -465,12 +478,13 @@ async fn check_limits(
               (status = 429, description = "`IDENTITY_REPLACE_LIMIT`"),
               AppErrorResponse))]
 pub async fn replace_identity(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     token: web::Path<String>,
     body: web::Json<ReplaceIdentityRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let pool = pool.get_ref();
+    let scoped = scoped_for_card(&pdb, token.as_str()).await?;
+    let pool = scoped.get_ref();
     let (member, _new_key) = doubly_verified(pool, &secret.0, token.as_str(), &body).await?;
     let mut tx = pool.begin().await?;
     check_limits(&mut tx, member.org_id, member.id).await?;
@@ -518,12 +532,13 @@ pub async fn replace_identity(
               (status = 409, description = "`NOTHING_TO_COMBINE` or `IDENTITY_LOCKED_AFTER_MERGE`"),
               AppErrorResponse))]
 pub async fn combine(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     token: web::Path<String>,
     body: web::Json<ReplaceIdentityRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let pool = pool.get_ref();
+    let scoped = scoped_for_card(&pdb, token.as_str()).await?;
+    let pool = scoped.get_ref();
     let (member, new_key) = doubly_verified(pool, &secret.0, token.as_str(), &body).await?;
     let mut tx = pool.begin().await?;
     check_limits(&mut tx, member.org_id, member.id).await?;

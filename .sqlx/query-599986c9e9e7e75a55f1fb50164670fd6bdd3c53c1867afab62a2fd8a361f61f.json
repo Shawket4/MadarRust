@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT rl.ingredient_id, rl.quantity::float8 AS \"qty!\", oi.name, rl.unit\n                 FROM recipe_lines rl\n                 JOIN org_ingredients oi ON oi.id = rl.ingredient_id\n                WHERE rl.owner_type = 'modifier_option' AND rl.owner_id = $1\n                  AND rl.size_label IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ingredient_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "qty!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "unit",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "599986c9e9e7e75a55f1fb50164670fd6bdd3c53c1867afab62a2fd8a361f61f"
+}

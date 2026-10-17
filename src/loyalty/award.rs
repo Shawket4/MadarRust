@@ -112,13 +112,13 @@ async fn load_order(
     pool: &PgPool,
     order_id: Option<Uuid>,
     order_key: Option<Uuid>,
+    caller_org: Option<Uuid>,
 ) -> Result<OrderFacts, AppError> {
     if order_id.is_none() && order_key.is_none() {
         return Err(AppError::BadRequest(
             "Name the order by order_id or order_key".into(),
         ));
     }
-    #[derive(sqlx::FromRow)]
     struct Row {
         id: Uuid,
         branch_id: Uuid,
@@ -130,18 +130,47 @@ async fn load_order(
         tax_amount: i32,
         loyalty_customer_id: Option<Uuid>,
     }
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT o.id, o.branch_id, b.org_id, o.created_at, \
-                (o.voided_at IS NOT NULL) AS voided, \
-                o.subtotal, o.discount_amount, o.tax_amount, o.loyalty_customer_id \
-           FROM orders o JOIN branches b ON b.id = o.branch_id \
-          WHERE ($1::uuid IS NOT NULL AND o.id = $1) \
-             OR ($1::uuid IS NULL AND o.idempotency_key = $2)",
-    )
-    .bind(order_id)
-    .bind(order_key)
-    .fetch_optional(pool)
-    .await?;
+    // By id, or by the till's idempotency key. The key is unique per org (DB
+    // Phase 2.3), so a key lookup is scoped to the caller's org: two orgs may
+    // hold the same key. A super admin (no org) names the order by id.
+    let row: Option<Row> = match (order_id, order_key, caller_org) {
+        (Some(id), _, _) => {
+            sqlx::query_as!(
+                Row,
+                r#"SELECT id, branch_id, org_id, created_at,
+                          (voided_at IS NOT NULL) AS "voided!",
+                          subtotal, discount_amount, tax_amount, loyalty_customer_id
+                     FROM orders WHERE id = $1"#,
+                id
+            )
+            .fetch_optional(pool)
+            .await?
+        }
+        (None, Some(key), Some(org)) => {
+            sqlx::query_as!(
+                Row,
+                r#"SELECT id, branch_id, org_id, created_at,
+                          (voided_at IS NOT NULL) AS "voided!",
+                          subtotal, discount_amount, tax_amount, loyalty_customer_id
+                     FROM orders WHERE org_id = $1 AND idempotency_key = $2"#,
+                org,
+                key
+            )
+            .fetch_optional(pool)
+            .await?
+        }
+        (None, Some(_), None) => {
+            return Err(AppError::BadRequest(
+                "Name the order by order_id: an order_key is only unique within an organization"
+                    .into(),
+            ));
+        }
+        (None, None, _) => {
+            return Err(AppError::BadRequest(
+                "Name the order by order_id or order_key".into(),
+            ));
+        }
+    };
 
     let r = row.ok_or_else(|| {
         // A till whose order has not drained yet lands here. The op stays
@@ -225,7 +254,7 @@ pub fn window_check(
     security(("bearer_jwt" = [])))]
 pub async fn award(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<AwardRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -245,7 +274,7 @@ pub async fn award_inner(
     actor: Option<Uuid>,
     caller_org: Option<Uuid>,
 ) -> Result<HttpResponse, AppError> {
-    let order = load_order(pool, body.order_id, body.order_key).await?;
+    let order = load_order(pool, body.order_id, body.order_key, caller_org).await?;
     if let Some(org) = caller_org
         && order.org_id != org
     {

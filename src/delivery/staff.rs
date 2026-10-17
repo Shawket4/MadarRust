@@ -161,16 +161,21 @@ where
         .await?)
 }
 
+/// The delivery order an `Idempotency-Key` already created in the org that
+/// owns `branch_id`. The key is unique per org (DB Phase 2.3), never global.
 pub async fn fetch_delivery_order_by_idem(
     pool: &PgPool,
+    branch_id: Uuid,
     key: Uuid,
 ) -> Result<Option<DeliveryOrder>, AppError> {
-    Ok(
-        sqlx::query_as(&format!("{DO_SELECT} WHERE idempotency_key = $1"))
-            .bind(key)
-            .fetch_optional(pool)
-            .await?,
-    )
+    Ok(sqlx::query_as(&format!(
+        "{DO_SELECT} WHERE idempotency_key = $2 \
+           AND org_id = (SELECT b.org_id FROM branches b WHERE b.id = $1)"
+    ))
+    .bind(branch_id)
+    .bind(key)
+    .fetch_optional(pool)
+    .await?)
 }
 
 // ── List / get ────────────────────────────────────────────────

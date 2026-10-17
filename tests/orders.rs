@@ -172,37 +172,15 @@ async fn seed_branch_inventory(pool: &PgPool, branch_id: Uuid, ing_id: Uuid, sto
 }
 
 async fn add_menu_item_recipe(pool: &PgPool, menu_item_id: Uuid, ing_id: Uuid, qty: f64) {
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, 'one_size', 'Test Ing', 'g')")
-        .bind(menu_item_id)
-        .bind(ing_id)
-        .bind(qty)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::item_recipe(pool, menu_item_id, "one_size", ing_id, qty, "g").await;
 }
 
 async fn seed_addon_item(pool: &PgPool, org_id: Uuid, name: &str, ptype: &str, price: i32) -> Uuid {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id)
-        .bind(org_id)
-        .bind(name)
-        .bind(ptype)
-        .bind(price)
-        .execute(pool)
-        .await
-        .unwrap();
-    id
+    common::legacy_catalog::addon_item(pool, None, org_id, name, ptype, price).await
 }
 
 async fn add_addon_ingredient(pool: &PgPool, addon_item_id: Uuid, ing_id: Uuid, qty: f64) {
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, 'Test Ing', 'ml')")
-        .bind(addon_item_id)
-        .bind(ing_id)
-        .bind(qty)
-        .execute(pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::addon_ingredient(pool, addon_item_id, ing_id, qty, "ml").await;
 }
 
 #[sqlx::test]
@@ -560,8 +538,7 @@ async fn test_milk_swap_converts_units_across_base_units(pool: PgPool) {
 
     // A milk_type addon that swaps in almond milk (its ingredient is in kg).
     let almond_addon = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 0).await;
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond Milk','kg')")
-        .bind(almond_addon).bind(almond).execute(&pool).await.unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, almond_addon, almond, 1, "kg").await;
 
     let req_body = CreateOrderRequest {
         branch_id,
@@ -668,15 +645,14 @@ async fn test_standalone_resolver_swap_additive_and_optional(pool: PgPool) {
     add_menu_item_recipe(&pool, menu_item_id, milk, 200.0).await;
 
     let swap_addon = seed_addon_item(&pool, org_id, "Almond", "milk_type", 0).await;
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond','kg')")
-        .bind(swap_addon).bind(almond).execute(&pool).await.unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, swap_addon, almond, 1, "kg").await;
     let whip_addon = seed_addon_item(&pool, org_id, "Whip", "other", 100).await;
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,15,'Cream','g')")
-        .bind(whip_addon).bind(cream).execute(&pool).await.unwrap();
-    let vanilla_field = Uuid::new_v4();
-    sqlx::query("INSERT INTO menu_item_optional_fields (id, menu_item_id, name, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, is_active) \
-                 VALUES ($1,$2,'Vanilla',50,$3,'Syrup','ml',5,true)")
-        .bind(vanilla_field).bind(menu_item_id).bind(syrup).execute(&pool).await.unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, whip_addon, cream, 15, "g").await;
+    let vanilla_field = common::legacy_catalog::optional_field(
+        &pool,
+        common::legacy_catalog::Optional::new(menu_item_id, "Vanilla", 50).recipe(syrup, 5, "ml"),
+    )
+    .await;
 
     let req_body = CreateOrderRequest {
         branch_id,
@@ -2087,8 +2063,7 @@ async fn test_configuration_swap_converts_units(pool: PgPool) {
 
     add_menu_item_recipe(&pool, menu_item_id, milk, 250.0).await; // 250 g milk
     let almond_addon = seed_addon_item(&pool, org_id, "Almond Milk", "milk_type", 0).await;
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1,$2,1,'Almond Milk','kg')")
-        .bind(almond_addon).bind(almond).execute(&pool).await.unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, almond_addon, almond, 1, "kg").await;
 
     let config = madar_rust::orders::component_resolve::resolve_menu_item_configuration(
         &pool,
@@ -2303,15 +2278,7 @@ async fn test_create_order_records_charged_prices_and_flags(pool: PgPool) {
 
     // (2) Branch override sets the price to 700. POS sends NO price → the branch-effective
     // expected (700) is recorded (NOT the 500 catalog) and the order is not flagged.
-    sqlx::query(
-        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available)
-         VALUES ($1, $2, 700, true)",
-    )
-    .bind(branch_id)
-    .bind(item)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::branch_menu_override(&pool, branch_id, item, Some(700), true).await;
 
     let of2 = post(
         CreateOrderRequest {
@@ -2421,13 +2388,9 @@ async fn set_branch_override(
     price: Option<i32>,
     available: bool,
 ) {
-    sqlx::query(
-        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (branch_id, menu_item_id)
-         DO UPDATE SET price_override = EXCLUDED.price_override, is_available = EXCLUDED.is_available",
-    )
-    .bind(branch).bind(item).bind(price).bind(available).execute(pool).await.unwrap();
+    // Replaces the item's override, as the legacy upsert did.
+    common::legacy_catalog::clear_branch_menu_override(pool, branch, item).await;
+    common::legacy_catalog::branch_menu_override(pool, branch, item, price, available).await;
 }
 async fn add_size(pool: &PgPool, item: Uuid, label: &str, price: i32) {
     // Written to `menu_item_sizes`: `item_sizes` is the old-client view over it
@@ -2872,11 +2835,7 @@ async fn test_create_order_branch_size_override_applied(pool: PgPool) {
     let item = seed_menu_item(&pool, org, cat).await; // base 500
     add_size(&pool, item, "large", 800).await;
     set_branch_override(&pool, branch, item, Some(600), true).await; // branch base 600
-    sqlx::query(
-        "INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override)
-         VALUES ($1, $2, 'large', 950)",
-    )
-    .bind(branch).bind(item).execute(&pool).await.unwrap();
+    common::legacy_catalog::branch_size_override(&pool, branch, item, "large", 950).await;
 
     // No client price → the branch size override (950) is used, not the catalog 800 or base 600.
     let mut sized = simple_order(branch, shift, item);
@@ -2910,11 +2869,7 @@ async fn test_create_order_branch_addon_override_applied(pool: PgPool) {
     let item = seed_menu_item(&pool, org, cat).await; // 500
     let addon = seed_addon_item(&pool, org, "Extra Shot", "extra", 100).await;
     // Branch reprices the addon to 150.
-    sqlx::query(
-        "INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available)
-         VALUES ($1, $2, 150, true)",
-    )
-    .bind(branch).bind(addon).execute(&pool).await.unwrap();
+    common::legacy_catalog::branch_addon_override(&pool, branch, addon, Some(150), true).await;
 
     let mut body = simple_order(branch, shift, item);
     body.items[0].addons = vec![madar_rust::orders::component_resolve::AddonInput {
@@ -4112,13 +4067,13 @@ async fn legacy_recipe_line(
     name: &str,
     qty: f64,
 ) {
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, $4, $5, 'g')")
-        .bind(item).bind(ing).bind(qty).bind(size).bind(name).execute(pool).await.unwrap();
+    let _ = name;
+    common::legacy_catalog::item_recipe(pool, item, size, ing, qty, "g").await;
 }
 
 async fn legacy_addon_line(pool: &PgPool, addon: Uuid, ing: Uuid, name: &str) {
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, $2, 1, $3, 'g')")
-        .bind(addon).bind(ing).bind(name).execute(pool).await.unwrap();
+    let _ = name;
+    common::legacy_catalog::addon_ingredient(pool, addon, ing, 1, "g").await;
 }
 
 #[sqlx::test]
@@ -4183,16 +4138,15 @@ async fn resolver_swap_picks_are_deterministic(pool: PgPool) {
         (barista, "Barista", 1),
         (oat, "Oat", 2),
     ] {
-        sqlx::query(
-            "INSERT INTO modifier_options (id, group_id, name, sort) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(id)
-        .bind(group)
-        .bind(name)
-        .bind(sort)
-        .execute(&pool)
-        .await
-        .unwrap();
+        // Each add-on IS its option already: place it in this group, in order.
+        sqlx::query("UPDATE modifier_options SET group_id = $2, name = $3, sort = $4 WHERE id = $1")
+            .bind(id)
+            .bind(group)
+            .bind(name)
+            .bind(sort)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     let addons = [madar_rust::orders::component_resolve::AddonInput {

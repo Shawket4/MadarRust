@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT o.service_mode,\n               COUNT(*)::bigint AS \"orders!\",\n               COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)), 0)::bigint AS \"revenue!\"\n        FROM orders o\n        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id\n        WHERE o.branch_id = ANY($1)\n          AND o.status::text NOT IN ('voided', 'refunded')\n          AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n          AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n        GROUP BY o.service_mode\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "service_mode",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "revenue!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "3806cb3cac67488973fafe6a319299ee7d6ebff62bb63dbc3f63c167e6444349"
+}

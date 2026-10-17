@@ -34,11 +34,14 @@ use crate::loyalty::model::{self, MemberRow};
 ///
 /// Compared in constant time: a byte-by-byte early exit leaks how much of a
 /// guessed token was right, and these tokens are long-lived.
+/// The pass's member (resolved on the owner pool: the serial and its token are
+/// the routing input) and a handle scoped to the member's org for the rest.
 async fn authenticated_member(
-    pool: &PgPool,
+    pdb: &crate::db::PublicDb,
     req: &HttpRequest,
     serial: &str,
-) -> Result<MemberRow, AppError> {
+) -> Result<(MemberRow, crate::db::Db), AppError> {
+    let pool = pdb.resolver();
     let presented = req
         .headers()
         .get("Authorization")
@@ -71,7 +74,8 @@ async fn authenticated_member(
     // A shop whose plan lacks loyalty has no wallet passes (a downgraded shop's
     // old passes stop updating: 404, like a pass that never existed).
     crate::plan::public_gate_org(pool, member.org_id, madar_plan::Feature::Loyalty).await?;
-    Ok(member)
+    let scoped = pdb.scoped(member.org_id).await;
+    Ok((member, scoped))
 }
 
 #[derive(Deserialize)]
@@ -86,12 +90,12 @@ pub struct PushTokenBody {
 /// them and retries on anything else.
 pub async fn register(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<(String, String, String)>,
     body: web::Json<PushTokenBody>,
 ) -> Result<HttpResponse, AppError> {
     let (device_library_id, _pass_type, serial) = path.into_inner();
-    let member = authenticated_member(pool.get_ref(), &req, &serial).await?;
+    let (member, pool) = authenticated_member(&pdb, &req, &serial).await?;
 
     let inserted = sqlx::query(
         "INSERT INTO loyalty_pass_devices (device_library_id, customer_id, org_id, push_token) \
@@ -116,11 +120,11 @@ pub async fn register(
 /// The customer deleted the pass, or the device is being wiped.
 pub async fn unregister(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<(String, String, String)>,
 ) -> Result<HttpResponse, AppError> {
     let (device_library_id, _pass_type, serial) = path.into_inner();
-    let member = authenticated_member(pool.get_ref(), &req, &serial).await?;
+    let (member, pool) = authenticated_member(&pdb, &req, &serial).await?;
     sqlx::query(
         "DELETE FROM loyalty_pass_devices WHERE device_library_id = $1 AND customer_id = $2",
     )
@@ -152,6 +156,8 @@ pub struct UpdatedSince {
 /// one left off. **204, not an empty list, when nothing changed** — an empty
 /// 200 makes some iOS versions re-fetch every pass on a loop.
 pub async fn serials(
+    // Stays on the owner pool on purpose: a device's passes can belong to
+    // several shops, and this returns only their ids and update times.
     pool: web::Data<PgPool>,
     path: web::Path<(String, String)>,
     query: web::Query<UpdatedSince>,
@@ -165,7 +171,7 @@ pub async fn serials(
 
     let rows: Vec<(Uuid, Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
         "SELECT c.id, c.org_id, c.pass_updated_at FROM loyalty_pass_devices d \
-           JOIN loyalty_customers c ON c.id = d.customer_id \
+           JOIN loyalty_memberships c ON c.id = d.customer_id \
           WHERE d.device_library_id = $1 \
             AND (c.deleted_at IS NULL OR c.pass_voided_at IS NOT NULL) \
             AND ($2::timestamptz IS NULL OR c.pass_updated_at > $2)",
@@ -220,11 +226,11 @@ pub async fn serials(
 /// that has not moved is wasted work on both ends.
 pub async fn latest_pass(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<(String, String)>,
 ) -> Result<HttpResponse, AppError> {
     let (_pass_type, serial) = path.into_inner();
-    let member = authenticated_member(pool.get_ref(), &req, &serial).await?;
+    let (member, pool) = authenticated_member(&pdb, &req, &serial).await?;
 
     if let (Some(updated), Some(header)) = (
         member.pass_updated_at,
@@ -244,7 +250,7 @@ pub async fn latest_pass(
     // A retired card is served voided, for as long as its device keeps asking:
     // a 404 here would leave the last balance on screen for ever.
     let retired: bool = sqlx::query_scalar(
-        "SELECT pass_voided_at IS NOT NULL FROM loyalty_customers WHERE id = $1",
+        "SELECT pass_voided_at IS NOT NULL FROM loyalty_memberships WHERE id = $1",
     )
     .bind(member.id)
     .fetch_optional(pool.get_ref())

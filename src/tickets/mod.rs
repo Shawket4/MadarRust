@@ -45,6 +45,12 @@ pub struct OpenTicketItemView {
     pub line: serde_json::Value,
     pub line_total: i32,
     pub voided: bool,
+    /// The line's name and quantity from its relational columns (DB Phase
+    /// 5.1). Additive: older tills keep reading them out of `line`.
+    #[serde(default)]
+    pub item_name: Option<String>,
+    #[serde(default)]
+    pub quantity: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -377,9 +383,11 @@ pub(crate) async fn open_ticket_views_on(
         serde_json::Value,
         i32,
         bool,
+        Option<String>,
+        Option<i32>,
     )> = sqlx::query_as(
         "SELECT oti.open_ticket_id, oti.id, r.round_number, r.fired_at, oti.menu_item_id, oti.line, \
-                oti.line_total, (oti.voided_at IS NOT NULL) AS voided \
+                oti.line_total, (oti.voided_at IS NOT NULL) AS voided, oti.item_name, oti.quantity \
          FROM open_ticket_items oti JOIN open_ticket_rounds r ON r.id = oti.round_id \
          WHERE oti.open_ticket_id = ANY($1) ORDER BY r.round_number, oti.created_at",
     )
@@ -388,8 +396,18 @@ pub(crate) async fn open_ticket_views_on(
     .await?;
     let mut items_of: std::collections::HashMap<Uuid, Vec<OpenTicketItemView>> =
         std::collections::HashMap::new();
-    for (ticket_id, id, round_number, round_fired_at, menu_item_id, line, line_total, voided) in
-        lines
+    for (
+        ticket_id,
+        id,
+        round_number,
+        round_fired_at,
+        menu_item_id,
+        line,
+        line_total,
+        voided,
+        item_name,
+        quantity,
+    ) in lines
     {
         items_of
             .entry(ticket_id)
@@ -402,6 +420,8 @@ pub(crate) async fn open_ticket_views_on(
                 line,
                 line_total,
                 voided,
+                item_name,
+                quantity,
             });
     }
 
@@ -951,15 +971,7 @@ pub(crate) async fn mint_ticket_ref(
     .bind(branch_id)
     .fetch_one(&mut **tx)
     .await?;
-    let seq: i32 = sqlx::query_scalar(
-        "INSERT INTO ticket_ref_counters (branch_id, business_date, last_seq) VALUES ($1, $2, 1) \
-         ON CONFLICT (branch_id, business_date) \
-         DO UPDATE SET last_seq = ticket_ref_counters.last_seq + 1 RETURNING last_seq",
-    )
-    .bind(branch_id)
-    .bind(biz_date)
-    .fetch_one(&mut **tx)
-    .await?;
+    let seq = crate::refs::next(&mut **tx, crate::refs::Scope::Ticket, branch_id, biz_date).await?;
     Ok(format!(
         "T-{}-{}-{:04}",
         branch_code,

@@ -47,9 +47,10 @@ INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active) VALUES
   ('{id:latte}', 'S', 4000, 0, true),
   ('{id:latte}', 'M', 5000, 1, true),
   ('{id:latte}', 'L', 6000, 2, false);
-INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override) VALUES
-  ('{id:branch}', '{id:latte}', 'M', 5200),
-  ('{id:branch}', '{id:latte}', 'XL', 9000);
+-- A branch price for M (the legacy XL override named no size, so it never applied).
+INSERT INTO menu_price_overrides (scope, branch_id, target_type, target_id, price)
+  SELECT 'branch', '{id:branch}', 'menu_item_size', z.id, 5200
+    FROM menu_item_sizes z WHERE z.menu_item_id = '{id:latte}' AND z.label = 'M';
 
 INSERT INTO modifier_groups (id, org_id, name, selection_type, min_selections, is_required, legacy_addon_type, effect, is_active) VALUES
   ('{id:syrup}',   '{id:org}', 'Syrup',   'multi',  1, true,  NULL,        'none',  true),
@@ -61,21 +62,6 @@ INSERT INTO modifier_groups (id, org_id, name, selection_type, min_selections, i
   ('{id:emptied}', '{id:org}', 'Crumbs',  'multi',  1, true,  NULL,        'adds',  true),
   ('{id:off}',     '{id:org}', 'Retired', 'multi',  1, true,  NULL,        'adds',  false);
 
-INSERT INTO addon_items (id, org_id, name, type, default_price, is_active) VALUES
-  ('{id:vanilla}',   '{id:org}', 'Vanilla',    'extra', 1000, true),
-  ('{id:hazelnut}',  '{id:org}', 'Hazelnut',   'extra', 1500, true),
-  ('{id:sugarfree}', '{id:org}', 'Sugar free', 'extra',  500, true),
-  ('{id:whip}',      '{id:org}', 'Whip',       'extra',  700, true),
-  ('{id:saucea}',    '{id:org}', 'Sauce A',    'extra',  300, true),
-  ('{id:sauceb}',    '{id:org}', 'Sauce B',    'extra',  400, true),
-  ('{id:whole}',     '{id:org}', 'Whole',      'extra',    0, true),
-  ('{id:oat}',       '{id:org}', 'Oat',        'extra',  800, true),
-  ('{id:skim}',      '{id:org}', 'Skim',       'milk_type', 200, true),
-  ('{id:x}',         '{id:org}', 'X',          'extra',  100, true),
-  ('{id:y}',         '{id:org}', 'Y',          'extra',  200, false),
-  ('{id:z}',         '{id:org}', 'Z',          'extra',  300, true),
-  ('{id:crumb}',     '{id:org}', 'Crumb',      'extra',  100, true),
-  ('{id:gone}',      '{id:org}', 'Gone',       'extra',  100, true);
 INSERT INTO modifier_options (id, group_id, name, price, sort, is_default, is_active) VALUES
   ('{id:vanilla}',   '{id:syrup}',   'Vanilla',    1000, 0, true,  true),
   ('{id:hazelnut}',  '{id:syrup}',   'Hazelnut',   1500, 1, false, true),
@@ -87,7 +73,8 @@ INSERT INTO modifier_options (id, group_id, name, price, sort, is_default, is_ac
   ('{id:oat}',       '{id:milk}',    'Oat',         800, 1, false, true),
   ('{id:skim}',      '{id:legacy}',  'Skim',        200, 0, false, true),
   ('{id:x}',         '{id:listed}',  'X',           100, 0, false, true),
-  ('{id:y}',         '{id:listed}',  'Y',           200, 1, true,  true),
+  -- Y: the legacy add-on row was inactive, and the backfill copies that onto the option.
+  ('{id:y}',         '{id:listed}',  'Y',           200, 1, true,  false),
   ('{id:z}',         '{id:listed}',  'Z',           300, 2, false, true),
   ('{id:crumb}',     '{id:emptied}', 'Crumb',       100, 0, false, true),
   ('{id:gone}',      '{id:off}',     'Gone',        100, 0, false, true);
@@ -105,9 +92,9 @@ UPDATE menu_item_modifier_groups SET min_override = 2, is_required_override = tr
  WHERE menu_item_id = '{id:latte}' AND group_id = '{id:listed}';
 UPDATE menu_item_modifier_groups SET included_option_ids = ARRAY[]::uuid[]
  WHERE menu_item_id = '{id:latte}' AND group_id = '{id:emptied}';
-INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available) VALUES
-  ('{id:branch}', '{id:hazelnut}', 1600, true),
-  ('{id:branch}', '{id:saucea}',   NULL, false);
+INSERT INTO menu_price_overrides (scope, branch_id, target_type, target_id, price, is_available) VALUES
+  ('branch', '{id:branch}', 'modifier_option', '{id:hazelnut}', 1600, NULL),
+  ('branch', '{id:branch}', 'modifier_option', '{id:saucea}',   NULL, false);
 "#;
 
 fn fixture_sql() -> String {
@@ -196,7 +183,14 @@ async fn the_shared_input_is_the_servers(pool: PgPool) {
         let view = &catalog.item(c.item).expect("loaded").view;
         let input = comp_input(view, &c.line);
         if let Some(r) = recorded.iter().find(|r| r.name == c.name) {
-            assert_eq!(&r.item, view, "{}: the loader's view", c.name);
+            // The recorded view carries one size no database can hold since DB
+            // Phase 2.4: a label only a LEGACY branch override named (inactive,
+            // unpriced; the old loader's UNION branch). Prod's views never
+            // produced it; it is set aside here, the vector file stays as
+            // shipped, and the comp input below is still compared in full.
+            let mut want = r.item.clone();
+            want.sizes.retain(|z| z.price.is_some() || z.is_active);
+            assert_eq!(&want, view, "{}: the loader's view", c.name);
             assert_eq!(r.line, c.line, "{}", c.name);
             assert_eq!(input, r.expected, "{}: the input", c.name);
         } else if std::env::var("MADAR_WRITE_STAFF_INPUT_VECTORS").is_err() {

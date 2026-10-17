@@ -14,7 +14,10 @@
 //! (`MADAR_WRITE_CATALOG_CAPTURE=1`).
 #![allow(clippy::too_many_arguments)]
 
+mod common;
+
 use actix_web::{App, test, web};
+use common::legacy_catalog as lc;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -112,14 +115,6 @@ const O_HOT: Uuid = id(0x80);
 const O_CREAM: Uuid = id(0x81);
 const O_OFF: Uuid = id(0x82);
 
-async fn exec(pool: &PgPool, sql: &str) {
-    for stmt in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-        sqlx::query(stmt)
-            .execute(pool)
-            .await
-            .unwrap_or_else(|e| panic!("{e}: {stmt}"));
-    }
-}
 
 async fn ingredient(pool: &PgPool, id: Uuid, name: &str, unit: &str, cat: Uuid) {
     sqlx::query(
@@ -159,7 +154,9 @@ async fn group(
     .unwrap();
 }
 
-/// An add-on item; with a group, also its modifier option (same id).
+/// An add-on: its modifier option in `group`, or (a legacy add-on that never
+/// had one) in its type's own group, as the menu-unification backfill made
+/// it. `addon_items` is the compat view over these since DB Phase 2.4.
 async fn option(
     pool: &PgPool,
     id: Uuid,
@@ -170,20 +167,11 @@ async fn option(
     active: bool,
     replaces: Option<Uuid>,
 ) {
-    sqlx::query(
-        "INSERT INTO addon_items (id, org_id, name, type, default_price, is_active) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(id)
-    .bind(ORG)
-    .bind(name)
-    .bind(kind)
-    .bind(price)
-    .bind(active)
-    .execute(pool)
-    .await
-    .unwrap();
-    if let Some((g, sort)) = group {
+    let Some((g, sort)) = group else {
+        lc::addon(pool, lc::Addon::new(ORG, name, kind, price).id(id).active(active)).await;
+        return;
+    };
+    {
         sqlx::query(
             "INSERT INTO modifier_options (id, group_id, name, price, sort, is_active, replaces_ingredient_id) \
              VALUES ($1, $2, $3, $4, $5, $6, $7)",
@@ -201,19 +189,8 @@ async fn option(
     }
 }
 
-async fn option_line(pool: &PgPool, option: Uuid, ing: Uuid, name: &str, unit: &str, qty: f64) {
-    sqlx::query(
-        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) \
-         VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(option)
-    .bind(ing)
-    .bind(qty)
-    .bind(name)
-    .bind(unit)
-    .execute(pool)
-    .await
-    .unwrap();
+async fn option_line(pool: &PgPool, option: Uuid, ing: Uuid, _name: &str, unit: &str, qty: f64) {
+    lc::addon_ingredient(pool, option, ing, qty, unit).await;
 }
 
 async fn sized_option_line(
@@ -287,19 +264,8 @@ async fn recipe(
     unit: &str,
     qty: f64,
 ) {
-    sqlx::query(
-        "INSERT INTO menu_item_recipes (menu_item_id, size_label, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(item)
-    .bind(size)
-    .bind(ing)
-    .bind(qty)
-    .bind(name)
-    .bind(unit)
-    .execute(pool)
-    .await
-    .unwrap();
+    let _ = name;
+    lc::item_recipe(pool, item, size, ing, qty, unit).await;
 }
 
 async fn optional(
@@ -312,24 +278,14 @@ async fn optional(
     ing: Option<(Uuid, &str, &str, f64)>,
     active: bool,
 ) {
-    sqlx::query(
-        "INSERT INTO menu_item_optional_fields \
-             (id, menu_item_id, name, price, size_label, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, is_active) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-    )
-    .bind(id)
-    .bind(item)
-    .bind(name)
-    .bind(price)
-    .bind(size)
-    .bind(ing.map(|i| i.0))
-    .bind(ing.map(|i| i.1))
-    .bind(ing.map(|i| i.2))
-    .bind(ing.map(|i| i.3))
-    .bind(active)
-    .execute(pool)
-    .await
-    .unwrap();
+    // A size-scoped optional is not representable on an option: the backfill
+    // kept its inline recipe as the generic line (reported optional.size_scoped).
+    let _ = size;
+    let mut f = lc::Optional::new(item, name, price).id(id).active(active);
+    if let Some((ing, _name, unit, qty)) = ing {
+        f = f.recipe(ing, qty, unit);
+    }
+    lc::optional_field(pool, f).await;
 }
 
 /// The fixture catalogue, at branch [`BRANCH`].
@@ -735,14 +691,8 @@ pub async fn seed(pool: &PgPool) {
     option_line(pool, A_SHOT, I_BEAN, "Espresso bean", "g", 9.0).await;
 
     // The branch: oat at 800, almond switched off (still priced if rung).
-    exec(
-        pool,
-        &format!(
-            "INSERT INTO branch_addon_overrides (branch_id, addon_item_id, price_override, is_available) VALUES \
-             ('{BRANCH}', '{A_OAT}', 800, true), ('{BRANCH}', '{A_ALMOND}', NULL, false)"
-        ),
-    )
-    .await;
+    lc::branch_addon_override(pool, BRANCH, A_OAT, Some(800), true).await;
+    lc::branch_addon_override(pool, BRANCH, A_ALMOND, None, false).await;
 
     // Items.
     item(
@@ -862,16 +812,9 @@ pub async fn seed(pool: &PgPool) {
 
     // The branch sells the latte at 3500 (M5), its Large at 4000, and prices a
     // "Jumbo" the item has no size for.
-    exec(
-        pool,
-        &format!(
-            "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available) \
-             VALUES ('{BRANCH}', '{M_LATTE}', 3500, true); \
-             INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override) VALUES \
-             ('{BRANCH}', '{M_LATTE}', 'Large', 4000), ('{BRANCH}', '{M_LATTE}', 'Jumbo', 4500)"
-        ),
-    )
-    .await;
+    lc::branch_menu_override(pool, BRANCH, M_LATTE, Some(3500), true).await;
+    lc::branch_size_override(pool, BRANCH, M_LATTE, "Large", 4000).await;
+    lc::branch_size_override(pool, BRANCH, M_LATTE, "Jumbo", 4500).await;
 
     optional(pool, O_HOT, M_LATTE, "Extra hot", 0, None, None, true).await;
     optional(
@@ -1417,6 +1360,25 @@ async fn the_server_prices_the_fixture_as_pinned(pool: PgPool) {
 
 // ── madar-catalog: the rule, the feed and the vectors ────────────────────────
 
+/// Shipped vector cases (madar-shared v0.8.1) whose captured INPUT holds data no
+/// database can hold since DB Phase 2.4, so this server's answer for them now
+/// differs from the shipped one while the rule is unchanged. Regenerating the
+/// vectors (MADAR_WRITE_CATALOG_VECTORS=1) is a madar-shared release; until
+/// then every other case must equal the shipped answer exactly.
+const SHIPPED_LEGACY_ONLY: &[&str] = &[
+    // An item-level branch price on an item WITH sizes: lands on no one_size row.
+    "latte_inactive_size_falls_back_to_the_branch_item_price",
+    "latte_no_size_is_the_branch_item_price",
+    "latte_oat_no_size",
+    "latte_size_only_the_branch_prices",
+    "latte_unknown_size",
+    // A size-scoped optional field ("cream on Large only"): the backfill dropped the scope.
+    "latte_small_cream_is_large_only",
+    // An add-on in no group: every option has a group now (the backfill's), so
+    // the swap target carries that group's category.
+    "latte_skim_no_group",
+];
+
 const VECTORS: &str = "../madar-shared/crates/madar-catalog/vectors/catalog_vectors.json";
 
 /// Every item of the fixture, by the key the vectors name it.
@@ -1690,11 +1652,41 @@ async fn the_rule_the_feed_and_the_vectors_agree_with_the_server(pool: PgPool) {
         std::fs::write(dump, &written).unwrap();
     }
     let shipped: Value = serde_json::from_str(madar_catalog::vectors::CATALOG).unwrap();
+    // The shipped vectors' INPUTS (item views, feed rows) were captured from the
+    // legacy tables and still carry the LEGACY_ONLY data, which no database can
+    // hold since DB Phase 2.4; regenerating them is a madar-shared release (an
+    // owner call). The rule is what must not drift: every other case's
+    // expected answer is the shipped one, exactly.
+    let ours = serde_json::to_value(&vectors).unwrap();
+    let by_name = |v: &Value| -> std::collections::BTreeMap<String, Value> {
+        v["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| (c["name"].as_str().unwrap().to_string(), c["expected"].clone()))
+            .collect()
+    };
+    let (ours, shipped) = (by_name(&ours), by_name(&shipped));
+    let differ: Vec<&String> = shipped
+        .iter()
+        .filter(|(name, want)| ours.get(*name) != Some(*want))
+        .map(|(name, _)| name)
+        .collect();
     assert_eq!(
-        serde_json::to_value(&vectors).unwrap(),
-        shipped,
-        "madar-catalog's vectors are not what this server writes: regenerate them \
+        differ,
+        SHIPPED_LEGACY_ONLY
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .iter()
+            .collect::<Vec<_>>(),
+        "madar-catalog's vectors are not what this server computes: regenerate \
          (MADAR_WRITE_CATALOG_VECTORS=1) and release madar-shared"
+    );
+    assert_eq!(
+        ours.keys().collect::<Vec<_>>(),
+        shipped.keys().collect::<Vec<_>>(),
+        "the same cases on both sides"
     );
 }
 

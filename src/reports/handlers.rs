@@ -441,7 +441,7 @@ pub async fn shift_summary(
         JOIN users    u ON u.id = s.teller_id
         LEFT JOIN orders o          ON o.till_id  = s.id
         LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-        WHERE s.id = $1
+        WHERE s.id = $1 AND s.deleted_at IS NULL
         GROUP BY s.id, b.name, u.name
         "#,
     )
@@ -583,262 +583,20 @@ pub async fn branch_sales(
         Some(raw) => crate::orders::handlers::parse_uuid_csv("exclude_items", raw)?,
         None => None,
     };
-
-    // Named rather than a positional tuple: at fourteen money columns a
-    // mis-ordered index is a wrong figure on a dashboard, not a compile error.
-    #[derive(sqlx::FromRow)]
-    struct Totals {
-        total_orders: i64,
-        voided_orders: i64,
-        subtotal: i64,
-        total_discount: i64,
-        total_tax: i64,
-        total_revenue: i64,
-        gross_sales: i64,
-        refunded_amount: i64,
-        total_service_charge: i64,
-        service_charge_waived_count: i64,
-        service_charge_waived_amount: i64,
-        total_delivery_fees: i64,
-        total_line_items: i64,
-        revenue_by_method: serde_json::Value,
-        total_tips: i64,
-        cash_tips: i64,
-    }
-
-    let totals = sqlx::query_as::<_, Totals>(
-        r#"
-        SELECT
-            COUNT(*) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS total_orders,
-            COUNT(*) FILTER (WHERE o.status = 'voided')::bigint AS voided_orders,
-            COALESCE(SUM(o.subtotal)        FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS subtotal,
-            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_discount,
-            COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tax,
-            -- Net of refunds against each sale; the two lines after it are the
-            -- identity `gross_sales − refunded_amount = total_revenue`. The join
-            -- on v_order_refund_totals is one row per order, so nothing here
-            -- fans out — the V17 lesson still holds.
-            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
-                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
-            COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS gross_sales,
-            COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_amount,
-            COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_service_charge,
-            COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded') AND o.service_charge_waived_by IS NOT NULL)::bigint AS service_charge_waived_count,
-            COALESCE(SUM(o.service_charge_waived_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS service_charge_waived_amount,
-            COALESCE(SUM(o.delivery_fee)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_delivery_fees,
-            COALESCE((
-              SELECT SUM(oi.quantity)::bigint
-              FROM order_items oi
-              JOIN orders o3 ON o3.id = oi.order_id
-              WHERE o3.branch_id = ANY($1) AND o3.status NOT IN ('voided', 'refunded')
-                AND oi.line_kind <> 'combo'
-                AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
-                AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
-                AND ($4::uuid[] IS NULL OR oi.menu_item_id != ALL($4::uuid[]))
-            ), 0)::bigint AS total_line_items,
-            COALESCE((
-              SELECT json_object_agg(method, rev) FROM (
-                SELECT op.method, SUM(op.amount)::bigint AS rev
-                FROM order_payments op
-                JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.branch_id = ANY($1) AND o2.status NOT IN ('voided', 'refunded')
-                  AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
-                  AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
-                GROUP BY op.method
-              ) sub
-            ), '{}'::json) AS revenue_by_method,
-            -- Tips, standalone. Deliberately NOT added into total_amount or into
-            -- any method bucket above: `revenue_by_method` is goods-only so it
-            -- lines up with the shift report's payment_summary.
-            COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tips,
-            COALESCE(SUM(o.tip_amount) FILTER (
-                WHERE o.status NOT IN ('voided', 'refunded')
-                  AND COALESCE(o.tip_is_cash,
-                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
-            ), 0)::bigint AS cash_tips
-        FROM orders o
-        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-        WHERE o.branch_id = ANY($1)
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        "#,
-    )
-    .bind(&branch_ids)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&exclude_items)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    // The screen wants a leaderboard and a spreadsheet wants the whole ranking,
-    // and both come through here. A hundred was low enough that an export asking
-    // for everything got the top hundred and no indication there was more; the
-    // default is unchanged, so nothing that did not ask is affected.
-    let item_limit = query.limit.unwrap_or(20).clamp(1, 1000);
-
-    let top_items = sqlx::query_as::<_, ItemSales>(
-        r#"
-        SELECT oi.menu_item_id, oi.item_name,
-               COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb) AS item_name_translations,
-               SUM(oi.quantity)::bigint   AS quantity_sold,
-               SUM(oi.line_total)::bigint AS revenue
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
-        WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
-          AND oi.line_kind <> 'combo'
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oi.menu_item_id, oi.item_name
-        -- One ranking everywhere (the POS metrics and the POS core too):
-        -- quantity, then revenue, then name.
-        ORDER BY quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
-        LIMIT $4
-        "#,
-    )
-    .bind(&branch_ids).bind(query.from).bind(query.to).bind(item_limit)
-    .fetch_all(pool.get_ref()).await?;
-
-    #[derive(sqlx::FromRow)]
-    struct CategoryItemRow {
-        category_id: Option<Uuid>,
-        category_name: Option<String>,
-        category_name_translations: Option<serde_json::Value>,
-        menu_item_id: Uuid,
-        item_name: String,
-        item_name_translations: serde_json::Value,
-        quantity_sold: i64,
-        revenue: i64,
-    }
-
-    let cat_rows = sqlx::query_as::<_, CategoryItemRow>(
-        r#"
-        SELECT
-            m.category_id AS category_id,
-            COALESCE(c.name, 'Uncategorized') AS category_name,
-            (array_agg(c.name_translations))[1] AS category_name_translations,
-            oi.menu_item_id AS menu_item_id,
-            oi.item_name,
-            COALESCE((array_agg(oi.name_translations))[1], '{}'::jsonb) AS item_name_translations,
-            SUM(oi.quantity)::bigint   AS quantity_sold,
-            SUM(oi.line_total)::bigint AS revenue
-        FROM order_items oi
-        JOIN orders o     ON o.id  = oi.order_id
-        LEFT JOIN menu_items m ON m.id  = oi.menu_item_id
-        LEFT JOIN categories c ON c.id = m.category_id
-        WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
-          AND oi.line_kind <> 'combo'
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY
-            m.category_id,
-            COALESCE(c.name, 'Uncategorized'),
-            oi.menu_item_id,
-            oi.item_name
-        ORDER BY category_name NULLS LAST, quantity_sold DESC, revenue DESC, oi.item_name COLLATE "C"
-        "#,
-    )
-    .bind(&branch_ids).bind(query.from).bind(query.to)
-    .fetch_all(pool.get_ref()).await?;
-
-    let mut by_category: Vec<CategorySales> = Vec::new();
-    for row in cat_rows {
-        let item = ItemSales {
-            menu_item_id: row.menu_item_id,
-            item_name: row.item_name,
-            item_name_translations: row.item_name_translations,
-            quantity_sold: row.quantity_sold,
-            revenue: row.revenue,
-        };
-        match by_category
-            .iter_mut()
-            .find(|c| c.category_id == row.category_id)
-        {
-            Some(cat) => {
-                cat.item_count += 1;
-                cat.quantity_sold += item.quantity_sold;
-                cat.revenue += item.revenue;
-                cat.items.push(item);
-            }
-            None => {
-                by_category.push(CategorySales {
-                    category_id: row.category_id,
-                    category_name: row.category_name,
-                    category_name_translations: row.category_name_translations,
-                    item_count: 1,
-                    quantity_sold: item.quantity_sold,
-                    revenue: item.revenue,
-                    items: vec![item],
-                });
-            }
-        }
-    }
-
-    let mode_rows = sqlx::query_as::<_, ServiceModeSales>(&format!(
-        r#"
-        SELECT o.service_mode,
-               COUNT(*)::bigint AS orders,
-               COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)), 0)::bigint AS revenue
-        FROM orders o
-        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-        WHERE o.branch_id = ANY($1)
-          AND o.{sold}
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY o.service_mode
-        "#,
-        sold = crate::orders::SOLD,
-    ))
-    .bind(&branch_ids)
-    .bind(query.from)
-    .bind(query.to)
-    .fetch_all(pool.get_ref())
-    .await?;
-    // Both modes, always, in a fixed order: a screen should not have to guess
-    // that a missing row means zero.
-    let by_service_mode: Vec<ServiceModeSales> = ["takeaway", "dine_in"]
-        .into_iter()
-        .map(|mode| {
-            mode_rows
-                .iter()
-                .find(|r| r.service_mode == mode)
-                .map(|r| ServiceModeSales {
-                    service_mode: r.service_mode.clone(),
-                    orders: r.orders,
-                    revenue: r.revenue,
-                })
-                .unwrap_or(ServiceModeSales {
-                    service_mode: mode.into(),
-                    orders: 0,
-                    revenue: 0,
-                })
-        })
-        .collect();
-
-    Ok(HttpResponse::Ok().json(BranchSalesReport {
-        branch_id: *branch_id,
+    // Closed days from the rollups, the rest live (reports::sales).
+    let report = super::sales::branch_sales_report(
+        pool.get_ref(),
+        &branch_ids,
+        *branch_id,
         branch_name,
-        from: query.from,
-        to: query.to,
-        total_orders: totals.total_orders,
-        voided_orders: totals.voided_orders,
-        subtotal: totals.subtotal,
-        total_discount: totals.total_discount,
-        total_tax: totals.total_tax,
-        total_revenue: totals.total_revenue,
-        gross_sales: totals.gross_sales,
-        refunded_amount: totals.refunded_amount,
-        total_service_charge: totals.total_service_charge,
-        service_charge_waived_count: totals.service_charge_waived_count,
-        service_charge_waived_amount: totals.service_charge_waived_amount,
-        total_delivery_fees: totals.total_delivery_fees,
-        total_line_items: totals.total_line_items,
-        revenue_by_method: totals.revenue_by_method,
-        total_tips: totals.total_tips,
-        cash_tips: totals.cash_tips,
-        top_items,
-        by_category,
-        by_service_mode,
-    }))
+        query.from,
+        query.to,
+        query.limit,
+        exclude_items,
+        super::sales::Source::configured(),
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(report))
 }
 
 // ── GET /reports/branches/:id/channel-breakdown ──────────────
@@ -999,124 +757,18 @@ pub async fn branch_sales_timeseries(
     // (nil UUID) the org's, so every branch buckets in one consistent zone.
     let tz: String = crate::tz::scope_tz_name(pool.get_ref(), *branch_id, org).await?;
 
-    let trunc = match query.granularity.as_deref().unwrap_or("daily") {
-        "hourly" => "hour",
-        "monthly" => "month",
-        _ => "day",
-    };
-
-    // `trunc` is an enum whitelist (closed match above) so it is safe to
-    // interpolate. `tz` is a DB value but originates as unvalidated free text
-    // on the branch, so it MUST be bound ($4), never interpolated — otherwise a
-    // crafted branch timezone is a stored SQL injection.
-    let sql = format!(
-        r#"
-        WITH periods AS (
-            SELECT
-                date_trunc('{trunc}', o.created_at AT TIME ZONE $4) AS period_val,
-                to_char(
-                    date_trunc('{trunc}', o.created_at AT TIME ZONE $4),
-                    'YYYY-MM-DD"T"HH24:MI:SS'
-                ) AS period_str,
-                COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
-                -- Net of refunds, attributed to the period the SALE fell in.
-                COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
-                         FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
-                COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded,
-                COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
-                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
-                COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
-            FROM orders o
-            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-            WHERE o.branch_id = ANY($1)
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY date_trunc('{trunc}', o.created_at AT TIME ZONE $4)
-        ),
-        -- Payment mix, bucketed ONCE for the whole range.
-        --
-        -- This used to be a correlated subquery in the SELECT list, which
-        -- re-ran per period row: a 120-day chart executed it 120 times, and
-        -- because the correlation predicate is `date_trunc(...) = p.period_val`
-        -- — a function over the column — no index could serve it, so each run
-        -- was a full scan of `orders`. Measured on 30k orders it cost ~730ms
-        -- and ~3.6M row visits to draw one chart; as a single grouped pass it
-        -- is ~27ms with byte-identical output. On the production box (1 vCPU,
-        -- Postgres co-resident) the old shape was the dashboard's slowest read.
-        methods AS (
-            SELECT
-                date_trunc('{trunc}', o2.created_at AT TIME ZONE $4) AS period_val,
-                op2.method,
-                SUM(op2.amount)::bigint AS rev
-            FROM order_payments op2
-            JOIN orders o2 ON o2.id = op2.order_id
-            WHERE o2.branch_id = ANY($1)
-              AND o2.status NOT IN ('voided', 'refunded')
-              AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
-            GROUP BY 1, 2
-        ),
-        methods_by_period AS (
-            SELECT period_val, json_object_agg(method, rev) AS revenue_by_method
-            FROM methods
-            GROUP BY period_val
-        ),
-        -- order_items/order_item_addons fan out orders, so they're summed in
-        -- their own bucketed CTEs rather than joined into `periods` above.
-        line_item_totals AS (
-            SELECT
-                date_trunc('{trunc}', o3.created_at AT TIME ZONE $4) AS period_val,
-                COALESCE(SUM(oi3.quantity), 0)::bigint AS line_items
-            FROM order_items oi3
-            JOIN orders o3 ON o3.id = oi3.order_id
-            WHERE o3.branch_id = ANY($1)
-              AND oi3.line_kind <> 'combo'
-              AND o3.status NOT IN ('voided', 'refunded')
-              AND ($2::timestamptz IS NULL OR o3.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o3.created_at <= $3)
-            GROUP BY 1
-        ),
-        addon_totals AS (
-            SELECT
-                date_trunc('{trunc}', o4.created_at AT TIME ZONE $4) AS period_val,
-                COALESCE(SUM(oia4.quantity), 0)::bigint AS addons
-            FROM order_item_addons oia4
-            JOIN order_items oi4 ON oi4.id = oia4.order_item_id
-            JOIN orders o4 ON o4.id = oi4.order_id
-            WHERE o4.branch_id = ANY($1)
-              AND o4.status NOT IN ('voided', 'refunded')
-              AND ($2::timestamptz IS NULL OR o4.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o4.created_at <= $3)
-            GROUP BY 1
-        )
-        SELECT
-            p.period_str AS period,
-            p.orders,
-            p.revenue,
-            p.refunded,
-            p.voided,
-            p.discount,
-            p.tax,
-            COALESCE(m.revenue_by_method, '{{}}'::json) AS revenue_by_method,
-            COALESCE(li.line_items, 0)::bigint AS line_items,
-            COALESCE(ad.addons, 0)::bigint AS addons
-        FROM periods p
-        LEFT JOIN methods_by_period m ON m.period_val = p.period_val
-        LEFT JOIN line_item_totals li ON li.period_val = p.period_val
-        LEFT JOIN addon_totals ad ON ad.period_val = p.period_val
-        ORDER BY p.period_val ASC
-        "#,
-        trunc = trunc,
-    );
-
-    let rows = sqlx::query_as::<_, TimeseriesPoint>(&sql)
-        .bind(&branch_ids)
-        .bind(query.from)
-        .bind(query.to)
-        .bind(&tz)
-        .fetch_all(pool.get_ref())
-        .await?;
-
+    // Daily and monthly read the closed-day rollups (reports::sales); hourly
+    // stays live.
+    let rows = super::sales::sales_timeseries(
+        pool.get_ref(),
+        &branch_ids,
+        &tz,
+        query.granularity.as_deref(),
+        query.from,
+        query.to,
+        super::sales::Source::configured(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(rows))
 }
 
@@ -1607,7 +1259,6 @@ pub async fn branch_addon_sales(
     branch_id: web::Path<Uuid>,
     query: web::Query<DateRangeQuery>,
 ) -> Result<HttpResponse, AppError> {
-    crate::compat_usage::count_internal("reports::branch_addon_sales");
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "orders", "read").await?;
     let (branch_ids, _org) =
@@ -1619,18 +1270,20 @@ pub async fn branch_addon_sales(
             oia.addon_item_id,
             oia.addon_name,
             COALESCE((array_agg(oia.name_translations))[1], '{}'::jsonb) AS addon_name_translations,
-            COALESCE(ai.type, 'extra') AS addon_type,
+            COALESCE(mg.legacy_addon_type, 'extra') AS addon_type,
             SUM(oia.quantity)::bigint  AS quantity_sold,
             SUM(oia.line_total)::bigint AS revenue
         FROM order_item_addons oia
         JOIN order_items oi ON oi.id  = oia.order_item_id
         JOIN orders o       ON o.id   = oi.order_id
-        LEFT JOIN addon_items ai ON ai.id = oia.addon_item_id
+        -- An add-on's type is its group's legacy_addon_type (the old addon_items).
+        LEFT JOIN modifier_options mo ON mo.id = oia.addon_item_id AND mo.legacy_source = 'addon'
+        LEFT JOIN modifier_groups mg ON mg.id = mo.group_id
         WHERE o.branch_id = ANY($1)
           AND o.status NOT IN ('voided', 'refunded')
           AND ($2::timestamptz IS NULL OR o.created_at >= $2)
           AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oia.addon_item_id, oia.addon_name, ai.type
+        GROUP BY oia.addon_item_id, oia.addon_name, mg.legacy_addon_type
         ORDER BY quantity_sold DESC, revenue DESC, oia.addon_name COLLATE "C"
         "#,
     )
@@ -1667,98 +1320,15 @@ pub async fn org_branch_comparison(
     if claims.role != UserRole::SuperAdmin && claims.org_id() != Some(*org_id) {
         return Err(AppError::Forbidden("Not your org".into()));
     }
-
-    #[derive(sqlx::FromRow)]
-    struct Row {
-        branch_id: Uuid,
-        branch_name: String,
-        total_orders: i64,
-        voided_orders: i64,
-        total_revenue: i64,
-        gross_sales: i64,
-        refunded_amount: i64,
-        revenue_by_method: serde_json::Value,
-        total_tips: i64,
-        cash_tips: i64,
-    }
-
-    let rows = sqlx::query_as::<_, Row>(
-        r#"
-        SELECT
-            b.id   AS branch_id,
-            b.name AS branch_name,
-            COUNT(DISTINCT o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS total_orders,
-            COUNT(DISTINCT o.id) FILTER (WHERE o.status  = 'voided')::bigint AS voided_orders,
-            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
-                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_revenue,
-            COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS gross_sales,
-            COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded_amount,
-            COALESCE((
-              SELECT json_object_agg(method, rev) FROM (
-                SELECT op.method, SUM(op.amount)::bigint AS rev
-                FROM order_payments op
-                JOIN orders o2 ON o2.id = op.order_id
-                WHERE o2.branch_id = b.id AND o2.status NOT IN ('voided', 'refunded')
-                  AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
-                  AND ($3::timestamptz IS NULL OR o2.created_at <= $3)
-                GROUP BY op.method
-              ) sub
-            ), '{}'::json) AS revenue_by_method,
-            COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS total_tips,
-            COALESCE(SUM(o.tip_amount) FILTER (
-                WHERE o.status NOT IN ('voided', 'refunded')
-                  AND COALESCE(o.tip_is_cash,
-                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')
-            ), 0)::bigint AS cash_tips
-        FROM branches b
-        LEFT JOIN orders o          ON o.branch_id = b.id
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-        WHERE b.org_id = $1 AND b.deleted_at IS NULL
-        GROUP BY b.id, b.name
-        ORDER BY total_revenue DESC
-        "#,
+    let report = super::sales::org_comparison(
+        pool.get_ref(),
+        *org_id,
+        query.from,
+        query.to,
+        super::sales::Source::configured(),
     )
-    .bind(*org_id)
-    .bind(query.from)
-    .bind(query.to)
-    .fetch_all(pool.get_ref())
     .await?;
-
-    let branches = rows
-        .into_iter()
-        .map(|r| BranchComparison {
-            branch_id: r.branch_id,
-            branch_name: r.branch_name,
-            total_orders: r.total_orders,
-            voided_orders: r.voided_orders,
-            total_revenue: r.total_revenue,
-            gross_sales: r.gross_sales,
-            refunded_amount: r.refunded_amount,
-            revenue_by_method: r.revenue_by_method,
-            total_tips: r.total_tips,
-            cash_tips: r.cash_tips,
-            // The average bill is what was ordered, not what was kept.
-            avg_order_value: if r.total_orders == 0 {
-                0
-            } else {
-                r.gross_sales / r.total_orders
-            },
-            void_rate_pct: if (r.total_orders + r.voided_orders) == 0 {
-                0.0
-            } else {
-                r.voided_orders as f64 / (r.total_orders + r.voided_orders) as f64 * 100.0
-            },
-        })
-        .collect();
-
-    Ok(HttpResponse::Ok().json(OrgComparisonReport {
-        org_id: *org_id,
-        from: query.from,
-        to: query.to,
-        branches,
-    }))
+    Ok(HttpResponse::Ok().json(report))
 }
 
 // ── GET /reports/branches/:branch_id/delivery-sales ──────────
@@ -3383,7 +2953,7 @@ pub async fn branch_till_sessions(
             LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
             WHERE o.till_id = s.id AND o.{SOLD}
         ) sal ON TRUE
-        WHERE s.branch_id = ANY($1)
+        WHERE s.branch_id = ANY($1) AND s.deleted_at IS NULL
           AND ($2::timestamptz IS NULL OR s.opened_at >= $2)
           AND ($3::timestamptz IS NULL OR s.opened_at <= $3)
           AND (s.branch_id = ANY($4) OR s.teller_id = $5)

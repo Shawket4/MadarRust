@@ -546,6 +546,79 @@ impl FromRequest for Db {
     }
 }
 
+// ── Public routes (DB_ARCHITECTURE_AUDIT §8 Phase 2.5) ──────────────────────
+//
+// A public route (an online order, a QR table, a loyalty card, a booking page)
+// carries no token, so there is no tenant to take from claims and `Db` would
+// answer 401. Such handlers used to run everything on the OWNER pool, which
+// bypasses RLS: one missing `org_id` filter and a shop's page could read
+// another shop's rows.
+//
+// [`PublicDb`] splits that in two:
+//   * [`PublicDb::resolver`] — the owner pool, for the ROUTING lookups only:
+//     the thing the caller supplied that the database can vouch for (a branch,
+//     a table, a shop's slug or host, a card or pass token) → its org;
+//   * [`PublicDb::scoped`] — a [`Db`] stamped with that org; everything after
+//     the resolution runs on it, under RLS, like a signed-in request.
+// Keep the resolver's queries few and obviously org-free; anything that reads
+// or writes a tenant's data belongs on the scoped handle.
+
+/// The extractor public handlers take instead of `web::Data<PgPool>`.
+#[derive(Clone)]
+pub struct PublicDb(PgPool);
+
+impl PublicDb {
+    /// The owner pool, for resolving which org a public request belongs to.
+    pub fn resolver(&self) -> &PgPool {
+        &self.0
+    }
+
+    /// The tenant handle for `org`, once the request has been resolved to it.
+    pub async fn scoped(&self, org: Uuid) -> Db {
+        Db::for_org(&self.0, org).await
+    }
+
+    /// Build one directly (tests, non-HTTP call sites).
+    pub fn new(base: &PgPool) -> PublicDb {
+        PublicDb(base.clone())
+    }
+
+    /// The org of a live (active, not deleted) branch, or None.
+    pub async fn branch_org(&self, branch_id: Uuid) -> Result<Option<Uuid>, AppError> {
+        Ok(sqlx::query_scalar!(
+            "SELECT org_id FROM branches WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+            branch_id
+        )
+        .fetch_optional(&self.0)
+        .await?)
+    }
+
+    /// (branch, org) of an active table at a live branch, or None.
+    pub async fn table_branch_org(&self, table_id: Uuid) -> Result<Option<(Uuid, Uuid)>, AppError> {
+        Ok(sqlx::query!(
+            "SELECT t.branch_id, b.org_id FROM branch_tables t JOIN branches b ON b.id = t.branch_id \
+              WHERE t.id = $1 AND t.is_active AND b.is_active AND b.deleted_at IS NULL",
+            table_id
+        )
+        .fetch_optional(&self.0)
+        .await?
+        .map(|r| (r.branch_id, r.org_id)))
+    }
+}
+
+impl FromRequest for PublicDb {
+    type Error = AppError;
+    type Future = std::future::Ready<Result<PublicDb, AppError>>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        std::future::ready(
+            req.app_data::<web::Data<PgPool>>()
+                .map(|p| PublicDb(p.get_ref().clone()))
+                .ok_or(AppError::Internal),
+        )
+    }
+}
+
 // ── Transient-failure retry (DB_ARCHITECTURE_AUDIT §6.3, Phase 1.8) ─────────
 //
 // A deadlock (40P01) or a serialization failure (40001) aborts the whole

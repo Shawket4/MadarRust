@@ -706,7 +706,7 @@ pub async fn save_url_recorded(
         // Recorded so `push_balance` has something to PATCH — it reads this
         // column, which nothing used to write, so no Google pass ever saw a
         // balance change.
-        sqlx::query("UPDATE loyalty_customers SET google_object_id = $2 WHERE id = $1")
+        sqlx::query("UPDATE loyalty_memberships SET google_object_id = $2 WHERE id = $1")
             .bind(member.id)
             .bind(&object_id)
             .execute(pool)

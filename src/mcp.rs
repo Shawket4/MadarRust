@@ -128,14 +128,19 @@ fn piastres(p: i32) -> f64 {
 }
 
 async fn call(pool: &web::Data<PgPool>, name: &str, args: &Value) -> Result<Value, ToolError> {
+    // Public tools: the shop is resolved on the owner pool, then read under RLS.
+    let pdb = crate::db::PublicDb::new(pool.get_ref());
     match name {
         "get_shop" => {
-            let org = shop_id(pool, arg_str(args, "shop")?).await?;
-            let page = crate::orgs::links_page::public_links_page(pool, org).await?;
+            let org = shop_id(pdb.resolver(), arg_str(args, "shop")?).await?;
+            let scoped = pdb.scoped(org).await;
+            let page = crate::orgs::links_page::public_links_page(scoped.get_ref(), org).await?;
             serde_json::to_value(page).map_err(|_| ToolError("could not read the shop".into()))
         }
         "get_menu" => {
-            let org = shop_id(pool, arg_str(args, "shop")?).await?;
+            let org = shop_id(pdb.resolver(), arg_str(args, "shop")?).await?;
+            let scoped = pdb.scoped(org).await;
+            let pool = scoped.get_ref();
             let wanted = match args.get("branch_id").filter(|v| !v.is_null()) {
                 Some(_) => Some(arg_uuid(args, "branch_id")?),
                 None => None,
@@ -186,7 +191,7 @@ async fn call(pool: &web::Data<PgPool>, name: &str, args: &Value) -> Result<Valu
                 .ok_or_else(|| ToolError("\"party_size\" must be a positive integer".into()))?;
             body_of(
                 crate::bookings::public::booking_slots(
-                    pool.clone(),
+                    pdb.clone(),
                     web::Path::from(branch),
                     web::Query(crate::bookings::public::SlotsQuery { date, party_size }),
                 )
@@ -197,7 +202,7 @@ async fn call(pool: &web::Data<PgPool>, name: &str, args: &Value) -> Result<Valu
         "track_order" => {
             let id = arg_uuid(args, "order_id")?;
             let mut v = body_of(
-                crate::delivery::public::track_delivery_order(pool.clone(), web::Path::from(id))
+                crate::delivery::public::track_delivery_order(pdb.clone(), web::Path::from(id))
                     .await,
             )
             .await?;

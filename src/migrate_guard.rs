@@ -29,12 +29,13 @@ pub fn concurrent_index_name(sql: &str) -> Option<String> {
     let mut words = rest.split_whitespace();
     let mut name = words.next()?;
     if name.eq_ignore_ascii_case("IF") {
-        // IF NOT EXISTS <name>
-        words.next()?;
-        words.next()?;
+        // CREATE … IF NOT EXISTS <name>  |  DROP … IF EXISTS <name>
+        if words.next()?.eq_ignore_ascii_case("NOT") {
+            words.next()?;
+        }
         name = words.next()?;
     }
-    let name = name.trim_matches('"');
+    let name = name.trim_end_matches(';').trim_matches('"');
     (!name.is_empty() && !name.eq_ignore_ascii_case("ON")).then(|| name.to_string())
 }
 

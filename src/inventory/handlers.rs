@@ -793,31 +793,9 @@ pub async fn update_catalog_item(
         .bind(new_unit)
         .execute(&mut *tx)
         .await?;
-        // TRANSITION (menu-unification): until the shim flip, the LEGACY recipe
-        // tables are still what costing/orders read — rebase them in lockstep or
-        // COGS/deductions would be off by F in the deploy→flip window. Post-flip
-        // they are shim VIEWS (relkind 'v', not updatable) and this self-disables.
-        // Remove at SHIM_TEARDOWN.
-        let legacy_live: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = 'public' AND c.relname = 'menu_item_recipes' AND c.relkind = 'r')",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if legacy_live {
-            for q in [
-                "UPDATE menu_item_recipes        SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1",
-                "UPDATE addon_item_ingredients   SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1",
-                "UPDATE menu_item_optional_fields SET quantity_used = round((quantity_used / $2)::numeric, 3), ingredient_unit = $3 WHERE org_ingredient_id = $1 AND quantity_used IS NOT NULL",
-            ] {
-                sqlx::query(q)
-                    .bind(id)
-                    .bind(f)
-                    .bind(new_unit)
-                    .execute(&mut *tx)
-                    .await?;
-            }
-        }
+        // (The legacy recipe tables were rebased here in lockstep until the
+        // menu-unification flip. Every database has them as read-only views
+        // over recipe_lines since DB Phase 2.4, so recipe_lines above is all.)
         // Branch balances, par levels and the ledger are all denominated in the
         // base unit → ÷ F; per-branch actual cost is per OLD unit → × F. This is
         // a re-denomination, not a stock change, so it is the one sanctioned
@@ -873,27 +851,8 @@ pub async fn update_catalog_item(
             .bind(factor)
             .execute(&mut *tx)
             .await?;
-            // TRANSITION: keep the legacy tables (still live pre-flip) in lockstep;
-            // self-disables once they become shim views. Remove at SHIM_TEARDOWN.
-            let legacy_live: bool = sqlx::query_scalar(
-                "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 WHERE n.nspname = 'public' AND c.relname = 'menu_item_recipes' AND c.relkind = 'r')",
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-            if legacy_live {
-                for q in [
-                    "UPDATE menu_item_recipes         SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
-                    "UPDATE addon_item_ingredients    SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1",
-                    "UPDATE menu_item_optional_fields SET quantity_used = round((quantity_used * $2)::numeric, 3) WHERE org_ingredient_id = $1 AND quantity_used IS NOT NULL",
-                ] {
-                    sqlx::query(q)
-                        .bind(id)
-                        .bind(factor)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-            }
+            // (The legacy recipe tables are views over recipe_lines since DB
+            // Phase 2.4: the rebase above is the only one.)
         }
     }
 
@@ -1004,11 +963,21 @@ pub async fn delete_catalog_item(
         r#"
         SELECT
             EXISTS (
-                SELECT 1 FROM menu_item_recipes         WHERE org_ingredient_id = $1
+                -- A size's recipe, an add-on's or an optional field's line (what
+                -- the old menu_item_recipes / addon_item_ingredients /
+                -- menu_item_optional_fields views listed), on recipe_lines.
+                SELECT 1 FROM recipe_lines r JOIN menu_item_sizes ms ON ms.id = r.owner_id
+                 WHERE r.owner_type = 'item_size' AND r.ingredient_id = $1
                 UNION ALL
-                SELECT 1 FROM addon_item_ingredients    WHERE org_ingredient_id = $1
+                SELECT 1 FROM recipe_lines r JOIN modifier_options mo ON mo.id = r.owner_id
+                 WHERE r.owner_type = 'modifier_option' AND r.size_label IS NULL
+                   AND mo.legacy_source = 'addon' AND r.ingredient_id = $1
                 UNION ALL
-                SELECT 1 FROM menu_item_optional_fields WHERE org_ingredient_id = $1
+                SELECT 1 FROM recipe_lines r JOIN modifier_options mo ON mo.id = r.owner_id
+                  JOIN menu_item_modifier_groups mimg
+                       ON mimg.group_id = mo.group_id AND mimg.legacy_origin = 'options'
+                 WHERE r.owner_type = 'modifier_option' AND r.size_label IS NULL
+                   AND mo.legacy_source = 'optional' AND r.ingredient_id = $1
             ),
             EXISTS (SELECT 1 FROM branch_stock WHERE org_ingredient_id = $1 AND on_hand <> 0)
                 -- In transit counts as stock: receiving or cancelling it needs the ingredient.

@@ -1,5 +1,8 @@
 #![allow(unused_imports)]
+mod common;
+
 use actix_web::{App, test, web};
+use common::legacy_catalog as lc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -81,8 +84,7 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
     let ing = Uuid::new_v4();
     sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Beans', 'g'::inventory_unit, 250, ingredient_category_id($2, 'coffee_bean'))")
         .bind(ing).bind(org_id).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 10.0, 'one_size', 'Beans', 'g')")
-        .bind(costed).bind(ing).execute(&pool).await.unwrap();
+    lc::item_recipe(&pool, costed, "one_size", ing, 10.0, "g").await;
 
     // Recipe-less item: cost must be NULL, never zero.
     let bare = Uuid::new_v4();
@@ -99,10 +101,8 @@ async fn test_sku_costs_rollup_and_missing(pool: PgPool) {
     let unpriced = Uuid::new_v4();
     sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Milk', 'g'::inventory_unit, NULL, ingredient_category_id($2, 'milk'))")
         .bind(unpriced).bind(org_id).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 10.0, 'one_size', 'Beans', 'g')")
-        .bind(partial).bind(ing).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, 200.0, 'one_size', 'Milk', 'g')")
-        .bind(partial).bind(unpriced).execute(&pool).await.unwrap();
+    lc::item_recipe(&pool, partial, "one_size", ing, 10.0, "g").await;
+    lc::item_recipe(&pool, partial, "one_size", unpriced, 200.0, "g").await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/costing/menu-items?org_id={org_id}"))
@@ -146,11 +146,9 @@ async fn test_addon_costs_rollup(pool: PgPool) {
     sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, 'Oat Milk', 'ml'::inventory_unit, 10, ingredient_category_id($2, 'milk'))")
         .bind(ing).bind(org_id).execute(&pool).await.unwrap();
     let addon = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, 'Oat', 'milk_type', 1500)")
-        .bind(addon).bind(org_id).execute(&pool).await.unwrap();
+    lc::addon_item(&pool, Some(addon), org_id, "Oat", "milk_type", 1500).await;
     // 200 ml @ 10 piastres/ml → 2 000 piastres.
-    sqlx::query("INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) VALUES ($1, $2, 200.0, 'Oat Milk', 'ml')")
-        .bind(addon).bind(ing).execute(&pool).await.unwrap();
+    lc::addon_ingredient(&pool, addon, ing, 200.0, "ml").await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/costing/addon-items?org_id={org_id}"))
@@ -202,8 +200,7 @@ async fn test_sku_cost_is_madar_money_recipe_cost(pool: PgPool) {
             let ing = Uuid::new_v4();
             sqlx::query("INSERT INTO org_ingredients (id, org_id, name, unit, cost_per_unit, category_id) VALUES ($1, $2, $3, 'g'::inventory_unit, $4, ingredient_category_id($2, 'dry'))")
                 .bind(ing).bind(org_id).bind(format!("{name} {i}")).bind(l.cost_per_unit).execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) VALUES ($1, $2, $3, 'one_size', $4, 'g')")
-                .bind(item).bind(ing).bind(l.qty).bind(format!("{name} {i}")).execute(&pool).await.unwrap();
+            lc::item_recipe(&pool, item, "one_size", ing, l.qty, "g").await;
         }
         cases.push((name, item, lines));
     }
@@ -318,17 +315,7 @@ mod backfill_tests {
     /// Menu item with a current recipe of `qty` units of `ing`.
     async fn seed_item_with_recipe(pool: &PgPool, org: Uuid, ing: Uuid, qty: f64) -> Uuid {
         let id = seed_bare_item(pool, org).await;
-        sqlx::query(
-            "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, \
-                                            ingredient_name, ingredient_unit, org_ingredient_id) \
-             VALUES ($1, 'one_size', $2, 'ing', 'g', $3)",
-        )
-        .bind(id)
-        .bind(rust_decimal::Decimal::try_from(qty).unwrap())
-        .bind(ing)
-        .execute(pool)
-        .await
-        .unwrap();
+        super::lc::item_recipe(pool, id, "one_size", ing, qty, "g").await;
         id
     }
 
@@ -391,23 +378,8 @@ mod backfill_tests {
         // costed addon (1 × ing per addon unit) and an optional consuming
         // 0.5 × ing per parent unit. Stale stored costs are garbage.
         let m1 = seed_item_with_recipe(&pool, org, ing, 1.0).await;
-        let addon_item: Uuid = sqlx::query_scalar(
-            "INSERT INTO addon_items (org_id, name, type, default_price) \
-             VALUES ($1, 'Syrup', 'extra', 100) RETURNING id",
-        )
-        .bind(org)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) \
-             VALUES ($1, $2, 1.0, 'ing', 'g')",
-        )
-        .bind(addon_item)
-        .bind(ing)
-        .execute(&pool)
-        .await
-        .unwrap();
+        let addon_item = super::lc::addon_item(&pool, None, org, "Syrup", "extra", 100).await;
+        super::lc::addon_ingredient(&pool, addon_item, ing, 1.0, "g").await;
         let l1 = insert_line(
             &pool,
             s.order,
@@ -459,14 +431,7 @@ mod backfill_tests {
 
         // L4: costed recipe BUT an addon with no ingredient links → the
         // line's full cost is unknowable; recipe-scope unit_cost resolves.
-        let uncosted_addon: Uuid = sqlx::query_scalar(
-            "INSERT INTO addon_items (org_id, name, type, default_price) \
-             VALUES ($1, 'NoIng', 'extra', 100) RETURNING id",
-        )
-        .bind(org)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let uncosted_addon = super::lc::addon_item(&pool, None, org, "NoIng", "extra", 100).await;
         let l4 = insert_line(&pool, s.order, Some(m1), 1, None, None, true).await;
         sqlx::query(
             "INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, \

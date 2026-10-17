@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            m.category_id AS \"category_id?\",\n            COALESCE(c.name, 'Uncategorized') AS \"category_name?\",\n            (array_agg(c.name_translations))[1] AS \"category_name_translations?\",\n            oi.menu_item_id AS \"menu_item_id!\",\n            oi.item_name,\n            COALESCE((array_agg(oi.name_translations ORDER BY oi.name_translations DESC))[1], '{}'::jsonb) AS \"item_name_translations!\",\n            SUM(oi.quantity)::bigint   AS \"quantity_sold!\",\n            SUM(oi.line_total)::bigint AS \"revenue!\"\n        FROM order_items oi\n        JOIN orders o     ON o.id  = oi.order_id\n        LEFT JOIN menu_items m ON m.id  = oi.menu_item_id\n        LEFT JOIN categories c ON c.id = m.category_id\n        WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')\n          AND oi.line_kind <> 'combo'\n          AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n          AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n        GROUP BY\n            m.category_id,\n            COALESCE(c.name, 'Uncategorized'),\n            oi.menu_item_id,\n            oi.item_name\n        ORDER BY 2 NULLS LAST, 7 DESC, 8 DESC, oi.item_name COLLATE \"C\", oi.menu_item_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "category_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "category_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "category_name_translations?",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "menu_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "item_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "item_name_translations!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 6,
+        "name": "quantity_sold!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "revenue!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true,
+      null,
+      null,
+      true,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "4ea7b0439b20db4be6d85c15565dcd48f0536e22411f05dcfb50471efbe31b80"
+}

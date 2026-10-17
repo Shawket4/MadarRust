@@ -317,7 +317,7 @@ pub struct PoolQuery {
     security(("bearer_jwt" = [])))]
 pub async fn get_today(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<PoolQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = crate::orgs::handlers::extract_claims(&req)?;
@@ -358,7 +358,7 @@ pub async fn get_today(
     security(("bearer_jwt" = [])))]
 pub async fn record(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<RecordStaffDrinkRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = crate::orgs::handlers::extract_claims(&req)?;
@@ -410,7 +410,7 @@ pub struct ListQuery {
     security(("bearer_jwt" = [])))]
 pub async fn list(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = crate::orgs::handlers::extract_claims(&req)?;
@@ -483,7 +483,7 @@ pub struct StaffDrinksSummary {
     security(("bearer_jwt" = [])))]
 pub async fn summary(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = crate::orgs::handlers::extract_claims(&req)?;

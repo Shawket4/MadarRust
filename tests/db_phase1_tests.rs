@@ -3,6 +3,8 @@
 //! rollups, the compat counters, the CONCURRENTLY-index boot guard, the
 //! transient-error classifier and the (inert) minimum-client gate.
 
+mod common;
+
 use actix_web::{App, HttpResponse, test as atest, web};
 use madar_rust::version_gate::{self, Policy, Verdict};
 use sqlx::PgPool;
@@ -77,14 +79,13 @@ async fn seed(pool: &PgPool, label: &str) -> Seed {
     .execute(pool)
     .await
     .unwrap();
+    let addon = common::legacy_catalog::addon_item(pool, None, org, "Oat", "milk_type", 20).await;
     sqlx::query(
-        "WITH a AS (INSERT INTO addon_items (org_id, name, type, default_price)
-                    VALUES ($2, 'Oat', 'milk_type', 20) RETURNING id)
-         INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
-         SELECT $1, a.id, 'Oat', 20, 1, 20 FROM a",
+        "INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
+         VALUES ($1, $2, 'Oat', 20, 1, 20)",
     )
     .bind(item)
-    .bind(org)
+    .bind(addon)
     .execute(pool)
     .await
     .unwrap();
@@ -173,13 +174,36 @@ async fn every_phase1_constraint_is_validated(pool: PgPool) {
     .await
     .unwrap();
     assert!(not_valid.is_empty(), "{not_valid:?}");
+    // Phase 2.2 turned the 22 `<t>_org_id_present` CHECKs into NOT NULL and
+    // dropped them: none left, and every one of those columns is NOT NULL.
     let present: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_constraint WHERE conname LIKE '%\\_org\\_id\\_present'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(present, 22);
+    assert_eq!(present, 0);
+    let nullable: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name::text FROM information_schema.columns
+          WHERE table_schema = 'public' AND column_name = 'org_id' AND is_nullable = 'YES'
+            AND table_name = ANY($1)",
+    )
+    .bind(
+        [
+            "orders", "tills", "inventory_movements", "branch_stock", "sync_changes",
+            "order_items", "order_payments", "till_cash_movements", "open_ticket_rounds",
+            "open_ticket_items", "kitchen_ticket_items", "menu_item_sizes", "modifier_options",
+            "recipe_lines", "stocktake_items", "purchase_order_lines", "goods_receipt_lines",
+            "stock_transfer_lines", "packaging_rule_lines", "recipe_base_lines",
+            "order_item_addons", "order_item_optionals",
+        ]
+        .map(String::from)
+        .to_vec(),
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(nullable.is_empty(), "{nullable:?}");
     let invalid_indexes: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_index WHERE NOT indisvalid")
         .fetch_one(&pool)
         .await
@@ -349,6 +373,11 @@ fn concurrent_index_names_are_read_from_no_transaction_files() {
     assert_eq!(
         name("-- no-transaction\nCREATE UNIQUE INDEX CONCURRENTLY uq_b ON t (x);").as_deref(),
         Some("uq_b")
+    );
+    // Phase 2.3 drops redundant indexes the same way, one per file.
+    assert_eq!(
+        name("-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS idx_d;").as_deref(),
+        Some("idx_d")
     );
     assert_eq!(name("CREATE INDEX CONCURRENTLY idx_c ON t (x);"), None);
     assert_eq!(name("-- no-transaction\nVACUUM t;"), None);

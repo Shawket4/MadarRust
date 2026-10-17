@@ -337,7 +337,7 @@ pub async fn record(
         .unwrap_or_default();
     let balance: Option<i32> = sqlx::query_scalar(
         "SELECT CASE WHEN $2 = 'visits' THEN visits_balance ELSE points_balance END \
-           FROM loyalty_customers WHERE id = $1 FOR UPDATE",
+           FROM loyalty_memberships WHERE id = $1 FOR UPDATE",
     )
     .bind(member.id)
     .bind(&currency)

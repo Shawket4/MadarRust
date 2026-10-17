@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT mo.name, COALESCE(mg.legacy_addon_type, '') AS \"addon_type!\"\n                 FROM modifier_options mo JOIN modifier_groups mg ON mg.id = mo.group_id\n                WHERE mo.id = $1 AND mo.legacy_source = 'addon'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "addon_type!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "068d666ec5ba3f7998cda8e5eb80e98555a4a30cb53fadc6566f594e290b54a1"
+}

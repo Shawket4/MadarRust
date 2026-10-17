@@ -8,6 +8,8 @@
 //! is double-counted, that the books count revenue net and cost in full, and
 //! that POS v0.5.0–v0.7.12's record-only flow is untouched.
 
+mod common;
+
 use actix_web::{App, test, web};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -106,15 +108,9 @@ async fn option(
     default: bool,
     sort: i32,
 ) -> Uuid {
+    // The option IS the add-on (`addon_items` is its compat view).
+    let _ = org;
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, 'extra', $4)")
-        .bind(id)
-        .bind(org)
-        .bind(name)
-        .bind(price)
-        .execute(pool)
-        .await
-        .unwrap();
     sqlx::query(
         "INSERT INTO modifier_options (id, group_id, name, price, sort, is_default) VALUES ($1, $2, $3, $4, $5, $6)",
     )
@@ -128,15 +124,7 @@ async fn option(
     .await
     .unwrap();
     // 1 g of the 1.00/g ingredient, so a line with picks has a KNOWN cost.
-    sqlx::query(
-        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) \
-         VALUES ($1, $2, 1, 'Beans', 'g')",
-    )
-    .bind(id)
-    .bind(ing)
-    .execute(pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::addon_ingredient(pool, id, ing, 1, "g").await;
     id
 }
 
@@ -269,16 +257,7 @@ async fn shop(pool: &PgPool) -> Shop {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) \
-             VALUES ($1, $2, 10, $3, 'Beans', 'g')",
-        )
-        .bind(latte)
-        .bind(ing)
-        .bind(label)
-        .execute(pool)
-        .await
-        .unwrap();
+        common::legacy_catalog::item_recipe(pool, latte, label, ing, 10, "g").await;
     }
     sqlx::query("DELETE FROM menu_item_sizes WHERE menu_item_id = $1 AND label = 'one_size'")
         .bind(latte)
@@ -1208,16 +1187,7 @@ async fn milk_group(pool: &PgPool, s: &Shop) -> (Uuid, Uuid) {
         ings.push(id);
     }
     for label in ["small", "medium", "large"] {
-        sqlx::query(
-            "INSERT INTO menu_item_recipes (menu_item_id, org_ingredient_id, quantity_used, size_label, ingredient_name, ingredient_unit) \
-             VALUES ($1, $2, 100, $3, 'Whole milk', 'ml')",
-        )
-        .bind(s.latte)
-        .bind(ings[0])
-        .bind(label)
-        .execute(pool)
-        .await
-        .unwrap();
+        common::legacy_catalog::item_recipe(pool, s.latte, label, ings[0], 100, "ml").await;
     }
     let group = Uuid::new_v4();
     sqlx::query(
@@ -1238,14 +1208,6 @@ async fn milk_group(pool: &PgPool, s: &Shop) -> (Uuid, Uuid) {
     let mut out = Vec::new();
     for (i, (name, price)) in [("Whole", 500), ("Oat", 1500)].iter().enumerate() {
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO addon_items (id, org_id, name, type, default_price) VALUES ($1, $2, $3, 'milk_type', $4)")
-            .bind(id)
-            .bind(s.org)
-            .bind(name)
-            .bind(price)
-            .execute(pool)
-            .await
-            .unwrap();
         sqlx::query(
             "INSERT INTO modifier_options (id, group_id, name, price, sort, is_default) VALUES ($1, $2, $3, $4, $5, $6)",
         )
@@ -1258,16 +1220,7 @@ async fn milk_group(pool: &PgPool, s: &Shop) -> (Uuid, Uuid) {
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, quantity_used, ingredient_name, ingredient_unit) \
-             VALUES ($1, $2, 100, $3, 'ml')",
-        )
-        .bind(id)
-        .bind(ings[i])
-        .bind(name)
-        .execute(pool)
-        .await
-        .unwrap();
+        common::legacy_catalog::addon_ingredient(pool, id, ings[i], 100, "ml").await;
         out.push(id);
     }
     (out[0], out[1])

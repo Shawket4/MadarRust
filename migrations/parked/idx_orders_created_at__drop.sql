@@ -1,0 +1,14 @@
+-- no-transaction
+DROP INDEX CONCURRENTLY IF EXISTS idx_orders_created_at;
+-- PARKED (DB audit 2026-10-16 Phase 2.3, L1 "low-selectivity singletons").
+-- NOT APPLIED: sqlx reads only the files directly in migrations/.
+--
+-- Condition to unpark (rename to <timestamp after the newest applied>_drop_idx_orders_created_at.sql
+-- and move it into migrations/): on LIVE prod, read-only,
+--     SELECT idx_scan, now() - stats_reset AS window
+--       FROM pg_stat_user_indexes JOIN pg_stat_database ON datname = current_database()
+--      WHERE indexrelname = 'idx_orders_created_at';
+-- shows idx_scan = 0 over a window of at least 30 days (the restored dumps
+-- carry no usage stats, so this cannot be decided on a copy). Phase 2.3 added
+-- the (org_id, time) indexes that serve the tenant-scoped reads.
+-- Owner sign-off: ______________________  date: __________

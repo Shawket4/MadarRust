@@ -190,7 +190,7 @@ pub struct ListBookingsQuery {
     security(("bearer_jwt" = [])))]
 pub async fn list_bookings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ListBookingsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -234,7 +234,7 @@ async fn load_for_access(
     security(("bearer_jwt" = [])))]
 pub async fn get_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -397,7 +397,7 @@ pub(crate) async fn create_booking_inner(
     security(("bearer_jwt" = [])))]
 pub async fn create_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     body: web::Json<CreateBookingRequest>,
 ) -> Result<HttpResponse, AppError> {
@@ -615,7 +615,7 @@ pub(crate) async fn update_booking_inner(
     security(("bearer_jwt" = [])))]
 pub async fn update_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: web::Json<UpdateBookingRequest>,
@@ -824,7 +824,7 @@ pub(crate) async fn cancel_inner(
     security(("bearer_jwt" = [])))]
 pub async fn cancel_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: Option<web::Json<CancelBookingRequest>>,
@@ -887,7 +887,7 @@ pub(crate) async fn no_show_inner(pool: &PgPool, id: Uuid) -> Result<HttpRespons
     security(("bearer_jwt" = [])))]
 pub async fn no_show_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
@@ -1016,7 +1016,7 @@ pub(crate) async fn seat_inner(
     security(("bearer_jwt" = [])))]
 pub async fn seat_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
     body: Option<web::Json<SeatBookingRequest>>,
@@ -1039,7 +1039,7 @@ pub async fn seat_booking(
     security(("bearer_jwt" = [])))]
 pub async fn complete_booking(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     hub: web::Data<BranchEventHub>,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
@@ -1307,7 +1307,7 @@ pub(crate) async fn day_availability(
     security(("bearer_jwt" = [])))]
 pub async fn availability(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AvailabilityQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -1365,7 +1365,7 @@ pub struct BookingStats {
     security(("bearer_jwt" = [])))]
 pub async fn stats(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<StatsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

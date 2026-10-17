@@ -281,7 +281,6 @@ async fn sku_costs_impl<'e, E>(
 where
     E: sqlx::PgExecutor<'e>,
 {
-    crate::compat_usage::count_internal("costing::sku_costs");
     #[derive(sqlx::FromRow)]
     struct Row {
         menu_item_id: Uuid,
@@ -302,10 +301,14 @@ where
                 mi.name AS item_name,
                 mi.category_id,
                 COALESCE(sz.label::text, 'one_size')          AS size_label,
-                COALESCE(sz.price_override, mi.base_price)::bigint AS price
+                COALESCE(sz.price, mi.base_price)::bigint AS price
             FROM menu_items mi
-            LEFT JOIN item_sizes sz
+            -- A size, minus the synthetic one_size sentinel of a sizeless item
+            -- (what the old `item_sizes` view listed).
+            LEFT JOIN menu_item_sizes sz
                    ON sz.menu_item_id = mi.id AND sz.is_active = TRUE
+                  AND NOT (sz.label = 'one_size'
+                           AND sz.id = (md5(sz.menu_item_id::text || ':one_size'))::uuid)
             WHERE mi.org_id = $1
               AND mi.deleted_at IS NULL
               AND mi.is_active = TRUE
@@ -323,21 +326,23 @@ where
         FROM expanded e
         CROSS JOIN LATERAL (
             SELECT
-                SUM(r.quantity_used * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
-                    FILTER (WHERE r.org_ingredient_id IS NOT NULL
-                              AND COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NOT NULL)
+                SUM(r.quantity * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
+                    FILTER (WHERE COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NOT NULL)
                            AS cost_piastres,
-                bool_or(r.org_ingredient_id IS NULL
-                        OR COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
+                bool_or(COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
                            AS cost_incomplete,
                 COUNT(*) > 0 AS has_recipe
-            FROM menu_item_recipes r
-            LEFT JOIN org_ingredients oi ON oi.id = r.org_ingredient_id
+            -- A size's recipe lines (the old `menu_item_recipes`; the sentinel
+            -- one_size row carries a sizeless item's recipe).
+            FROM recipe_lines r
+            JOIN menu_item_sizes ms ON ms.id = r.owner_id
+            JOIN org_ingredients oi ON oi.id = r.ingredient_id
             LEFT JOIN branch_stock bi
-                   ON bi.org_ingredient_id = r.org_ingredient_id
+                   ON bi.org_ingredient_id = r.ingredient_id
                   AND bi.branch_id = $3
-            WHERE r.menu_item_id = e.menu_item_id
-              AND COALESCE(r.size_label::text, 'one_size') = e.size_label
+            WHERE r.owner_type = 'item_size'
+              AND ms.menu_item_id = e.menu_item_id
+              AND ms.label = e.size_label
         ) r
         ORDER BY e.item_name, e.size_label
         "#,
@@ -408,7 +413,6 @@ pub async fn org_addon_costs(
     org_id: Uuid,
     branch_id: Option<Uuid>,
 ) -> Result<Vec<AddonCost>, AppError> {
-    crate::compat_usage::count_internal("costing::org_addon_costs");
     #[derive(sqlx::FromRow)]
     struct Row {
         addon_item_id: Uuid,
@@ -421,32 +425,36 @@ pub async fn org_addon_costs(
 
     let rows: Vec<Row> = sqlx::query_as::<_, Row>(
         r#"
+        -- An add-on is a modifier option of legacy_source 'addon' in a typed
+        -- group (the old `addon_items`); its cost comes from its generic
+        -- (sizeless) recipe lines (`addon_item_ingredients`).
         SELECT
-            a.id            AS addon_item_id,
-            a.name,
-            a.type          AS addon_type,
-            a.default_price::bigint AS price,
+            mo.id           AS addon_item_id,
+            mo.name,
+            mg.legacy_addon_type AS addon_type,
+            mo.price::bigint AS price,
             c.cost_piastres,
             c.cost_incomplete
-        FROM addon_items a
+        FROM modifier_options mo
+        JOIN modifier_groups mg ON mg.id = mo.group_id
         LEFT JOIN LATERAL (
             SELECT
-                SUM(ai.quantity_used * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
-                    FILTER (WHERE ai.org_ingredient_id IS NOT NULL
-                              AND COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NOT NULL)
+                SUM(ai.quantity * COALESCE(bi.cost_per_unit, oi.cost_per_unit))
+                    FILTER (WHERE COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NOT NULL)
                            AS cost_piastres,
-                bool_or(ai.org_ingredient_id IS NULL
-                        OR COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
+                bool_or(COALESCE(bi.cost_per_unit, oi.cost_per_unit) IS NULL)
                            AS cost_incomplete
-            FROM addon_item_ingredients ai
-            LEFT JOIN org_ingredients oi ON oi.id = ai.org_ingredient_id
+            FROM recipe_lines ai
+            JOIN org_ingredients oi ON oi.id = ai.ingredient_id
             LEFT JOIN branch_stock bi
-                   ON bi.org_ingredient_id = ai.org_ingredient_id
+                   ON bi.org_ingredient_id = ai.ingredient_id
                   AND bi.branch_id = $2
-            WHERE ai.addon_item_id = a.id
+            WHERE ai.owner_type = 'modifier_option' AND ai.owner_id = mo.id
+              AND ai.size_label IS NULL
         ) c ON TRUE
-        WHERE a.org_id = $1 AND a.is_active = TRUE AND a.type IS NOT NULL
-        ORDER BY a.name
+        WHERE mg.org_id = $1 AND mo.legacy_source = 'addon' AND mo.is_active = TRUE
+          AND mg.legacy_addon_type IS NOT NULL
+        ORDER BY mo.name
         "#,
     )
     .bind(org_id)

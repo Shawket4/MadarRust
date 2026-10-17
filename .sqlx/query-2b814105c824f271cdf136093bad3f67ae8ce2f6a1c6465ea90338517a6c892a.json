@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.branch_id, b.org_id FROM branch_tables t JOIN branches b ON b.id = t.branch_id WHERE t.id = $1 AND t.is_active AND b.is_active AND b.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "org_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2b814105c824f271cdf136093bad3f67ae8ce2f6a1c6465ea90338517a6c892a"
+}

@@ -5,7 +5,6 @@
 use actix_web::{HttpRequest, HttpResponse, web};
 use chrono::NaiveTime;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -247,7 +246,7 @@ pub struct BranchQuery {
     security(("bearer_jwt" = [])))]
 pub async fn get_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BranchQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -261,7 +260,7 @@ pub async fn get_settings(
     security(("bearer_jwt" = [])))]
 pub async fn put_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<BookingSettings>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;

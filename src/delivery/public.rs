@@ -148,6 +148,19 @@ const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
     (now() AT TIME ZONE COALESCE(b.timezone, o.timezone)::text)::time AS local_time,
     EXISTS(SELECT 1 FROM tills sh WHERE sh.branch_id = b.id AND sh.status = 'open') AS has_open_shift"#;
 
+/// The tenant handle of a live branch, for the branch-keyed public routes
+/// (404 like a branch that does not exist otherwise).
+async fn scoped_for_branch(
+    pdb: &crate::db::PublicDb,
+    branch_id: Uuid,
+) -> Result<crate::db::Db, AppError> {
+    let org = pdb
+        .branch_org(branch_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    Ok(pdb.scoped(org).await)
+}
+
 /// A shop's branches that take online orders, with each channel's hours and settings.
 ///
 /// `org_id` names the shop. With `browse=true` every active branch is listed, for a read-only menu.
@@ -156,9 +169,10 @@ const BRANCH_OPEN_SELECT: &str = r#"b.id, b.name, b.code,
     responses((status = 200, body = [PublicBranch]), AppErrorResponse)
 )]
 pub async fn public_branches(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     query: web::Query<PublicBranchesQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = pdb.scoped(query.org_id).await;
     // Online ordering, and the read-only `browse` menu, are the paid `online`
     // feature: a Free shop has no such page (404, never 403).
     crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
@@ -461,10 +475,11 @@ pub struct ChannelParam {
     responses((status = 200, body = DeliveryMenu), AppErrorResponse)
 )]
 pub async fn public_menu(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<Uuid>,
     query: web::Query<ChannelParam>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, *path).await?;
     let branch_id = path.into_inner();
     crate::plan::public_gate_branch(pool.get_ref(), branch_id, madar_plan::Feature::Online)
         .await?;
@@ -534,7 +549,6 @@ pub(crate) async fn load_public_menu(
     branch_id: Uuid,
     channel: Option<&str>,
 ) -> Result<DeliveryMenu, AppError> {
-    crate::compat_usage::count_internal("delivery::public::menu");
     // The channel's active discount (customer-facing), if any.
     // A dine-in bill carries no channel discount: the waiter's or the
     // cashier's discount is applied on the bill itself, at the till.
@@ -607,11 +621,25 @@ pub(crate) async fn load_public_menu(
                       COALESCE(bcmo.price_override, bmo.price_override, mi.base_price) AS price,
                       mi.kind
                FROM menu_items mi
-               LEFT JOIN branch_menu_overrides bmo
-                      ON bmo.menu_item_id = mi.id AND bmo.branch_id = $1
-               LEFT JOIN branch_channel_menu_overrides bcmo
-                      ON bcmo.menu_item_id = mi.id AND bcmo.branch_id = $1
-                     AND bcmo.channel = $2::delivery_channel
+               -- The item-level rollups the old branch_menu_overrides /
+               -- branch_channel_menu_overrides views made of the size-scoped
+               -- overrides: the one_size price, and availability (branch: off
+               -- when any size is off; channel: the tri-state bool_and).
+               LEFT JOIN LATERAL (
+                   SELECT max(p.price) FILTER (WHERE ms.label = 'one_size') AS price_override,
+                          NOT bool_or(p.is_available = false) AS is_available
+                     FROM menu_price_overrides p
+                     JOIN menu_item_sizes ms ON ms.id = p.target_id
+                    WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size'
+                      AND p.branch_id = $1 AND ms.menu_item_id = mi.id) bmo ON true
+               LEFT JOIN LATERAL (
+                   SELECT max(p.price) FILTER (WHERE ms.label = 'one_size') AS price_override,
+                          bool_and(p.is_available) AS is_available
+                     FROM menu_price_overrides p
+                     JOIN menu_item_sizes ms ON ms.id = p.target_id
+                    WHERE p.scope = 'branch_channel' AND p.target_type = 'menu_item_size'
+                      AND p.branch_id = $1 AND p.channel = $2::delivery_channel
+                      AND ms.menu_item_id = mi.id) bcmo ON true
                WHERE mi.org_id = $3 AND mi.is_active = true AND mi.deleted_at IS NULL
                  AND COALESCE(bcmo.is_available, bmo.is_available, true) = true
                ORDER BY mi.name"#,
@@ -626,15 +654,22 @@ pub(crate) async fn load_public_menu(
 
     // Catalog size prices + branch size overrides (branch override wins).
     let catalog_sizes: Vec<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT menu_item_id, label::text, price_override FROM item_sizes \
-         WHERE is_active = true AND menu_item_id = ANY($1) ORDER BY label",
+        // Real sizes (not a sizeless item's one_size sentinel), as `item_sizes` listed.
+        "SELECT z.menu_item_id, z.label::text, z.price FROM menu_item_sizes z \
+         WHERE z.is_active = true AND z.menu_item_id = ANY($1) \
+           AND NOT (z.label = 'one_size' AND z.id = (md5(z.menu_item_id::text || ':one_size'))::uuid) \
+         ORDER BY z.label",
     )
     .bind(&item_ids)
     .fetch_all(pool)
     .await?;
     let branch_sizes: Vec<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT menu_item_id, size_label::text, price_override FROM branch_menu_size_overrides \
-         WHERE branch_id = $1 AND menu_item_id = ANY($2)",
+        // A priced branch override on a real size (`branch_menu_size_overrides`).
+        "SELECT ms.menu_item_id, ms.label::text, p.price \
+           FROM menu_price_overrides p JOIN menu_item_sizes ms ON ms.id = p.target_id \
+          WHERE p.scope = 'branch' AND p.target_type = 'menu_item_size' \
+            AND p.branch_id = $1 AND ms.menu_item_id = ANY($2) \
+            AND p.price IS NOT NULL AND ms.label <> 'one_size'",
     )
     .bind(branch_id)
     .bind(&item_ids)
@@ -689,9 +724,12 @@ pub(crate) async fn load_public_menu(
     let channel_prices: std::collections::HashMap<Uuid, i32> = match channel {
         None => std::collections::HashMap::new(),
         Some(ch) => sqlx::query_as::<_, (Uuid, i32)>(
-            "SELECT addon_item_id, price_override FROM branch_channel_addon_overrides \
-              WHERE branch_id = $1 AND channel = $2::delivery_channel \
-                AND price_override IS NOT NULL AND addon_item_id = ANY($3)",
+            // An add-on's branch+channel price (`branch_channel_addon_overrides`).
+            "SELECT p.target_id, p.price FROM menu_price_overrides p \
+               JOIN modifier_options mo ON mo.id = p.target_id AND mo.legacy_source = 'addon' \
+              WHERE p.scope = 'branch_channel' AND p.target_type = 'modifier_option' \
+                AND p.branch_id = $1 AND p.channel = $2::delivery_channel \
+                AND p.price IS NOT NULL AND p.target_id = ANY($3)",
         )
         .bind(branch_id)
         .bind(ch)
@@ -1071,21 +1109,28 @@ async fn load_addon_catalog(
     // the chain falls through to the branch override and the catalogue.
     channel: Option<&str>,
 ) -> Result<Vec<DeliveryAddonOption>, AppError> {
-    crate::compat_usage::count_internal("delivery::public::addon_catalog");
     // Resolve the override chain in SQL and drop options whose channel
     // availability is false.
     let rows: Vec<(Uuid, String, serde_json::Value, String, i32, bool)> = sqlx::query_as(
-        "SELECT a.id, a.name, a.name_translations, a.type, \
-                COALESCE(bcao.price_override, bao.price_override, a.default_price) AS price, \
-                COALESCE(bcao.is_available, bao.is_available, true)               AS is_available \
-         FROM addon_items a \
-         LEFT JOIN branch_addon_overrides bao \
-                ON bao.addon_item_id = a.id AND bao.branch_id = $1 \
-         LEFT JOIN branch_channel_addon_overrides bcao \
-                ON bcao.addon_item_id = a.id AND bcao.branch_id = $1 \
+        // Unified tables (DB Phase 3.1): an add-on is a modifier option of
+        // legacy_source 'addon' in a typed group; its branch and branch+channel
+        // prices are menu_price_overrides rows (the old addon_items /
+        // branch_addon_overrides / branch_channel_addon_overrides views).
+        "SELECT mo.id, mo.name, mo.name_translations, mg.legacy_addon_type, \
+                COALESCE(bcao.price, bao.price, mo.price)              AS price, \
+                COALESCE(bcao.is_available, bao.is_available, true)    AS is_available \
+         FROM modifier_options mo \
+         JOIN modifier_groups mg ON mg.id = mo.group_id \
+         LEFT JOIN menu_price_overrides bao \
+                ON bao.scope = 'branch' AND bao.target_type = 'modifier_option' \
+               AND bao.target_id = mo.id AND bao.branch_id = $1 \
+         LEFT JOIN menu_price_overrides bcao \
+                ON bcao.scope = 'branch_channel' AND bcao.target_type = 'modifier_option' \
+               AND bcao.target_id = mo.id AND bcao.branch_id = $1 \
                AND bcao.channel = $2::delivery_channel \
-         WHERE a.org_id = $3 AND a.is_active = true AND a.type IS NOT NULL \
-         ORDER BY a.type, a.name",
+         WHERE mg.org_id = $3 AND mo.legacy_source = 'addon' AND mo.is_active = true \
+           AND mg.legacy_addon_type IS NOT NULL \
+         ORDER BY mg.legacy_addon_type, mo.name",
     )
     .bind(branch_id)
     .bind(channel)
@@ -1116,7 +1161,6 @@ async fn load_optional_fields(
     pool: &PgPool,
     item_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Vec<DeliveryOptionalField>>, AppError> {
-    crate::compat_usage::count_internal("delivery::public::optional_fields");
     let mut by_item: std::collections::HashMap<Uuid, Vec<DeliveryOptionalField>> =
         std::collections::HashMap::new();
     if item_ids.is_empty() {
@@ -1124,10 +1168,18 @@ async fn load_optional_fields(
     }
 
     let rows: Vec<(Uuid, Uuid, String, serde_json::Value, i32, Option<String>)> = sqlx::query_as(
-        "SELECT id, menu_item_id, name, name_translations, price, size_label::text \
-         FROM menu_item_optional_fields \
-         WHERE menu_item_id = ANY($1) AND is_active = true \
-         ORDER BY name",
+        // An optional field: a legacy_source 'optional' option in the item's
+        // Options attachment (the old `menu_item_optional_fields`, row for row:
+        // the same join to its generic recipe line).
+        "SELECT mo.id, mimg.menu_item_id, mo.name, mo.name_translations, mo.price, NULL::text \
+         FROM modifier_options mo \
+         JOIN menu_item_modifier_groups mimg \
+              ON mimg.group_id = mo.group_id AND mimg.legacy_origin = 'options' \
+         LEFT JOIN recipe_lines rl ON rl.owner_type = 'modifier_option' \
+              AND rl.owner_id = mo.id AND rl.size_label IS NULL \
+         WHERE mo.legacy_source = 'optional' AND mimg.menu_item_id = ANY($1) \
+           AND mo.is_active = true \
+         ORDER BY mo.name",
     )
     .bind(item_ids)
     .fetch_all(pool)
@@ -1161,7 +1213,6 @@ async fn load_default_milk(
     pool: &PgPool,
     item_ids: &[Uuid],
 ) -> Result<std::collections::HashMap<Uuid, Uuid>, AppError> {
-    crate::compat_usage::count_internal("delivery::public::default_milk");
     let mut by_item: std::collections::HashMap<Uuid, Uuid> = std::collections::HashMap::new();
     if item_ids.is_empty() {
         return Ok(by_item);
@@ -1170,14 +1221,20 @@ async fn load_default_milk(
     // For each item: its recipe milk ingredient (category slug 'milk') → the milk_type
     // addon whose ingredient matches. DISTINCT ON keeps one addon per item.
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT DISTINCT ON (r.menu_item_id) r.menu_item_id, a.id \
-         FROM menu_item_recipes r \
-         JOIN org_ingredients i ON i.id = r.org_ingredient_id \
+        // The item's size recipe line in category milk (`menu_item_recipes`) →
+        // a milk_type add-on whose generic line is that ingredient
+        // (`addon_item_ingredients` / `addon_items`).
+        "SELECT DISTINCT ON (ms.menu_item_id) ms.menu_item_id, mo.id \
+         FROM recipe_lines r \
+         JOIN menu_item_sizes ms ON ms.id = r.owner_id \
+         JOIN org_ingredients i ON i.id = r.ingredient_id \
          JOIN ingredient_categories ic ON ic.id = i.category_id AND ic.slug = 'milk' \
-         JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id \
-         JOIN addon_items a ON a.id = ai.addon_item_id AND a.type = 'milk_type' \
-         WHERE r.menu_item_id = ANY($1) \
-         ORDER BY r.menu_item_id, (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id",
+         JOIN recipe_lines ai ON ai.owner_type = 'modifier_option' AND ai.size_label IS NULL \
+              AND ai.ingredient_id = r.ingredient_id \
+         JOIN modifier_options mo ON mo.id = ai.owner_id AND mo.legacy_source = 'addon' \
+         JOIN modifier_groups mg ON mg.id = mo.group_id AND mg.legacy_addon_type = 'milk_type' \
+         WHERE r.owner_type = 'item_size' AND ms.menu_item_id = ANY($1) \
+         ORDER BY ms.menu_item_id, mo.sort NULLS LAST, mo.name, mo.id",
     )
     .bind(item_ids)
     .fetch_all(pool)
@@ -1242,7 +1299,7 @@ async fn load_modifier_groups(
          JOIN modifier_groups g  ON g.id = mimg.group_id AND g.is_active = true \
          LEFT JOIN modifier_options o ON o.group_id = g.id AND o.is_active = true \
                                 AND o.legacy_source = 'addon' \
-                                AND (mimg.included_option_ids IS NULL OR o.id = ANY(mimg.included_option_ids)) \
+                                AND (NOT mimg.option_allowlist OR EXISTS (SELECT 1 FROM menu_item_modifier_group_options xo WHERE xo.mimg_id = mimg.id AND xo.option_id = o.id)) \
          LEFT JOIN menu_price_overrides bc \
                 ON bc.target_type = 'modifier_option' AND bc.target_id = o.id \
                AND bc.scope = 'branch_channel' AND bc.branch_id = $2 \
@@ -1324,10 +1381,14 @@ async fn load_allowed_addon_ids(
         return Ok(by_item);
     }
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT menu_item_id, addon_item_id \
-         FROM menu_item_allowed_addons \
-         WHERE menu_item_id = ANY($1) \
-         ORDER BY menu_item_id, sort_order ASC, created_at ASC",
+        // An item's add-on allowlist (the old `menu_item_allowed_addons`), from
+        // the attachment option table (DB Phase 3.4), in allowlist order.
+        "SELECT m.menu_item_id, x.option_id \
+         FROM menu_item_modifier_groups m \
+         JOIN menu_item_modifier_group_options x ON x.mimg_id = m.id \
+         JOIN modifier_options mo ON mo.id = x.option_id AND mo.legacy_source = 'addon' \
+         WHERE m.option_allowlist AND m.menu_item_id = ANY($1) \
+         ORDER BY m.menu_item_id, x.sort",
     )
     .bind(item_ids)
     .fetch_all(pool)
@@ -1479,10 +1540,11 @@ pub(crate) async fn compute_outside_fee(
     responses((status = 200, body = QuoteResponse), AppErrorResponse)
 )]
 pub async fn delivery_quote(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<Uuid>,
     query: web::Query<QuoteQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, *path).await?;
     let branch_id = path.into_inner();
     crate::plan::public_gate_branch(pool.get_ref(), branch_id, madar_plan::Feature::Online)
         .await?;
@@ -1627,6 +1689,8 @@ fn generate_otp_code() -> String {
     responses((status = 200, body = OtpRequestResponse), AppErrorResponse)
 )]
 pub async fn otp_request(
+    // The owner pool on purpose: a phone's OTP is not any shop's data
+    // (`delivery_otp` has no org), it proves a number for every shop at once.
     pool: web::Data<PgPool>,
     body: web::Json<OtpRequestInput>,
 ) -> Result<HttpResponse, AppError> {
@@ -1686,6 +1750,8 @@ pub struct OtpVerifyResponse {
     responses((status = 200, body = OtpVerifyResponse), AppErrorResponse)
 )]
 pub async fn otp_verify(
+    // The owner pool on purpose: a phone's OTP is not any shop's data
+    // (`delivery_otp` has no org), it proves a number for every shop at once.
     pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
     body: web::Json<OtpVerifyInput>,
@@ -1771,11 +1837,12 @@ pub struct DeliveryOrderInput {
 )]
 pub async fn create_delivery_order(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     hub: web::Data<BranchEventHub>,
     body: web::Json<DeliveryOrderInput>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = scoped_for_branch(&pdb, body.branch_id).await?;
     crate::plan::public_gate_branch(pool.get_ref(), body.branch_id, madar_plan::Feature::Online)
         .await?;
     validate_channel(&body.channel)?;
@@ -1940,7 +2007,7 @@ pub async fn create_delivery_order(
         .and_then(|s| Uuid::parse_str(s).ok());
     if let Some(key) = idem
         && let Some(existing) =
-            super::staff::fetch_delivery_order_by_idem(pool.get_ref(), key).await?
+            super::staff::fetch_delivery_order_by_idem(pool.get_ref(), body.branch_id, key).await?
     {
         return Ok(HttpResponse::Ok().json(existing));
     }
@@ -2148,15 +2215,8 @@ pub async fn create_delivery_order(
     .bind(body.branch_id)
     .fetch_one(&mut *tx)
     .await?;
-    let seq: i32 = sqlx::query_scalar(
-        "INSERT INTO delivery_ref_counters (branch_id, business_date, last_seq) VALUES ($1, $2, 1) \
-         ON CONFLICT (branch_id, business_date) DO UPDATE SET last_seq = delivery_ref_counters.last_seq + 1 \
-         RETURNING last_seq",
-    )
-    .bind(body.branch_id)
-    .bind(biz_date)
-    .fetch_one(&mut *tx)
-    .await?;
+    let seq =
+        crate::refs::next(&mut *tx, crate::refs::Scope::Delivery, body.branch_id, biz_date).await?;
     let delivery_ref = format!(
         "D-{}-{}-{:04}",
         branch_code,
@@ -2298,7 +2358,7 @@ pub async fn create_delivery_order(
             drop(tx);
             if let Some(key) = idem
                 && let Some(existing) =
-                    super::staff::fetch_delivery_order_by_idem(pool.get_ref(), key).await?
+                    super::staff::fetch_delivery_order_by_idem(pool.get_ref(), body.branch_id, key).await?
             {
                 return Ok(HttpResponse::Ok().json(existing));
             }
@@ -2439,10 +2499,11 @@ struct OrderHistoryRow {
     responses((status = 200, body = [OrderHistorySummary]), AppErrorResponse)
 )]
 pub async fn guest_order_history(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     query: web::Query<GuestHistoryQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = pdb.scoped(query.org_id).await;
     crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
         .await?;
     let phone = normalize_phone(&query.phone)?;
@@ -2557,10 +2618,11 @@ pub struct GuestSavedLocation {
     responses((status = 200, body = [GuestSavedLocation]), AppErrorResponse)
 )]
 pub async fn guest_past_locations(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     secret: web::Data<JwtSecret>,
     query: web::Query<GuestLocationsQuery>,
 ) -> Result<HttpResponse, AppError> {
+    let pool = pdb.scoped(query.org_id).await;
     crate::plan::public_gate_org(pool.get_ref(), query.org_id, madar_plan::Feature::Online)
         .await?;
     let phone = normalize_phone(&query.phone)?;
@@ -2643,9 +2705,14 @@ pub struct DeliveryTracking {
     responses((status = 200, body = DeliveryTracking), AppErrorResponse)
 )]
 pub async fn track_delivery_order(
-    pool: web::Data<PgPool>,
+    pdb: crate::db::PublicDb,
     path: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
+    let org = sqlx::query_scalar!("SELECT org_id FROM delivery_orders WHERE id = $1", *path)
+        .fetch_optional(pdb.resolver())
+        .await?
+        .ok_or_else(|| AppError::NotFound("Order not found".into()))?;
+    let pool = pdb.scoped(org).await;
     let id = path.into_inner();
     let row: Option<DeliveryTracking> = sqlx::query_as(
         "SELECT d.id, d.org_id, b.name AS branch_name, d.delivery_ref, \

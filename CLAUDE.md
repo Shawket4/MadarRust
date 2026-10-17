@@ -268,6 +268,70 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   every `client_seen::legacy_hit`, plus `compat_usage::count_internal` at each
   server read of a compat view. A shim with 0 hits for 30 days is a removal
   candidate.
+- **Flat RLS (Phase 2.1).** A tenant table's policy is
+  `(org_id = (SELECT current_setting('app.org_id', true)::uuid)) IS TRUE`, on the
+  row's own NOT NULL `org_id`, never a sub-select through a parent. `IS TRUE`
+  on purpose: the same rows, but the planner cannot make it an index condition
+  (a bare `=` gets a 1/n_distinct estimate that is far too low for a big tenant
+  and BitmapAnds the whole org's index). A new tenant child table gets org_id
+  (the trio above) and this policy. `scripts/db_rls_visibility.sql` diffs what
+  every org sees before/after a policy change.
+- **Uniqueness of client keys and refs is PER ORG** (Phase 2.3):
+  `(org_id, idempotency_key)`, `(org_id, client_ref)`, `(org_id, order_ref |
+  ticket_ref | delivery_ref)`. Codes repeat across orgs, so a lookup by a key or
+  a ref always names the org (or runs under RLS).
+- **Every database has prod's catalog shape** (Phase 2.4): the legacy catalog
+  names (`addon_items`, `menu_item_recipes`, the branch override lists, …) are
+  read-only security-invoker VIEWS over the unified tables; their old tables are
+  in schema `archive`. Seed tests through `tests/common/legacy_catalog.rs`, never
+  by writing those names. Writes to them answer 410 `SHIM_WRITE_REMOVED`.
+- **Public routes take `PublicDb`** (Phase 2.5), never the owner pool: resolve
+  the org from what the caller supplied that the DB vouches for (branch, table,
+  slug, card / pass / booking token) with `PublicDb::resolver()`, then do
+  everything else on `PublicDb::scoped(org)` (RLS). Merchant handlers take `Db`.
+- **Sales reports read closed days from rollups** (Phase 2.6, `src/reports/sales.rs`):
+  `/reports/branches/{id}/sales`, the daily/monthly timeseries and the org
+  comparison add up `sales_daily_sold*` for whole closed, covered, clean days and
+  compute the rest live (`sales_daily_plan`). Any write to a closed day marks the
+  SALE's day dirty by trigger (orders, order_items, order_payments, order_refunds,
+  order_item_addons), so it is read live until the worker recomputes it. **None
+  of that runs while an order is created** (k6 2026-10-17: it cost ~12 ms of
+  Postgres time per order): coverage stays 30+ minutes behind now, so the orders
+  INSERT trigger is a row trigger with `WHEN (NEW.created_at < now() - 30 min)`,
+  the UPDATE/DELETE statement triggers return before marking unless a row is
+  that old, and lines / add-ons / payments have NO insert trigger (they are only
+  inserted with their order, whose INSERT marks). Insert those rows anywhere
+  else and the day must be marked there. `report_rollups_tests::order_create_does_no_rollup_work`
+  pins it. Till close settles the branch (`sales_daily_settle_till`); the worker
+  also recomputes D-1/D-2 once more after they are two hours closed. A new
+  figure in one of these reports needs a column in the rollup, its recompute, and
+  a run of `report-rollup-reconcile`; a new table whose rows change those figures
+  needs the dirty trigger. Verify on a copy: `scripts/verify_report_rollups.sh <db>`.
+- **The compat layer (Phase 3).** Every shim kept for old clients is one
+  entry in `src/compat::REGISTRY` (counter, what replaced it, sunset
+  condition, sites, parked contract). Old-shape read routes read `compat.*`
+  views, and only at registered sites; the server's own code reads the unified
+  tables. `tests/compat_contract_tests.rs` enforces both and pins every old
+  shape served, byte for byte. An item's option allowlist is
+  `menu_item_modifier_group_options` + `option_allowlist`; the array column is
+  still written (a trigger mirrors it) until its parked contract.
+- **Ledgers never go by cascade (Phase 5.7).** FKs from organizations/branches
+  into ledger tables RESTRICT; `DELETE /tills/{id}` stamps `tills.deleted_at`
+  (every till fetch/list leaves stamped ones out). A hard delete of an org
+  (only the demo sweeper) deletes its ledgers explicitly.
+- **Ref numbers come from `refs::next`** (Phase 5.3), never a bare counter
+  upsert: one `ref_counters` table, mirrored into the old per-scope table whose
+  row lock older binaries share.
+- **`loyalty_memberships`** is the membership table (Phase 5.5);
+  `loyalty_customers` is its updatable compat view. New SQL names the table.
+- **Dine-in lines are relational** (Phase 5.1): `open_ticket_items.quantity /
+  item_name / unit_price / size_label / modifier_names` plus
+  `open_ticket_item_addons` / `_optionals`, mirrored from `line` by trigger.
+  Read the columns; `line.input` stays the frozen request settle replays.
+- **Verifying a phase on a prod copy is one command:**
+  `scripts/db_verify_phase.sh <2|3|5> <source-db>` (clones the source, never
+  writes it; reconcile, per-org visible rows, plans, backfills twice, the
+  phase's check script). See `docs/release-2026-10-17.md`.
 - **Checks to run on a prod copy:** `scripts/db_reconcile.sql` (per-org counts
   and sums, diff before/after: must be empty), `scripts/db_phase1_check.sql`
   (prints only problems), `scripts/explain_hot_paths.sql` (plan timings),

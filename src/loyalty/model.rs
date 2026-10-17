@@ -139,7 +139,7 @@ pub const MEMBER_COLS: &str = "id, org_id, name, phone, member_token, points_bal
     pass_notice";
 
 /// The membership joined to its customer. Every read of a member goes through
-/// this; writes go to `loyalty_customers` (programme) or `customers` (person).
+/// this; writes go to `loyalty_memberships` (programme) or `customers` (person).
 pub const MEMBERS: &str = "loyalty_members_v";
 
 impl MemberRow {
@@ -334,7 +334,7 @@ pub async fn award_for_order(
         None => points,
         Some(cap) => {
             let current: i32 = sqlx::query_scalar(&format!(
-                "SELECT {column} FROM loyalty_customers WHERE id = $1 FOR UPDATE",
+                "SELECT {column} FROM loyalty_memberships WHERE id = $1 FOR UPDATE",
                 column = match rule.mode {
                     earn::Mode::Points => "points_balance",
                     earn::Mode::Visits => "visits_balance",
@@ -541,7 +541,7 @@ pub async fn forget_in(
     // Locked, so two admins forgetting the same member — or a sweep messaging
     // them at the same moment — serialise on the row.
     let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        "SELECT id FROM loyalty_memberships WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(member_id)
     .fetch_optional(&mut *tx)
@@ -567,7 +567,7 @@ pub async fn forget_in(
     .fetch_one(&mut *tx)
     .await?;
     sqlx::query(
-        "UPDATE loyalty_customers \
+        "UPDATE loyalty_memberships \
             SET deleted_at = now(), \
                 member_token = $2, \
                 apple_auth_token = CASE WHEN $3 THEN apple_auth_token END, \
@@ -623,7 +623,7 @@ pub const ERASED_PASS_GRACE_HOURS: i32 = 48;
 pub async fn purge_erased_pass(pool: &PgPool, member_id: Uuid) -> Result<bool, AppError> {
     let mut tx = pool.begin().await?;
     let hit = sqlx::query(
-        "UPDATE loyalty_customers m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now() \
+        "UPDATE loyalty_memberships m SET apple_auth_token = NULL, pass_voided_at = NULL, updated_at = now() \
           WHERE m.id = $1 AND m.deleted_at IS NOT NULL \
             AND EXISTS (SELECT 1 FROM customers c WHERE c.id = m.id AND c.erased_at IS NOT NULL)",
     )
@@ -646,7 +646,7 @@ pub async fn purge_erased_pass(pool: &PgPool, member_id: Uuid) -> Result<bool, A
 /// anyway. Bounded per call; returns how many were purged.
 pub async fn purge_stale_erased_passes(pool: &PgPool) -> Result<usize, AppError> {
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT m.id FROM loyalty_customers m JOIN customers c ON c.id = m.id \
+        "SELECT m.id FROM loyalty_memberships m JOIN customers c ON c.id = m.id \
           WHERE c.erased_at IS NOT NULL AND m.deleted_at IS NOT NULL \
             AND (m.apple_auth_token IS NOT NULL \
                  OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)) \
@@ -690,7 +690,7 @@ pub async fn purge_stale_erased_passes(pool: &PgPool) -> Result<usize, AppError>
 pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, AppError> {
     let mut tx = pool.begin().await?;
     let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM loyalty_customers WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        "SELECT id FROM loyalty_memberships WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(member_id)
     .fetch_optional(&mut *tx)
@@ -702,7 +702,7 @@ pub async fn leave(pool: &PgPool, member_id: Uuid) -> Result<Option<MemberRow>, 
         return Ok(None);
     };
     sqlx::query(
-        "UPDATE loyalty_customers \
+        "UPDATE loyalty_memberships \
             SET deleted_at = now(), pass_voided_at = now(), pass_updated_at = now(), \
                 member_token = $2, \
                 pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
@@ -737,7 +737,7 @@ where
     Ok(sqlx::query_as(&format!(
         "SELECT {MEMBER_COLS} FROM {MEMBERS} v \
           WHERE v.id = $1 AND v.deleted_at IS NOT NULL AND v.apple_auth_token IS NOT NULL \
-            AND EXISTS (SELECT 1 FROM loyalty_customers m \
+            AND EXISTS (SELECT 1 FROM loyalty_memberships m \
                          WHERE m.id = v.id AND m.pass_voided_at IS NOT NULL)"
     ))
     .bind(id)
@@ -759,7 +759,7 @@ pub async fn enrol(
     joined_branch_id: Option<Uuid>,
 ) -> Result<bool, AppError> {
     let done = sqlx::query(
-        "INSERT INTO loyalty_customers (id, org_id, member_token, joined_branch_id, apple_auth_token) \
+        "INSERT INTO loyalty_memberships (id, org_id, member_token, joined_branch_id, apple_auth_token) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (id) DO UPDATE \
             SET deleted_at = NULL, pass_voided_at = NULL, member_token = EXCLUDED.member_token, \
@@ -767,8 +767,8 @@ pub async fn enrol(
                 joined_branch_id = EXCLUDED.joined_branch_id, \
                 apple_serial = NULL, google_object_id = NULL, \
                 enrolled_at = now(), updated_at = now() \
-          WHERE loyalty_customers.deleted_at IS NOT NULL \
-            AND loyalty_customers.org_id = EXCLUDED.org_id",
+          WHERE loyalty_memberships.deleted_at IS NOT NULL \
+            AND loyalty_memberships.org_id = EXCLUDED.org_id",
     )
     .bind(customer_id)
     .bind(org_id)
@@ -808,7 +808,7 @@ pub async fn merge_memberships(
     let mut ids = [loser_id, survivor_id];
     ids.sort();
     sqlx::query(
-        "SELECT id FROM loyalty_customers WHERE id = ANY($1) AND org_id = $2 ORDER BY id FOR UPDATE",
+        "SELECT id FROM loyalty_memberships WHERE id = ANY($1) AND org_id = $2 ORDER BY id FOR UPDATE",
     )
     .bind(&ids[..])
     .bind(org_id)
@@ -878,7 +878,7 @@ pub async fn merge_memberships(
         // `pass_voided_at`: the card in the loser's wallet is served one last
         // time, marked voided (see `find_voided`). `pass_updated_at` moves so
         // the device's "what changed since" question includes this serial.
-        "UPDATE loyalty_customers \
+        "UPDATE loyalty_memberships \
             SET deleted_at = now(), pass_voided_at = now(), pass_updated_at = now(), \
                 pass_notice = NULL, pass_notice_at = NULL, pass_notice_seen_at = NULL, \
                 pass_notice_wallets = NULL, pass_notice_fallback = NULL, \

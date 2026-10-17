@@ -1,6 +1,8 @@
 //! Waste from the till: the live route's permission gate, the ledger math, the
 //! recipe explosion, and replay's accept-and-flag / approval / idempotency.
 
+mod common;
+
 use actix_web::{App, test, web};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -274,19 +276,8 @@ async fn a_menu_item_waste_explodes_through_its_recipe(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    for (ing, name, unit, qty) in [(beans, "Beans", "g", 18.0), (milk, "Milk", "ml", 200.0)] {
-        sqlx::query(
-            "INSERT INTO menu_item_recipes (menu_item_id, size_label, quantity_used, ingredient_name, ingredient_unit, org_ingredient_id) \
-             VALUES ($1, 'one_size', $2, $3, $4, $5)",
-        )
-        .bind(item)
-        .bind(rust_decimal::Decimal::try_from(qty).unwrap())
-        .bind(name)
-        .bind(unit)
-        .bind(ing)
-        .execute(&pool)
-        .await
-        .unwrap();
+    for (ing, unit, qty) in [(beans, "g", 18.0), (milk, "ml", 200.0)] {
+        common::legacy_catalog::item_recipe(&pool, item, "one_size", ing, qty, unit).await;
     }
     let bearer = token(admin, org, UserRole::OrgAdmin);
     let id = Uuid::new_v4();

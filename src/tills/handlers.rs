@@ -510,7 +510,8 @@ pub(crate) async fn fetch_till<'e, E: sqlx::PgExecutor<'e>>(
     till_id: Uuid,
 ) -> Result<Option<Till>, sqlx::Error> {
     sqlx::query_as::<_, Till>(&format!(
-        "SELECT {TILL_COLUMNS} {TILL_FROM} WHERE s.id = $1"
+        // A deleted till (DB Phase 5.7: soft delete) is a till that is not there.
+        "SELECT {TILL_COLUMNS} {TILL_FROM} WHERE s.id = $1 AND s.deleted_at IS NULL"
     ))
     .bind(till_id)
     .fetch_optional(exec)
@@ -1036,7 +1037,8 @@ pub(crate) async fn list_tills_core(
         ));
     }
     let filter = format!(
-        "{scope} AND ($2::text IS NULL OR s.status::text = $2) AND ($3::uuid IS NULL OR s.teller_id = $3) \
+        "{scope} AND s.deleted_at IS NULL \
+         AND ($2::text IS NULL OR s.status::text = $2) AND ($3::uuid IS NULL OR s.teller_id = $3) \
          AND ($4::uuid IS NULL OR s.device_id = $4) \
          AND (NOT COALESCE($5::bool, false) OR s.opened_while_another_open OR s.reconciliation_status = 'disagreed') \
          AND ($6::timestamptz IS NULL OR s.opened_at >= $6) AND ($7::timestamptz IS NULL OR s.opened_at < $7)"
@@ -1931,16 +1933,16 @@ pub async fn delete_till(
             "Cannot delete a till that has recorded (non-voided) orders — its sales are part of the financial record.".into(),
         ));
     }
-    let mut tx = pool.get_ref().begin().await?;
-    sqlx::query("DELETE FROM orders WHERE till_id = $1")
-        .bind(*till_id)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM tills WHERE id = $1")
-        .bind(*till_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    // Soft delete (DB Phase 5.7, owner decision): the till and its voided
+    // orders stay in the ledger; the till drops out of every till list and
+    // fetch, and the POS feed tells tills it is gone, exactly as when the row
+    // was deleted. Same 204.
+    sqlx::query!(
+        "UPDATE tills SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+        *till_id
+    )
+    .execute(pool.get_ref())
+    .await?;
     Ok(HttpResponse::NoContent().finish())
 }
 

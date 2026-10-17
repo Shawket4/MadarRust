@@ -950,9 +950,9 @@ pub async fn list_menu_items(
                 mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
                 (
                     SELECT a.id::text
-                    FROM menu_item_recipes r
-                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    FROM compat.menu_item_recipes r
+                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
                     -- Deterministic: the group's display order (component_resolve agrees).
@@ -960,7 +960,7 @@ pub async fn list_menu_items(
                     LIMIT 1
                 ) AS default_milk_addon_id
          FROM menu_items mi
-         LEFT JOIN branch_menu_overrides bmo
+         LEFT JOIN compat.branch_menu_overrides bmo
                 ON bmo.menu_item_id = mi.id AND bmo.branch_id = $3
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
@@ -1106,7 +1106,7 @@ pub async fn list_menu_catalog(
     // matches nothing → identical to the plain org catalog.
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM menu_items mi
-         LEFT JOIN branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
+         LEFT JOIN compat.branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
            AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
@@ -1136,9 +1136,9 @@ pub async fn list_menu_catalog(
                 mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
                 (
                     SELECT a.id::text
-                    FROM menu_item_recipes r
-                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    FROM compat.menu_item_recipes r
+                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = mi.id
                       AND a.type = 'milk_type'
                     -- Deterministic: the group's display order (component_resolve agrees).
@@ -1146,7 +1146,7 @@ pub async fn list_menu_catalog(
                     LIMIT 1
                 ) AS default_milk_addon_id
          FROM menu_items mi
-         LEFT JOIN branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
+         LEFT JOIN compat.branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
            AND ($2::uuid IS NULL OR mi.category_id = $2)
            AND ($3::text IS NULL OR mi.name ILIKE '%' || $3 || '%')
@@ -1436,9 +1436,9 @@ pub async fn update_menu_item(
                    created_at, updated_at, deleted_at, kind,
                    (
                        SELECT a.id::text
-                       FROM menu_item_recipes r
-                       JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                       JOIN addon_items a ON a.id = ai.addon_item_id
+                       FROM compat.menu_item_recipes r
+                       JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                       JOIN compat.addon_items a ON a.id = ai.addon_item_id
                        WHERE r.menu_item_id = menu_items.id
                          AND a.type = 'milk_type'
                        -- Deterministic: the group's display order (component_resolve agrees).
@@ -1745,8 +1745,8 @@ pub async fn list_addon_items(
     // branch-disabled addons are excluded. Without it ($3 NULL), the LEFT JOIN matches
     // nothing → the plain org list (legacy contract). A custom group's options
     // (type NULL) are not addons: see `AddonItem`.
-    const FILTER: &str = "FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao
+    const FILTER: &str = "FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao
                 ON bao.addon_item_id = a.id AND bao.branch_id = $3
          WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
@@ -1770,7 +1770,7 @@ pub async fn list_addon_items(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 COALESCE(bao.price_override, a.default_price) AS default_price,
                 a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
+                (SELECT org_ingredient_id FROM compat.addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
          {FILTER}
          ORDER BY a.type ASC, a.created_at ASC
          LIMIT $5 OFFSET $6"
@@ -1877,8 +1877,8 @@ pub async fn list_addon_catalog(
         .filter(|s| !s.is_empty());
 
     let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
+        "SELECT COUNT(*) FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
          WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
@@ -1899,9 +1899,9 @@ pub async fn list_addon_catalog(
     let data = sqlx::query_as::<_, AddonItem>(&format!(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 a.default_price, a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
-         FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
+                (SELECT org_ingredient_id FROM compat.addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
+         FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $4
          WHERE a.org_id = $1 AND a.type IS NOT NULL
            AND ($2::text IS NULL OR a.type = $2)
            AND ($3::text IS NULL OR a.name ILIKE '%' || $3 || '%')
@@ -2021,7 +2021,7 @@ pub async fn list_addon_slots(
     tag = "menu",
     params(("id" = Uuid, Path, description = "Menu item ID")),
     request_body = CreateAddonSlotRequest,
-    responses((status = 201, description = "Addon slot created", body = AddonSlot), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn create_addon_slot(
@@ -2030,48 +2030,9 @@ pub async fn create_addon_slot(
     id: web::Path<Uuid>,
     body: web::Json<CreateAddonSlotRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-
-    let item = fetch_menu_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    let mut_body = body.into_inner();
-    let mut label_translations = mut_body
-        .label_translations
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(lbl) = &mut_body.label {
-        crate::translation::ensure_translations_json(&mut label_translations, Some(lbl))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    }
-
-    let row = sqlx::query_as::<_, AddonSlot>(
-        "INSERT INTO menu_item_addon_slots
-             (menu_item_id, addon_type, label, label_translations, is_required,
-              min_selections, max_selections)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (menu_item_id, addon_type) DO UPDATE SET
-             label              = COALESCE(EXCLUDED.label, menu_item_addon_slots.label),
-             label_translations = EXCLUDED.label_translations,
-             is_required        = EXCLUDED.is_required,
-             min_selections     = EXCLUDED.min_selections,
-             max_selections     = EXCLUDED.max_selections
-         RETURNING id, menu_item_id, addon_type, label, label_translations, is_required,
-                   min_selections, max_selections, created_at",
-    )
-    .bind(*id)
-    .bind(&mut_body.addon_type)
-    .bind(&mut_body.label)
-    .bind(label_translations)
-    .bind(mut_body.is_required.unwrap_or(false))
-    .bind(mut_body.min_selections.unwrap_or(0))
-    .bind(mut_body.max_selections)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Created().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, id, body);
+    Err(crate::compat_usage::shim_write_removed("POST /menu-items/{id}/addon-slots"))
 }
 
 #[utoipa::path(
@@ -2083,7 +2044,7 @@ pub async fn create_addon_slot(
         ("slot_id" = Uuid, Path, description = "Addon slot ID")
     ),
     request_body = UpdateAddonSlotRequest,
-    responses((status = 200, description = "Addon slot updated", body = AddonSlot), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn update_addon_slot(
@@ -2092,59 +2053,9 @@ pub async fn update_addon_slot(
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateAddonSlotRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let (item_id, slot_id) = path.into_inner();
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-
-    let item = fetch_menu_item(pool.get_ref(), item_id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    let existing: AddonSlot = sqlx::query_as(
-        "SELECT id, menu_item_id, addon_type, label, label_translations, is_required, min_selections, max_selections, created_at FROM menu_item_addon_slots WHERE id = $1 AND menu_item_id = $2"
-    )
-    .bind(slot_id)
-    .bind(item_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Addon slot not found".into()))?;
-
-    let mut_body = body.into_inner();
-    let mut label_translations = existing.label_translations;
-    if let Some(new_label) = &mut_body.label {
-        crate::translation::ensure_translations_json(&mut label_translations, Some(new_label))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    } else if let Some(new_tr) = mut_body.label_translations {
-        label_translations = new_tr;
-        if let Some(lbl) = &existing.label {
-            crate::translation::ensure_translations_json(&mut label_translations, Some(lbl))
-                .await
-                .map_err(|_| AppError::Internal)?;
-        }
-    }
-
-    let row = sqlx::query_as::<_, AddonSlot>(
-        "UPDATE menu_item_addon_slots SET
-             label              = COALESCE($3, label),
-             label_translations = $4,
-             is_required        = COALESCE($5, is_required),
-             min_selections     = COALESCE($6, min_selections),
-             max_selections     = COALESCE($7, max_selections)
-         WHERE id = $1 AND menu_item_id = $2
-         RETURNING id, menu_item_id, addon_type, label, label_translations, is_required,
-                   min_selections, max_selections, created_at",
-    )
-    .bind(slot_id)
-    .bind(item_id)
-    .bind(&mut_body.label)
-    .bind(label_translations)
-    .bind(mut_body.is_required)
-    .bind(mut_body.min_selections)
-    .bind(mut_body.max_selections)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, path, body);
+    Err(crate::compat_usage::shim_write_removed("PATCH /menu-items/{id}/addon-slots/{slot_id}"))
 }
 
 #[utoipa::path(
@@ -2155,7 +2066,7 @@ pub async fn update_addon_slot(
         ("id" = Uuid, Path, description = "Menu item ID"),
         ("slot_id" = Uuid, Path, description = "Addon slot ID")
     ),
-    responses((status = 204, description = "Addon slot deleted"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_addon_slot(
@@ -2163,20 +2074,9 @@ pub async fn delete_addon_slot(
     pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    let (item_id, slot_id) = path.into_inner();
-    check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
-
-    let item = fetch_menu_item(pool.get_ref(), item_id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    sqlx::query("DELETE FROM menu_item_addon_slots WHERE id = $1 AND menu_item_id = $2")
-        .bind(slot_id)
-        .bind(item_id)
-        .execute(pool.get_ref())
-        .await?;
-
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, path);
+    Err(crate::compat_usage::shim_write_removed("DELETE /menu-items/{id}/addon-slots/{slot_id}"))
 }
 
 // ── Addon Overrides ───────────────────────────────────────────
@@ -2257,7 +2157,7 @@ pub struct PutAllowedAddonsRequest {
     tag = "menu",
     params(("id" = Uuid, Path, description = "Menu item ID")),
     request_body = PutAllowedAddonsRequest,
-    responses((status = 200, description = "Allowed addon IDs replaced", body = Vec<String>), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn put_allowed_addons(
@@ -2266,38 +2166,9 @@ pub async fn put_allowed_addons(
     id: web::Path<Uuid>,
     body: web::Json<PutAllowedAddonsRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-
-    let item = fetch_menu_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    // Validate every addon belongs to the same org.
-    for addon_id in &body.addon_item_ids {
-        let addon = fetch_addon_item(pool.get_ref(), *addon_id).await?;
-        require_same_org(&claims, Some(addon.org_id))?;
-    }
-
-    let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM menu_item_allowed_addons WHERE menu_item_id = $1")
-        .bind(*id)
-        .execute(&mut *tx)
-        .await?;
-
-    for (i, addon_id) in body.addon_item_ids.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO menu_item_allowed_addons (menu_item_id, addon_item_id, sort_order)
-             VALUES ($1, $2, $3)",
-        )
-        .bind(*id)
-        .bind(addon_id)
-        .bind(i as i32)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-
-    Ok(HttpResponse::Ok().json(&body.addon_item_ids))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, id, body);
+    Err(crate::compat_usage::shim_write_removed("PUT /menu-items/{id}/allowed-addons"))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2375,7 +2246,7 @@ pub async fn list_optional_fields(
                org_ingredient_id, ingredient_name, ingredient_unit,
                quantity_used, size_label::text,
                is_active, created_at, updated_at
-        FROM menu_item_optional_fields
+        FROM compat.menu_item_optional_fields
         WHERE menu_item_id = $1
         ORDER BY name ASC
         "#,
@@ -2393,7 +2264,7 @@ pub async fn list_optional_fields(
     tag = "menu",
     params(("id" = Uuid, Path, description = "Menu item ID")),
     request_body = CreateOptionalFieldRequest,
-    responses((status = 201, description = "Optional field created", body = OptionalField), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn create_optional_field(
@@ -2402,88 +2273,9 @@ pub async fn create_optional_field(
     id: web::Path<Uuid>,
     body: web::Json<CreateOptionalFieldRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    let item = fetch_menu_item(pool.get_ref(), *id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    if body.name.trim().is_empty() {
-        return Err(AppError::BadRequest("name cannot be empty".into()));
-    }
-
-    // Validate: if any ingredient field is set, all required ones must be present
-    let has_ingredient = body.org_ingredient_id.is_some()
-        || body.ingredient_name.is_some()
-        || body.ingredient_unit.is_some()
-        || body.quantity_used.is_some();
-
-    if has_ingredient {
-        if body.ingredient_name.is_none()
-            || body.ingredient_unit.is_none()
-            || body.quantity_used.is_none()
-        {
-            return Err(AppError::BadRequest(
-                "ingredient_name, ingredient_unit, and quantity_used are all required when configuring an ingredient deduction".into()
-            ));
-        }
-        if let Some(qty) = body.quantity_used
-            && qty <= 0.0
-        {
-            return Err(AppError::BadRequest(
-                "quantity_used must be greater than 0".into(),
-            ));
-        }
-    }
-
-    let mut mut_body = body.into_inner();
-    // Normalize the deduction quantity to the linked ingredient's base unit.
-    if has_ingredient {
-        let unit = mut_body.ingredient_unit.clone().unwrap_or_default();
-        let qty = mut_body.quantity_used.unwrap_or(0.0);
-        let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
-            pool.get_ref(),
-            item.org_id,
-            mut_body.org_ingredient_id,
-            &unit,
-            qty,
-        )
-        .await?;
-        mut_body.ingredient_unit = Some(nu);
-        mut_body.quantity_used = Some(nq);
-    }
-    let trimmed_name = mut_body.name.trim().to_string();
-    let mut name_translations = mut_body
-        .name_translations
-        .unwrap_or_else(|| serde_json::json!({}));
-    crate::translation::ensure_translations_json(&mut name_translations, Some(&trimmed_name))
-        .await
-        .map_err(|_| AppError::Internal)?;
-
-    let row = sqlx::query_as::<_, OptionalField>(
-        r#"
-        INSERT INTO menu_item_optional_fields
-            (menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name,
-             ingredient_unit, quantity_used, size_label)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        RETURNING id, menu_item_id, name, name_translations, price,
-                  org_ingredient_id, ingredient_name, ingredient_unit,
-                  quantity_used, size_label::text,
-                  is_active, created_at, updated_at
-        "#,
-    )
-    .bind(*id)
-    .bind(trimmed_name)
-    .bind(name_translations)
-    .bind(mut_body.price.unwrap_or(0))
-    .bind(mut_body.org_ingredient_id)
-    .bind(&mut_body.ingredient_name)
-    .bind(&mut_body.ingredient_unit)
-    .bind(mut_body.quantity_used)
-    .bind(&mut_body.size_label)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Created().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, id, body);
+    Err(crate::compat_usage::shim_write_removed("POST /menu-items/{id}/optionals"))
 }
 
 #[utoipa::path(
@@ -2495,7 +2287,7 @@ pub async fn create_optional_field(
         ("field_id" = Uuid, Path, description = "Field ID")
     ),
     request_body = UpdateOptionalFieldRequest,
-    responses((status = 200, description = "Optional field updated", body = OptionalField), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn update_optional_field(
@@ -2504,108 +2296,9 @@ pub async fn update_optional_field(
     path: web::Path<(Uuid, Uuid)>,
     body: web::Json<UpdateOptionalFieldRequest>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    let (item_id, field_id) = path.into_inner();
-    let item = fetch_menu_item(pool.get_ref(), item_id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    if let Some(qty) = body.quantity_used
-        && qty <= 0.0
-    {
-        return Err(AppError::BadRequest(
-            "quantity_used must be greater than 0".into(),
-        ));
-    }
-
-    let existing: OptionalField = sqlx::query_as(
-        r#"SELECT id, menu_item_id, name, name_translations, price, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used, size_label::text, is_active, created_at, updated_at FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2"#
-    )
-    .bind(field_id)
-    .bind(item_id)
-    .fetch_optional(pool.get_ref())
-    .await?
-    .ok_or_else(|| AppError::NotFound("Optional field not found".into()))?;
-
-    // Changing the linked ingredient OR its unit reinterprets the stored
-    // (base-unit) quantity, so a fresh quantity_used must accompany either
-    // change — otherwise the old amount is silently re-read in the new unit (V21).
-    if body.quantity_used.is_none()
-        && (body.ingredient_unit.is_some()
-            || (body.org_ingredient_id.is_some()
-                && body.org_ingredient_id != existing.org_ingredient_id))
-    {
-        return Err(AppError::BadRequest(
-            "provide quantity_used when changing the linked ingredient or its unit".into(),
-        ));
-    }
-
-    let mut mut_body = body.into_inner();
-    // Normalize a newly-supplied quantity to the linked ingredient's base unit.
-    if let Some(qty) = mut_body.quantity_used {
-        let effective_id = mut_body.org_ingredient_id.or(existing.org_ingredient_id);
-        let unit = mut_body
-            .ingredient_unit
-            .clone()
-            .or_else(|| existing.ingredient_unit.clone())
-            .unwrap_or_default();
-        let (nu, nq) = crate::recipes::handlers::normalize_recipe_unit(
-            pool.get_ref(),
-            item.org_id,
-            effective_id,
-            &unit,
-            qty,
-        )
-        .await?;
-        mut_body.ingredient_unit = Some(nu);
-        mut_body.quantity_used = Some(nq);
-    }
-    let mut name_translations = existing.name_translations;
-    if let Some(new_name) = &mut_body.name {
-        crate::translation::ensure_translations_json(&mut name_translations, Some(new_name))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    } else if let Some(new_tr) = mut_body.name_translations {
-        name_translations = new_tr;
-        crate::translation::ensure_translations_json(&mut name_translations, Some(&existing.name))
-            .await
-            .map_err(|_| AppError::Internal)?;
-    }
-
-    let row = sqlx::query_as::<_, OptionalField>(
-        r#"
-        UPDATE menu_item_optional_fields SET
-            name              = COALESCE($3, name),
-            name_translations = $4,
-            price             = COALESCE($5, price),
-            org_ingredient_id = COALESCE($6, org_ingredient_id),
-            ingredient_name   = COALESCE($7, ingredient_name),
-            ingredient_unit   = COALESCE($8, ingredient_unit),
-            quantity_used     = COALESCE($9, quantity_used),
-            size_label        = COALESCE($10, size_label),
-            is_active         = COALESCE($11, is_active)
-        WHERE id = $1 AND menu_item_id = $2
-        RETURNING id, menu_item_id, name, name_translations, price,
-                  org_ingredient_id, ingredient_name, ingredient_unit,
-                  quantity_used, size_label::text,
-                  is_active, created_at, updated_at
-        "#,
-    )
-    .bind(field_id)
-    .bind(item_id)
-    .bind(&mut_body.name)
-    .bind(name_translations)
-    .bind(mut_body.price)
-    .bind(mut_body.org_ingredient_id)
-    .bind(&mut_body.ingredient_name)
-    .bind(&mut_body.ingredient_unit)
-    .bind(mut_body.quantity_used)
-    .bind(&mut_body.size_label)
-    .bind(mut_body.is_active)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, path, body);
+    Err(crate::compat_usage::shim_write_removed("PATCH /menu-items/{id}/optionals/{field_id}"))
 }
 
 #[utoipa::path(
@@ -2616,7 +2309,7 @@ pub async fn update_optional_field(
         ("id" = Uuid, Path, description = "Menu item ID"),
         ("field_id" = Uuid, Path, description = "Field ID")
     ),
-    responses((status = 204, description = "Optional field deleted"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_optional_field(
@@ -2624,19 +2317,9 @@ pub async fn delete_optional_field(
     pool: crate::db::Db,
     path: web::Path<(Uuid, Uuid)>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "delete").await?;
-    let (item_id, field_id) = path.into_inner();
-    let item = fetch_menu_item(pool.get_ref(), item_id).await?;
-    require_same_org(&claims, Some(item.org_id))?;
-
-    sqlx::query("DELETE FROM menu_item_optional_fields WHERE id = $1 AND menu_item_id = $2")
-        .bind(field_id)
-        .bind(item_id)
-        .execute(pool.get_ref())
-        .await?;
-
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, path);
+    Err(crate::compat_usage::shim_write_removed("DELETE /menu-items/{id}/optionals/{field_id}"))
 }
 
 // ── Branch menu override handlers ─────────────────────────────
@@ -2665,7 +2348,7 @@ async fn fetch_branch_size_overrides(
 ) -> Result<Vec<BranchSizeOverride>, AppError> {
     Ok(sqlx::query_as::<_, BranchSizeOverride>(
         "SELECT size_label::text AS size_label, price_override
-         FROM branch_menu_size_overrides
+         FROM compat.branch_menu_size_overrides
          WHERE branch_id = $1 AND menu_item_id = $2
          ORDER BY size_label",
     )
@@ -2722,7 +2405,7 @@ pub async fn list_branch_menu_overrides(
 
     let mut rows = sqlx::query_as::<_, BranchMenuOverride>(
         "SELECT branch_id, menu_item_id, price_override, is_available, updated_at
-         FROM branch_menu_overrides WHERE branch_id = $1",
+         FROM compat.branch_menu_overrides WHERE branch_id = $1",
     )
     .bind(query.branch_id)
     .fetch_all(pool.get_ref())
@@ -2731,7 +2414,7 @@ pub async fn list_branch_menu_overrides(
     // Attach each item's size overrides (single round trip, grouped by item).
     let size_rows = sqlx::query_as::<_, (Uuid, String, i32)>(
         "SELECT menu_item_id, size_label::text, price_override
-         FROM branch_menu_size_overrides WHERE branch_id = $1",
+         FROM compat.branch_menu_size_overrides WHERE branch_id = $1",
     )
     .bind(query.branch_id)
     .fetch_all(pool.get_ref())
@@ -2760,7 +2443,7 @@ pub async fn list_branch_menu_overrides(
     tag = "menu",
     operation_id = "upsert_branch_menu_override",
     request_body = BranchMenuOverrideInput,
-    responses((status = 200, description = "Override upserted", body = BranchMenuOverride), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn upsert_branch_menu_override(
@@ -2768,100 +2451,9 @@ pub async fn upsert_branch_menu_override(
     pool: crate::db::Db,
     body: web::Json<BranchMenuOverrideInput>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    let org_id = branch_in_scope(pool.get_ref(), &claims, body.branch_id).await?;
-
-    // The item must belong to the same org as the branch.
-    let item_org: Option<Uuid> =
-        sqlx::query_scalar("SELECT org_id FROM menu_items WHERE id = $1 AND deleted_at IS NULL")
-            .bind(body.menu_item_id)
-            .fetch_optional(pool.get_ref())
-            .await?;
-    if item_org != Some(org_id) {
-        return Err(AppError::NotFound(
-            "Menu item not found in this organization".into(),
-        ));
-    }
-    if let Some(p) = body.price_override
-        && p < 0
-    {
-        return Err(AppError::BadRequest("price_override must be ≥ 0".into()));
-    }
-
-    // Validate any provided size overrides against the item's actual (active) sizes.
-    if let Some(ref sizes) = body.sizes
-        && !sizes.is_empty()
-    {
-        for s in sizes {
-            if s.price_override < 0 {
-                return Err(AppError::BadRequest(
-                    "size price_override must be ≥ 0".into(),
-                ));
-            }
-        }
-        let valid: Vec<String> = sqlx::query_scalar(
-            "SELECT label::text FROM menu_item_sizes WHERE menu_item_id = $1 AND is_active = true",
-        )
-        .bind(body.menu_item_id)
-        .fetch_all(pool.get_ref())
-        .await?;
-        for s in sizes {
-            if !valid.contains(&s.size_label) {
-                return Err(AppError::BadRequest(format!(
-                    "Size '{}' is not a valid size for this item",
-                    s.size_label
-                )));
-            }
-        }
-    }
-
-    let mut tx = pool.get_ref().begin().await?;
-
-    let mut row = sqlx::query_as::<_, BranchMenuOverride>(
-        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, price_override, is_available, updated_at)
-         VALUES ($1, $2, $3, $4, now())
-         ON CONFLICT (branch_id, menu_item_id)
-         DO UPDATE SET price_override = EXCLUDED.price_override,
-                       is_available   = EXCLUDED.is_available,
-                       updated_at     = now()
-         RETURNING branch_id, menu_item_id, price_override, is_available, updated_at",
-    )
-    .bind(body.branch_id)
-    .bind(body.menu_item_id)
-    .bind(body.price_override)
-    .bind(body.is_available)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    // `sizes` is a full-replacement of this item's size overrides (None leaves them as-is).
-    if let Some(ref sizes) = body.sizes {
-        sqlx::query(
-            "DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2",
-        )
-        .bind(body.branch_id)
-        .bind(body.menu_item_id)
-        .execute(&mut *tx)
-        .await?;
-        for s in sizes {
-            sqlx::query(
-                "INSERT INTO branch_menu_size_overrides (branch_id, menu_item_id, size_label, price_override, updated_at)
-                 VALUES ($1, $2, $3, $4, now())",
-            )
-            .bind(body.branch_id)
-            .bind(body.menu_item_id)
-            .bind(&s.size_label)
-            .bind(s.price_override)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
-    tx.commit().await?;
-
-    row.sizes =
-        fetch_branch_size_overrides(pool.get_ref(), body.branch_id, body.menu_item_id).await?;
-    Ok(HttpResponse::Ok().json(row))
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, body);
+    Err(crate::compat_usage::shim_write_removed("PUT /branch-menu-overrides"))
 }
 
 #[utoipa::path(
@@ -2870,7 +2462,7 @@ pub async fn upsert_branch_menu_override(
     tag = "menu",
     operation_id = "delete_branch_menu_override",
     params(BranchOverrideKeyQuery),
-    responses((status = 204, description = "Override cleared — item (and its size overrides) revert to the org catalog"), AppErrorResponse),
+    responses((status = 410, description = "Retired: in production this writes a read-only compat view. Answers 410 SHIM_WRITE_REMOVED.", body = crate::errors::ErrorBody), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn delete_branch_menu_override(
@@ -2878,26 +2470,9 @@ pub async fn delete_branch_menu_override(
     pool: crate::db::Db,
     query: web::Query<BranchOverrideKeyQuery>,
 ) -> Result<HttpResponse, AppError> {
-    let claims = extract_claims(&req)?;
-    check_permission(pool.get_ref(), &claims, "menu_items", "update").await?;
-    branch_in_scope(pool.get_ref(), &claims, query.branch_id).await?;
-
-    let mut tx = pool.get_ref().begin().await?;
-    sqlx::query(
-        "DELETE FROM branch_menu_size_overrides WHERE branch_id = $1 AND menu_item_id = $2",
-    )
-    .bind(query.branch_id)
-    .bind(query.menu_item_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query("DELETE FROM branch_menu_overrides WHERE branch_id = $1 AND menu_item_id = $2")
-        .bind(query.branch_id)
-        .bind(query.menu_item_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-
-    Ok(HttpResponse::NoContent().finish())
+    let _claims = extract_claims(&req)?;
+    let _ = (pool, query);
+    Err(crate::compat_usage::shim_write_removed("DELETE /branch-menu-overrides"))
 }
 
 // ── Branch addon override handlers ────────────────────────────
@@ -2923,7 +2498,7 @@ pub async fn list_branch_addon_overrides(
 
     let rows = sqlx::query_as::<_, BranchAddonOverride>(
         "SELECT branch_id, addon_item_id, price_override, is_available, updated_at
-         FROM branch_addon_overrides WHERE branch_id = $1",
+         FROM compat.branch_addon_overrides WHERE branch_id = $1",
     )
     .bind(query.branch_id)
     .fetch_all(pool.get_ref())
@@ -2999,9 +2574,9 @@ async fn fetch_menu_item(pool: &PgPool, id: Uuid) -> Result<MenuItem, AppError> 
                 created_at, updated_at, deleted_at, kind,
                 (
                     SELECT a.id::text
-                    FROM menu_item_recipes r
-                    JOIN addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN addon_items a ON a.id = ai.addon_item_id
+                    FROM compat.menu_item_recipes r
+                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
                     WHERE r.menu_item_id = menu_items.id
                       AND a.type = 'milk_type'
                     -- Deterministic: the group's display order (component_resolve agrees).
@@ -3015,24 +2590,6 @@ async fn fetch_menu_item(pool: &PgPool, id: Uuid) -> Result<MenuItem, AppError> 
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Menu item not found".into()))
-}
-
-async fn fetch_addon_item(pool: &PgPool, id: Uuid) -> Result<AddonItem, AppError> {
-    sqlx::query_as::<_, AddonItem>(
-        "SELECT id, org_id, name, name_translations, type as addon_type, default_price,
-                is_active, created_at, updated_at,
-                (SELECT org_ingredient_id
-                   FROM addon_item_ingredients
-                  WHERE addon_item_id = addon_items.id
-                  ORDER BY ingredient_name, org_ingredient_id
-                  LIMIT 1) AS primary_ingredient_id
-         FROM addon_items
-         WHERE id = $1 AND type IS NOT NULL",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Addon item not found".into()))
 }
 
 /// Every size row of an item, including the synthetic `one_size` row — i.e.
@@ -3053,7 +2610,7 @@ async fn fetch_all_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, 
 async fn fetch_sizes(pool: &PgPool, item_id: Uuid) -> Result<Vec<ItemSize>, AppError> {
     Ok(sqlx::query_as::<_, ItemSize>(
         "SELECT id, menu_item_id, label::text, price_override, is_active
-         FROM item_sizes
+         FROM compat.item_sizes
          WHERE menu_item_id = $1
          ORDER BY label ASC",
     )
@@ -3066,7 +2623,7 @@ async fn fetch_addon_slots(pool: &PgPool, item_id: Uuid) -> Result<Vec<AddonSlot
     Ok(sqlx::query_as::<_, AddonSlot>(
         "SELECT id, menu_item_id, addon_type, label, label_translations, is_required,
                 min_selections, max_selections, created_at
-         FROM menu_item_addon_slots
+         FROM compat.menu_item_addon_slots
          WHERE menu_item_id = $1
          ORDER BY created_at ASC",
     )
@@ -3077,7 +2634,7 @@ async fn fetch_addon_slots(pool: &PgPool, item_id: Uuid) -> Result<Vec<AddonSlot
 
 async fn fetch_allowed_addon_ids(pool: &PgPool, item_id: Uuid) -> Result<Vec<Uuid>, AppError> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT addon_item_id FROM menu_item_allowed_addons
+        "SELECT addon_item_id FROM compat.menu_item_allowed_addons
          WHERE menu_item_id = $1
          ORDER BY sort_order ASC, created_at ASC",
     )
@@ -3096,7 +2653,7 @@ async fn fetch_optional_fields(
                 org_ingredient_id, ingredient_name, ingredient_unit,
                 quantity_used, size_label::text,
                 is_active, created_at, updated_at
-         FROM menu_item_optional_fields
+         FROM compat.menu_item_optional_fields
          WHERE menu_item_id = $1 AND is_active = true
          ORDER BY name ASC",
     )
@@ -3112,7 +2669,7 @@ async fn fetch_item_recipes(pool: &PgPool, item_id: Uuid) -> Result<Vec<MenuItem
                   (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category,
                   r.size_label::text,
                   i.yield_pct::float8 AS yield_pct
-           FROM   menu_item_recipes r
+           FROM   compat.menu_item_recipes r
            LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
            WHERE  r.menu_item_id = $1"#,
     )
@@ -3143,9 +2700,9 @@ pub(crate) async fn addon_items_by_ids(
         "SELECT a.id, a.org_id, a.name, a.name_translations, a.type as addon_type,
                 COALESCE(bao.price_override, a.default_price) AS default_price,
                 a.is_active, a.created_at, a.updated_at,
-                (SELECT org_ingredient_id FROM addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
-         FROM addon_items a
-         LEFT JOIN branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
+                (SELECT org_ingredient_id FROM compat.addon_item_ingredients WHERE addon_item_id = a.id ORDER BY ingredient_name, org_ingredient_id LIMIT 1) as primary_ingredient_id
+         FROM compat.addon_items a
+         LEFT JOIN compat.branch_addon_overrides bao ON bao.addon_item_id = a.id AND bao.branch_id = $2
          WHERE a.org_id = $1 AND a.id = ANY($3) AND a.type IS NOT NULL",
     )
     .bind(org_id)
@@ -3154,7 +2711,7 @@ pub(crate) async fn addon_items_by_ids(
     .fetch_all(&mut *conn)
     .await?;
     let available: std::collections::HashMap<Uuid, bool> = sqlx::query_as::<_, (Uuid, bool)>(
-        "SELECT addon_item_id, is_available FROM branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = ANY($2)",
+        "SELECT addon_item_id, is_available FROM compat.branch_addon_overrides WHERE branch_id = $1 AND addon_item_id = ANY($2)",
     )
     .bind(branch_id)
     .bind(ids)
@@ -3184,7 +2741,7 @@ pub(crate) async fn addon_items_by_ids(
     ) in sqlx::query_as::<_, IngRow>(
         "SELECT aii.addon_item_id, aii.org_ingredient_id, aii.quantity_used, aii.ingredient_name, \
                 aii.ingredient_unit, ic.id, ic.slug \
-           FROM addon_item_ingredients aii \
+           FROM compat.addon_item_ingredients aii \
            LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id \
            LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id \
           WHERE aii.addon_item_id = ANY($1) ORDER BY aii.addon_item_id, aii.ingredient_name",
@@ -3232,7 +2789,7 @@ async fn fetch_addon_ingredients(
     Ok(sqlx::query_as::<_, AddonItemIngredient>(
         "SELECT aii.org_ingredient_id, aii.quantity_used, aii.ingredient_name, aii.ingredient_unit,
                 ic.id AS category_id, ic.slug AS category_slug
-         FROM   addon_item_ingredients aii
+         FROM   compat.addon_item_ingredients aii
          LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id
          LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id
          WHERE  aii.addon_item_id = $1

@@ -471,7 +471,7 @@ pub(super) async fn scope_org(
     security(("bearer_jwt" = [])))]
 pub async fn get_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
@@ -523,7 +523,7 @@ pub async fn get_settings(
     security(("bearer_jwt" = [])))]
 pub async fn put_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<LoyaltySettings>,
 ) -> Result<HttpResponse, AppError> {
     let incoming = body.into_inner();
@@ -645,7 +645,7 @@ pub async fn put_settings(
     params(ScopeQuery), responses((status = 204), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn delete_settings(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
@@ -836,7 +836,7 @@ fn in_mode(mut items: Vec<RewardItem>, mode: Mode) -> Vec<RewardItem> {
     security(("bearer_jwt" = [])))]
 pub async fn get_reward_items(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
@@ -885,7 +885,7 @@ pub struct PutRewardItems {
     security(("bearer_jwt" = [])))]
 pub async fn put_reward_items(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<PutRewardItems>,
 ) -> Result<HttpResponse, AppError> {
     let incoming = body.into_inner();
@@ -1127,7 +1127,7 @@ pub async fn eligible_item_ids(
     security(("bearer_jwt" = [])))]
 pub async fn get_earning_items(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) = scope_org(pool.get_ref(), &req, query.branch_id).await?;
@@ -1165,7 +1165,7 @@ pub struct PutEarningItems {
     security(("bearer_jwt" = [])))]
 pub async fn put_earning_items(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<PutEarningItems>,
 ) -> Result<HttpResponse, AppError> {
     let incoming = body.into_inner();

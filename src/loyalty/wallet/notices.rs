@@ -105,7 +105,7 @@ pub async fn announce(
         // device fetches whatever is there when it asks, and asking first would
         // hand it the pass without the message on it.
         sqlx::query(
-            "UPDATE loyalty_customers \
+            "UPDATE loyalty_memberships \
                 SET pass_notice = $2, pass_notice_at = now(), pass_notice_seen_at = NULL, \
                     pass_notice_fallback = $3, pass_updated_at = now() \
               WHERE id = $1",
@@ -139,7 +139,7 @@ pub async fn announce(
         return Ok(());
     }
 
-    sqlx::query("UPDATE loyalty_customers SET pass_notice_wallets = $2 WHERE id = $1")
+    sqlx::query("UPDATE loyalty_memberships SET pass_notice_wallets = $2 WHERE id = $1")
         .bind(member.id)
         .bind(reached.join(","))
         .execute(pool)
@@ -173,7 +173,7 @@ pub async fn sweep_undelivered(pool: &PgPool) -> Result<(), AppError> {
         // cleared and failed to send is one missed message; one we sent and
         // failed to clear is a customer messaged every tick.
         let cleared = sqlx::query(
-            "UPDATE loyalty_customers \
+            "UPDATE loyalty_memberships \
                 SET pass_notice = NULL, pass_notice_at = NULL, pass_notice_fallback = NULL, \
                     pass_notice_wallets = NULL \
               WHERE id = $1 AND pass_notice_at IS NOT NULL",
@@ -200,7 +200,7 @@ pub async fn mark_seen(pool: &PgPool, member: &MemberRow) {
         return;
     }
     let _ = sqlx::query(
-        "UPDATE loyalty_customers SET pass_notice_seen_at = now() \
+        "UPDATE loyalty_memberships SET pass_notice_seen_at = now() \
           WHERE id = $1 AND pass_notice_seen_at IS NULL",
     )
     .bind(member.id)

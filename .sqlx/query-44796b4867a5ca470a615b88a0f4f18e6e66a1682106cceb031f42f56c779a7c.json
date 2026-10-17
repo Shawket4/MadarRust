@@ -1,0 +1,115 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COUNT(*) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS \"total_orders!\",\n            COUNT(*) FILTER (WHERE o.status = 'voided')::bigint AS \"voided_orders!\",\n            COALESCE(SUM(o.subtotal)        FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"subtotal!\",\n            COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_discount!\",\n            COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_tax!\",\n            -- Net of refunds against each sale; the two lines after it are the\n            -- identity `gross_sales − refunded_amount = total_revenue`. The join\n            -- on v_order_refund_totals is one row per order, so nothing here\n            -- fans out — the V17 lesson still holds.\n            COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))\n                     FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_revenue!\",\n            COALESCE(SUM(o.total_amount)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"gross_sales!\",\n            COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"refunded_amount!\",\n            COALESCE(SUM(o.service_charge_amount - COALESCE(rf.refunded_service_charge, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_service_charge!\",\n            COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded') AND o.service_charge_waived_by IS NOT NULL)::bigint AS \"service_charge_waived_count!\",\n            COALESCE(SUM(o.service_charge_waived_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"service_charge_waived_amount!\",\n            COALESCE(SUM(o.delivery_fee)    FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_delivery_fees!\",\n            COALESCE((\n              SELECT SUM(oi.quantity)::bigint\n              FROM order_items oi\n              JOIN orders o3 ON o3.id = oi.order_id\n              WHERE o3.branch_id = ANY($1) AND o3.status NOT IN ('voided', 'refunded')\n                AND oi.line_kind <> 'combo'\n                AND ($2::timestamptz IS NULL OR o3.created_at >= $2)\n                AND ($3::timestamptz IS NULL OR o3.created_at <= $3)\n                AND ($4::uuid[] IS NULL OR oi.menu_item_id != ALL($4::uuid[]))\n            ), 0)::bigint AS \"total_line_items!\",\n            COALESCE((\n              SELECT json_object_agg(method, rev) FROM (\n                SELECT op.method, SUM(op.amount)::bigint AS rev\n                FROM order_payments op\n                JOIN orders o2 ON o2.id = op.order_id\n                WHERE o2.branch_id = ANY($1) AND o2.status NOT IN ('voided', 'refunded')\n                  AND ($2::timestamptz IS NULL OR o2.created_at >= $2)\n                  AND ($3::timestamptz IS NULL OR o2.created_at <= $3)\n                GROUP BY op.method\n              ) sub\n            ), '{}'::json) AS \"revenue_by_method!: serde_json::Value\",\n            -- Tips, standalone. Deliberately NOT added into total_amount or into\n            -- any method bucket above: `revenue_by_method` is goods-only so it\n            -- lines up with the shift report's payment_summary.\n            COALESCE(SUM(o.tip_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS \"total_tips!\",\n            COALESCE(SUM(o.tip_amount) FILTER (\n                WHERE o.status NOT IN ('voided', 'refunded')\n                  AND COALESCE(o.tip_is_cash,\n                               COALESCE(o.tip_payment_method, o.payment_method) = 'cash')\n            ), 0)::bigint AS \"cash_tips!\"\n        FROM orders o\n        LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id\n        WHERE o.branch_id = ANY($1)\n          AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n          AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "voided_orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "subtotal!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "total_discount!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "total_tax!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "total_revenue!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "gross_sales!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "refunded_amount!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "total_service_charge!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "service_charge_waived_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "service_charge_waived_amount!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "total_delivery_fees!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 12,
+        "name": "total_line_items!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 13,
+        "name": "revenue_by_method!: serde_json::Value",
+        "type_info": "Json"
+      },
+      {
+        "ordinal": 14,
+        "name": "total_tips!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 15,
+        "name": "cash_tips!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "44796b4867a5ca470a615b88a0f4f18e6e66a1682106cceb031f42f56c779a7c"
+}

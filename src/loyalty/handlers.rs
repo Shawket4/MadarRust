@@ -71,7 +71,7 @@ pub struct LookupRequest {
     security(("bearer_jwt" = [])))]
 pub async fn lookup(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<LookupRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -130,7 +130,7 @@ pub struct BirthdayPreview {
     security(("bearer_jwt" = [])))]
 pub async fn birthday_preview(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<LoyaltySettings>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -185,7 +185,7 @@ pub struct WalletStatus {
     security(("bearer_jwt" = [])))]
 pub async fn wallet_status(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<ScopeQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -267,7 +267,7 @@ pub async fn wallet_status(
     security(("bearer_jwt" = [])))]
 pub async fn google_object(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -343,7 +343,7 @@ pub struct GoogleObjectDump {
     security(("bearer_jwt" = [])))]
 pub async fn google_refresh(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -471,7 +471,7 @@ pub struct AdjustRequest {
     security(("bearer_jwt" = [])))]
 pub async fn adjust(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     body: web::Json<AdjustRequest>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -558,7 +558,7 @@ pub struct MembersPage {
     security(("bearer_jwt" = [])))]
 pub async fn list_members(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<MembersQuery>,
 ) -> Result<HttpResponse, AppError> {
     // The same resolution the settings and rewards handlers use, from the same
@@ -662,7 +662,7 @@ pub async fn list_members(
     security(("bearer_jwt" = [])))]
 pub async fn delete_member(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
@@ -715,7 +715,7 @@ pub struct MemberDetail {
     responses((status = 200, body = MemberDetail), AppErrorResponse), security(("bearer_jwt" = [])))]
 pub async fn get_member(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     query: web::Query<MembersQuery>,
 ) -> Result<HttpResponse, AppError> {
@@ -821,7 +821,7 @@ pub struct LoyaltyAnalytics {
     security(("bearer_jwt" = [])))]
 pub async fn analytics(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
@@ -914,7 +914,7 @@ pub async fn analytics(
                                              ELSE points_balance END) > 0), \
                     COALESCE(SUM(GREATEST(points_balance, 0)), 0)::bigint, \
                     COALESCE(SUM(GREATEST(visits_balance, 0)), 0)::bigint \
-               FROM loyalty_customers WHERE org_id = $1 AND deleted_at IS NULL",
+               FROM loyalty_memberships WHERE org_id = $1 AND deleted_at IS NULL",
         )
         .bind(org_id)
         .bind(&currency)
@@ -1016,7 +1016,7 @@ fn safe_ratio(num: i64, den: i64) -> f64 {
     security(("bearer_jwt" = [])))]
 pub async fn behavior(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
@@ -1045,7 +1045,7 @@ pub async fn behavior(
     let pool = pool.get_ref();
 
     let total_members: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM loyalty_customers WHERE org_id = $1 AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM loyalty_memberships WHERE org_id = $1 AND deleted_at IS NULL",
     )
     .bind(org_id)
     .fetch_one(pool)
@@ -1053,7 +1053,7 @@ pub async fn behavior(
 
     let members_ever_redeemed: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT t.customer_id) FROM loyalty_transactions t \
-           JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = t.customer_id AND c.deleted_at IS NULL \
           WHERE t.org_id = $1 AND t.kind = 'redeem'",
     )
     .bind(org_id)
@@ -1085,7 +1085,7 @@ pub async fn behavior(
             SELECT t.customer_id, c.enrolled_at, \
                    COUNT(*) FILTER (WHERE t.kind = 'earn') AS earn_visits \
               FROM loyalty_transactions t \
-              JOIN loyalty_customers c ON c.id = t.customer_id \
+              JOIN loyalty_memberships c ON c.id = t.customer_id \
              WHERE t.org_id = $1 AND ($2::uuid[] IS NULL OR t.branch_id = ANY($2)) \
                AND c.deleted_at IS NULL \
                AND t.created_at >= $3 AND t.created_at < $4 \
@@ -1150,7 +1150,7 @@ pub struct CampaignEffectiveness {
     security(("bearer_jwt" = [])))]
 pub async fn campaign_effectiveness(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
@@ -1186,7 +1186,7 @@ pub async fn campaign_effectiveness(
                       AND lt.created_at <= w.sent_at + interval '30 days' \
                 ))::bigint \
            FROM loyalty_winbacks w \
-           JOIN loyalty_customers c ON c.id = w.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = w.customer_id AND c.deleted_at IS NULL \
           WHERE w.org_id = $1 AND w.sent_at >= $2 AND w.sent_at < $3",
     )
     .bind(org_id)
@@ -1204,7 +1204,7 @@ pub async fn campaign_effectiveness(
                       AND lt.created_at <= g.sent_at + interval '30 days' \
                 ))::bigint \
            FROM loyalty_birthday_greetings g \
-           JOIN loyalty_customers c ON c.id = g.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = g.customer_id AND c.deleted_at IS NULL \
           WHERE g.org_id = $1 AND g.sent_at >= $2 AND g.sent_at < $3",
     )
     .bind(org_id)
@@ -1246,7 +1246,7 @@ pub struct LiabilityTrendPoint {
 /// A weekly trend of the programme's liability, in the org's live currency
 /// (points or visits — never both; see [`PointsLiability`]).
 ///
-/// `loyalty_customers.points_balance`/`visits_balance` are CURRENT balances
+/// `loyalty_memberships.points_balance`/`visits_balance` are CURRENT balances
 /// with no history table, so this is not a snapshot of the outstanding
 /// balance at each week — it is each week's *net change* (earned minus
 /// redeemed, reversals netted in), read straight off the ledger. Summing
@@ -1267,7 +1267,7 @@ pub struct LiabilityTrend {
     security(("bearer_jwt" = [])))]
 pub async fn liability_trend(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<AnalyticsQuery>,
 ) -> Result<HttpResponse, AppError> {
     let (org_id, claims) =
@@ -1309,7 +1309,7 @@ pub async fn liability_trend(
         "SELECT {week} AT TIME ZONE $5 AS week, \
                 COALESCE(SUM(t.points), 0)::bigint AS outstanding \
            FROM loyalty_transactions t \
-           JOIN loyalty_customers c ON c.id = t.customer_id AND c.deleted_at IS NULL \
+           JOIN loyalty_memberships c ON c.id = t.customer_id AND c.deleted_at IS NULL \
           WHERE t.org_id = $1 AND t.currency = $2 \
             AND t.created_at >= $3 AND t.created_at < $4 \
           GROUP BY week \

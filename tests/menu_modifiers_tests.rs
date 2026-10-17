@@ -258,21 +258,11 @@ async fn catalog_revision(pool: &PgPool, org_id: Uuid) -> i64 {
 /// stable-id order-history soft-delete path can be exercised). Mirrors the order chain
 /// in the studio tests.
 ///
-/// Pre-FLIP, `order_item_addons.addon_item_id` still has a hard FK to the legacy
-/// `addon_items` table (dropped only by the Wave-2 shim). The stable-id invariant
-/// (CONTRACT §4) is exactly that `modifier_options.id == addon_items.id`, so we seed a
-/// matching `addon_items` row with the SAME id to satisfy the legacy FK — modelling the
-/// post-backfill reality the soft-delete check relies on.
+/// `addon_items` is the compat view over `modifier_options` (prod's shape on every
+/// database since DB Phase 2.4), so the option itself is the add-on the line names
+/// (the stable-id invariant, CONTRACT §4); no legacy row to seed.
 async fn seed_order_with_addon(pool: &PgPool, org: Uuid, item: Uuid, option_id: Uuid) {
-    sqlx::query(
-        "INSERT INTO addon_items (id, org_id, name, type, default_price) \
-         VALUES ($1, $2, 'Oat', 'milk_type', 1000) ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(option_id)
-    .bind(org)
-    .execute(pool)
-    .await
-    .unwrap();
+
 
     let branch = seed_branch(pool, org).await;
     let teller = seed_user(pool, org).await;

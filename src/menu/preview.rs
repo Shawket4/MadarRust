@@ -180,7 +180,11 @@ pub async fn preview(
 
     // Split the chosen ids: this item's optional fields vs addon options.
     let optional_ids: HashSet<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM menu_item_optional_fields WHERE menu_item_id = $1 AND id = ANY($2)",
+        // This item's optional fields (the old `menu_item_optional_fields`).
+        "SELECT mo.id FROM modifier_options mo \
+           JOIN menu_item_modifier_groups mimg \
+                ON mimg.group_id = mo.group_id AND mimg.legacy_origin = 'options' \
+          WHERE mo.legacy_source = 'optional' AND mimg.menu_item_id = $1 AND mo.id = ANY($2)",
     )
     .bind(item_id)
     .bind(&body.option_ids)
@@ -389,7 +393,7 @@ async fn swap_defaults(
     };
     let rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         "WITH swap AS (
-            SELECT g.id, m.included_option_ids,
+            SELECT g.id, m.id AS mimg_id, m.option_allowlist,
                    COALESCE(c.slug, CASE g.legacy_addon_type WHEN 'milk_type' THEN 'milk'
                                                              ELSE 'coffee_bean' END) AS slug
               FROM menu_item_modifier_groups m
@@ -409,7 +413,7 @@ async fn swap_defaults(
          SELECT sw.id,
                 (SELECT o.id FROM modifier_options o
                   WHERE o.group_id = sw.id AND o.is_active
-                    AND (sw.included_option_ids IS NULL OR o.id = ANY(sw.included_option_ids))
+                    AND (NOT sw.option_allowlist OR EXISTS (SELECT 1 FROM menu_item_modifier_group_options xo WHERE xo.mimg_id = sw.mimg_id AND xo.option_id = o.id))
                     AND (o.replaces_ingredient_id = b.ingredient_id
                          OR EXISTS (SELECT 1 FROM recipe_lines r
                                      WHERE r.owner_type = 'modifier_option' AND r.owner_id = o.id

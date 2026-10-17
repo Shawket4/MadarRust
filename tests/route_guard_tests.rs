@@ -479,6 +479,80 @@ pub const AUTHENTICATED: &[(&str, &str, &str)] = &[
         "DELETE",
         "/recipes/addons/{addon_item_id}",
         "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod)",
+    ),    (
+        "POST",
+        "/menu-items/{id}/addon-slots",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "PATCH",
+        "/menu-items/{id}/addon-slots/{slot_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "DELETE",
+        "/menu-items/{id}/addon-slots/{slot_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "PUT",
+        "/menu-items/{id}/allowed-addons",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "POST",
+        "/menu-items/{id}/optionals",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "PATCH",
+        "/menu-items/{id}/optionals/{field_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "DELETE",
+        "/menu-items/{id}/optionals/{field_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "PUT",
+        "/branch-menu-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "DELETE",
+        "/branch-menu-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "POST",
+        "/recipes/drinks/{menu_item_id}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "DELETE",
+        "/recipes/drinks/{menu_item_id}/{size}",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "PUT",
+        "/delivery/channel-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "DELETE",
+        "/delivery/channel-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "PUT",
+        "/delivery/channel-addon-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
+    ),
+    (
+        "DELETE",
+        "/delivery/channel-addon-overrides",
+        "tombstone: 410 SHIM_WRITE_REMOVED for everyone (a read-only view in prod; DB Phase 2.4)",
     ),
 ];
 

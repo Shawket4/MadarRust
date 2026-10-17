@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(SUM(sales_daily_advance(b.id, make_interval(secs => $1))), 0)::bigint AS \"n!\"\n             FROM branches b WHERE b.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b03d54b3498d55921fa6e3579cdad5c59c5819ab90ce1f17bb95ebd3fefe61e8"
+}

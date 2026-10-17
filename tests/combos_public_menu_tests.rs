@@ -213,22 +213,12 @@ async fn a_combo_outside_its_window_or_with_an_empty_slot_is_hidden(pool: PgPool
     let qr = format!("/public/tables/{table}/menu");
 
     // The only Main (Burger) switched off at the branch: the slot is empty.
-    sqlx::query(
-        "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, is_available) VALUES ($2, $1, false)",
-    )
-    .bind(s.burger)
-    .bind(s.branch)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::branch_menu_override(&pool, s.branch, s.burger, None, false).await;
     let (st, m) = get(&app, &qr).await;
     assert_eq!(st, 200, "{m}");
     assert!(find(&m, s.burger).is_none(), "the burger is off here");
     assert!(find(&m, s.combo).is_none(), "so is the combo");
-    sqlx::query("DELETE FROM branch_menu_overrides")
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::clear_all_branch_menu_overrides(&pool, None).await;
 
     // A window on a single weekday that isn't today, all day.
     let (_, m) = get(&app, &qr).await;
@@ -307,14 +297,7 @@ async fn an_unavailable_choice_is_shown_greyed_and_never_the_default(pool: PgPoo
     // Cola (reached through the Drinks category) is off at this branch, and
     // so is the Latte, the Drink slot's own default.
     for item in [s.cola, s.latte] {
-        sqlx::query(
-            "INSERT INTO branch_menu_overrides (branch_id, menu_item_id, is_available) VALUES ($1, $2, false)",
-        )
-        .bind(s.branch)
-        .bind(item)
-        .execute(&pool)
-        .await
-        .unwrap();
+        common::legacy_catalog::branch_menu_override(&pool, s.branch, item, None, false).await;
     }
     // A second Drinks item keeps the slot sellable.
     let tea = common::combos::item(&pool, s.org, s.drinks, "Tea", 2000).await;
@@ -363,11 +346,7 @@ async fn an_unavailable_choice_is_shown_greyed_and_never_the_default(pool: PgPoo
 
     // Deactivated (not deleted), the Latte item choice still shows greyed;
     // deleted, it is gone.
-    sqlx::query("DELETE FROM branch_menu_overrides WHERE menu_item_id = $1")
-        .bind(s.latte)
-        .execute(&pool)
-        .await
-        .unwrap();
+    common::legacy_catalog::clear_branch_menu_override(&pool, s.branch, s.latte).await;
     sqlx::query("UPDATE menu_items SET is_active = false WHERE id = $1")
         .bind(s.latte)
         .execute(&pool)

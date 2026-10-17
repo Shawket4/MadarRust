@@ -1,6 +1,6 @@
 //! Garbage collection for expired demo orgs.
 //!
-//! Org/branch foreign keys are NOT `ON DELETE CASCADE`, so an expired demo
+//! Org/branch foreign keys into ledgers RESTRICT (DB Phase 5.7), so an expired demo
 //! org's child rows are removed explicitly in dependency order. Each org is
 //! purged in its own transaction and failures are isolated (logged, skipped)
 //! so one bad org can't wedge the whole sweep — it just lingers and is retried
@@ -22,8 +22,19 @@ use uuid::Uuid;
 /// cascade to their own children (orders→order_items, menu_items→item_sizes/
 /// recipes) are relied upon; everything org/branch-scoped is explicit.
 const PURGE_STMTS: &[&str] = &[
+    // Ledgers that used to go with the org/branch by cascade. Since DB Phase
+    // 5.7 those FKs RESTRICT (a real shop's ledger never disappears as a side
+    // effect), so a DEMO org's are removed explicitly, children first.
+    "DELETE FROM loyalty_transactions WHERE org_id = $1",
+    "DELETE FROM order_refund_lines WHERE org_id = $1",
+    "DELETE FROM order_refunds WHERE org_id = $1",
+    "DELETE FROM kitchen_tickets WHERE org_id = $1",
+    "DELETE FROM delivery_orders WHERE org_id = $1",
+    "DELETE FROM inventory_movements WHERE org_id = $1",
     // Branch-scoped transactional data (orders cascade to order_items).
     "DELETE FROM orders WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
+    "DELETE FROM table_occupancies WHERE org_id = $1",
+    "DELETE FROM open_tickets WHERE org_id = $1",
     "DELETE FROM tills WHERE branch_id IN (SELECT id FROM branches WHERE org_id = $1)",
     // Unified menu model (menu unification): recipe_lines and
     // menu_price_overrides have NO FK to their polymorphic owners/targets, so

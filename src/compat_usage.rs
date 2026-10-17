@@ -22,8 +22,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// A server read of a compat VIEW (`deploy/menu_unification_shim.sql` in prod);
-/// the site names the module. These move to the unified tables in Phase 3.
+/// A server read of a compat VIEW; the site names the module. Since DB Phase
+/// 3.1 the server's own code reads the unified tables and nothing counts this;
+/// it stays for any new internal compat read (`tests/compat_contract_tests.rs`
+/// forbids unregistered ones).
 pub const KIND_COMPAT_VIEW_SERVER: &str = "compat_view_server";
 /// A client read an old menu shape (`/addon-items`, `/branch-addon-overrides`,
 /// `/branch-menu-overrides`, `/recipes/addons/{id}`, `/recipes/drinks`,
@@ -142,7 +144,7 @@ pub fn spawn(pool: PgPool) {
 /// The answer of a retired write into a compat view: 410 `SHIM_WRITE_REMOVED`.
 ///
 /// In production these relations have been read-only views since the menu
-/// unification (`deploy/menu_unification_shim.sql`), so every one of these
+/// unification (now migration `20261018200000_p2_converge_legacy_catalog`), so every one of these
 /// writes already failed there; no dashboard or POS build calls them.
 /// Counted (`shim_write_gone`, site = the route) like any legacy path.
 pub fn shim_write_removed(route: &'static str) -> crate::errors::AppError {

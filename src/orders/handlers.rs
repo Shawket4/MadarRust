@@ -2766,17 +2766,20 @@ async fn create_order_once(
     // so the OFFLINE receipt is byte-identical to the synced reprint and concurrent
     // devices never collide. Stored VERBATIM when present; absent (dashboard/legacy)
     // → the server mints the deterministic <BRANCH>-<YYMMDD>-<SHIFT6>-<NNN> fallback.
-    // The global UNIQUE(order_ref) index backstops either path.
+    // The per-org UNIQUE (org_id, order_ref) index backstops either path.
     let order_ref = match &body.order_ref {
         // R5: the same ref minted by a DIFFERENT device (two devices sharing a
         // code offline) is kept, suffixed with that device; the same device and
         // ref is an idempotent duplicate (handled at the unique violation below).
         Some(r) => {
-            let clash: Option<Option<Uuid>> =
-                sqlx::query_scalar("SELECT device_id FROM orders WHERE order_ref = $1")
-                    .bind(r)
-                    .fetch_optional(&mut *tx)
-                    .await?;
+            // Per org: the ref is unique per org since DB Phase 2.3.
+            let clash: Option<Option<Uuid>> = sqlx::query_scalar!(
+                "SELECT device_id FROM orders WHERE org_id = $1 AND order_ref = $2",
+                actor.org_id,
+                r
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
             match (clash, body.device_id) {
                 (Some(other), Some(mine)) if other != Some(mine) => {
                     madar_ids::order_ref::with_device_suffix(r, &mine.simple().to_string())
@@ -2934,14 +2937,16 @@ async fn create_order_once(
             if db.code().as_deref() == Some("23505")
                 && db
                     .constraint()
-                    .is_some_and(|c| c.contains("idempotency") || c.contains("order_ref")) =>
+                    // "idem": `uq_orders_org_idem` since DB Phase 2.3 (and the
+                    // global `orders_idempotency_key_idx` before it).
+                    .is_some_and(|c| c.contains("idem") || c.contains("order_ref")) =>
         {
             drop(tx);
             // Idempotent replay: a prior attempt already committed this order. Match
             // it by idempotency_key OR by the client-minted order_ref — a device
             // whose ref_seq counter rewound after a reinstall/restore re-sends with a
-            // NEW idempotency key but a REUSED order_ref, which trips the global
-            // UNIQUE(order_ref). Return the existing order, not a money-losing 409
+            // NEW idempotency key but a REUSED order_ref, which trips the per-org
+            // UNIQUE (org_id, order_ref). Return the existing order, not a money-losing 409
             // that the offline client would dead-letter into a lost sale.
             if let Some(key) = body.idempotency_key
                 && let Some(existing) = fetch_order_by_idempotency_key(pool.get_ref(), key, actor.org_id).await? {
@@ -4277,38 +4282,31 @@ pub async fn preview_recipe(
     let mut result: Vec<PreviewIngredient> = Vec::new();
 
     // Base recipe
-    let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> = if let Some(size) =
-        &body.size_label
-    {
-        sqlx::query_as(
-                r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
-                          r.ingredient_name, r.ingredient_unit,
-                          (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category
-                   FROM   menu_item_recipes r
-                   LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-                   WHERE  r.menu_item_id = $1 AND r.size_label = $2"#,
-            )
-            .bind(body.menu_item_id)
-            .bind(size)
-            .fetch_all(pool.get_ref())
-            .await?
-    } else {
-        sqlx::query_as(
-                r#"SELECT r.org_ingredient_id, r.quantity_used::float8,
-                          r.ingredient_name, r.ingredient_unit,
-                          (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category
-                   FROM   menu_item_recipes r
-                   LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id
-                   WHERE  r.menu_item_id = $1
-                     AND  r.size_label = (
-                         SELECT size_label FROM menu_item_recipes
-                         WHERE  menu_item_id = $1 ORDER BY size_label LIMIT 1
-                     )"#,
-            )
-            .bind(body.menu_item_id)
-            .fetch_all(pool.get_ref())
-            .await?
-    };
+    // A size's recipe: recipe_lines (owner_type item_size) on its
+    // menu_item_sizes row (the old `menu_item_recipes`); without a size, the
+    // first recipe size by label. `category` keeps its old NULL-able shape
+    // decoded as String (a line's ingredient always has a category).
+    let recipe_rows: Vec<(Option<Uuid>, f64, String, String, String)> = sqlx::query!(
+        r#"SELECT rl.ingredient_id, rl.quantity::float8 AS "qty!",
+                  oi.name AS ingredient_name, rl.unit AS ingredient_unit,
+                  (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = oi.category_id) AS "category!"
+             FROM recipe_lines rl
+             JOIN menu_item_sizes ms ON ms.id = rl.owner_id
+             JOIN org_ingredients oi ON oi.id = rl.ingredient_id
+            WHERE rl.owner_type = 'item_size' AND ms.menu_item_id = $1
+              AND ms.label = COALESCE($2, (
+                  SELECT s2.label FROM recipe_lines r2
+                    JOIN menu_item_sizes s2 ON s2.id = r2.owner_id
+                   WHERE r2.owner_type = 'item_size' AND s2.menu_item_id = $1
+                   ORDER BY s2.label LIMIT 1))"#,
+        body.menu_item_id,
+        body.size_label.as_deref()
+    )
+    .fetch_all(pool.get_ref())
+    .await?
+    .into_iter()
+    .map(|r| (Some(r.ingredient_id), r.qty, r.ingredient_name, r.ingredient_unit, r.category))
+    .collect();
 
     for (ing_id, qty, name, unit, category) in recipe_rows {
         result.push(PreviewIngredient {
@@ -4326,22 +4324,33 @@ pub async fn preview_recipe(
         let addon_qty = addon.quantity.max(1) as f64;
 
         // A custom group's option has no add-on type: it adds, never swaps.
-        let (addon_name, addon_type): (String, String) =
-            sqlx::query_as("SELECT name, COALESCE(type, '') FROM addon_items WHERE id = $1")
-                .bind(addon.addon_item_id)
-                .fetch_optional(pool.get_ref())
-                .await?
-                .ok_or_else(|| {
-                    AppError::NotFound(format!("Addon {} not found", addon.addon_item_id))
-                })?;
-
-        let rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query_as(
-            "SELECT org_ingredient_id, quantity_used::float8, ingredient_name, ingredient_unit
-             FROM   addon_item_ingredients WHERE addon_item_id = $1",
+        // An add-on is a modifier option of legacy_source 'addon'; its type is
+        // its group's legacy_addon_type (the old `addon_items`).
+        let (addon_name, addon_type): (String, String) = sqlx::query!(
+            r#"SELECT mo.name, COALESCE(mg.legacy_addon_type, '') AS "addon_type!"
+                 FROM modifier_options mo JOIN modifier_groups mg ON mg.id = mo.group_id
+                WHERE mo.id = $1 AND mo.legacy_source = 'addon'"#,
+            addon.addon_item_id
         )
-        .bind(addon.addon_item_id)
+        .fetch_optional(pool.get_ref())
+        .await?
+        .map(|r| (r.name, r.addon_type))
+        .ok_or_else(|| AppError::NotFound(format!("Addon {} not found", addon.addon_item_id)))?;
+
+        // Its generic (sizeless) recipe lines (`addon_item_ingredients`).
+        let rows: Vec<(Option<Uuid>, f64, String, String)> = sqlx::query!(
+            r#"SELECT rl.ingredient_id, rl.quantity::float8 AS "qty!", oi.name, rl.unit
+                 FROM recipe_lines rl
+                 JOIN org_ingredients oi ON oi.id = rl.ingredient_id
+                WHERE rl.owner_type = 'modifier_option' AND rl.owner_id = $1
+                  AND rl.size_label IS NULL"#,
+            addon.addon_item_id
+        )
         .fetch_all(pool.get_ref())
-        .await?;
+        .await?
+        .into_iter()
+        .map(|r| (Some(r.ingredient_id), r.qty, r.name, r.unit))
+        .collect();
 
         let target_category = match addon_type.as_str() {
             "milk_type" => Some("milk"),
@@ -4390,16 +4399,27 @@ pub async fn preview_recipe(
     // Optionals
     for &field_id in &body.optional_field_ids {
         // Explicit type annotation fixes the inference issue
-        let row_result =
-            sqlx::query_as::<_, (String, Option<f64>, Option<String>, Option<String>)>(
-                "SELECT name, quantity_used::float8, ingredient_name, ingredient_unit
-             FROM menu_item_optional_fields
-             WHERE id = $1 AND menu_item_id = $2 AND is_active = true",
+        // An optional field: a legacy_source 'optional' option in the item's
+        // Options attachment, with its generic recipe line (the old
+        // `menu_item_optional_fields`).
+        let row_result: Option<(String, Option<f64>, Option<String>, Option<String>)> =
+            sqlx::query!(
+                r#"SELECT mo.name, rl.quantity::float8 AS "qty?", oi.name AS "ingredient_name?",
+                          rl.unit AS "ingredient_unit?"
+                     FROM modifier_options mo
+                     JOIN menu_item_modifier_groups mimg
+                          ON mimg.group_id = mo.group_id AND mimg.legacy_origin = 'options'
+                     LEFT JOIN recipe_lines rl ON rl.owner_type = 'modifier_option'
+                          AND rl.owner_id = mo.id AND rl.size_label IS NULL
+                     LEFT JOIN org_ingredients oi ON oi.id = rl.ingredient_id
+                    WHERE mo.id = $1 AND mimg.menu_item_id = $2
+                      AND mo.legacy_source = 'optional' AND mo.is_active = true"#,
+                field_id,
+                body.menu_item_id
             )
-            .bind(field_id)
-            .bind(body.menu_item_id)
             .fetch_optional(pool.get_ref())
-            .await?;
+            .await?
+            .map(|r| (r.name, r.qty, r.ingredient_name, r.ingredient_unit));
 
         if let Some((fname, Some(qty), Some(ing_name), Some(ing_unit))) = row_result {
             result.push(PreviewIngredient {

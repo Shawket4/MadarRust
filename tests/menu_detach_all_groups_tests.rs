@@ -110,10 +110,8 @@ async fn shop(pool: &PgPool) -> Shop {
     madar_rust::permissions::seeder::seed_role_permissions(pool)
         .await
         .unwrap();
-    sqlx::raw_sql(include_str!("../deploy/menu_unification_shim.sql"))
-        .execute(pool)
-        .await
-        .unwrap();
+    // Every database has prod\'s catalog shape since DB Phase 2.4 (the
+    // legacy relations are the compat views): no shim to apply.
     let token = madar_rust::auth::jwt::create_token(
         &test_secret(),
         owner,

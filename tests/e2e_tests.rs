@@ -1,4 +1,6 @@
 #![allow(unused_imports, unused_variables, dead_code)]
+mod common;
+
 use actix_web::{App, HttpMessage, test, web};
 use bigdecimal::BigDecimal;
 use chrono::Utc;
@@ -565,13 +567,8 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
 
     // Add-on item: Vanilla Syrup (syrup). Seeded straight into the legacy
     // catalog: its write route is retired (a read-only view in production).
-    let vanilla_addon_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO addon_items (org_id, name, type, default_price) VALUES ($1, 'Vanilla Syrup', 'syrup', 50) RETURNING id",
-    )
-    .bind(org_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let vanilla_addon_id: Uuid =
+        common::legacy_catalog::addon_item(&pool, None, org_id, "Vanilla Syrup", "syrup", 50).await;
 
     // STEP 3.3: Configure Inventory Catalog Items (ingredients)
     let espresso_beans: OrgIngredient = test::read_body_json(
@@ -655,8 +652,9 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
 
     seed_opening_stock(&pool, branch_id, vanilla_flavor.id, 100.0, 10.0).await;
 
-    // STEP 3.5: Map items to ingredients via Recipes
-    // Espresso Macchiato (medium size): 18g beans, 150ml milk
+    // STEP 3.5: Map items to ingredients via Recipes. The legacy drink-recipe
+    // write is retired (it wrote a read-only view in production: 410); the
+    // recipes are seeded as the unified tables hold them.
     let resp = test::call_service(
         &app,
         test::TestRequest::post()
@@ -672,53 +670,15 @@ async fn test_e2e_kitchen_inventory_order_lifecycle(pool: PgPool) {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
-
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!("/recipes/drinks/{}", espresso_id))
-            .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-            .set_json(serde_json::json!({
-                "size_label": "medium",
-                "org_ingredient_id": whole_milk.id,
-                "ingredient_name": "Whole Milk",
-                "ingredient_unit": "ml",
-                "quantity_used": 150.0
-            }))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
-
+    assert_eq!(resp.status().as_u16(), 410);
+    // Espresso Macchiato (medium size): 18g beans, 150ml milk
+    common::legacy_catalog::item_recipe(&pool, espresso_id, "medium", espresso_beans.id, 18, "g").await;
+    common::legacy_catalog::item_recipe(&pool, espresso_id, "medium", whole_milk.id, 150, "ml").await;
     // Croissant (one size / base): 1 croissant dough
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!("/recipes/drinks/{}", croissant_id))
-            .insert_header(("Authorization", format!("Bearer {}", admin_token)))
-            .set_json(serde_json::json!({
-                "size_label": "one_size",
-                "org_ingredient_id": croissant_dough.id,
-                "ingredient_name": "Croissant Dough",
-                "ingredient_unit": "pcs",
-                "quantity_used": 1.0
-            }))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(resp.status(), actix_web::http::StatusCode::OK);
+    common::legacy_catalog::item_recipe(&pool, croissant_id, "one_size", croissant_dough.id, 1, "pcs").await;
 
     // Vanilla Syrup addon: 15ml vanilla flavor (seeded: the write route is retired).
-    sqlx::query(
-        "INSERT INTO addon_item_ingredients (addon_item_id, org_ingredient_id, ingredient_name, ingredient_unit, quantity_used) \
-         VALUES ($1, $2, 'Vanilla Flavor', 'ml', 15)",
-    )
-    .bind(vanilla_addon_id)
-    .bind(vanilla_flavor.id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    common::legacy_catalog::addon_ingredient(&pool, vanilla_addon_id, vanilla_flavor.id, 15, "ml").await;
 
     // STEP 3.6: Start POS operations - Open Shift
     let shift: Shift = test::read_body_json(
@@ -1183,10 +1143,16 @@ async fn test_e2e_purchasing_stocktake_reporting_lifecycle(pool: PgPool) {
         .set_json(serde_json::json!({"org_id":org_id,"category_id":cat_id,"name":"Latte","base_price":300})).to_request());
     assert_eq!(mi_st, 201, "menu-item create: {mi:?}");
     let latte = mi["id"].as_str().unwrap().to_string();
-    let st = jstatus!(app, test::TestRequest::post()
-        .uri(&format!("/recipes/drinks/{latte}")).insert_header(("Authorization", abearer.clone()))
-        .set_json(serde_json::json!({"size_label":"one_size","org_ingredient_id":beans,"ingredient_name":"Beans","ingredient_unit":"g","quantity_used":18.0})).to_request());
-    assert_eq!(st, 200);
+    // The recipe as the unified tables hold it (the legacy write route is retired).
+    common::legacy_catalog::item_recipe(
+        &pool,
+        latte.parse().unwrap(),
+        "one_size",
+        beans.parse().unwrap(),
+        18,
+        "g",
+    )
+    .await;
     let (_, shift) = jget!(
         app,
         test::TestRequest::post()

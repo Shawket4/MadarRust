@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH unified AS (\n                       SELECT last_seq FROM ref_counters\n                        WHERE scope = 'delivery' AND branch_id = $1 AND business_date = $2),\n                   legacy AS (\n                       INSERT INTO delivery_ref_counters (branch_id, business_date, last_seq)\n                       VALUES ($1, $2, COALESCE((SELECT last_seq FROM unified), 0) + 1)\n                       ON CONFLICT (branch_id, business_date) DO UPDATE\n                          SET last_seq = GREATEST(delivery_ref_counters.last_seq,\n                                                  COALESCE((SELECT last_seq FROM unified), 0)) + 1\n                       RETURNING last_seq)\n                   INSERT INTO ref_counters (scope, branch_id, business_date, last_seq)\n                   SELECT 'delivery', $1, $2, last_seq FROM legacy\n                   ON CONFLICT (scope, branch_id, business_date) DO UPDATE\n                      SET last_seq = GREATEST(ref_counters.last_seq, EXCLUDED.last_seq)\n                   RETURNING last_seq",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_seq",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "203abb1abadfa29a9a6162d72fa1d8446ff626e223d2d4cec9966e92530b1649"
+}

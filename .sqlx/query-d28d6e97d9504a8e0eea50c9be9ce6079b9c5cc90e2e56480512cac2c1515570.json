@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, branch_id, org_id, created_at,\n                          (voided_at IS NOT NULL) AS \"voided!\",\n                          subtotal, discount_amount, tax_amount, loyalty_customer_id\n                     FROM orders WHERE org_id = $1 AND idempotency_key = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "org_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "voided!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "subtotal",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "discount_amount",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "tax_amount",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "loyalty_customer_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d28d6e97d9504a8e0eea50c9be9ce6079b9c5cc90e2e56480512cac2c1515570"
+}

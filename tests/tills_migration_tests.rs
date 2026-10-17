@@ -1173,6 +1173,7 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
         include_str!("../migrations/20260922030000_staff_drinks_pool.sql"),
         include_str!("../migrations/20260925030000_customers_shared_key.sql"),
         include_str!("../migrations/20261005100000_combos.sql"),
+        include_str!("../migrations/20261020120000_p5_loyalty_memberships_rename.sql"),
     ]
     .iter()
     .flat_map(|sql| {
@@ -1193,9 +1194,10 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
     assert!(header.len() > 40, "header parsed: {header:?}");
     // Source tables a later migration dropped (its `-- SOURCE TABLES REMOVED`
     // block): the combos tables (20261004120000_remove_combos).
-    let removed: Vec<String> = [include_str!(
-        "../migrations/20261004120000_remove_combos.sql"
-    )]
+    let removed: Vec<String> = [
+        include_str!("../migrations/20261004120000_remove_combos.sql"),
+        include_str!("../migrations/20261020120000_p5_loyalty_memberships_rename.sql"),
+    ]
     .iter()
     .flat_map(|sql| {
         sql.lines()
@@ -1214,7 +1216,12 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
     .collect();
     assert_eq!(
         removed,
-        ["bundles", "bundle_components", "bundle_branch_availability"],
+        [
+            "bundles",
+            "bundle_components",
+            "bundle_branch_availability",
+            "loyalty_customers"
+        ],
         "removed-tables block parsed"
     );
     let header: Vec<String> = header
@@ -1233,8 +1240,12 @@ async fn every_projection_source_table_has_emitter(pool: PgPool) {
         h, registry,
         "migration header and sync_source_tables() disagree"
     );
+    // A source that is now a compat VIEW (addon_items, addon_item_ingredients,
+    // branch_addon_overrides: DB Phase 2.4 gave every database prod's shape)
+    // carries no trigger; the unified tables under it emit `addon_item`.
     let missing = lines(&pool, "SELECT s.source_table FROM sync_source_tables() s
-        WHERE NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE (SELECT c.relkind FROM pg_class c WHERE c.oid = to_regclass('public.' || s.source_table)) IS DISTINCT FROM 'v'
+          AND NOT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
                            WHERE t.tgrelid = to_regclass('public.' || s.source_table) AND t.tgname = 'sync_emit'
                              AND p.proname = 'sync_emit_' || s.source_table)").await;
     assert!(missing.is_empty(), "tables without emitter: {missing:?}");

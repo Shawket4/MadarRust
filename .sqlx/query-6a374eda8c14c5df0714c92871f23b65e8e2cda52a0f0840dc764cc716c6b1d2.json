@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT mo.name, rl.quantity::float8 AS \"qty?\", oi.name AS \"ingredient_name?\",\n                          rl.unit AS \"ingredient_unit?\"\n                     FROM modifier_options mo\n                     JOIN menu_item_modifier_groups mimg\n                          ON mimg.group_id = mo.group_id AND mimg.legacy_origin = 'options'\n                     LEFT JOIN recipe_lines rl ON rl.owner_type = 'modifier_option'\n                          AND rl.owner_id = mo.id AND rl.size_label IS NULL\n                     LEFT JOIN org_ingredients oi ON oi.id = rl.ingredient_id\n                    WHERE mo.id = $1 AND mimg.menu_item_id = $2\n                      AND mo.legacy_source = 'optional' AND mo.is_active = true",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "qty?",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 2,
+        "name": "ingredient_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "ingredient_unit?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "6a374eda8c14c5df0714c92871f23b65e8e2cda52a0f0840dc764cc716c6b1d2"
+}

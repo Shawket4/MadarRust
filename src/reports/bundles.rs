@@ -280,7 +280,7 @@ async fn deal_rows(
 #[tracing::instrument(skip_all, fields(from = %query.from, to = %query.to))]
 pub async fn bundles_report(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     query: web::Query<BundlesQuery>,
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
@@ -369,7 +369,7 @@ pub async fn bundles_report(
 #[tracing::instrument(skip_all, fields(combo_id = %*id, from = %query.from, to = %query.to))]
 pub async fn combo_mix(
     req: HttpRequest,
-    pool: web::Data<PgPool>,
+    pool: crate::db::Db,
     id: web::Path<Uuid>,
     query: web::Query<BundlesMixQuery>,
 ) -> Result<HttpResponse, AppError> {
