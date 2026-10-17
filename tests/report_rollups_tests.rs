@@ -467,7 +467,23 @@ async fn order_create_does_no_rollup_work(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(marks(&pool).await >= 2, "a void of an old sale marks its day");
+    let after_void = marks(&pool).await;
+    assert!(after_void >= 2, "a void of an old sale marks its day");
+    // A delete (the cascade through its lines, add-on and payment included).
+    sqlx::query("DELETE FROM orders WHERE id = $1")
+        .bind(late)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(marks(&pool).await > after_void, "a delete of an old sale marks its day");
+    // And a delete of today's sales (an empty till's hard delete) marks nothing.
+    let before = marks(&pool).await;
+    sqlx::query("DELETE FROM orders WHERE till_id = $1")
+        .bind(till)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(marks(&pool).await, before);
 }
 
 /// The coverage never reaches within 30 minutes of now, whatever lag a caller
