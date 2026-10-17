@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO order_item_optionals\n               (id, org_id, order_item_id, optional_field_id, field_name, name_translations, price,\n                org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost)\n           SELECT u.id, $1, u.item, u.field, u.name, u.tr, u.price,\n                  u.ing, u.ing_name, u.ing_unit, u.used, u.cost\n             FROM UNNEST($2::uuid[], $3::uuid[], $4::uuid[], $5::text[], $6::jsonb[], $7::int4[],\n                         $8::uuid[], $9::text[], $10::text[], $11::float8[], $12::int8[])\n                  WITH ORDINALITY AS u(id, item, field, name, tr, price, ing, ing_name, ing_unit,\n                                       used, cost, ord)\n            ORDER BY u.ord\n           RETURNING id, order_item_id, optional_field_id, field_name, name_translations, price,\n                     org_ingredient_id, ingredient_name, ingredient_unit, quantity_deducted, cost",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "order_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "optional_field_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "field_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "name_translations",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "price",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "org_ingredient_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "ingredient_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "ingredient_unit",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "quantity_deducted",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 10,
+        "name": "cost",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "JsonbArray",
+        "Int4Array",
+        "UuidArray",
+        "TextArray",
+        "TextArray",
+        "Float8Array",
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "b3209b6ec24e702e888ddc5245a91628f0e5811f2d653ebc62cf45d6f8839584"
+}

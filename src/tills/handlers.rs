@@ -1322,7 +1322,7 @@ async fn fetch_cash_movement_by_client_ref(
     org_id: Uuid,
 ) -> Result<Option<CashMovement>, AppError> {
     Ok(sqlx::query_as::<_, CashMovement>(&format!(
-        "SELECT {CASH_MOVEMENT_COLUMNS} FROM till_cash_movements m WHERE m.client_ref = $1 \
+        "SELECT {CASH_MOVEMENT_COLUMNS} FROM till_cash_movements m WHERE m.client_ref = $1 AND m.org_id = $2 \
            AND m.till_id IN (SELECT s.id FROM tills s JOIN branches b ON b.id = s.branch_id WHERE b.org_id = $2)"
     ))
     .bind(client_ref)

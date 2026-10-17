@@ -1,0 +1,225 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO order_items\n               (id, order_id, org_id, menu_item_id, item_name, name_translations, size_label,\n                unit_price, quantity, line_total, notes, deductions_snapshot,\n                line_cost, unit_cost, cost_missing,\n                price_flagged, is_reward, reward_units, reward_covered,\n                staff_comp_minor, staff_drink_id,\n                line_kind, combo_line_id, combo_slot_id, combo_slot_name,\n                combo_unit_price, combo_share, combo_surcharge, deal_minor,\n                combo_slot_name_translations)\n           SELECT u.id, $1, $2, u.menu_item_id, u.item_name, u.name_translations, u.size_label,\n                  u.unit_price, u.quantity, u.line_total, u.notes, u.snapshot,\n                  u.line_cost, u.unit_cost, u.cost_missing,\n                  u.price_flagged, u.is_reward, u.reward_units, u.reward_covered,\n                  u.staff_comp, u.staff_drink,\n                  u.line_kind, u.combo_line, u.combo_slot, u.combo_slot_name,\n                  u.combo_unit_price, u.combo_share, u.combo_surcharge, u.deal_minor,\n                  u.combo_slot_tr\n             FROM UNNEST($3::uuid[], $4::uuid[], $5::text[], $6::jsonb[], $7::text[],\n                         $8::int4[], $9::int4[], $10::int4[], $11::text[], $12::jsonb[],\n                         $13::int8[], $14::int8[], $15::bool[],\n                         $16::bool[], $17::bool[], $18::int4[], $19::int4[],\n                         $20::int4[], $21::uuid[],\n                         $22::text[], $23::uuid[], $24::uuid[], $25::text[],\n                         $26::int4[], $27::int4[], $28::int4[], $29::int4[],\n                         $30::jsonb[])\n                  WITH ORDINALITY AS u(id, menu_item_id, item_name, name_translations, size_label,\n                                       unit_price, quantity, line_total, notes, snapshot,\n                                       line_cost, unit_cost, cost_missing,\n                                       price_flagged, is_reward, reward_units, reward_covered,\n                                       staff_comp, staff_drink,\n                                       line_kind, combo_line, combo_slot, combo_slot_name,\n                                       combo_unit_price, combo_share, combo_surcharge, deal_minor,\n                                       combo_slot_tr, ord)\n            ORDER BY u.ord\n           RETURNING id, order_id, menu_item_id, item_name, name_translations, size_label,\n                     unit_price, quantity, line_total, notes, deductions_snapshot,\n                     NULL::uuid AS \"bundle_id\", NULL::int4 AS \"bundle_unit_price\",\n                     line_cost, unit_cost, cost_missing,\n                     is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id,\n                     line_kind, combo_line_id, combo_slot_id, combo_slot_name,\n                     combo_slot_name_translations,\n                     combo_unit_price, combo_share, combo_surcharge, deal_minor",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "order_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "menu_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "item_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "name_translations",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "size_label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "unit_price",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "quantity",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "line_total",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "notes",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "deductions_snapshot",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
+        "name": "bundle_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 12,
+        "name": "bundle_unit_price",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "line_cost",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 14,
+        "name": "unit_cost",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 15,
+        "name": "cost_missing",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 16,
+        "name": "is_reward",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 17,
+        "name": "reward_units",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 18,
+        "name": "reward_covered",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 19,
+        "name": "staff_comp_minor",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 20,
+        "name": "staff_drink_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 21,
+        "name": "line_kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 22,
+        "name": "combo_line_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 23,
+        "name": "combo_slot_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 24,
+        "name": "combo_slot_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 25,
+        "name": "combo_slot_name_translations",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 26,
+        "name": "combo_unit_price",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 27,
+        "name": "combo_share",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 28,
+        "name": "combo_surcharge",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 29,
+        "name": "deal_minor",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "JsonbArray",
+        "TextArray",
+        "Int4Array",
+        "Int4Array",
+        "Int4Array",
+        "TextArray",
+        "JsonbArray",
+        "Int8Array",
+        "Int8Array",
+        "BoolArray",
+        "BoolArray",
+        "BoolArray",
+        "Int4Array",
+        "Int4Array",
+        "Int4Array",
+        "UuidArray",
+        "TextArray",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "Int4Array",
+        "Int4Array",
+        "Int4Array",
+        "Int4Array",
+        "JsonbArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      null,
+      null,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "08318dff4bd4ca55009fb465b29306aaeeecd82bdf63bf12e25ca0d737ef94fa"
+}

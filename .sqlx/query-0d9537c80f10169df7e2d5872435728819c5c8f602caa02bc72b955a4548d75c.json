@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO order_payments (order_id, org_id, till_id, method, amount, reference, is_cash) SELECT $1, $2, $3, u.method, u.amount, u.reference, u.is_cash FROM UNNEST($4::text[], $5::int4[], $6::text[], $7::bool[]) WITH ORDINALITY AS u(method, amount, reference, is_cash, ord) ORDER BY u.ord",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "TextArray",
+        "Int4Array",
+        "TextArray",
+        "BoolArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0d9537c80f10169df7e2d5872435728819c5c8f602caa02bc72b955a4548d75c"
+}

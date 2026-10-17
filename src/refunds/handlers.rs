@@ -693,16 +693,26 @@ pub(crate) async fn post_refund_waste(
         }
     }
 
+    // Every movement of the refund in one statement, in the order they were
+    // posted one by one (`record_movements`: same rows, same trigger order).
+    let notes: Vec<(Uuid, i32, String)> = units
+        .iter()
+        .filter_map(|(item_id, n)| {
+            let (_, name, ..) = items.iter().find(|(id, ..)| id == item_id)?;
+            Some((*item_id, *n, format!("Refund: {name} x{n}")))
+        })
+        .collect();
+    let mut entries: Vec<crate::inventory::movements::MovementParams> = Vec::new();
     let mut posted = 0;
-    for (item_id, n) in units {
-        let Some((_, name, sold, snapshot)) = items.iter().find(|(id, ..)| *id == item_id) else {
+    for (item_id, n, note) in &notes {
+        let (item_id, n) = (*item_id, *n);
+        let Some((_, _, sold, snapshot)) = items.iter().find(|(id, ..)| *id == item_id) else {
             continue;
         };
         if *sold <= 0 || n <= 0 {
             continue;
         }
         let share = (f64::from(n) / f64::from(*sold)).min(1.0);
-        let note = format!("Refund: {name} x{n}");
         for d in snapshot.as_array().map(Vec::as_slice).unwrap_or_default() {
             let (Some(qty), Some(ing)) = (
                 d.get("quantity").and_then(|v| v.as_f64()),
@@ -723,26 +733,23 @@ pub(crate) async fn post_refund_waste(
             for (kind, signed, reason) in
                 [("refund_restock", q, None), ("waste", -q, Some("refund"))]
             {
-                crate::inventory::movements::record_movement(
-                    &mut *tx,
-                    crate::inventory::movements::MovementParams {
-                        branch_id,
-                        org_ingredient_id: ing,
-                        movement_type: kind,
-                        quantity: signed,
-                        unit_cost,
-                        reason,
-                        source_type: Some("refund"),
-                        source_id: Some(refund_id),
-                        note: Some(&note),
-                        created_by: Some(actor),
-                    },
-                )
-                .await?;
+                entries.push(crate::inventory::movements::MovementParams {
+                    branch_id,
+                    org_ingredient_id: ing,
+                    movement_type: kind,
+                    quantity: signed,
+                    unit_cost,
+                    reason,
+                    source_type: Some("refund"),
+                    source_id: Some(refund_id),
+                    note: Some(note),
+                    created_by: Some(actor),
+                });
             }
             posted += 1;
         }
     }
+    crate::inventory::movements::record_movements(&mut *tx, None, &entries).await?;
     Ok(posted)
 }
 
