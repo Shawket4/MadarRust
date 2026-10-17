@@ -892,7 +892,9 @@ pub async fn reorder_categories(
     tag = "menu",
     operation_id = "list_menu_items",
     params(MenuItemQuery),
-    responses((status = 200, description = "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract)", body = Vec<MenuItem>), AppErrorResponse),
+    responses((status = 200, description = "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract). Carries an `ETag` when served through the menu cache.", body = Vec<MenuItem>),
+              (status = 304, description = "`If-None-Match` held the current body's ETag. No body."),
+              AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
 pub async fn list_menu_items(
@@ -931,11 +933,9 @@ pub async fn list_menu_items(
         sells_combos,
     );
     if let Some(c) = &cache
-        && let Some(body) = c.get(query.org_id, &variant).await
+        && let Some(entry) = c.get_entry(query.org_id, &variant).await
     {
-        return Ok(HttpResponse::Ok()
-            .content_type("application/json")
-            .body(body));
+        return Ok(crate::menu::cache::respond(&req, entry).await);
     }
 
     // When branch_id is supplied, prices are branch-effective (override replaces
@@ -1045,7 +1045,8 @@ pub async fn list_menu_items(
         }
         let body = web::Bytes::from(serde_json::to_vec(&result).map_err(|_| AppError::Internal)?);
         if let Some(c) = &cache {
-            c.put(query.org_id, &variant, body.clone()).await;
+            let entry = c.put_entry(query.org_id, &variant, body).await;
+            return Ok(crate::menu::cache::respond(&req, entry).await);
         }
         return Ok(HttpResponse::Ok()
             .content_type("application/json")
@@ -1055,7 +1056,8 @@ pub async fn list_menu_items(
     attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
     let body = web::Bytes::from(serde_json::to_vec(&items).map_err(|_| AppError::Internal)?);
     if let Some(c) = &cache {
-        c.put(query.org_id, &variant, body.clone()).await;
+        let entry = c.put_entry(query.org_id, &variant, body).await;
+        return Ok(crate::menu::cache::respond(&req, entry).await);
     }
     Ok(HttpResponse::Ok()
         .content_type("application/json")

@@ -290,6 +290,10 @@ async fn run() -> std::io::Result<()> {
             .wrap(actix_web::middleware::from_fn(
                 madar_rust::client_seen::record,
             ))
+            // OPT-A: a mutating request that finished here bumps its org's
+            // fence before the response leaves (`fastpath::fence`), so the
+            // writer's next read never meets a cached answer from before it.
+            .wrap(actix_web::middleware::from_fn(madar_rust::fastpath::fence))
             // The request's tenant cell for the shared RLS pool (`db.rs`):
             // just inside Sentry, around every handler.
             .wrap(actix_web::middleware::from_fn(madar_rust::db::tenant_scope))

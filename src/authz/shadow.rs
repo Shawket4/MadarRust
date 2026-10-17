@@ -70,14 +70,28 @@ pub async fn decide(
     resource: &str,
     action: &str,
 ) -> Result<(), AppError> {
-    match new_decision(conn, user_id, resource, action).await? {
-        Some(true) => Ok(()),
-        Some(false) => Err(plan_denial(conn, user_id, resource, action)
-            .await
-            .unwrap_or_else(|| deny(resource, action))),
+    match super::load::load(conn, user_id).await? {
+        Some(loaded) => decide_loaded(&loaded, resource, action),
         None if spec_role_default(role, resource, action) => Ok(()),
         None => Err(deny(resource, action)),
     }
+}
+
+/// [`decide`] for a person whose grants are loaded (no I/O): the cell's
+/// capability anywhere they work; a refusal names the plan when the plan is
+/// what removed it.
+pub fn decide_loaded(
+    loaded: &super::load::Loaded,
+    resource: &str,
+    action: &str,
+) -> Result<(), AppError> {
+    let eff = loaded.resolve_at(Scope::Anywhere, chrono::Utc::now().timestamp());
+    if legacy::granted(&eff, resource, action) {
+        return Ok(());
+    }
+    Err(super::Cap::from_legacy(resource, action)
+        .and_then(|cap| crate::plan::refusal_for(loaded.plan, cap))
+        .unwrap_or_else(|| deny(resource, action)))
 }
 
 /// Does the spec give `role` the cell by default (or as core)?

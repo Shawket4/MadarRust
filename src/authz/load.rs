@@ -54,18 +54,49 @@ fn limits_from(v: Option<serde_json::Value>) -> Option<Limits> {
 
 /// The org epoch for a user (0 when the org has none yet).
 pub async fn epoch_of(conn: &mut PgConnection, user_id: Uuid) -> Result<i64, AppError> {
-    Ok(sqlx::query_scalar(
-        "SELECT COALESCE((SELECT e.epoch FROM authz_epoch e WHERE e.org_id = u.org_id), 0)
-           FROM users u WHERE u.id = $1",
+    Ok(org_epoch_of(conn, user_id).await?.map_or(0, |r| r.1))
+}
+
+/// A user's org and that org's epoch; `None` when there is no such user.
+/// Remembered by the fast path (`fastpath::user_epoch`) until an authz
+/// notification or a local write of the org says it may have moved.
+async fn org_epoch_of(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<Option<(Option<Uuid>, i64)>, AppError> {
+    let cap = crate::fastpath::capture(None, None);
+    let row = sqlx::query!(
+        r#"SELECT u.org_id,
+                  COALESCE((SELECT e.epoch FROM authz_epoch e WHERE e.org_id = u.org_id), 0) AS "epoch!"
+             FROM users u WHERE u.id = $1"#,
+        user_id
     )
-    .bind(user_id)
     .fetch_optional(&mut *conn)
     .await?
-    .unwrap_or(0))
+    .map(|r| (r.org_id, r.epoch));
+    if let (Some(cap), Some((org, epoch))) = (cap, row) {
+        crate::fastpath::put_user_epoch(cap, user_id, org, epoch);
+    }
+    Ok(row)
+}
+
+/// A person's grants from memory alone: their org's epoch is known to the
+/// fast path and the entry for it is cached. `None` = ask the database
+/// ([`load`]); never a stale entry (the epoch is the cache key, and the fast
+/// path forgets an epoch the moment it may have moved).
+pub async fn cached(user_id: Uuid) -> Option<Arc<Loaded>> {
+    if cfg!(test) {
+        return None;
+    }
+    let (_, epoch) = crate::fastpath::user_epoch(user_id)?;
+    CACHE.get(&(user_id, epoch)).await
 }
 
 /// Load (or reuse) a person's grants. `None` when there is no such user.
 pub async fn load(conn: &mut PgConnection, user_id: Uuid) -> Result<Option<Arc<Loaded>>, AppError> {
+    if let Some(hit) = cached(user_id).await {
+        return Ok(Some(hit));
+    }
     let epoch = epoch_of(conn, user_id).await?;
     if !cfg!(test)
         && let Some(hit) = CACHE.get(&(user_id, epoch)).await

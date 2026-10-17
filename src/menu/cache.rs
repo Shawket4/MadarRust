@@ -56,9 +56,140 @@
 use actix_web::web::Bytes;
 use moka::future::Cache;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use uuid::Uuid;
+
+/// One cached body: the JSON, its ETag (a hash of the bytes, so it is the same
+/// on every instance), and the body compressed once per content coding the
+/// first time a client asks for it (OPT-A: a cache hit costs no compression).
+pub struct CachedBody {
+    pub body: Bytes,
+    /// Weak (the body also goes out compressed): `W/"m-<sha256 prefix>"`.
+    pub etag: String,
+    encoded: Mutex<HashMap<&'static str, Bytes>>,
+}
+
+/// Content codings a cached body is stored in, with their levels. Higher than
+/// the per-response levels actix uses (brotli 3, gzip 1, zstd 3), because the
+/// cost is paid once per body instead of once per response. Measured on a
+/// 1.09 MB `full=true` body: brotli 5 → 51 KB in 9 ms (q3: 65 KB), gzip 6 →
+/// 96 KB in 11 ms (level 1: 149 KB).
+pub const STORED_CODINGS: [&str; 3] = ["br", "gzip", "zstd"];
+
+impl CachedBody {
+    pub fn new(body: Bytes) -> Self {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(&body);
+        let hex: String = d[..12].iter().map(|b| format!("{b:02x}")).collect();
+        Self {
+            body,
+            etag: format!("W/\"m-{hex}\""),
+            encoded: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The body in `coding` (one of [`STORED_CODINGS`]), compressed on the
+    /// first ask and kept. `None` for any other coding.
+    pub async fn encoded(self: &Arc<Self>, coding: &str) -> Option<Bytes> {
+        let coding: &'static str = STORED_CODINGS.into_iter().find(|c| *c == coding)?;
+        if let Some(b) = self
+            .encoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(coding)
+        {
+            return Some(b.clone());
+        }
+        let me = self.clone();
+        let out = actix_web::web::block(move || compress(coding, &me.body))
+            .await
+            .ok()??;
+        self.encoded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(coding, out.clone());
+        Some(out)
+    }
+}
+
+/// The content coding the `Compress` middleware would pick for this request
+/// (same negotiation, same supported list), when it is a stored one.
+fn negotiated(req: &actix_web::HttpRequest) -> Option<&'static str> {
+    use actix_web::HttpMessage;
+    use actix_web::http::header::{AcceptEncoding, Encoding};
+    let accept = req.get_header::<AcceptEncoding>()?;
+    let supported = [
+        Encoding::identity(),
+        Encoding::brotli(),
+        Encoding::gzip(),
+        Encoding::deflate(),
+        Encoding::zstd(),
+    ];
+    let chosen = accept.negotiate(supported.iter())?.to_string();
+    STORED_CODINGS.into_iter().find(|c| *c == chosen)
+}
+
+/// A cached `/menu-items` body as a response: `304` when the caller already
+/// holds it (`If-None-Match` = its ETag), else the body in the negotiated
+/// coding from the stored copy (the outer `Compress` leaves a response that
+/// already has a `Content-Encoding` alone). The decoded body is the same bytes
+/// a client always got; the ETag and `Cache-Control` headers are additive.
+pub async fn respond(
+    req: &actix_web::HttpRequest,
+    entry: Arc<CachedBody>,
+) -> actix_web::HttpResponse {
+    use actix_web::http::header;
+    let held = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|t| t.trim() == entry.etag));
+    if held {
+        return actix_web::HttpResponse::NotModified()
+            .insert_header((header::ETAG, entry.etag.clone()))
+            .insert_header((header::CACHE_CONTROL, "private, no-cache"))
+            .finish();
+    }
+    let mut res = actix_web::HttpResponse::Ok();
+    res.content_type("application/json")
+        .insert_header((header::ETAG, entry.etag.clone()))
+        .insert_header((header::CACHE_CONTROL, "private, no-cache"));
+    if let Some(coding) = negotiated(req)
+        && let Some(body) = entry.encoded(coding).await
+    {
+        res.insert_header((header::CONTENT_ENCODING, coding))
+            .insert_header((header::VARY, "accept-encoding"));
+        return res.body(body);
+    }
+    res.body(entry.body.clone())
+}
+
+/// Compress `body` in `coding` at the stored level.
+pub fn compress(coding: &str, body: &[u8]) -> Option<Bytes> {
+    use std::io::Write;
+    let out = match coding {
+        "br" => {
+            let mut out = Vec::with_capacity(body.len() / 8);
+            {
+                let mut w = brotli::CompressorWriter::new(&mut out, 32 * 1024, 5, 22);
+                w.write_all(body).ok()?;
+            }
+            out
+        }
+        "gzip" => {
+            let mut w = flate2::write::GzEncoder::new(
+                Vec::with_capacity(body.len() / 8),
+                flate2::Compression::new(6),
+            );
+            w.write_all(body).ok()?;
+            w.finish().ok()?
+        }
+        "zstd" => zstd::bulk::compress(body, 9).ok()?,
+        _ => return None,
+    };
+    Some(Bytes::from(out))
+}
 
 /// The TTL when `MENU_CACHE_TTL_SECS` is unset.
 pub const DEFAULT_TTL_SECS: u64 = 600;
@@ -68,7 +199,7 @@ pub struct MenuCache {
     /// Whether the database has the prod catalog shape (see the module doc),
     /// checked once.
     shape_ok: tokio::sync::OnceCell<bool>,
-    bodies: Cache<String, Bytes>,
+    bodies: Cache<String, Arc<CachedBody>>,
     versions: RwLock<HashMap<Uuid, u64>>,
 }
 
@@ -170,17 +301,31 @@ impl MenuCache {
     }
 
     pub async fn get(&self, org: Uuid, variant: &str) -> Option<Bytes> {
+        Some(self.get_entry(org, variant).await?.body.clone())
+    }
+
+    pub async fn put(&self, org: Uuid, variant: &str, body: Bytes) {
+        self.put_entry(org, variant, body).await;
+    }
+
+    /// The cached body with its ETag and stored codings.
+    pub async fn get_entry(&self, org: Uuid, variant: &str) -> Option<Arc<CachedBody>> {
         if !self.enabled {
             return None;
         }
         self.bodies.get(&self.key(org, variant)).await
     }
 
-    pub async fn put(&self, org: Uuid, variant: &str, body: Bytes) {
-        if !self.enabled {
-            return;
+    /// Cache `body` (when on) and return it as an entry either way, so the
+    /// response that built it carries the same ETag a later hit will.
+    pub async fn put_entry(&self, org: Uuid, variant: &str, body: Bytes) -> Arc<CachedBody> {
+        let entry = Arc::new(CachedBody::new(body));
+        if self.enabled {
+            self.bodies
+                .insert(self.key(org, variant), entry.clone())
+                .await;
         }
-        self.bodies.insert(self.key(org, variant), body).await;
+        entry
     }
 }
 

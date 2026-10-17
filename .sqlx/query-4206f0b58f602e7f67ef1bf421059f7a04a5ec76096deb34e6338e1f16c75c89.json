@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.org_id,\n                  COALESCE((SELECT e.epoch FROM authz_epoch e WHERE e.org_id = u.org_id), 0) AS \"epoch!\"\n             FROM users u WHERE u.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "org_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "epoch!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "4206f0b58f602e7f67ef1bf421059f7a04a5ec76096deb34e6338e1f16c75c89"
+}

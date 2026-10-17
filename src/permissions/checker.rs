@@ -14,6 +14,13 @@ pub async fn check_permission(
     if claims.role == UserRole::SuperAdmin {
         return Ok(());
     }
+    // From memory when the fast path holds both the account and the grants
+    // (no connection, no statement); otherwise exactly the database path.
+    if let Some(verdict) =
+        check_cached(claims.user_id(), Some(claims.iat as i64), resource, action).await
+    {
+        return verdict;
+    }
     let mut conn = pool.acquire().await?;
     check_on(
         &mut conn,
@@ -81,26 +88,28 @@ async fn check_on(
     // Some(true) = active, Some(false) = disabled, None = no such row. We deny
     // only Some(false), so a missing row (service/integration tokens with no
     // corresponding stored user) still passes through.
+    let cap = crate::fastpath::capture(None, None);
     let account = sqlx::query!(
         r#"SELECT (is_active AND deleted_at IS NULL) AS "ok!",
-                  floor(extract(epoch FROM sessions_valid_after))::bigint AS valid_after
+                  floor(extract(epoch FROM sessions_valid_after))::bigint AS valid_after,
+                  org_id
              FROM users WHERE id = $1"#,
         user_id
     )
     .fetch_optional(&mut *conn)
     .await?
-    .map(|r| (r.ok, r.valid_after));
-    if let Some((ok, valid_after)) = account {
-        if !ok {
-            return Err(AppError::Forbidden("Account is disabled".into()));
+    .map(|r| {
+        let acc = crate::fastpath::Account {
+            ok: r.ok,
+            valid_after: r.valid_after,
+        };
+        if let Some(cap) = cap {
+            crate::fastpath::put_account(cap, user_id, r.org_id, acc);
         }
-        if let (Some(iat), Some(after)) = (issued_at, valid_after)
-            && iat < after
-        {
-            return Err(AppError::Unauthorized(
-                "Your session has ended. Please sign in again.".into(),
-            ));
-        }
+        acc
+    });
+    if let Some(acc) = account {
+        account_verdict(acc, issued_at)?;
     }
 
     // The single model (DB audit Phase 4). The legacy tables are read only
@@ -114,6 +123,41 @@ async fn check_on(
             crate::authz::shadow::observe_in(mode, conn, user_id, resource, action, legacy).await
         }
     }
+}
+
+/// The account half of [`check_on`] (V28 + the session cutoff).
+fn account_verdict(acc: crate::fastpath::Account, issued_at: Option<i64>) -> Result<(), AppError> {
+    if !acc.ok {
+        return Err(AppError::Forbidden("Account is disabled".into()));
+    }
+    if let (Some(iat), Some(after)) = (issued_at, acc.valid_after)
+        && iat < after
+    {
+        return Err(AppError::Unauthorized(
+            "Your session has ended. Please sign in again.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_on`] from memory: `Some` only when the fast path holds the
+/// person's account row and their grants at the current epoch (and the
+/// single model decides). A person with no user row is never answered here.
+async fn check_cached(
+    user_id: uuid::Uuid,
+    issued_at: Option<i64>,
+    resource: &str,
+    action: &str,
+) -> Option<Result<(), AppError>> {
+    if *crate::authz::shadow::MODE != crate::authz::shadow::Mode::Single {
+        return None;
+    }
+    let acc = crate::fastpath::account(user_id)?;
+    let loaded = crate::authz::load::cached(user_id).await?;
+    Some(
+        account_verdict(acc, issued_at)
+            .and_then(|()| crate::authz::shadow::decide_loaded(&loaded, resource, action)),
+    )
 }
 
 /// Today's resolution as a boolean, for the side-by-side comparison.

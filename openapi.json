@@ -23191,7 +23191,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract)",
+            "description": "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract). Carries an `ETag` when served through the menu cache.",
             "content": {
               "application/json": {
                 "schema": {
@@ -23202,6 +23202,9 @@
                 }
               }
             }
+          },
+          "304": {
+            "description": "`If-None-Match` held the current body's ETag. No body."
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -62500,7 +62503,7 @@
         },
         "responses": {
           "200": {
-            "description": "Changefeed page, resync marker or full snapshot",
+            "description": "Changefeed page, resync marker or full snapshot. An idle incremental answer (nothing after `since`) carries an `ETag` when the request named a `protocol` or sent `If-None-Match`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -62508,6 +62511,9 @@
                 }
               }
             }
+          },
+          "304": {
+            "description": "Opt-in: `If-None-Match` held the idle answer's ETag and nothing changed since. No body."
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
