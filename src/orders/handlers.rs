@@ -25,18 +25,29 @@ const DEFAULT_PER_PAGE_BRANCH: i64 = 100;
 const MAX_PER_PAGE: i64 = 1000;
 
 // ── Shared SELECT fragment ────────────────────────────────────
-/// Every order read (list, export, single fetches) selects through this. The
-/// names (approver, discount issuer), the branch's effective zone (the body of
-/// `effective_timezone`, NULL when the branch or its org is not visible, as
-/// the function returns) and the tender legs are JOINs, not per-row
-/// subqueries: an export of a year ran each of them once per order (two of
-/// them as seq scans of `users` / `approvals`). The ids joined on are primary
-/// keys, so no join fans a row out; the legs stay one index probe per order.
-const ORDER_SELECT: &str =
+/// One order row, as every order read returns it. Two spellings of the SAME
+/// row, chosen by how many rows a statement reads:
+///
+/// * [`ORDER_SELECT`] — paged and single reads (the list, by id / key / ref /
+///   ticket): unchanged. Its per-order lookups (the tender legs, the zone,
+///   the discount issuer and approver names) are subqueries in the select
+///   list, which run after the list's ORDER BY … LIMIT, for the page's rows
+///   only. As joins they ran for every order of the scope before the sort:
+///   measured on the prod copy (RLS, custom plan) the page got slower.
+/// * [`ORDER_SELECT_ALL`] — reads of a whole scope (the export), where each
+///   of those ran once per order (the two names as seq scans of `users` /
+///   `approvals`, the zone as a function call): the names and the zone (the
+///   body of `effective_timezone`, NULL when the branch or its org is not
+///   visible, as the function returns) are joins on primary keys, so no join
+///   fans a row out. The tender legs stay one index probe per order.
+macro_rules! order_select {
+    ($tz:literal, $applied_by:literal, $approved_by:literal, $joins:literal) => {
+        concat!(
     "SELECT o.id, o.branch_id, o.till_id, o.till_id AS shift_id, o.teller_id, u.name AS teller_name,
      o.waiter_id, w.name AS waiter_name,
      o.order_number, o.order_ref, o.status::text, o.payment_method::text,
-     COALESCE(pl.legs, '[]'::json) AS payment_legs,
+     COALESCE((SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount, 'is_cash', op.is_cash) ORDER BY op.id)
+               FROM order_payments op WHERE op.order_id = o.id), '[]'::json) AS payment_legs,
      o.subtotal, o.discount_type::text, o.discount_value,
      o.discount_amount, o.tax_amount, o.service_charge_amount, o.total_amount,
      o.amount_tendered, o.change_given, o.tip_amount, o.tip_payment_method, o.discount_id,
@@ -45,7 +56,9 @@ const ORDER_SELECT: &str =
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
      o.loyalty_customer_id, lc.name AS loyalty_member_name,
      o.price_flagged, o.price_expected_total, o.created_at,
-     CASE WHEN tzo.id IS NOT NULL THEN COALESCE(tzb.timezone::text, tzo.timezone::text, 'Africa/Cairo') END AS timezone,
+",
+            $tz,
+            " AS timezone,
      o.idempotency_key, o.open_ticket_id,
      o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification,
      o.tax_inclusive, o.tax_rate_applied, o.service_charge_rate_applied, o.service_charge_taxable_applied,
@@ -53,24 +66,42 @@ const ORDER_SELECT: &str =
      o.service_charge_waived_at, o.service_charge_waived_amount,
      o.started_by, sb.name AS started_by_name,
      o.discount_kind, o.discount_percent_bps, o.discount_applied_by,
-     dab.name AS discount_applied_by_name,
+     ",
+            $applied_by,
+            " AS discount_applied_by_name,
      o.discount_approval_id, o.service_mode,
-     apu.name AS discount_approved_by_name
+     ",
+            $approved_by,
+            " AS discount_approved_by_name
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users sb ON sb.id = o.started_by
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN users sw ON sw.id = o.service_charge_waived_by
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
-     LEFT JOIN customers lc ON lc.id = o.loyalty_customer_id
+     LEFT JOIN customers lc ON lc.id = o.loyalty_customer_id",
+            $joins,
+            " "
+        )
+    };
+}
+const ORDER_SELECT: &str = order_select!(
+    "effective_timezone(o.branch_id)",
+    "(SELECT name FROM users WHERE id = o.discount_applied_by)",
+    "(SELECT au.name FROM approvals ap JOIN users au ON au.id = ap.approver_user_id
+       WHERE ap.id = o.discount_approval_id)",
+    ""
+);
+const ORDER_SELECT_ALL: &str = order_select!(
+    "CASE WHEN tzo.id IS NOT NULL THEN COALESCE(tzb.timezone::text, tzo.timezone::text, 'Africa/Cairo') END",
+    "dab.name",
+    "apu.name",
+    "
      LEFT JOIN users dab ON dab.id = o.discount_applied_by
      LEFT JOIN approvals ap ON ap.id = o.discount_approval_id
      LEFT JOIN users apu ON apu.id = ap.approver_user_id
      LEFT JOIN branches tzb ON tzb.id = o.branch_id
-     LEFT JOIN organizations tzo ON tzo.id = tzb.org_id
-     LEFT JOIN LATERAL (
-         SELECT json_agg(json_build_object('method', op.method, 'amount', op.amount, 'is_cash', op.is_cash) ORDER BY op.id) AS legs
-           FROM order_payments op WHERE op.order_id = o.id
-     ) pl ON TRUE ";
+     LEFT JOIN organizations tzo ON tzo.id = tzb.org_id"
+);
 
 // ── Shared summary aggregate ──────────────────────────────────
 /// The statement hydrating [OrderSummary] (by name, via `FromRow`) over every
@@ -5259,7 +5290,7 @@ pub async fn export_orders(
 
     let data_sql = format!(
         "{} WHERE {} {} ORDER BY o.created_at DESC",
-        ORDER_SELECT, scope_condition, filter
+        ORDER_SELECT_ALL, scope_condition, filter
     );
 
     let orders: Vec<Order> =
