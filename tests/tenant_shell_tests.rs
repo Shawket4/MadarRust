@@ -131,6 +131,8 @@ async fn classify_mirrors_the_app_routers() {
         ("/order/".into(), Some(Page::Order)),
         ("/order/?branch=x&table=y".into(), Some(Page::Order)),
         ("/order/menu".into(), Some(Page::Menu)),
+        ("/menu".into(), Some(Page::MenuDisplay)),
+        ("/menu?lang=ar".into(), Some(Page::MenuDisplay)),
         ("/order/track/9f2c".into(), Some(Page::Track)),
         ("/order/now/tok_1".into(), Some(Page::OrderAgain)),
         (format!("/order/order/{org}"), Some(Page::Order)),
@@ -146,6 +148,7 @@ async fn classify_mirrors_the_app_routers() {
         ("/openapi.json".into(), None),
         ("/order/not-a-uuid".into(), None),
         ("/order/menu/extra".into(), None),
+        ("/menu/extra".into(), None),
         ("/book/manage/".into(), None),
         ("/card/".into(), None),
         ("/card/a.b".into(), None),
@@ -321,6 +324,38 @@ async fn each_page_has_its_own_entry_and_address(pool: PgPool) {
         );
         assert!(!html.contains("rel=\"canonical\""), "{path}");
     }
+}
+
+/// `/menu`, the menu without prices: the loyalty bundle's entry while the shop
+/// has it on, with no price in the HTML a crawler reads; a 404 while it is off.
+#[sqlx::test]
+async fn the_menu_without_prices_is_served_only_when_on(pool: PgPool) {
+    env();
+    let org = shop(&pool, "drops", "Drops").await;
+    branch(&pool, org, "Maadi").await;
+    menu_item(&pool, org, "Coffee", "Flat white", 8500).await;
+    let shells = shells(&["loyalty", "order", "book"]);
+    let app = app!(pool, shells);
+
+    let (status, html) = page(&app, "drops.madar-pos.cloud", "/menu").await;
+    assert_eq!(status, 404, "off: {html}");
+    assert!(html.contains("This page isn't here."));
+
+    sqlx::query(
+        "INSERT INTO org_links_pages (org_id, menu_display_enabled) VALUES ($1, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    tenant_shell::invalidate(org);
+
+    let (status, html) = page(&app, "drops.madar-pos.cloud", "/menu").await;
+    assert_eq!(status, 200, "{html}");
+    assert!(html.contains("/assets/loyalty-abc.js"), "the loyalty bundle's entry");
+    assert!(html.contains("<title>Drops — Menu</title>"));
+    assert!(!html.contains("EGP"), "no price in the HTML: {html}");
+    assert!(!html.contains("85.00"), "{html}");
 }
 
 /// The 404s: no such shop (or switched off, the same answer), not a shop host

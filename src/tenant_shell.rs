@@ -80,6 +80,9 @@ pub enum Page {
     Card,
     Order,
     Menu,
+    /// `/menu`: the menu without prices (`orgs::menu_display`), served by the
+    /// loyalty bundle. Only when the shop has switched it on.
+    MenuDisplay,
     Track,
     OrderAgain,
     Book,
@@ -89,7 +92,9 @@ pub enum Page {
 impl Page {
     pub fn bundle(self) -> Bundle {
         match self {
-            Page::Links | Page::Rewards | Page::Join | Page::Card => Bundle::Links,
+            Page::Links | Page::Rewards | Page::Join | Page::Card | Page::MenuDisplay => {
+                Bundle::Links
+            }
             Page::Order | Page::Menu | Page::Track | Page::OrderAgain => Bundle::Order,
             Page::Book | Page::Booking => Bundle::Book,
         }
@@ -111,6 +116,7 @@ impl Page {
             Page::Rewards => "/rewards",
             Page::Order => "/order/",
             Page::Menu => "/order/menu",
+            Page::MenuDisplay => "/menu",
             Page::Book => "/book/",
             // Never canonical (not indexable); the shop root stands in.
             Page::Join | Page::Card | Page::Track | Page::OrderAgain | Page::Booking => "/",
@@ -150,6 +156,7 @@ pub fn classify(path: &str) -> Option<Page> {
     match segs.as_slice() {
         [] => Some(Page::Links),
         ["rewards"] => Some(Page::Rewards),
+        ["menu"] => Some(Page::MenuDisplay),
         ["join", "org", id] if is_uuid(id) => Some(Page::Join),
         ["join", branch] if is_token(branch) => Some(Page::Join),
         ["card", token] if is_token(token) => Some(Page::Card),
@@ -340,6 +347,22 @@ pub async fn shell(
         return not_found_page(Some((&name, &origin)));
     };
 
+    // The menu without prices exists only while the shop has it switched on;
+    // off, `/menu` is a path the shop's apps don't route.
+    if page == Page::MenuDisplay {
+        match crate::orgs::menu_display::is_on(pool, org_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                let name = public_links_page(pool, org_id)
+                    .await
+                    .map(|p| p.brand.name)
+                    .unwrap_or_else(|_| slug.clone());
+                return not_found_page(Some((&name, &origin)));
+            }
+            Err(_) => return unavailable(),
+        }
+    }
+
     let Some((modified, body)) = template(&config.template(page.bundle())).await else {
         return unavailable();
     };
@@ -468,7 +491,7 @@ fn title_of(page: Page, name: &str, links: &PublicLinksPage) -> String {
         Page::Join => "Join the rewards",
         Page::Card => "Your rewards card",
         Page::Order => "Order online",
-        Page::Menu => "Menu",
+        Page::Menu | Page::MenuDisplay => "Menu",
         Page::Track => "Your order",
         Page::OrderAgain => "Order again",
         Page::Book => "Book a table",

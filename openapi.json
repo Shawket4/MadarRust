@@ -30430,12 +30430,217 @@
         ]
       }
     },
+    "/orgs/{id}/links-page/menu-display": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The menu-without-prices settings.",
+        "description": "Every plan: no `branding` or `online` check, so a Free shop can reach it.\nThe organisation settings capabilities, as the links page.",
+        "operationId": "get_menu_display",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuDisplaySettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Save the menu-without-prices settings. Writes ONLY its own columns: a\nshop's links page (and a Free shop's lack of one) is left exactly as it was.",
+        "operationId": "put_menu_display",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MenuDisplayInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MenuDisplaySettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/orgs/{id}/links-qr": {
       "get": {
         "tags": [
           "qr"
         ],
-        "summary": "The code for the shop's links page — the one address that leads to\neverything else (menu, ordering, rewards, bookings, socials).",
+        "summary": "The code for the shop's links page — the one address that leads to\neverything else (menu, ordering, rewards, bookings, socials) — or, with\n`target=menu_display`, for the menu without prices on the same editor.",
         "operationId": "org_links_qr",
         "parameters": [
           {
@@ -30514,6 +30719,15 @@
               "type": "integer",
               "format": "int32",
               "minimum": 0
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Omitted: the links page itself (the paid `branding` feature).\n`menu_display`: the menu without prices, which every plan has.",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -35848,6 +36062,109 @@
         "responses": {
           "200": {
             "description": "Apple Wallet pass"
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/public/menu-display": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "The shop's menu without prices.",
+        "description": "`org_id` or `slug` names the shop. Every plan, Free included. A shop that\nhas not switched the page on answers 404, exactly like a shop that does not\nexist. The answer carries no price, cost, surcharge, discount or deal field.",
+        "operationId": "public_menu_display",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "query",
+            "description": "The shop, when the page already knows which one it is.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slug",
+            "in": "query",
+            "description": "The first label of the hostname, when it does not — `rue` for\n`rue.madar-pos.cloud`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicMenuDisplay"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -82952,6 +83269,505 @@
           }
         }
       },
+      "MenuDisplayAddon": {
+        "type": "object",
+        "description": "One add-on of the org's catalogue (milk, coffee, extras), by name.",
+        "required": [
+          "addon_item_id",
+          "name",
+          "name_translations",
+          "type",
+          "is_available"
+        ],
+        "properties": {
+          "addon_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_available": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "type": {
+            "type": "string",
+            "description": "`milk_type` | `coffee_type` | `extra` | a custom group's type."
+          }
+        }
+      },
+      "MenuDisplayBranch": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "MenuDisplayBranchOption": {
+        "type": "object",
+        "description": "A branch, as the editor's picker lists it.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "MenuDisplayCombo": {
+        "type": "object",
+        "required": [
+          "is_fixed",
+          "slots"
+        ],
+        "properties": {
+          "is_fixed": {
+            "type": "boolean"
+          },
+          "slots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayComboSlot"
+            }
+          }
+        }
+      },
+      "MenuDisplayComboChoice": {
+        "type": "object",
+        "description": "One item a combo slot offers. Unavailable choices are left out.",
+        "required": [
+          "menu_item_id",
+          "name",
+          "name_translations",
+          "included_size_label",
+          "sizes"
+        ],
+        "properties": {
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "included_size_label": {
+            "type": "string"
+          },
+          "menu_item_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "sizes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplaySize"
+            },
+            "description": "In the order the priced menu offers them (cheapest first)."
+          }
+        }
+      },
+      "MenuDisplayComboSlot": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "name_translations",
+          "sort",
+          "min",
+          "max",
+          "choices"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayComboChoice"
+            }
+          },
+          "default_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "default_size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "max": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "sort": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "MenuDisplayInput": {
+        "type": "object",
+        "description": "What the editor saves.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`None` = the default branch."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "title_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_en": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MenuDisplayItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "name_translations",
+          "sizes",
+          "optionals",
+          "allowed_addon_ids",
+          "modifier_groups",
+          "kind"
+        ],
+        "properties": {
+          "allowed_addon_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The item's add-on allowlist (empty = no restriction)."
+          },
+          "category_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "combo": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MenuDisplayCombo",
+                "description": "A `combo` row's slots."
+              }
+            ]
+          },
+          "default_milk_addon_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The item's base milk, pre-selected as on the till."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "image_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "description": "`item` | `combo`."
+          },
+          "modifier_groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayModifierGroup"
+            },
+            "description": "Non-empty = the item's add-ons are exactly these groups' options."
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "optionals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayOptional"
+            }
+          },
+          "sizes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplaySize"
+            }
+          }
+        }
+      },
+      "MenuDisplayMenu": {
+        "type": "object",
+        "required": [
+          "categories",
+          "items",
+          "addons"
+        ],
+        "properties": {
+          "addons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayAddon"
+            }
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeliveryMenuCategory"
+            },
+            "description": "In the POS's order."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayItem"
+            }
+          }
+        }
+      },
+      "MenuDisplayModifierGroup": {
+        "type": "object",
+        "description": "A per-item modifier group, constraints resolved, by name.",
+        "required": [
+          "group_id",
+          "name",
+          "name_translations",
+          "selection_type",
+          "min_selections",
+          "is_required",
+          "options"
+        ],
+        "properties": {
+          "addon_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "group_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_required": {
+            "type": "boolean"
+          },
+          "max_selections": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "min_selections": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayModifierOption"
+            }
+          },
+          "selection_type": {
+            "type": "string",
+            "description": "\"single\" | \"multi\"."
+          }
+        }
+      },
+      "MenuDisplayModifierOption": {
+        "type": "object",
+        "required": [
+          "option_id",
+          "name",
+          "name_translations"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "option_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "MenuDisplayOptional": {
+        "type": "object",
+        "description": "An item's optional toggle (\"Extra hot\"), by name.",
+        "required": [
+          "id",
+          "name",
+          "name_translations"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_translations": {
+            "type": "object"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when it only applies to one size."
+          }
+        }
+      },
+      "MenuDisplaySettings": {
+        "type": "object",
+        "description": "The editor's view.",
+        "required": [
+          "enabled",
+          "branches"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch the shop picked; `None` = the default (its first branch)."
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MenuDisplayBranchOption"
+            },
+            "description": "Every open branch, for the picker."
+          },
+          "effective_branch_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The branch the page shows right now (the pick, else the default).\n`None` when the shop has no open branch."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "public_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the page is: `<slug>.madar-pos.cloud/menu` on a shop's own host,\nelse the generic host's `/menu/<org id>`. `None` when no host is\nconfigured on this server."
+          },
+          "title_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_en": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MenuDisplaySize": {
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          }
+        }
+      },
       "MenuItem": {
         "type": "object",
         "required": [
@@ -90788,6 +91604,39 @@
             ]
           },
           "tagline_en": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PublicMenuDisplay": {
+        "type": "object",
+        "description": "Everything the menu-without-prices page shows, in one request.",
+        "required": [
+          "brand",
+          "branch",
+          "menu"
+        ],
+        "properties": {
+          "branch": {
+            "$ref": "#/components/schemas/MenuDisplayBranch"
+          },
+          "brand": {
+            "$ref": "#/components/schemas/PublicBrand",
+            "description": "The shop's header, with the branding tier already applied (a shop off\nthe tier wears Madar's colours under its own name)."
+          },
+          "menu": {
+            "$ref": "#/components/schemas/MenuDisplayMenu"
+          },
+          "title_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_en": {
             "type": [
               "string",
               "null"
