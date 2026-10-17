@@ -359,7 +359,7 @@ async fn build_catalog_snapshot(
 
     // ── Attached modifier groups → options (resolved) + option recipes. ──
     let (groups_by_item, referenced_ingredient_ids) =
-        load_modifier_groups(&mut *conn, &item_ids, branch_id, channel).await?;
+        load_modifier_groups(&mut *conn, &item_ids, branch_id, channel, true).await?;
 
     // ── Assemble items. ──
     let mut items = Vec::with_capacity(item_rows.len());
@@ -482,6 +482,8 @@ async fn load_modifier_groups(
     item_ids: &[Uuid],
     branch_id: Uuid,
     channel: Option<&str>,
+    // Load each option's recipe lines (the pull drops them: see projection).
+    with_recipes: bool,
 ) -> Result<
     (
         std::collections::HashMap<Uuid, Vec<SyncModifierGroup>>,
@@ -496,73 +498,68 @@ async fn load_modifier_groups(
     }
 
     // Attachments joined to active groups, with min/max/required resolved.
-    #[allow(clippy::type_complexity)]
-    let attach_rows: Vec<(
-        Uuid,
-        Uuid,
-        String,
-        serde_json::Value,
-        String,
-        i32,
-        Option<i32>,
-        bool,
-        Option<String>,
-        Option<Vec<Uuid>>,
-        i32,
-        String,
-        Option<Uuid>,
-        Option<String>,
-    )> = sqlx::query_as(
-        "SELECT mimg.menu_item_id, mg.id, mg.name, mg.name_translations, mg.selection_type, \
-                COALESCE(mimg.min_override, mg.min_selections) AS min, \
-                COALESCE(mimg.max_override, mg.max_selections) AS max, \
-                COALESCE(mimg.is_required_override, mg.is_required) AS is_required, \
-                mg.legacy_addon_type, mimg_included_options(mimg.id, mimg.option_allowlist) AS included_option_ids, mimg.sort, \
-                mg.effect, mg.swap_category_id, sc.slug \
-         FROM menu_item_modifier_groups mimg \
-         JOIN modifier_groups mg ON mg.id = mimg.group_id \
-         LEFT JOIN ingredient_categories sc ON sc.id = mg.swap_category_id \
-         WHERE mimg.menu_item_id = ANY($1) AND mg.is_active = true \
-         ORDER BY mimg.menu_item_id, mimg.sort, mg.name",
+    let attach_rows = sqlx::query!(
+        r#"SELECT mimg.menu_item_id, mimg.id AS mimg_id, mg.id AS group_id, mg.name,
+                  mg.name_translations, mg.selection_type,
+                  COALESCE(mimg.min_override, mg.min_selections) AS "min!",
+                  COALESCE(mimg.max_override, mg.max_selections) AS max,
+                  COALESCE(mimg.is_required_override, mg.is_required) AS "is_required!",
+                  mg.legacy_addon_type, mimg.option_allowlist AS "allowlist?",
+                  mg.effect, mg.swap_category_id, sc.slug AS "swap_category_slug?"
+             FROM menu_item_modifier_groups mimg
+             JOIN modifier_groups mg ON mg.id = mimg.group_id
+             LEFT JOIN ingredient_categories sc ON sc.id = mg.swap_category_id
+            WHERE mimg.menu_item_id = ANY($1) AND mg.is_active = true
+            ORDER BY mimg.menu_item_id, mimg.sort, mg.name"#,
+        item_ids,
     )
-    .bind(item_ids)
     .fetch_all(&mut *conn)
     .await?;
 
+    // `mimg_included_options` for every attachment in one query (it ran once
+    // per attachment row through SPI: 56 calls per build, six builds per boot
+    // pull): the allow-list in (sort, option) order, `None` = every option.
+    let listed: Vec<Uuid> = attach_rows
+        .iter()
+        .filter(|a| a.allowlist == Some(true))
+        .map(|a| a.mimg_id)
+        .collect();
+    let mut allowlists: std::collections::HashMap<Uuid, Vec<Uuid>> =
+        std::collections::HashMap::new();
+    if !listed.is_empty() {
+        for r in sqlx::query!(
+            r#"SELECT x.mimg_id, array_agg(x.option_id ORDER BY x.sort, x.option_id) AS "ids!"
+                     FROM menu_item_modifier_group_options x
+                    WHERE x.mimg_id = ANY($1) GROUP BY x.mimg_id"#,
+            &listed,
+        )
+        .fetch_all(&mut *conn)
+        .await?
+        {
+            allowlists.insert(r.mimg_id, r.ids);
+        }
+    }
+
     let attachments: Vec<RawGroupAttachment> = attach_rows
         .into_iter()
-        .map(
-            |(
-                menu_item_id,
-                group_id,
-                name,
-                name_translations,
-                selection_type,
-                min,
-                max,
-                is_required,
-                legacy_addon_type,
-                included_option_ids,
-                _sort,
-                effect,
-                swap_category_id,
-                swap_category_slug,
-            )| RawGroupAttachment {
-                menu_item_id,
-                group_id,
-                name,
-                name_translations,
-                selection_type,
-                min,
-                max,
-                is_required,
-                legacy_addon_type,
-                included_option_ids,
-                effect,
-                swap_category_id,
-                swap_category_slug,
+        .map(|r| RawGroupAttachment {
+            menu_item_id: r.menu_item_id,
+            group_id: r.group_id,
+            name: r.name,
+            name_translations: r.name_translations,
+            selection_type: r.selection_type,
+            min: r.min,
+            max: r.max,
+            is_required: r.is_required,
+            legacy_addon_type: r.legacy_addon_type,
+            included_option_ids: match r.allowlist {
+                Some(true) => Some(allowlists.remove(&r.mimg_id).unwrap_or_default()),
+                _ => None,
             },
-        )
+            effect: r.effect,
+            swap_category_id: r.swap_category_id,
+            swap_category_slug: r.swap_category_slug,
+        })
         .collect();
 
     // Bulk-load every active option (with resolved price/avail) for the referenced
@@ -574,7 +571,7 @@ async fn load_modifier_groups(
         g
     };
     let (options_by_group, recipes_by_option, referenced_ingredient_ids) =
-        load_group_options(&mut *conn, &group_ids, branch_id, channel).await?;
+        load_group_options(&mut *conn, &group_ids, branch_id, channel, with_recipes).await?;
 
     for a in &attachments {
         let all_opts = options_by_group.get(&a.group_id);
@@ -648,6 +645,7 @@ async fn load_group_options(
     group_ids: &[Uuid],
     branch_id: Uuid,
     channel: Option<&str>,
+    with_recipes: bool,
 ) -> Result<
     (
         std::collections::HashMap<Uuid, Vec<RawOption>>,
@@ -711,7 +709,7 @@ async fn load_group_options(
     let mut recipes_by_option: std::collections::HashMap<Uuid, Vec<SyncRecipeLine>> =
         std::collections::HashMap::new();
     let mut referenced: Vec<Uuid> = Vec::new();
-    if !option_ids.is_empty() {
+    if with_recipes && !option_ids.is_empty() {
         let recipe_rows: Vec<(Uuid, Uuid, rust_decimal::Decimal, String)> = sqlx::query_as(
             "SELECT owner_id, ingredient_id, quantity, unit \
              FROM recipe_lines \
@@ -794,7 +792,9 @@ pub(crate) async fn sync_items_by_ids(
     .await?;
     let item_ids: Vec<Uuid> = item_rows.iter().map(|r| r.0).collect();
     let sizes_by_item = load_sizes(&mut *conn, &item_ids, branch_id, None).await?;
-    let (groups_by_item, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, None).await?;
+    // Option recipes are not on the till's feed (the projection strips them).
+    let (groups_by_item, _) =
+        load_modifier_groups(&mut *conn, &item_ids, branch_id, None, false).await?;
     let mut combos = combo_feeds(&mut *conn, org_id, branch_id, &item_rows).await?;
     Ok(item_rows
         .into_iter()
@@ -855,79 +855,141 @@ async fn combo_feeds(
     crate::combos::load::feeds_for(conn, org_id, Some(branch_id), &ids).await
 }
 
-/// Per delivery channel, the sizes and modifier options of `ids` whose price or
-/// availability for `(branch_id, channel)` differs from the in-store resolution:
+/// Per delivery channel, the sizes and modifier options of `items` (the
+/// in-store resolution [`sync_items_by_ids`] built) whose price or
+/// availability for `(branch_id, channel)` differs from it:
 /// `{ "<channel>": { "sizes": { "<size_id>": {price, is_available} },
 ///                   "options": { "<option_id>": {price, is_available} } } }`.
 /// Items with no channel difference get no entry (sync pull projection).
-pub(crate) async fn sync_channel_prices_by_ids(
+///
+/// Which sizes and options an item lists does not depend on the channel (the
+/// active sizes; the active options its groups allow), only their resolved
+/// figures do. So the in-store items are the base, and every channel's figures
+/// come from two queries (sizes, options) over all channels at once — not a
+/// full rebuild of sizes, groups, allow-lists and recipes per channel.
+pub(crate) async fn sync_channel_prices_for(
     conn: &mut PgConnection,
-    org_id: Uuid,
     branch_id: Uuid,
-    ids: &[Uuid],
+    items: &[SyncItem],
 ) -> Result<std::collections::HashMap<Uuid, serde_json::Value>, AppError> {
     use serde_json::{Map, Value, json};
-    let item_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM menu_items WHERE org_id = $1 AND id = ANY($2) AND is_active = true AND deleted_at IS NULL",
+    use std::collections::HashMap;
+    if items.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let size_ids: Vec<Uuid> = items
+        .iter()
+        .flat_map(|i| i.sizes.iter().map(|s| s.id))
+        .collect();
+    let option_ids: Vec<Uuid> = {
+        let mut v: Vec<Uuid> = items
+            .iter()
+            .flat_map(|i| i.modifier_groups.iter().flat_map(|g| g.options.iter().map(|o| o.id)))
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let channels: Vec<String> = sqlx::query_scalar!(
+        r#"SELECT unnest(enum_range(NULL::delivery_channel))::text AS "c!""#
     )
-    .bind(org_id)
-    .bind(ids)
     .fetch_all(&mut *conn)
     .await?;
-    let mut out: std::collections::HashMap<Uuid, Map<String, Value>> =
-        std::collections::HashMap::new();
-    if item_ids.is_empty() {
-        return Ok(std::collections::HashMap::new());
+    // (channel, size or option id) → resolved (price, availability), with the
+    // same one-probe lateral as `load_sizes` / `load_group_options`.
+    let mut figures: HashMap<(String, Uuid), (i32, bool)> = HashMap::new();
+    if !size_ids.is_empty() {
+        for r in sqlx::query!(
+            r#"SELECT ch.c AS "channel!", s.id,
+                      COALESCE(o.bc_price, o.b_price, o.c_price, s.price) AS "price!",
+                      COALESCE(o.bc_avail, o.b_avail, o.c_avail, TRUE) AS "is_available!"
+                 FROM unnest($3::text[]) AS ch(c)
+                 CROSS JOIN menu_item_sizes s
+                 LEFT JOIN LATERAL (
+                      SELECT max(x.price) FILTER (WHERE x.scope = 'branch_channel') AS bc_price,
+                             max(x.price) FILTER (WHERE x.scope = 'branch')         AS b_price,
+                             max(x.price) FILTER (WHERE x.scope = 'channel')        AS c_price,
+                             bool_or(x.is_available) FILTER (WHERE x.scope = 'branch_channel') AS bc_avail,
+                             bool_or(x.is_available) FILTER (WHERE x.scope = 'branch')         AS b_avail,
+                             bool_or(x.is_available) FILTER (WHERE x.scope = 'channel')        AS c_avail
+                        FROM menu_price_overrides x
+                       WHERE x.target_type = 'menu_item_size' AND x.target_id = s.id
+                         AND ((x.scope = 'branch_channel' AND x.branch_id = $2
+                               AND x.channel = ch.c::delivery_channel)
+                           OR (x.scope = 'branch' AND x.branch_id = $2)
+                           OR (x.scope = 'channel' AND x.channel = ch.c::delivery_channel))) o ON true
+                WHERE s.id = ANY($1)"#,
+            &size_ids,
+            branch_id,
+            &channels,
+        )
+        .fetch_all(&mut *conn)
+        .await?
+        {
+            figures.insert((r.channel, r.id), (r.price, r.is_available));
+        }
     }
-    let base_sizes = load_sizes(&mut *conn, &item_ids, branch_id, None).await?;
-    let (base_groups, _) = load_modifier_groups(&mut *conn, &item_ids, branch_id, None).await?;
-    let channels: Vec<String> =
-        sqlx::query_scalar("SELECT unnest(enum_range(NULL::delivery_channel))::text")
-            .fetch_all(&mut *conn)
-            .await?;
+    if !option_ids.is_empty() {
+        for r in sqlx::query!(
+            r#"SELECT ch.c AS "channel!", mo.id,
+                      COALESCE(o.bc_price, o.b_price, o.c_price, mo.price) AS "price!",
+                      COALESCE(o.bc_avail, o.b_avail, o.c_avail, TRUE) AS "is_available!"
+                 FROM unnest($3::text[]) AS ch(c)
+                 CROSS JOIN modifier_options mo
+                 LEFT JOIN LATERAL (
+                      SELECT max(x.price) FILTER (WHERE x.scope = 'branch_channel') AS bc_price,
+                             max(x.price) FILTER (WHERE x.scope = 'branch')         AS b_price,
+                             max(x.price) FILTER (WHERE x.scope = 'channel')        AS c_price,
+                             bool_or(x.is_available) FILTER (WHERE x.scope = 'branch_channel') AS bc_avail,
+                             bool_or(x.is_available) FILTER (WHERE x.scope = 'branch')         AS b_avail,
+                             bool_or(x.is_available) FILTER (WHERE x.scope = 'channel')        AS c_avail
+                        FROM menu_price_overrides x
+                       WHERE x.target_type = 'modifier_option' AND x.target_id = mo.id
+                         AND ((x.scope = 'branch_channel' AND x.branch_id = $2
+                               AND x.channel = ch.c::delivery_channel)
+                           OR (x.scope = 'branch' AND x.branch_id = $2)
+                           OR (x.scope = 'channel' AND x.channel = ch.c::delivery_channel))) o ON true
+                WHERE mo.id = ANY($1)"#,
+            &option_ids,
+            branch_id,
+            &channels,
+        )
+        .fetch_all(&mut *conn)
+        .await?
+        {
+            figures.insert((r.channel, r.id), (r.price, r.is_available));
+        }
+    }
+
+    let mut out: HashMap<Uuid, Map<String, Value>> = HashMap::new();
     for channel in &channels {
-        let sizes = load_sizes(&mut *conn, &item_ids, branch_id, Some(channel)).await?;
-        let (groups, _) =
-            load_modifier_groups(&mut *conn, &item_ids, branch_id, Some(channel)).await?;
-        for item in &item_ids {
+        for item in items {
             let mut size_diff = Map::new();
-            let base: std::collections::HashMap<Uuid, (i32, bool)> = base_sizes
-                .get(item)
-                .map(|v| {
-                    v.iter()
-                        .map(|s| (s.id, (s.price, s.is_available)))
-                        .collect()
-                })
-                .unwrap_or_default();
-            for s in sizes.get(item).map(Vec::as_slice).unwrap_or_default() {
-                if base.get(&s.id) != Some(&(s.price, s.is_available)) {
+            for s in &item.sizes {
+                if let Some(&(price, is_available)) = figures.get(&(channel.clone(), s.id))
+                    && (price, is_available) != (s.price, s.is_available)
+                {
                     size_diff.insert(
                         s.id.to_string(),
-                        json!({ "price": s.price, "is_available": s.is_available }),
+                        json!({ "price": price, "is_available": is_available }),
                     );
                 }
             }
-            let base_opts: std::collections::HashMap<Uuid, (i32, bool)> = base_groups
-                .get(item)
-                .map(|g| {
-                    g.iter()
-                        .flat_map(|g| g.options.iter().map(|o| (o.id, (o.price, o.is_available))))
-                        .collect()
-                })
-                .unwrap_or_default();
             let mut opt_diff = Map::new();
-            for g in groups.get(item).map(Vec::as_slice).unwrap_or_default() {
+            for g in &item.modifier_groups {
                 for o in &g.options {
-                    if base_opts.get(&o.id) != Some(&(o.price, o.is_available)) {
+                    if let Some(&(price, is_available)) = figures.get(&(channel.clone(), o.id))
+                        && (price, is_available) != (o.price, o.is_available)
+                    {
                         opt_diff.insert(
                             o.id.to_string(),
-                            json!({ "price": o.price, "is_available": o.is_available }),
+                            json!({ "price": price, "is_available": is_available }),
                         );
                     }
                 }
             }
             if !size_diff.is_empty() || !opt_diff.is_empty() {
-                out.entry(*item).or_default().insert(
+                out.entry(item.id).or_default().insert(
                     channel.clone(),
                     json!({ "sizes": size_diff, "options": opt_diff }),
                 );

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (r.menu_item_id) r.menu_item_id AS \"menu_item_id!\", a.id::text AS \"addon_id!\"\n             FROM compat.menu_item_recipes r\n             JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id\n             JOIN compat.addon_items a ON a.id = ai.addon_item_id\n            WHERE r.menu_item_id = ANY($1) AND a.type = 'milk_type'\n            ORDER BY r.menu_item_id,\n                     (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST,\n                     a.name, a.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "menu_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "addon_id!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "f29bf6d54a7f3292722ea85f7d769ace91d4b38c946ca7dc32b7e1281d83b8cc"
+}

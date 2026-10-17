@@ -35,7 +35,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::errors::AppError;
-use crate::orders::component_resolve::{AddonInput, resolve_menu_item_configuration};
+use crate::orders::component_resolve::AddonInput;
 
 // ── Intake input ──────────────────────────────────────────────
 
@@ -351,6 +351,20 @@ pub async fn resolve_cart_as(
         .await?
         .ok_or(AppError::Internal)?;
     let mut catalog = crate::orders::catalog_view::Catalog::new(Some(branch_id));
+    // Every plain line's item and add-ons in ONE batched catalogue load, as
+    // the order path keeps one catalogue per order (it was a load per line:
+    // ~10 statements each). The rule looks options up by id, so a line priced
+    // over the whole cart's catalogue is priced exactly as over its own.
+    {
+        let plain: Vec<&CartLineInput> =
+            lines.iter().filter(|l| !ctx.is_combo(Some(l.menu_item_id))).collect();
+        let items: Vec<Uuid> = plain.iter().map(|l| l.menu_item_id).collect();
+        let options: Vec<Uuid> = plain
+            .iter()
+            .flat_map(|l| l.addons.iter().map(|a| a.addon_item_id))
+            .collect();
+        catalog.ensure_on(pool, &items, &options).await?;
+    }
 
     for (idx, line) in lines.iter().enumerate() {
         if ctx.is_combo(Some(line.menu_item_id)) {
@@ -491,16 +505,14 @@ pub async fn resolve_cart_as(
 
         // Reuse the shared config resolver for addons / optionals / recipe deductions
         // (branch-effective addon prices; no channel addon layer yet).
-        let config = resolve_menu_item_configuration(
-            pool,
+        let config = crate::orders::component_resolve::resolve_loaded(
+            &catalog,
             line.menu_item_id,
             line.size_label.clone(),
             line.quantity,
             &line.addons,
             &line.optional_field_ids,
-            branch_id,
-        )
-        .await?;
+        )?;
 
         // Cost-enrich this line's deductions at the current ingredient costs.
         let mut line_deductions: Vec<SnapshotDeduction> = config

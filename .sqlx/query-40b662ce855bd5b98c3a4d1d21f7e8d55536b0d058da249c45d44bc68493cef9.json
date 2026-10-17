@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             COALESCE((SELECT revision FROM catalog_revision WHERE org_id = $1), 0) AS \"rev!\",\n             (SELECT max(updated_at) FROM org_ingredients WHERE org_id = $1) AS ingredients,\n             (SELECT max(updated_at) FROM asset_jobs WHERE org_id = $1) AS assets,\n             (SELECT max(updated_at) FROM recipe_step_presets) AS presets,\n             (now() AT TIME ZONE 'UTC')::date AS \"day!\",\n             -- The database, so a key never matches another database's\n             -- (process-global users of this key, e.g. the lint cache).\n             current_database()::text AS \"db!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rev!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "ingredients",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "assets",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "presets",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "day!",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 5,
+        "name": "db!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "40b662ce855bd5b98c3a4d1d21f7e8d55536b0d058da249c45d44bc68493cef9"
+}

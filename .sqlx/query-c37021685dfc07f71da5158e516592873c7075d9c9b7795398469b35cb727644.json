@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n             (SELECT md5(o::text) FROM organizations o WHERE o.id = $1) AS org_row,\n             (SELECT md5(string_agg(b::text, ',' ORDER BY b.id)) FROM branches b\n               WHERE b.org_id = $1) AS branch_rows,\n             (SELECT md5(p::text) FROM org_links_pages p WHERE p.org_id = $1) AS page_row,\n             CASE WHEN EXISTS (SELECT 1 FROM sale_windows w WHERE w.org_id = $1)\n                  THEN to_char(now() AT TIME ZONE 'UTC', 'YYYYMMDDHH24MI')\n                       || CASE WHEN EXISTS (\n                               SELECT 1 FROM sale_windows w\n                                WHERE w.org_id = $1\n                                  AND (extract(second FROM w.starts_at) <> 0\n                                    OR extract(second FROM w.ends_at) <> 0))\n                          THEN to_char(clock_timestamp(), 'SS.US') ELSE '' END\n                  ELSE '' END AS \"clock!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "org_row",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch_rows",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "page_row",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "clock!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "c37021685dfc07f71da5158e516592873c7075d9c9b7795398469b35cb727644"
+}

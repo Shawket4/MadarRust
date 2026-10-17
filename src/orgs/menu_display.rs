@@ -513,11 +513,16 @@ pub(crate) async fn is_on(pool: &PgPool, org_id: Uuid) -> Result<bool, AppError>
 /// exist. The answer carries no price, cost, surcharge, discount or deal field.
 #[utoipa::path(get, path = "/public/menu-display", tag = "orgs",
     operation_id = "public_menu_display", params(BrandQuery),
-    responses((status = 200, body = PublicMenuDisplay), AppErrorResponse))]
+    responses((status = 200, description = "The menu without prices. Carries an `ETag` and `Cache-Control: public, no-cache`.", body = PublicMenuDisplay),
+              (status = 304, description = "`If-None-Match` held the current menu's ETag. No body."),
+              AppErrorResponse))]
 pub async fn public_menu_display(
+    req: HttpRequest,
     pdb: crate::db::PublicDb,
+    cache: Option<web::Data<crate::menu::cache::MenuCache>>,
     query: web::Query<BrandQuery>,
 ) -> Result<HttpResponse, AppError> {
+    use crate::menu::cache;
     let no_page = || AppError::NotFound("No menu at that address".into());
     let org_id = match resolve_org_any_plan(pdb.resolver(), &query).await {
         Ok(id) => id,
@@ -526,6 +531,23 @@ pub async fn public_menu_display(
     };
     let pool = pdb.scoped(org_id).await;
     let pool = pool.get_ref();
+    // Everything below depends only on rows the public fingerprint covers (the
+    // catalogue, the org and branch rows, the page's settings, the clock for
+    // sale windows), so a hit skips it all and answers from the stored,
+    // pre-compressed body. A miss that ends in a 404 is not stored.
+    let key = match &cache {
+        Some(c) if c.usable(pool).await => Some(format!(
+            "pub|display|{}",
+            cache::public_fingerprint(pool, org_id).await?
+        )),
+        _ => None,
+    };
+    let cache = cache.filter(|_| key.is_some());
+    if let (Some(c), Some(k)) = (&cache, &key)
+        && let Some(entry) = c.get_entry(org_id, k).await
+    {
+        return Ok(cache::respond_as(&req, entry, cache::PUBLIC, true).await);
+    }
     if !is_on(pool, org_id).await? {
         return Err(no_page());
     }
@@ -543,18 +565,24 @@ pub async fn public_menu_display(
     // The dine-in menu (`channel: None`): branch availability, no channel.
     let menu = load_public_menu(pool, org_id, branch_id, None).await?;
 
-    Ok(HttpResponse::Ok()
-        // As the links page: a shop checking its own edit sees it within a
-        // minute, and a crowd scanning one table card is not a query storm.
-        .insert_header(("Cache-Control", "public, max-age=60"))
-        .json(PublicMenuDisplay {
-            brand: brand_of(org_id, slug, brand),
-            title_en: stored.title_en,
-            title_ar: stored.title_ar,
-            branch: MenuDisplayBranch {
-                id: branch_id,
-                name: branch_name,
-            },
-            menu: strip_prices(menu),
-        }))
+    let body = serde_json::to_vec(&PublicMenuDisplay {
+        brand: brand_of(org_id, slug, brand),
+        title_en: stored.title_en,
+        title_ar: stored.title_ar,
+        branch: MenuDisplayBranch {
+            id: branch_id,
+            name: branch_name,
+        },
+        menu: strip_prices(menu),
+    })
+    .map_err(|_| AppError::Internal)?;
+    let body = web::Bytes::from(body);
+    // `public, no-cache` + ETag: a shop checking its own edit sees it on the
+    // next load (a 304 when nothing changed), and a crowd scanning one table
+    // card is served from the menu cache, not a query storm.
+    let (entry, stored) = match (&cache, &key) {
+        (Some(c), Some(k)) => (c.put_entry(org_id, k, body).await, true),
+        _ => (std::sync::Arc::new(cache::CachedBody::new(body)), false),
+    };
+    Ok(cache::respond_as(&req, entry, cache::PUBLIC, stored).await)
 }

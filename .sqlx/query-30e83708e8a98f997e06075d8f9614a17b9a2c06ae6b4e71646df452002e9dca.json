@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id AS \"id!\", s.menu_item_id AS \"menu_item_id!\",\n                      s.addon_type AS \"addon_type!\", s.label,\n                      s.label_translations AS \"label_translations!\",\n                      s.is_required AS \"is_required!\", s.min_selections AS \"min_selections!\",\n                      s.max_selections, s.created_at AS \"created_at!\"\n                 FROM unnest($1::uuid[]) AS m(id)\n                 CROSS JOIN LATERAL (\n                      SELECT id, menu_item_id, addon_type, label, label_translations, is_required,\n                             min_selections, max_selections, created_at\n                        FROM compat.menu_item_addon_slots\n                       WHERE menu_item_id = m.id\n                       ORDER BY created_at ASC) s",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "menu_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "addon_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "label_translations!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_required!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "min_selections!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "max_selections",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "30e83708e8a98f997e06075d8f9614a17b9a2c06ae6b4e71646df452002e9dca"
+}

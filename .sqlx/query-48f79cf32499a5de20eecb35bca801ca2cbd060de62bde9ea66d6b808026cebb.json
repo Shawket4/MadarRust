@@ -1,0 +1,94 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id AS \"id!\", menu_item_id AS \"menu_item_id!\", name AS \"name!\",\n                      name_translations AS \"name_translations!\", price AS \"price!\",\n                      org_ingredient_id, ingredient_name, ingredient_unit,\n                      quantity_used AS \"quantity_used: sqlx::types::BigDecimal\",\n                      size_label::text AS size_label,\n                      is_active AS \"is_active!\", created_at AS \"created_at!\",\n                      updated_at AS \"updated_at!\"\n                 FROM compat.menu_item_optional_fields\n                WHERE menu_item_id = ANY($1) AND is_active = true\n                ORDER BY menu_item_id, name ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "menu_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "name_translations!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "price!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "org_ingredient_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "ingredient_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "ingredient_unit",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "quantity_used: sqlx::types::BigDecimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 9,
+        "name": "size_label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "48f79cf32499a5de20eecb35bca801ca2cbd060de62bde9ea66d6b808026cebb"
+}

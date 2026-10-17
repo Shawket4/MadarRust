@@ -240,6 +240,10 @@ pub async fn project(
         }
         "menu_item" => {
             let items = crate::menu::catalog_sync::sync_items_by_ids(&mut *conn, org_id, branch_id, ids).await?;
+            // Per-channel prices: only where a delivery channel resolves a size or an
+            // option differently from the in-store price (TILLS_VERIFICATION gap),
+            // measured against the in-store items just built.
+            let mut channel_prices = crate::menu::catalog_sync::sync_channel_prices_for(&mut *conn, branch_id, &items).await?;
             let mut out = keyed(items, &[]);
             // Option recipes are the preview's business, not the till's (35% of the
             // old catalog body).
@@ -264,9 +268,6 @@ pub async fn project(
                     m.insert("image_hash".into(), json!(h));
                 }
             }
-            // Per-channel prices: only where a delivery channel resolves a size or an
-            // option differently from the in-store price above (TILLS_VERIFICATION gap).
-            let mut channel_prices = crate::menu::catalog_sync::sync_channel_prices_by_ids(&mut *conn, org_id, branch_id, ids).await?;
             for (id, v) in out.iter_mut() {
                 if let Value::Object(m) = v {
                     m.insert("channel_prices".into(), channel_prices.remove(id).unwrap_or_else(|| json!({})));

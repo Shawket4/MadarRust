@@ -463,12 +463,63 @@ pub async fn lint_org(pool: &PgPool, org_id: Uuid) -> Result<Vec<LintIssue>, App
     lint_org_group(pool, org_id, None).await
 }
 
+/// The last full lint of each org, under the menu fingerprint it was run at.
+///
+/// Every rule reads catalogue tables only, all of which bump the org's
+/// `catalog_revision` on write (and `org_ingredients.updated_at` covers the
+/// ingredient columns outside that trigger), so [`crate::menu::cache::fingerprint`]
+/// — read from the database on every call, hence safe across instances —
+/// names the catalogue a lint saw. The studio preview asks for the lint on
+/// every debounced edit and `/menu/lint` on every page open; between catalogue
+/// writes they now cost one fingerprint query instead of every rule.
+/// `MENU_CACHE_TTL_SECS=0` (the menu cache off) turns this off too.
+static LINTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, (String, std::sync::Arc<Vec<LintIssue>>)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn lint_cache_on() -> bool {
+    std::env::var("MENU_CACHE_TTL_SECS").ok().as_deref() != Some("0")
+}
+
+async fn lint_all(pool: &PgPool, org_id: Uuid) -> Result<std::sync::Arc<Vec<LintIssue>>, AppError> {
+    let key = if lint_cache_on() {
+        let fp = crate::menu::cache::fingerprint(pool, org_id).await?;
+        let lints = LINTS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, v)) = lints.get(&org_id)
+            && *k == fp
+        {
+            return Ok(v.clone());
+        }
+        Some(fp)
+    } else {
+        None
+    };
+    let all = std::sync::Arc::new(run_rules(pool, org_id).await?);
+    if let Some(fp) = key {
+        LINTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(org_id, (fp, all.clone()));
+    }
+    Ok(all)
+}
+
 /// [`lint_org`] restricted to findings about one modifier group (`group_id = gid`).
 pub async fn lint_org_group(
     pool: &PgPool,
     org_id: Uuid,
     group_id: Option<Uuid>,
 ) -> Result<Vec<LintIssue>, AppError> {
+    let all = lint_all(pool, org_id).await?;
+    Ok(all
+        .iter()
+        .filter(|i| group_id.is_none() || i.group_id == group_id)
+        .cloned()
+        .collect())
+}
+
+/// Every rule, in order, over the database.
+async fn run_rules(pool: &PgPool, org_id: Uuid) -> Result<Vec<LintIssue>, AppError> {
     let mut out = Vec::new();
     for rule in RULES {
         let rows: Vec<Row> = sqlx::query_as(rule.sql)
@@ -477,7 +528,6 @@ pub async fn lint_org_group(
             .await?;
         out.extend(
             rows.into_iter()
-                .filter(|row| group_id.is_none() || row.5 == group_id)
                 .map(
                     |(entity_id, entity_name, size_label, message, item_id, group_id)| LintIssue {
                         rule: rule.id.to_string(),

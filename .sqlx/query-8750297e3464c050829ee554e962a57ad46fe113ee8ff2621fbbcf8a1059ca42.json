@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT x.mimg_id, array_agg(x.option_id ORDER BY x.sort, x.option_id) AS \"ids!\"\n                     FROM menu_item_modifier_group_options x\n                    WHERE x.mimg_id = ANY($1) GROUP BY x.mimg_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mimg_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "ids!",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "8750297e3464c050829ee554e962a57ad46fe113ee8ff2621fbbcf8a1059ca42"
+}

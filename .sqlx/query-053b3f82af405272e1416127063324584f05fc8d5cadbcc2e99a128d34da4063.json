@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.id AS \"menu_item_id!\", r.org_ingredient_id,\n                      r.quantity_used AS \"quantity_used!: sqlx::types::BigDecimal\",\n                      r.ingredient_name AS \"ingredient_name!\", r.ingredient_unit AS \"ingredient_unit!\",\n                      r.category AS \"category!\", r.size_label AS \"size_label!\", r.yield_pct\n                 FROM unnest($1::uuid[]) AS m(id)\n                 CROSS JOIN LATERAL (\n                      SELECT r.org_ingredient_id, r.quantity_used,\n                             r.ingredient_name, r.ingredient_unit,\n                             (SELECT ic.slug FROM ingredient_categories ic WHERE ic.id = i.category_id) as category,\n                             r.size_label::text AS size_label,\n                             i.yield_pct::float8 AS yield_pct\n                        FROM compat.menu_item_recipes r\n                        LEFT JOIN org_ingredients i ON i.id = r.org_ingredient_id\n                       WHERE r.menu_item_id = m.id\n                      OFFSET 0) r",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "menu_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "org_ingredient_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "quantity_used!: sqlx::types::BigDecimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 3,
+        "name": "ingredient_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "ingredient_unit!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "category!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "size_label!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "yield_pct",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      true,
+      true,
+      true,
+      null,
+      true,
+      null
+    ]
+  },
+  "hash": "053b3f82af405272e1416127063324584f05fc8d5cadbcc2e99a128d34da4063"
+}

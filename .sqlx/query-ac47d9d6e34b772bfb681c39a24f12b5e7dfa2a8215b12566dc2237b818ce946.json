@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ch.c AS \"channel!\", s.id,\n                      COALESCE(o.bc_price, o.b_price, o.c_price, s.price) AS \"price!\",\n                      COALESCE(o.bc_avail, o.b_avail, o.c_avail, TRUE) AS \"is_available!\"\n                 FROM unnest($3::text[]) AS ch(c)\n                 CROSS JOIN menu_item_sizes s\n                 LEFT JOIN LATERAL (\n                      SELECT max(x.price) FILTER (WHERE x.scope = 'branch_channel') AS bc_price,\n                             max(x.price) FILTER (WHERE x.scope = 'branch')         AS b_price,\n                             max(x.price) FILTER (WHERE x.scope = 'channel')        AS c_price,\n                             bool_or(x.is_available) FILTER (WHERE x.scope = 'branch_channel') AS bc_avail,\n                             bool_or(x.is_available) FILTER (WHERE x.scope = 'branch')         AS b_avail,\n                             bool_or(x.is_available) FILTER (WHERE x.scope = 'channel')        AS c_avail\n                        FROM menu_price_overrides x\n                       WHERE x.target_type = 'menu_item_size' AND x.target_id = s.id\n                         AND ((x.scope = 'branch_channel' AND x.branch_id = $2\n                               AND x.channel = ch.c::delivery_channel)\n                           OR (x.scope = 'branch' AND x.branch_id = $2)\n                           OR (x.scope = 'channel' AND x.channel = ch.c::delivery_channel))) o ON true\n                WHERE s.id = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "price!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_available!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "ac47d9d6e34b772bfb681c39a24f12b5e7dfa2a8215b12566dc2237b818ce946"
+}

@@ -102,9 +102,21 @@ impl CachedBody {
             return Some(b.clone());
         }
         let me = self.clone();
-        let out = actix_web::web::block(move || compress(coding, &me.body))
-            .await
-            .ok()??;
+        let out = actix_web::web::block(move || {
+            let t = std::time::Instant::now();
+            let out = compress(coding, &me.body);
+            tracing::debug!(
+                target: "madar::menu_build",
+                coding,
+                bytes = me.body.len(),
+                compressed = out.as_ref().map_or(0, |b| b.len()),
+                compress_us = t.elapsed().as_micros() as u64,
+                "stored coding"
+            );
+            out
+        })
+        .await
+        .ok()??;
         self.encoded
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -139,6 +151,32 @@ pub async fn respond(
     req: &actix_web::HttpRequest,
     entry: Arc<CachedBody>,
 ) -> actix_web::HttpResponse {
+    respond_as(req, entry, PRIVATE, true).await
+}
+
+/// `Cache-Control` of a till's menu: only the caller may keep it, and it
+/// revalidates (ETag) before every use.
+pub const PRIVATE: &str = "private, no-cache";
+
+/// `Cache-Control` of a public menu (`/public/menu-display`, the dine-in table
+/// menu): anyone may keep it, but must revalidate before every use, so an
+/// edit is never hidden behind a max-age; the ETag makes that revalidation a
+/// bodiless 304. The server side is the menu cache, keyed on the database
+/// fingerprint ([`public_fingerprint`]), so a crowd scanning one table card
+/// costs one build per edit, on any instance.
+pub const PUBLIC: &str = "public, no-cache";
+
+/// [`respond`] with the given `Cache-Control`. `stored`: serve the entry's
+/// stored codings (a body that lives in the cache, compressed once at the
+/// stored level). `false` for a body built for this one response: it goes out
+/// plain and the `Compress` middleware encodes it at its cheap per-response
+/// level, as every dynamic body is.
+pub async fn respond_as(
+    req: &actix_web::HttpRequest,
+    entry: Arc<CachedBody>,
+    cache_control: &'static str,
+    stored: bool,
+) -> actix_web::HttpResponse {
     use actix_web::http::header;
     let held = req
         .headers()
@@ -148,14 +186,15 @@ pub async fn respond(
     if held {
         return actix_web::HttpResponse::NotModified()
             .insert_header((header::ETAG, entry.etag.clone()))
-            .insert_header((header::CACHE_CONTROL, "private, no-cache"))
+            .insert_header((header::CACHE_CONTROL, cache_control))
             .finish();
     }
     let mut res = actix_web::HttpResponse::Ok();
     res.content_type("application/json")
         .insert_header((header::ETAG, entry.etag.clone()))
-        .insert_header((header::CACHE_CONTROL, "private, no-cache"));
-    if let Some(coding) = negotiated(req)
+        .insert_header((header::CACHE_CONTROL, cache_control));
+    if stored
+        && let Some(coding) = negotiated(req)
         && let Some(body) = entry.encoded(coding).await
     {
         res.insert_header((header::CONTENT_ENCODING, coding))
@@ -355,18 +394,71 @@ pub async fn fingerprint(pool: &sqlx::PgPool, org: Uuid) -> Result<String, sqlx:
              (SELECT max(updated_at) FROM org_ingredients WHERE org_id = $1) AS ingredients,
              (SELECT max(updated_at) FROM asset_jobs WHERE org_id = $1) AS assets,
              (SELECT max(updated_at) FROM recipe_step_presets) AS presets,
-             (now() AT TIME ZONE 'UTC')::date AS "day!""#,
+             (now() AT TIME ZONE 'UTC')::date AS "day!",
+             -- The database, so a key never matches another database's
+             -- (process-global users of this key, e.g. the lint cache).
+             current_database()::text AS "db!""#,
         org
     )
     .fetch_one(pool)
     .await?;
     let t = |v: Option<chrono::DateTime<chrono::Utc>>| v.map_or(0, |t| t.timestamp_micros());
     Ok(format!(
-        "{}.{}.{}.{}.{}",
+        "{}.{}.{}.{}.{}.{}",
         r.rev,
         t(r.ingredients),
         t(r.assets),
         t(r.presets),
-        r.day
+        r.day,
+        r.db
+    ))
+}
+
+/// Everything a cached PUBLIC menu body depends on, in one query: what
+/// [`fingerprint`] covers for the till's menu (the catalogue — items, sizes,
+/// groups, options, recipes, branch and channel overrides, combos, deals and
+/// sale windows all bump `catalog_revision` — ingredient yields, asset jobs and
+/// the UTC date that moves signed image URLs), plus what only the public pages
+/// read:
+/// * the organization row (name, slug, branding, colours, plan, timezone,
+///   active) and the org's branch rows (which branch the page shows, its name,
+///   its timezone, open or not), each as a hash of the whole row, so no
+///   `updated_at` discipline is assumed;
+/// * the `org_links_pages` row (the menu-display switch, titles, branch pick);
+/// * the clock, ONLY for an org with sale windows (combos and deals on sale
+///   "now"): the current minute, as windows open and close on whole minutes
+///   — down to the microsecond if any window boundary has seconds.
+///
+/// A public page is open to anyone, so its key never trusts this process's
+/// memory alone: every read runs this on the database, which is what makes the
+/// cache safe across instances (a write on another instance changes a row
+/// here before its commit returns).
+pub async fn public_fingerprint(pool: &sqlx::PgPool, org: Uuid) -> Result<String, sqlx::Error> {
+    let base = fingerprint(pool, org).await?;
+    let r = sqlx::query!(
+        r#"SELECT
+             (SELECT md5(o::text) FROM organizations o WHERE o.id = $1) AS org_row,
+             (SELECT md5(string_agg(b::text, ',' ORDER BY b.id)) FROM branches b
+               WHERE b.org_id = $1) AS branch_rows,
+             (SELECT md5(p::text) FROM org_links_pages p WHERE p.org_id = $1) AS page_row,
+             CASE WHEN EXISTS (SELECT 1 FROM sale_windows w WHERE w.org_id = $1)
+                  THEN to_char(now() AT TIME ZONE 'UTC', 'YYYYMMDDHH24MI')
+                       || CASE WHEN EXISTS (
+                               SELECT 1 FROM sale_windows w
+                                WHERE w.org_id = $1
+                                  AND (extract(second FROM w.starts_at) <> 0
+                                    OR extract(second FROM w.ends_at) <> 0))
+                          THEN to_char(clock_timestamp(), 'SS.US') ELSE '' END
+                  ELSE '' END AS "clock!""#,
+        org
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(format!(
+        "{base}.{}.{}.{}.{}",
+        r.org_row.unwrap_or_default(),
+        r.branch_rows.unwrap_or_default(),
+        r.page_row.unwrap_or_default(),
+        r.clock
     ))
 }

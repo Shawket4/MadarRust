@@ -253,20 +253,46 @@ async fn live_bill(pool: &PgPool, table_id: Uuid) -> Result<Option<PublicTableBi
 #[utoipa::path(get, path = "/public/tables/{id}/menu", tag = "open_tickets",
     operation_id = "public_table_menu",
     params(("id" = Uuid, Path, description = "Table ID, from the QR")),
-    responses((status = 200, body = crate::delivery::public::DeliveryMenu), AppErrorResponse))]
+    responses((status = 200, description = "The menu. Carries an `ETag` and `Cache-Control: public, no-cache`.", body = crate::delivery::public::DeliveryMenu),
+              (status = 304, description = "`If-None-Match` held the current menu's ETag. No body."),
+              AppErrorResponse))]
 pub async fn table_menu(
+    req: actix_web::HttpRequest,
     pdb: crate::db::PublicDb,
+    cache: Option<web::Data<crate::menu::cache::MenuCache>>,
     id: web::Path<Uuid>,
 ) -> Result<HttpResponse, AppError> {
+    use crate::menu::cache;
     let (branch_id, org_id) = pdb
         .table_branch_org(*id)
         .await?
         .ok_or_else(|| AppError::NotFound("No table at that code".into()))?;
     crate::plan::public_gate_org(pdb.resolver(), org_id, madar_plan::Feature::Floor).await?;
     let pool = pdb.scoped(org_id).await;
+    // The body is the branch's dine-in menu, the same for every table of the
+    // branch: cached per (org, branch) under the public fingerprint, and served
+    // pre-compressed. The table and plan checks above run on every request.
+    let key = match &cache {
+        Some(c) if c.usable(pool.get_ref()).await => Some(format!(
+            "pub|table|{}|{branch_id}",
+            cache::public_fingerprint(pool.get_ref(), org_id).await?
+        )),
+        _ => None,
+    };
+    let cache = cache.filter(|_| key.is_some());
+    if let (Some(c), Some(k)) = (&cache, &key)
+        && let Some(entry) = c.get_entry(org_id, k).await
+    {
+        return Ok(cache::respond_as(&req, entry, cache::PUBLIC, true).await);
+    }
     let menu =
         crate::delivery::public::load_public_menu(pool.get_ref(), org_id, branch_id, None).await?;
-    Ok(HttpResponse::Ok().json(menu))
+    let body = web::Bytes::from(serde_json::to_vec(&menu).map_err(|_| AppError::Internal)?);
+    let (entry, stored) = match (&cache, &key) {
+        (Some(c), Some(k)) => (c.put_entry(org_id, k, body).await, true),
+        _ => (std::sync::Arc::new(cache::CachedBody::new(body)), false),
+    };
+    Ok(cache::respond_as(&req, entry, cache::PUBLIC, stored).await)
 }
 
 /// Send this table's order to the kitchen.
