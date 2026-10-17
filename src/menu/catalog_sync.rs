@@ -378,36 +378,47 @@ async fn load_sizes(
 
     // effective_price = COALESCE(bc.price, b.price, c.price, s.price)
     // effective_avail = COALESCE(bc.is_available, b.is_available, c.is_available, TRUE)
-    let rows: Vec<(Uuid, Uuid, String, i32, bool)> = sqlx::query_as(
-        "SELECT s.menu_item_id, s.id, s.label, \
-                COALESCE(bc.price, b.price, c.price, s.price) AS price, \
-                COALESCE(bc.is_available, b.is_available, c.is_available, TRUE) AS is_available \
-         FROM menu_item_sizes s \
-         LEFT JOIN menu_price_overrides bc \
-                ON bc.target_type = 'menu_item_size' AND bc.target_id = s.id \
-               AND bc.scope = 'branch_channel' AND bc.branch_id = $2 \
-               AND bc.channel = $3::delivery_channel \
-         LEFT JOIN menu_price_overrides b \
-                ON b.target_type = 'menu_item_size' AND b.target_id = s.id \
-               AND b.scope = 'branch' AND b.branch_id = $2 \
-         LEFT JOIN menu_price_overrides c \
-                ON c.target_type = 'menu_item_size' AND c.target_id = s.id \
-               AND c.scope = 'channel' AND c.channel = $3::delivery_channel \
-         WHERE s.menu_item_id = ANY($1) AND s.is_active = true \
-         ORDER BY s.menu_item_id, s.sort, s.label",
+    //
+    // The three overrides come from ONE lateral probe per size (each scope has
+    // at most one row per size for a given branch/channel: the partial unique
+    // indexes), always an index lookup on (target_type, target_id). As three
+    // LEFT JOINs the plan hung on the sizes' row estimate, which the flat RLS
+    // predicate makes 1 for any tenant (1/n_distinct of org_id): the planner
+    // then re-scanned the whole override table once per size (k6 2026-10-17:
+    // 1.05 -> 1.50 ms per call; 1.38 -> 0.53 ms at 1,900 shops with this).
+    let rows = sqlx::query!(
+        r#"SELECT s.menu_item_id, s.id, s.label,
+                  COALESCE(o.bc_price, o.b_price, o.c_price, s.price) AS "price!",
+                  COALESCE(o.bc_avail, o.b_avail, o.c_avail, TRUE) AS "is_available!"
+             FROM menu_item_sizes s
+             LEFT JOIN LATERAL (
+                  SELECT max(x.price) FILTER (WHERE x.scope = 'branch_channel') AS bc_price,
+                         max(x.price) FILTER (WHERE x.scope = 'branch')         AS b_price,
+                         max(x.price) FILTER (WHERE x.scope = 'channel')        AS c_price,
+                         bool_or(x.is_available) FILTER (WHERE x.scope = 'branch_channel') AS bc_avail,
+                         bool_or(x.is_available) FILTER (WHERE x.scope = 'branch')         AS b_avail,
+                         bool_or(x.is_available) FILTER (WHERE x.scope = 'channel')        AS c_avail
+                    FROM menu_price_overrides x
+                   WHERE x.target_type = 'menu_item_size' AND x.target_id = s.id
+                     AND ((x.scope = 'branch_channel' AND x.branch_id = $2
+                           AND x.channel = $3::text::delivery_channel)
+                       OR (x.scope = 'branch' AND x.branch_id = $2)
+                       OR (x.scope = 'channel' AND x.channel = $3::text::delivery_channel))) o ON true
+            WHERE s.menu_item_id = ANY($1) AND s.is_active = true
+            ORDER BY s.menu_item_id, s.sort, s.label"#,
+        item_ids,
+        branch_id,
+        channel,
     )
-    .bind(item_ids)
-    .bind(branch_id)
-    .bind(channel)
     .fetch_all(&mut *conn)
     .await?;
 
-    for (menu_item_id, id, label, price, is_available) in rows {
-        map.entry(menu_item_id).or_default().push(SyncSize {
-            id,
-            label,
-            price,
-            is_available,
+    for r in rows {
+        map.entry(r.menu_item_id).or_default().push(SyncSize {
+            id: r.id,
+            label: r.label,
+            price: r.price,
+            is_available: r.is_available,
         });
     }
     Ok(map)
@@ -626,63 +637,48 @@ async fn load_group_options(
         return Ok((by_group, std::collections::HashMap::new(), Vec::new()));
     }
 
-    // Options with price/availability resolved (same COALESCE shape as sizes, but
-    // target_type='modifier_option' and default price = mo.price).
-    let opt_rows: Vec<(
-        Uuid,
-        Uuid,
-        String,
-        serde_json::Value,
-        i32,
-        bool,
-        Option<Uuid>,
-        bool,
-    )> = sqlx::query_as(
-        "SELECT mo.group_id, mo.id, mo.name, mo.name_translations, \
-                COALESCE(bc.price, b.price, c.price, mo.price) AS price, \
-                COALESCE(bc.is_available, b.is_available, c.is_available, TRUE) AS is_available, \
-                mo.replaces_ingredient_id, mo.is_default \
-         FROM modifier_options mo \
-         LEFT JOIN menu_price_overrides bc \
-                ON bc.target_type = 'modifier_option' AND bc.target_id = mo.id \
-               AND bc.scope = 'branch_channel' AND bc.branch_id = $2 \
-               AND bc.channel = $3::delivery_channel \
-         LEFT JOIN menu_price_overrides b \
-                ON b.target_type = 'modifier_option' AND b.target_id = mo.id \
-               AND b.scope = 'branch' AND b.branch_id = $2 \
-         LEFT JOIN menu_price_overrides c \
-                ON c.target_type = 'modifier_option' AND c.target_id = mo.id \
-               AND c.scope = 'channel' AND c.channel = $3::delivery_channel \
-         WHERE mo.group_id = ANY($1) AND mo.is_active = true \
-         ORDER BY mo.group_id, mo.sort, mo.name",
+    // Options with price/availability resolved (same COALESCE shape and the
+    // same one-probe lateral as sizes, but target_type='modifier_option' and
+    // default price = mo.price).
+    let opt_rows = sqlx::query!(
+        r#"SELECT mo.group_id, mo.id, mo.name, mo.name_translations,
+                  COALESCE(o.bc_price, o.b_price, o.c_price, mo.price) AS "price!",
+                  COALESCE(o.bc_avail, o.b_avail, o.c_avail, TRUE) AS "is_available!",
+                  mo.replaces_ingredient_id, mo.is_default
+             FROM modifier_options mo
+             LEFT JOIN LATERAL (
+                  SELECT max(x.price) FILTER (WHERE x.scope = 'branch_channel') AS bc_price,
+                         max(x.price) FILTER (WHERE x.scope = 'branch')         AS b_price,
+                         max(x.price) FILTER (WHERE x.scope = 'channel')        AS c_price,
+                         bool_or(x.is_available) FILTER (WHERE x.scope = 'branch_channel') AS bc_avail,
+                         bool_or(x.is_available) FILTER (WHERE x.scope = 'branch')         AS b_avail,
+                         bool_or(x.is_available) FILTER (WHERE x.scope = 'channel')        AS c_avail
+                    FROM menu_price_overrides x
+                   WHERE x.target_type = 'modifier_option' AND x.target_id = mo.id
+                     AND ((x.scope = 'branch_channel' AND x.branch_id = $2
+                           AND x.channel = $3::text::delivery_channel)
+                       OR (x.scope = 'branch' AND x.branch_id = $2)
+                       OR (x.scope = 'channel' AND x.channel = $3::text::delivery_channel))) o ON true
+            WHERE mo.group_id = ANY($1) AND mo.is_active = true
+            ORDER BY mo.group_id, mo.sort, mo.name"#,
+        group_ids,
+        branch_id,
+        channel,
     )
-    .bind(group_ids)
-    .bind(branch_id)
-    .bind(channel)
     .fetch_all(&mut *conn)
     .await?;
 
     let mut option_ids = Vec::with_capacity(opt_rows.len());
-    for (
-        group_id,
-        id,
-        name,
-        name_translations,
-        price,
-        is_available,
-        replaces_ingredient_id,
-        is_default,
-    ) in opt_rows
-    {
-        option_ids.push(id);
-        by_group.entry(group_id).or_default().push(RawOption {
-            id,
-            name,
-            name_translations,
-            price,
-            is_available,
-            replaces_ingredient_id,
-            is_default,
+    for r in opt_rows {
+        option_ids.push(r.id);
+        by_group.entry(r.group_id).or_default().push(RawOption {
+            id: r.id,
+            name: r.name,
+            name_translations: r.name_translations,
+            price: r.price,
+            is_available: r.is_available,
+            replaces_ingredient_id: r.replaces_ingredient_id,
+            is_default: r.is_default,
         });
     }
 

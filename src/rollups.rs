@@ -25,6 +25,22 @@ pub async fn after_till_close(pool: &PgPool, till_id: Uuid) {
     if let Err(e) = recompute_till(pool, till_id).await {
         tracing::warn!(target: "madar.rollups", %till_id, error = %e, "sales_daily recompute after till close failed");
     }
+    if let Err(e) = settle_till(pool, till_id).await {
+        tracing::warn!(target: "madar.rollups", %till_id, error = %e, "report rollups after till close failed");
+    }
+}
+
+/// The report rollups of a till's branch, brought up to date at its close
+/// (coverage advanced, its dirty days recomputed; the worker takes any rest).
+/// Returns how many days were recomputed.
+pub async fn settle_till(pool: &PgPool, till_id: Uuid) -> Result<i32, sqlx::Error> {
+    let n = sqlx::query_scalar!(
+        r#"SELECT sales_daily_settle_till($1) AS "n!""#,
+        till_id
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
 }
 
 /// Recompute every business day of `till_id`; returns how many days.
@@ -63,14 +79,17 @@ pub async fn sweep(pool: &PgPool) -> Result<i64, sqlx::Error> {
 /// What one report-rollup pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReportTick {
-    /// Closed days newly brought into coverage (each enters dirty).
+    /// Closed days newly brought into coverage (each enters dirty), plus
+    /// D-1 / D-2 marked for their catch-up recompute.
     pub days_covered: i64,
     /// Dirty days recomputed.
     pub days_recomputed: i64,
 }
 
 /// Extend every live branch's coverage over the days that closed more than
-/// `lag` ago, then recompute dirty days (at most `max_days`, in batches of 50,
+/// `lag` ago (never less than 30 minutes: the order write path relies on it,
+/// see migration 20261018310000), mark D-1 and D-2 for their catch-up
+/// recompute, then recompute dirty days (at most `max_days`, in batches of 50,
 /// one short transaction per batch). Idempotent: a second run right after
 /// does nothing.
 pub async fn report_tick(

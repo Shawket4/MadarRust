@@ -318,3 +318,223 @@ async fn the_rollup_tables_are_tenant_scoped(pool: PgPool) {
         assert_eq!(other, 0, "{t}");
     }
 }
+
+// ── maintenance stays off the order write path (k6 2026-10-17) ─────────────
+
+/// Replaces `sales_daily_mark` in this test's database with one that only
+/// logs its calls, so a test can count every dirty-mark any trigger makes.
+async fn log_marks(pool: &PgPool) {
+    sqlx::raw_sql(
+        "CREATE TABLE mark_log (branches uuid[], ats timestamptz[]);
+         GRANT INSERT ON mark_log TO madar_app;
+         CREATE OR REPLACE FUNCTION sales_daily_mark(p_branch uuid[], p_at timestamptz[])
+         RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = public AS
+         $fn$ INSERT INTO mark_log VALUES (p_branch, p_at) $fn$;",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn marks(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM mark_log")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// An org admin's token, their open till and a priced item, for `POST /orders`.
+async fn till_shop(pool: &PgPool, s: &Shop) -> (String, Uuid, Uuid) {
+    madar_rust::permissions::seeder::seed_role_permissions(pool).await.unwrap();
+    let admin = Uuid::new_v4();
+    sqlx::raw_sql(&format!(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active)
+              VALUES ('{org}', 'cash', '#000', 'x', true, true);
+         INSERT INTO users (id, org_id, name, email, password_hash, role)
+              VALUES ('{admin}', '{org}', 'Owner', '{admin}@t.com', 'h', 'org_admin');
+         INSERT INTO menu_items (id, org_id, name, category_id, base_price, is_active)
+              VALUES (md5('{org}latte')::uuid, '{org}', 'Latte', md5('{org}cat')::uuid, 5000, true);",
+        org = s.org,
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    let jwt = madar_rust::auth::jwt::create_token(
+        &madar_rust::auth::jwt::JwtSecret("secret".into()),
+        admin,
+        Some(s.org),
+        madar_rust::models::UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
+    let item: Uuid = sqlx::query_scalar("SELECT md5($1 || 'latte')::uuid")
+        .bind(s.org.to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let till: Uuid = sqlx::query_scalar(
+        "INSERT INTO tills (branch_id, teller_id, status, opening_cash) VALUES ($1, $2, 'open', 0) RETURNING id",
+    )
+    .bind(s.branch)
+    .bind(admin)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (jwt, till, item)
+}
+
+/// Creating an order (its INSERTs into orders, order_items, order_payments
+/// and the UPDATEs the create path makes) does no rollup work: no trigger
+/// gets as far as a dirty-mark, and no INSERT trigger of the rollups is left
+/// on the line, add-on or payment tables. A sale replayed into a closed day
+/// still marks it.
+#[sqlx::test]
+async fn order_create_does_no_rollup_work(pool: PgPool) {
+    use actix_web::{App, test, web};
+    let s = shop(&pool).await;
+    seed_history(&pool, &s).await;
+    tick(&pool).await;
+    let (jwt, till, item) = till_shop(&pool, &s).await;
+    log_marks(&pool).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(madar_rust::auth::jwt::JwtSecret("secret".into())))
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .configure(madar_rust::orders::routes::configure),
+    )
+    .await;
+    for qty in [1, 3] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/orders")
+                .insert_header(("Authorization", format!("Bearer {jwt}")))
+                .set_json(serde_json::json!({
+                    "branch_id": s.branch, "till_id": till, "payment_method": "cash",
+                    "items": [{ "menu_item_id": item, "quantity": qty }],
+                    "idempotency_key": Uuid::new_v4(),
+                }))
+                .to_request(),
+        )
+        .await;
+        let status = resp.status();
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert!(status.is_success(), "POST /orders → {status}: {body}");
+    }
+    let lines: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.till_id = $1",
+    )
+    .bind(till)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lines, 2, "both orders were booked");
+    assert_eq!(marks(&pool).await, 0, "order create made a rollup dirty-mark");
+    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM sales_daily_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(dirty, 0);
+
+    // No rollup INSERT trigger on the child tables; the orders one is a row
+    // trigger whose WHEN is false for a sale rung up now.
+    let ins: Vec<(String, String)> = sqlx::query_as(
+        "SELECT tgrelid::regclass::text, pg_get_triggerdef(oid) FROM pg_trigger
+          WHERE tgname LIKE 'sales_daily_%' AND NOT tgisinternal AND (tgtype & 4) <> 0
+            AND tgrelid::regclass::text IN ('orders', 'order_items', 'order_payments', 'order_item_addons')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ins.len(), 1, "{ins:?}");
+    assert_eq!(ins[0].0, "orders");
+    assert!(
+        ins[0].1.contains("FOR EACH ROW WHEN ((new.created_at < (now() - '00:30:00'::interval)))"),
+        "{}",
+        ins[0].1
+    );
+
+    // The control: the same log sees a sale replayed into day -3, and a void
+    // of an old sale.
+    let at = local_noon(&pool, &s, 3).await;
+    let late = sale(&pool, &s, at, "completed", 700, "Flat white", "card").await;
+    assert_eq!(marks(&pool).await, 1, "a late sale marks its day");
+    sqlx::query("UPDATE orders SET status = 'voided' WHERE id = $1")
+        .bind(late)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(marks(&pool).await >= 2, "a void of an old sale marks its day");
+}
+
+/// The coverage never reaches within 30 minutes of now, whatever lag a caller
+/// passes (the orders INSERT trigger's WHEN relies on it).
+#[sqlx::test]
+async fn coverage_keeps_a_30_minute_margin(pool: PgPool) {
+    let s = shop(&pool).await;
+    seed_history(&pool, &s).await;
+    tick(&pool).await;
+    let (through, expect): (chrono::NaiveDate, chrono::NaiveDate) = sqlx::query_as(
+        "SELECT c.through, ((now() - interval '30 minutes') AT TIME ZONE $2)::date - 1
+           FROM sales_daily_coverage c WHERE c.branch_id = $1",
+    )
+    .bind(s.branch)
+    .bind(&s.tz)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(through, expect);
+}
+
+/// Once D-2 is two hours closed, a rollup of it computed before then is
+/// recomputed one more time (a straggling writer); after that, nothing.
+#[sqlx::test]
+async fn the_catch_up_recomputes_d2_once_more(pool: PgPool) {
+    let s = shop(&pool).await;
+    seed_history(&pool, &s).await;
+    let at = local_noon(&pool, &s, 2).await;
+    sale(&pool, &s, at, "completed", 250, "Latte", "cash").await;
+    tick(&pool).await;
+    // As if D-2 had been computed an hour after it closed.
+    sqlx::query(
+        "UPDATE sales_daily_sold SET computed_at = ((business_date + 1)::timestamp AT TIME ZONE $2) + interval '1 hour'
+          WHERE branch_id = $1 AND business_date = (now() AT TIME ZONE $2)::date - 2",
+    )
+    .bind(s.branch)
+    .bind(&s.tz)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let t = tick(&pool).await;
+    assert_eq!((t.days_covered, t.days_recomputed), (1, 1), "{t:?}");
+    assert_eq!(tick(&pool).await, rollups::ReportTick::default(), "then nothing");
+    let (from, to) = dashboard_window(&pool, &s, 6).await;
+    assert_same(&pool, &s, Some(from), Some(to), "after catch-up").await;
+}
+
+/// A till close recomputes its branch's dirty days at once.
+#[sqlx::test]
+async fn a_till_close_settles_its_branch(pool: PgPool) {
+    let s = shop(&pool).await;
+    let ids = seed_history(&pool, &s).await;
+    tick(&pool).await;
+    sqlx::query("UPDATE orders SET status = 'voided' WHERE id = $1")
+        .bind(ids[4])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let at = local_noon(&pool, &s, 3).await + Duration::minutes(30);
+    sale(&pool, &s, at, "completed", 700, "Flat white", "card").await;
+    assert_eq!(rollups::settle_till(&pool, s.till).await.unwrap(), 2);
+    let dirty: i64 = sqlx::query_scalar("SELECT count(*) FROM sales_daily_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(dirty, 0);
+    assert_eq!(rollups::settle_till(&pool, s.till).await.unwrap(), 0, "idempotent");
+    let (from, to) = dashboard_window(&pool, &s, 6).await;
+    assert_same(&pool, &s, Some(from), Some(to), "after the close").await;
+}

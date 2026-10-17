@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.menu_item_id, s.id, s.label,\n                  COALESCE(o.bc_price, o.b_price, o.c_price, s.price) AS \"price!\",\n                  COALESCE(o.bc_avail, o.b_avail, o.c_avail, TRUE) AS \"is_available!\"\n             FROM menu_item_sizes s\n             LEFT JOIN LATERAL (\n                  SELECT max(x.price) FILTER (WHERE x.scope = 'branch_channel') AS bc_price,\n                         max(x.price) FILTER (WHERE x.scope = 'branch')         AS b_price,\n                         max(x.price) FILTER (WHERE x.scope = 'channel')        AS c_price,\n                         bool_or(x.is_available) FILTER (WHERE x.scope = 'branch_channel') AS bc_avail,\n                         bool_or(x.is_available) FILTER (WHERE x.scope = 'branch')         AS b_avail,\n                         bool_or(x.is_available) FILTER (WHERE x.scope = 'channel')        AS c_avail\n                    FROM menu_price_overrides x\n                   WHERE x.target_type = 'menu_item_size' AND x.target_id = s.id\n                     AND ((x.scope = 'branch_channel' AND x.branch_id = $2\n                           AND x.channel = $3::text::delivery_channel)\n                       OR (x.scope = 'branch' AND x.branch_id = $2)\n                       OR (x.scope = 'channel' AND x.channel = $3::text::delivery_channel))) o ON true\n            WHERE s.menu_item_id = ANY($1) AND s.is_active = true\n            ORDER BY s.menu_item_id, s.sort, s.label",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "menu_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "label",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "price!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "is_available!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "613294e5a8b0d980fbf9ec4621d93c8cb7e6eeccd2e1569e7173d3a182b89076"
+}

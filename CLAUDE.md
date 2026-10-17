@@ -294,7 +294,16 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   comparison add up `sales_daily_sold*` for whole closed, covered, clean days and
   compute the rest live (`sales_daily_plan`). Any write to a closed day marks the
   SALE's day dirty by trigger (orders, order_items, order_payments, order_refunds,
-  order_item_addons), so it is read live until the worker recomputes it. A new
+  order_item_addons), so it is read live until the worker recomputes it. **None
+  of that runs while an order is created** (k6 2026-10-17: it cost ~12 ms of
+  Postgres time per order): coverage stays 30+ minutes behind now, so the orders
+  INSERT trigger is a row trigger with `WHEN (NEW.created_at < now() - 30 min)`,
+  the UPDATE/DELETE statement triggers return before marking unless a row is
+  that old, and lines / add-ons / payments have NO insert trigger (they are only
+  inserted with their order, whose INSERT marks). Insert those rows anywhere
+  else and the day must be marked there. `report_rollups_tests::order_create_does_no_rollup_work`
+  pins it. Till close settles the branch (`sales_daily_settle_till`); the worker
+  also recomputes D-1/D-2 once more after they are two hours closed. A new
   figure in one of these reports needs a column in the rollup, its recompute, and
   a run of `report-rollup-reconcile`; a new table whose rows change those figures
   needs the dirty trigger. Verify on a copy: `scripts/verify_report_rollups.sh <db>`.
