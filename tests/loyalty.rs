@@ -1661,6 +1661,218 @@ async fn an_award_for_another_tenants_sale_is_refused(pool: PgPool) {
     assert_eq!(balance_of(&pool, member).await, 0);
 }
 
+// ── Award refusals carry a stable code, live and replayed ───────────────────
+
+/// Send one award request down BOTH doors — the live route and a queued op
+/// through `/sync/replay` — and return what each answered.
+async fn award_both_ways<S, B>(
+    app: &S,
+    jwt: &str,
+    teller: Uuid,
+    request: Value,
+) -> [(StatusCode, Value); 2]
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+    B: actix_web::body::MessageBody,
+{
+    let live = test::TestRequest::post()
+        .uri("/loyalty/award")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(request.clone())
+        .to_request();
+    let resp = test::call_service(app, live).await;
+    let a = (resp.status(), serde_json::from_slice(&test::read_body(resp).await).unwrap());
+    let queued = test::TestRequest::post()
+        .uri("/sync/replay")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "op": "award_loyalty_points", "teller_id": teller, "request": request
+        }))
+        .to_request();
+    let resp = test::call_service(app, queued).await;
+    let b = (resp.status(), serde_json::from_slice(&test::read_body(resp).await).unwrap());
+    [a, b]
+}
+
+fn assert_refusal(got: [(StatusCode, Value); 2], status: StatusCode, code: &str, error: &str) {
+    for (i, (st, body)) in got.iter().enumerate() {
+        let door = ["live", "replay"][i];
+        assert_eq!(*st, status, "{door}: {body}");
+        assert_eq!(body["code"], code, "{door}: {body}");
+        assert_eq!(body["error"], error, "{door}: text must not change: {body}");
+    }
+}
+
+#[sqlx::test]
+async fn every_award_refusal_has_its_own_code_on_both_doors(pool: PgPool) {
+    perms(&pool).await;
+    let org = seed_org(&pool).await;
+    let other = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Maadi").await;
+    let other_branch = seed_branch(&pool, other, "Theirs").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let their_teller = seed_user(&pool, other, "teller").await;
+    seed_cash_method(&pool, org).await;
+    seed_cash_method(&pool, other).await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    let their_shift = open_shift_row(&pool, other_branch, their_teller).await;
+    enable_program(&pool, org, 1000, 100, false).await;
+    enable_program(&pool, other, 1000, 100, false).await;
+    let member = seed_member(&pool, org, "201000000001", "Mcodetoken000000000001").await;
+    let item = seed_menu_item(&pool, org, "Feast", 13_000).await;
+    let their_item = seed_menu_item(&pool, other, "Theirs", 13_000).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+            .configure(madar_rust::orders::routes::configure)
+            .configure(madar_rust::loyalty::routes::configure)
+            .configure(madar_rust::sync::routes::configure),
+    )
+    .await;
+    let jwt = token(teller, org, UserRole::Teller, Some(branch));
+    let their_jwt = token(their_teller, other, UserRole::Teller, Some(other_branch));
+    let tok = "Mcodetoken000000000001";
+
+    // The sale has not reached the server.
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": Uuid::new_v4(), "token": tok
+        })).await,
+        StatusCode::NOT_FOUND,
+        "LOYALTY_SALE_NOT_ON_SERVER",
+        "Not found: That sale is not on the server yet",
+    );
+
+    // Another shop's sale. Row-level security hides it from the caller before
+    // `award_inner` ever sees it, so both doors answer exactly as they do for a
+    // sale that does not exist: nothing about the other org leaks.
+    let (their_order, _) = place_order(&app, &their_jwt, other_branch, their_shift, their_item).await;
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": their_order, "token": tok
+        })).await,
+        StatusCode::NOT_FOUND,
+        "LOYALTY_SALE_NOT_ON_SERVER",
+        "Not found: That sale is not on the server yet",
+    );
+    // The order-org check is the second line of defence, for a caller whose
+    // connection is not row-scoped (this test pool). Called directly it is a 404
+    // with the old words and its own code, and says nothing else.
+    {
+        use actix_web::ResponseError;
+        let body: madar_rust::loyalty::award::AwardRequest = serde_json::from_value(json!({
+            "branch_id": branch, "order_id": their_order, "token": tok
+        }))
+        .unwrap();
+        let err = madar_rust::loyalty::award::award_inner(&pool, body, None, Some(org))
+            .await
+            .unwrap_err();
+        let resp = err.error_response();
+        let status = resp.status();
+        let bytes = actix_web::body::to_bytes(resp.into_body()).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_refusal(
+            [(status, v.clone()), (status, v)],
+            StatusCode::NOT_FOUND,
+            "LOYALTY_SALE_OTHER_SHOP",
+            "Not found: Order not found",
+        );
+    }
+
+    // A card nobody holds.
+    let (o, _) = place_order(&app, &jwt, branch, shift, item).await;
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": o, "token": "Mnosuchtoken0000000001"
+        })).await,
+        StatusCode::NOT_FOUND,
+        "LOYALTY_CARD_NOT_MEMBER",
+        "Not found: No member for that card",
+    );
+
+    // A voided sale.
+    let (voided, _) = place_order(&app, &jwt, branch, shift, item).await;
+    sqlx::query(
+        "UPDATE orders SET voided_at = now(), voided_by = $2, status = 'voided', \
+                void_reason = 'customer_request' WHERE id = $1",
+    )
+    .bind(voided)
+    .bind(teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": voided, "token": tok
+        })).await,
+        StatusCode::CONFLICT,
+        "LOYALTY_SALE_VOIDED",
+        "Conflict: That sale was voided — it earns no points",
+    );
+
+    // Past the window.
+    let (aged, _) = place_order(&app, &jwt, branch, shift, item).await;
+    sqlx::query("UPDATE orders SET created_at = now() - interval '25 hours' WHERE id = $1")
+        .bind(aged)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": aged, "token": tok
+        })).await,
+        StatusCode::CONFLICT,
+        "LOYALTY_WINDOW_CLOSED",
+        "Conflict: the 24-hour window for adding points to this sale has closed",
+    );
+
+    // Post-dated, and back-dated to before the sale.
+    let (fresh, _) = place_order(&app, &jwt, branch, shift, item).await;
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": fresh, "token": tok,
+            "requested_at": (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339(),
+        })).await,
+        StatusCode::CONFLICT,
+        "LOYALTY_WINDOW_FUTURE",
+        "Conflict: that request is dated in the future",
+    );
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": fresh, "token": tok,
+            "requested_at": (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+        })).await,
+        StatusCode::CONFLICT,
+        "LOYALTY_WINDOW_BEFORE_SALE",
+        "Conflict: that request is dated before the sale",
+    );
+
+    // The programme switched off after the sale.
+    sqlx::query("UPDATE loyalty_settings SET enabled = false WHERE org_id = $1")
+        .bind(org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_refusal(
+        award_both_ways(&app, &jwt, teller, json!({
+            "branch_id": branch, "order_id": fresh, "token": tok
+        })).await,
+        StatusCode::CONFLICT,
+        "LOYALTY_PROGRAM_OFF",
+        "Conflict: The loyalty program is switched off for the branch that made this sale",
+    );
+
+    // None of it moved a point.
+    assert_eq!(balance_of(&pool, member).await, 0);
+}
+
 // ── Redemption: rewards covering lines of a cart ─────────────────────────────
 
 /// Place a sale that spends a balance on some of its lines.

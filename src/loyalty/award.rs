@@ -48,6 +48,37 @@ use crate::permissions::checker::check_permission;
 /// without leaving a sale open to being mined for points indefinitely.
 pub const AWARD_WINDOW_HOURS: i64 = 24;
 
+// Stable refusal codes in the `{error, code}` envelope. The till words them in
+// its own language and decides retry-or-stuck from them; the statuses and the
+// English `error` text are exactly what they were before the codes existed, so
+// a till that has never heard of a code behaves as it always did.
+pub const CODE_SALE_NOT_ON_SERVER: &str = "LOYALTY_SALE_NOT_ON_SERVER";
+pub const CODE_SALE_OTHER_SHOP: &str = "LOYALTY_SALE_OTHER_SHOP";
+pub const CODE_CARD_NOT_MEMBER: &str = "LOYALTY_CARD_NOT_MEMBER";
+pub const CODE_SALE_VOIDED: &str = "LOYALTY_SALE_VOIDED";
+pub const CODE_WINDOW_CLOSED: &str = "LOYALTY_WINDOW_CLOSED";
+pub const CODE_WINDOW_FUTURE: &str = "LOYALTY_WINDOW_FUTURE";
+pub const CODE_WINDOW_BEFORE_SALE: &str = "LOYALTY_WINDOW_BEFORE_SALE";
+pub const CODE_PROGRAM_OFF: &str = "LOYALTY_PROGRAM_OFF";
+
+/// A 409 with a code. The reason keeps the `Conflict: ` prefix the plain
+/// variant rendered, so the `error` text is byte-identical to before.
+fn refused(code: &'static str, reason: &str) -> AppError {
+    AppError::Refused {
+        code,
+        reason: format!("Conflict: {reason}"),
+    }
+}
+
+/// A coded 404, with the `Not found: ` prefix the plain variant rendered.
+fn not_found(code: &'static str, reason: &str) -> AppError {
+    AppError::Coded {
+        status: 404,
+        code,
+        reason: format!("Not found: {reason}"),
+    }
+}
+
 /// Tolerance for a till whose clock runs fast. Generous enough for ordinary
 /// drift, far too small to reach past the window.
 const FUTURE_SKEW_MINUTES: i64 = 5;
@@ -176,7 +207,7 @@ async fn load_order(
         // A till whose order has not drained yet lands here. The op stays
         // queued and is retried, which is why this is a 404 and not a
         // dead-letter: the order is coming.
-        AppError::NotFound("That sale is not on the server yet".into())
+        not_found(CODE_SALE_NOT_ON_SERVER, "That sale is not on the server yet")
     })?;
 
     // The sale's own lines. Read here rather than sent, so live checkout, a
@@ -232,16 +263,25 @@ pub fn window_check(
     order_created_at: DateTime<Utc>,
     requested_at: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> Result<(), String> {
+) -> Result<(), (&'static str, String)> {
     if requested_at > now + Duration::minutes(FUTURE_SKEW_MINUTES) {
-        return Err("that request is dated in the future".into());
+        return Err((
+            CODE_WINDOW_FUTURE,
+            "that request is dated in the future".into(),
+        ));
     }
     if requested_at < order_created_at {
-        return Err("that request is dated before the sale".into());
+        return Err((
+            CODE_WINDOW_BEFORE_SALE,
+            "that request is dated before the sale".into(),
+        ));
     }
     if requested_at - order_created_at > Duration::hours(AWARD_WINDOW_HOURS) {
-        return Err(format!(
-            "the {AWARD_WINDOW_HOURS}-hour window for adding points to this sale has closed"
+        return Err((
+            CODE_WINDOW_CLOSED,
+            format!(
+                "the {AWARD_WINDOW_HOURS}-hour window for adding points to this sale has closed"
+            ),
         ));
     }
     Ok(())
@@ -278,25 +318,30 @@ pub async fn award_inner(
     if let Some(org) = caller_org
         && order.org_id != org
     {
-        return Err(AppError::NotFound("Order not found".into()));
+        // Same 404 and same words as ever: the code names the refusal for the
+        // till, and nothing else about the other org's sale leaves the server.
+        return Err(not_found(CODE_SALE_OTHER_SHOP, "Order not found"));
     }
     if order.voided {
-        return Err(AppError::Conflict(
-            "That sale was voided — it earns no points".into(),
+        return Err(refused(
+            CODE_SALE_VOIDED,
+            "That sale was voided — it earns no points",
         ));
     }
 
     let now = Utc::now();
     let requested_at = body.requested_at.unwrap_or(now);
-    window_check(order.created_at, requested_at, now).map_err(AppError::Conflict)?;
+    window_check(order.created_at, requested_at, now)
+        .map_err(|(code, why)| refused(code, &why))?;
 
     // The ORDER's branch decides the rules, not the branch the request names: a
     // sale made at one branch keeps its own terms even if the card is presented
     // at another.
     let settings = load_effective(pool, order.org_id, order.branch_id).await?;
     if !settings.enabled {
-        return Err(AppError::Conflict(
-            "The loyalty program is switched off for the branch that made this sale".into(),
+        return Err(refused(
+            CODE_PROGRAM_OFF,
+            "The loyalty program is switched off for the branch that made this sale",
         ));
     }
 
@@ -419,7 +464,7 @@ async fn resolve_member(
     };
     match found {
         Some(m) if m.org_id == org_id => Ok(m),
-        _ => Err(AppError::NotFound("No member for that card".into())),
+        _ => Err(not_found(CODE_CARD_NOT_MEMBER, "No member for that card")),
     }
 }
 
@@ -443,16 +488,23 @@ mod tests {
 
     #[test]
     fn a_press_past_the_window_is_refused() {
-        let err = window_check(t(0), t(25), t(25)).unwrap_err();
+        let (code, err) = window_check(t(0), t(25), t(25)).unwrap_err();
+        assert_eq!(code, CODE_WINDOW_CLOSED);
         assert!(err.contains("24-hour window"), "{err}");
     }
 
     #[test]
     fn a_forged_timestamp_cannot_reach_outside_the_window() {
         // Backdating to before the sale, to make a stale press look fresh.
-        assert!(window_check(t(10), t(9), t(40)).is_err());
+        assert_eq!(
+            window_check(t(10), t(9), t(40)).unwrap_err().0,
+            CODE_WINDOW_BEFORE_SALE
+        );
         // Post-dating, to keep a window open past its close.
-        assert!(window_check(t(0), t(40), t(0)).is_err());
+        assert_eq!(
+            window_check(t(0), t(40), t(0)).unwrap_err().0,
+            CODE_WINDOW_FUTURE
+        );
     }
 
     #[test]
