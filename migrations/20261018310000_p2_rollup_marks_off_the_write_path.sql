@@ -52,11 +52,18 @@ BEGIN
         PERFORM sales_daily_mark(ARRAY[NEW.branch_id], ARRAY[NEW.created_at]);
         RETURN NULL;
     END IF;
-    IF TG_OP IN ('INSERT', 'UPDATE') AND EXISTS (SELECT 1 FROM new_rows WHERE created_at < v_old) THEN
-        PERFORM sales_daily_mark(array_agg(n.branch_id), array_agg(n.created_at)) FROM new_rows n;
+    -- Nested IFs, not one AND: a DELETE trigger has no new_rows (an UPDATE
+    -- has both), and naming a missing transition table is an error even in a
+    -- branch that would not run.
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        IF EXISTS (SELECT 1 FROM new_rows WHERE created_at < v_old) THEN
+            PERFORM sales_daily_mark(array_agg(n.branch_id), array_agg(n.created_at)) FROM new_rows n;
+        END IF;
     END IF;
-    IF TG_OP IN ('UPDATE', 'DELETE') AND EXISTS (SELECT 1 FROM old_rows WHERE created_at < v_old) THEN
-        PERFORM sales_daily_mark(array_agg(o.branch_id), array_agg(o.created_at)) FROM old_rows o;
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        IF EXISTS (SELECT 1 FROM old_rows WHERE created_at < v_old) THEN
+            PERFORM sales_daily_mark(array_agg(o.branch_id), array_agg(o.created_at)) FROM old_rows o;
+        END IF;
     END IF;
     RETURN NULL;
 END
