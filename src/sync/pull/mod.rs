@@ -164,7 +164,9 @@ fn coded(code: &'static str, reason: &str) -> AppError {
 
 #[utoipa::path(post, path = "/sync/pull", tag = "sync",
     params(PullQuery), request_body = PullRequest,
-    responses((status = 200, description = "Changefeed page, resync marker or full snapshot", body = PullResponse), AppErrorResponse),
+    responses((status = 200, description = "Changefeed page, resync marker or full snapshot. An idle incremental answer (nothing after `since`) carries an `ETag` when the request named a `protocol` or sent `If-None-Match`.", body = PullResponse),
+              (status = 304, description = "Opt-in: `If-None-Match` held the idle answer's ETag and nothing changed since. No body."),
+              AppErrorResponse),
     security(("bearer_jwt" = [])))]
 pub async fn pull(
     req: HttpRequest,
@@ -175,18 +177,56 @@ pub async fn pull(
     let claims = crate::tills::handlers::extract_claims(&req)?;
     let body = body.into_inner();
     crate::tills::handlers::require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
-    let org_id: Uuid =
-        sqlx::query_scalar("SELECT org_id FROM branches WHERE id = $1 AND deleted_at IS NULL")
-            .bind(body.branch_id)
-            .fetch_optional(pool.get_ref())
-            .await?
-            .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
+    let org_id = crate::authz::scope::branch_org(pool.get_ref(), body.branch_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Branch not found".into()))?;
     if claims.role != crate::models::UserRole::SuperAdmin && claims.org_id() != Some(org_id) {
         return Err(AppError::Forbidden(
             "Branch belongs to another organization".into(),
         ));
     }
-    let resp = pull_core(pool.get_ref(), org_id, &body, q.since).await?;
+    // OPT-A: a till already at the head of its feed is answered from memory
+    // (`fastpath`), and a till that sent `If-None-Match` with the idle
+    // answer's ETag gets a 304. Same body as the database path below.
+    let plain_incremental = q.since.is_some()
+        && body.types.is_none()
+        && body.ledger_page_size.is_none()
+        && body.snapshot_cursor.is_none();
+    if plain_incremental
+        && let Some(since) = q.since
+        && let Some(idle) = crate::fastpath::idle(org_id, body.branch_id, since)
+    {
+        let mut resp = PullResponse {
+            full: false,
+            since: Some(since),
+            next: Some(since),
+            has_more: false,
+            server_time: Utc::now().to_rfc3339(),
+            checksums: idle.checksums,
+            ..Default::default()
+        };
+        apply_protocol(&mut resp, body.protocol);
+        return Ok(respond(&req, &body, resp));
+    }
+    let cap = if plain_incremental {
+        crate::fastpath::capture(Some(body.branch_id), None)
+    } else {
+        None
+    };
+    let (resp, idle_until) =
+        pull_core_ex(pool.get_ref(), org_id, &body, q.since, cap.is_some()).await?;
+    if let (Some(cap), Some(until)) = (cap, idle_until) {
+        crate::fastpath::put_idle(
+            cap,
+            org_id,
+            body.branch_id,
+            crate::fastpath::Idle {
+                since: q.since.unwrap_or_default(),
+                checksums: resp.checksums.clone(),
+            },
+            until,
+        );
+    }
     // A till the Free plan switched off has now been TOLD (its own device row
     // came back with `plan_inactive`): from here a new sale it queues is refused
     // on replay (`plan::replay_verdict`).
@@ -203,7 +243,71 @@ pub async fn pull(
     {
         crate::plan::mark_till_told(pool.get_ref(), device).await?;
     }
-    Ok(HttpResponse::Ok().json(resp))
+    Ok(respond(&req, &body, resp))
+}
+
+/// "Nothing after `since`": no change, no further page, the cursor stays.
+fn is_idle(resp: &PullResponse, since: Option<i64>) -> bool {
+    since.is_some()
+        && !resp.full
+        && !resp.resync_required
+        && !resp.has_more
+        && resp.changes.is_empty()
+        && resp.next == since
+}
+
+/// The ETag of an idle answer: everything in it but `server_time`. Weak, as
+/// the body is also served compressed.
+fn idle_etag(resp: &PullResponse) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(format!(
+        "{:?}|{:?}|{:?}|",
+        resp.since, resp.protocol, resp.ledger_retention_hours
+    ));
+    for (ty, c) in &resp.checksums {
+        h.update(format!("{ty}={}:{};", c.count, c.checksum));
+    }
+    let hex: String = h.finalize()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("W/\"p-{hex}\"")
+}
+
+/// The response, with the opt-in ETag / 304 for an idle answer. A till that
+/// names no `protocol` and sends no `If-None-Match` gets exactly the old
+/// response: no ETag header, never a 304.
+fn respond(req: &HttpRequest, body: &PullRequest, resp: PullResponse) -> HttpResponse {
+    let inm = req
+        .headers()
+        .get(actix_web::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    let opted_in = body.protocol.is_some() || inm.is_some();
+    if !opted_in || !is_idle(&resp, resp.since) {
+        return HttpResponse::Ok().json(resp);
+    }
+    let etag = idle_etag(&resp);
+    let matches = inm.is_some_and(|v| v.split(',').any(|t| t.trim() == etag));
+    if matches {
+        return HttpResponse::NotModified()
+            .insert_header((actix_web::http::header::ETAG, etag))
+            .finish();
+    }
+    HttpResponse::Ok()
+        .insert_header((actix_web::http::header::ETAG, etag))
+        .json(resp)
+}
+
+/// Protocol fields only for a till that named a protocol: v1 is unchanged.
+fn apply_protocol(resp: &mut PullResponse, protocol: Option<u16>) {
+    if protocol.is_some() {
+        let p = crate::sync::protocol::negotiate(protocol);
+        resp.protocol = Some(p);
+        if p >= crate::sync::protocol::V2 {
+            resp.ledger_retention_hours = Some(sweeper::retention().num_hours());
+        }
+    }
 }
 
 /// Everything behind the route (tests call it directly).
@@ -213,6 +317,19 @@ pub async fn pull_core(
     body: &PullRequest,
     since: Option<i64>,
 ) -> Result<PullResponse, AppError> {
+    Ok(pull_core_ex(pool, org_id, body, since, false).await?.0)
+}
+
+/// [`pull_core`], plus — when `want_idle` and the answer is idle — the
+/// deadline its checksums hold until (`sync_idle_valid_until`, read in the
+/// same snapshot): `Some(None)` = no clock-based row on the branch.
+async fn pull_core_ex(
+    pool: &PgPool,
+    org_id: Uuid,
+    body: &PullRequest,
+    since: Option<i64>,
+    want_idle: bool,
+) -> Result<(PullResponse, Option<Option<chrono::DateTime<Utc>>>), AppError> {
     let types: Vec<String> = match &body.types {
         Some(t) => {
             if since.is_some() {
@@ -244,8 +361,14 @@ pub async fn pull_core(
             "`ledger_page_size` / `snapshot_cursor` are only valid for a full pull",
         ));
     }
+    let mut idle_until = None;
     let mut resp = match since {
-        Some(since) => incremental(pool, org_id, body.branch_id, since, limit).await,
+        Some(since) => {
+            let (resp, until) =
+                incremental(pool, org_id, body.branch_id, since, limit, want_idle).await?;
+            idle_until = until;
+            resp
+        }
         None => match body.ledger_page_size {
             Some(size) => {
                 full_paged(
@@ -256,20 +379,13 @@ pub async fn pull_core(
                     size.clamp(100, 10_000),
                     body.snapshot_cursor.clone(),
                 )
-                .await
+                .await?
             }
-            None => full(pool, org_id, body.branch_id, &types).await,
+            None => full(pool, org_id, body.branch_id, &types).await?,
         },
-    }?;
-    // Protocol fields only for a till that named a protocol: v1 is unchanged.
-    if body.protocol.is_some() {
-        let p = crate::sync::protocol::negotiate(body.protocol);
-        resp.protocol = Some(p);
-        if p >= crate::sync::protocol::V2 {
-            resp.ledger_retention_hours = Some(sweeper::retention().num_hours());
-        }
-    }
-    Ok(resp)
+    };
+    apply_protocol(&mut resp, body.protocol);
+    Ok((resp, idle_until))
 }
 
 async fn incremental(
@@ -278,28 +394,37 @@ async fn incremental(
     branch: Uuid,
     since: i64,
     limit: i64,
-) -> Result<PullResponse, AppError> {
+    want_idle: bool,
+) -> Result<(PullResponse, Option<Option<chrono::DateTime<Utc>>>), AppError> {
     let server_time = Utc::now().to_rfc3339();
+    // ONE pooled connection for the whole pull (round trips: each acquire of
+    // the shared tenant pool stamps the org on the connection first), and a
+    // pull never holds a second one (a pool of 5 would otherwise deadlock
+    // under 6 concurrent pulls).
+    let mut conn = pool.acquire().await?;
     let (purged, head): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE((SELECT purged_through_seq FROM sync_feed_watermarks WHERE branch_id = $1), 0), \
                 COALESCE((SELECT max(seq) FROM sync_changes WHERE branch_id = $1), 0)",
     )
     .bind(branch)
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     if since < purged || since > head {
-        return Ok(PullResponse {
-            resync_required: true,
-            since: Some(since),
-            server_time,
-            ..Default::default()
-        });
+        return Ok((
+            PullResponse {
+                resync_required: true,
+                since: Some(since),
+                server_time,
+                ..Default::default()
+            },
+            None,
+        ));
     }
     // Autocommit statement BEFORE reading (B1 amendment R-horizon).
     let horizon: i64 = sqlx::query_scalar("SELECT sync_safe_horizon($1, $2)")
         .bind(branch)
         .bind(since)
-        .fetch_one(pool)
+        .fetch_one(&mut *conn)
         .await?;
     let rows = sqlx::query(
         "SELECT seq, type, entity_id, op FROM sync_changes \
@@ -309,7 +434,7 @@ async fn incremental(
     .bind(since)
     .bind(horizon)
     .bind(limit + 1)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
     let has_more = rows.len() as i64 > limit;
     let rows: Vec<(i64, String, Uuid, String)> = rows
@@ -322,11 +447,10 @@ async fn incremental(
     } else {
         horizon
     };
+    let idle = rows.is_empty() && !has_more && next == since;
 
-    // Projections and checksums read one snapshot on ONE connection: a pull
-    // never holds a second pooled connection (a pool of 5 would otherwise
-    // deadlock under 6 concurrent pulls).
-    let mut tx = pool.begin().await?;
+    // Projections and checksums read one snapshot on the same connection.
+    let mut tx = sqlx::Acquire::begin(&mut *conn).await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
@@ -365,17 +489,32 @@ async fn incremental(
     } else {
         state_checksums(&mut tx, branch, ALL_TYPES, horizon).await?
     };
+    // The idle answer's clock deadline, in the checksums' own snapshot (the
+    // live gates read `now()`, the transaction's start, in both).
+    let idle_until = if want_idle && idle {
+        let until: Option<chrono::DateTime<Utc>> =
+            sqlx::query_scalar("SELECT sync_idle_valid_until($1)")
+                .bind(branch)
+                .fetch_one(&mut *tx)
+                .await?;
+        Some(until)
+    } else {
+        None
+    };
     tx.commit().await?;
-    Ok(PullResponse {
-        full: false,
-        since: Some(since),
-        next: Some(next),
-        has_more,
-        server_time,
-        changes,
-        checksums,
-        ..Default::default()
-    })
+    Ok((
+        PullResponse {
+            full: false,
+            since: Some(since),
+            next: Some(next),
+            has_more,
+            server_time,
+            changes,
+            checksums,
+            ..Default::default()
+        },
+        idle_until,
+    ))
 }
 
 async fn full(

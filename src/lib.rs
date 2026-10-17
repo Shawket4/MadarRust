@@ -34,6 +34,7 @@ pub mod demo;
 pub mod devices;
 pub mod discounts;
 pub mod errors;
+pub mod fastpath;
 pub mod floor_ops;
 pub mod geo;
 pub mod insights;

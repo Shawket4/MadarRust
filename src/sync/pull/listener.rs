@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use sqlx::PgPool;
-use sqlx::postgres::PgListener;
 use uuid::Uuid;
 
 use crate::realtime::event::{BranchEvent, Topic};
@@ -65,34 +64,8 @@ pub fn publish(hub: &BranchEventHub, branch: Uuid) {
     );
 }
 
+/// The LISTEN task (now shared with the read fast paths: `fastpath::listener`,
+/// which keeps this module's debounce and `sync.changed` publish).
 pub fn spawn(pool: PgPool, hub: BranchEventHub) {
-    crate::db::spawn(async move {
-        loop {
-            if let Err(e) = run(&pool, &hub).await {
-                tracing::warn!(error = %e, "sync LISTEN task restarting");
-            }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
-}
-
-async fn run(pool: &PgPool, hub: &BranchEventHub) -> Result<(), sqlx::Error> {
-    let mut listener = PgListener::connect_with(pool).await?;
-    listener.listen(CHANNEL).await?;
-    let mut debounce = Debouncer::default();
-    loop {
-        let next = tokio::time::timeout(Duration::from_millis(250), listener.recv()).await;
-        let now = Instant::now();
-        if let Ok(n) = next {
-            let n = n?;
-            if let Ok(branch) = Uuid::parse_str(n.payload())
-                && debounce.on_notify(branch, now)
-            {
-                publish(hub, branch);
-            }
-        }
-        for branch in debounce.due(now) {
-            publish(hub, branch);
-        }
-    }
+    crate::fastpath::listener::spawn(pool, hub)
 }

@@ -19,6 +19,10 @@ pub async fn effective(
     user_id: Uuid,
     branch: Option<Uuid>,
 ) -> Result<EffectiveSet, AppError> {
+    // From memory when the fast path knows the person's epoch: no connection.
+    if let Some(loaded) = super::load::cached(user_id).await {
+        return Ok(resolve_at_branch(&loaded, branch));
+    }
     let mut conn = pool.acquire().await?;
     effective_on(&mut conn, user_id, branch).await
 }
@@ -31,12 +35,16 @@ pub async fn effective_on(
     let Some(loaded) = super::load::load(conn, user_id).await? else {
         return Ok(EffectiveSet::default());
     };
+    Ok(resolve_at_branch(&loaded, branch))
+}
+
+fn resolve_at_branch(loaded: &super::load::Loaded, branch: Option<Uuid>) -> EffectiveSet {
     let b = branch.map(|b| b.to_string());
     let scope = match &b {
         Some(b) => Scope::Branch(b),
         None => Scope::Anywhere,
     };
-    Ok(loaded.resolve_at(scope, chrono::Utc::now().timestamp()))
+    loaded.resolve_at(scope, chrono::Utc::now().timestamp())
 }
 
 /// The caller's effective set; a super admin holds everything.

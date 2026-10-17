@@ -157,6 +157,17 @@ async fn raise_watermark(
     )
     .execute(&mut *conn)
     .await?;
+    // A cursor below the new watermark must now resync: every instance drops
+    // the branch's cached idle answer (`fastpath`), at commit. No device is
+    // nudged (that is the `sync_changes` channel).
+    sqlx::query!(
+        "SELECT pg_notify($1, $2)",
+        crate::fastpath::listener::PURGED,
+        branch.to_string()
+    )
+    .execute(&mut *conn)
+    .await?;
+    crate::fastpath::on_branch_changed(branch);
     Ok(())
 }
 
