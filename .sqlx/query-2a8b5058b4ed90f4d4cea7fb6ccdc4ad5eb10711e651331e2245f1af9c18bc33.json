@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO org_links_pages (org_id, menu_display_enabled, menu_display_title_en, menu_display_title_ar, menu_display_branch_id) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (org_id) DO UPDATE SET menu_display_enabled = EXCLUDED.menu_display_enabled, menu_display_title_en = EXCLUDED.menu_display_title_en, menu_display_title_ar = EXCLUDED.menu_display_title_ar, menu_display_branch_id = EXCLUDED.menu_display_branch_id, updated_at = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2a8b5058b4ed90f4d4cea7fb6ccdc4ad5eb10711e651331e2245f1af9c18bc33"
+}

@@ -289,6 +289,11 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
     ),
     (
         "GET",
+        "/public/menu-display",
+        "the shop's menu without prices (every plan; 404 unless the shop switched it on)",
+    ),
+    (
+        "GET",
         "/public/tenant-shell",
         "a shop page's HTML for nginx: the links page and menu that the public endpoints already serve",
     ),

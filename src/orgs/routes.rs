@@ -1,5 +1,8 @@
 use crate::{auth::middleware::JwtMiddleware, orgs::handlers, qr_card::handlers as qr_handlers};
-use actix_web::web;
+use actix_governor::Governor;
+use actix_web::{middleware::Condition, web};
+
+use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     // Outside the JWT scope on purpose: this is the first request a customer's
@@ -9,6 +12,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.route(
         "/public/orgs/links",
         web::get().to(super::links_page::public_links),
+    );
+    // The menu without prices: every plan, so per-IP limited like the other
+    // public menus (a table card in a busy shop is scanned all evening).
+    let menu_display_gov =
+        crate::rate_limit::route_governor(PeerIpOrLocalhost, "MENU_DISPLAY", "BROWSE");
+    cfg.service(
+        web::resource("/public/menu-display")
+            .wrap(Condition::new(
+                rate_limiting_enabled(),
+                Governor::new(&menu_display_gov),
+            ))
+            .route(web::get().to(super::menu_display::public_menu_display)),
     );
     cfg.route(
         "/public/orgs/favicon",
@@ -69,6 +84,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/{id}/links-page",
                 web::put().to(super::links_page::put_links_page),
+            )
+            .route(
+                "/{id}/links-page/menu-display",
+                web::get().to(super::menu_display::get_menu_display),
+            )
+            .route(
+                "/{id}/links-page/menu-display",
+                web::put().to(super::menu_display::put_menu_display),
             )
             .route("/{id}/links-qr", web::get().to(qr_handlers::org_links_qr)),
     );

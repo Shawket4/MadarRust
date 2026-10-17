@@ -121,6 +121,7 @@ rue.madar-pos.cloud/card/<token>     the member's own loyalty card
 rue.madar-pos.cloud/join/...          the counter QR's signup form
 rue.madar-pos.cloud/order/            ordering
 rue.madar-pos.cloud/order/menu        the read-only menu (optional ?branch=<id>)
+rue.madar-pos.cloud/menu              the menu WITHOUT prices, when the shop has it on
 rue.madar-pos.cloud/book/             table bookings
 ```
 
@@ -132,6 +133,16 @@ now encodes `/rewards`. A code printed earlier that encodes the bare root lands
 on the links page, whose Rewards button goes to the same sign-up.
 Wallet-pass URLs (`webServiceURL` and the images Google fetches) are
 untouched and still come from `PUBLIC_LOYALTY_BASE_URL` (section 5).
+
+**The menu without prices (2026-10-17)** is another route of the loyalty
+bundle: `/menu` on the shop host, and `loyalty.madar-pos.cloud/menu/<org id>`
+for a shop with no host of its own (every plan has it, Free included). Both are
+served by the `location /` that already serves the links page, so neither
+needed an nginx edit; the tenant shell (`Page::MenuDisplay`) answers `/menu`
+only while the shop has it switched on, and puts no price in its HTML. It reads
+`GET /public/menu-display?slug=|org_id=`, whose types carry no price field; its
+settings are `GET/PUT /orgs/{id}/links-page/menu-display` and its code is
+`GET /orgs/{id}/links-qr?target=menu_display`. It is never a links-page button.
 
 The links page is a route of the **loyalty bundle**, not a bundle of its own.
 `/`, `/rewards`, `/join/…` and `/card/<token>` are all client-side routes of the

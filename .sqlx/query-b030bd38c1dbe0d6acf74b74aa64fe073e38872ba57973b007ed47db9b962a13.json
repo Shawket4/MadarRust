@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT menu_display_enabled, menu_display_title_en, menu_display_title_ar,\n                  menu_display_branch_id\n             FROM org_links_pages WHERE org_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "menu_display_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "menu_display_title_en",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "menu_display_title_ar",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "menu_display_branch_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "b030bd38c1dbe0d6acf74b74aa64fe073e38872ba57973b007ed47db9b962a13"
+}

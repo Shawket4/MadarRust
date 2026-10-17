@@ -272,6 +272,13 @@ pub const ROUTE_LIMITS: &[RouteLimitDef] = &[
         guards: "per IP: the public delivery menu",
     },
     RouteLimitDef {
+        area: "MENU_DISPLAY",
+        limiter: "BROWSE",
+        burst: 60,
+        ms_per_request: 500,
+        guards: "per IP: the shop's menu without prices (GET /public/menu-display)",
+    },
+    RouteLimitDef {
         area: "DELIVERY",
         limiter: "QUOTE",
         burst: 20,
@@ -1000,6 +1007,8 @@ mod tests {
             ("TICKETS", "TABLE_INTAKE", 10, 6),
             ("INTEGRATIONS", "PARTNER", 30, 2),
             ("DELIVERY", "BROWSE", 30, 1),
+            // Added at the doubled numbers, like the public delivery menu.
+            ("MENU_DISPLAY", "BROWSE", 30, 1),
             ("DELIVERY", "QUOTE", 10, 6),
             ("DELIVERY", "OTP", 3, 30),
             ("DELIVERY", "INTAKE", 10, 6),

@@ -124,6 +124,7 @@ fn purpose_of(kind: &str) -> Option<&'static str> {
         "org_order" | "branch_order" | "table_order" => Some("Scan to order"),
         "order_track" => Some("Track your order"),
         "org_booking" | "branch_booking" => Some("Scan to book a table"),
+        "org_menu_display" => Some("Scan for the menu"),
         // Loyalty deliberately has NONE. The card is handed over at the
         // counter, or sits beside the till, where "scan to join our rewards"
         // reads as an advert for something the person is already doing — and a
@@ -286,6 +287,23 @@ pub(crate) fn org_links_url(shop: Option<&str>, _org_id: Uuid) -> Result<String,
              branding"
                 .into(),
         )),
+    }
+}
+
+/// Where the menu without prices lives on a shop's own host.
+const MENU_DISPLAY_PATH: &str = "/menu";
+
+/// The menu without prices (`orgs::menu_display`): `/menu` at the root of a
+/// shop's own host (the loyalty bundle serves it there, as it serves the links
+/// page), else the generic loyalty host's `/menu/<org id>` — the same bundle,
+/// with the shop named in the path the way `/join/org/<org id>` names it.
+///
+/// The shop's host follows [`links_page_origin`]: the page and its code are
+/// shown on the same editor as the links page, and must name the same host.
+pub(crate) async fn menu_display_url(pool: &PgPool, org_id: Uuid) -> Result<String, AppError> {
+    match links_page_origin(pool, org_id).await? {
+        Some(origin) => Ok(format!("{origin}{MENU_DISPLAY_PATH}")),
+        None => Ok(format!("{}{MENU_DISPLAY_PATH}/{org_id}", loyalty_base()?)),
     }
 }
 
@@ -1325,8 +1343,18 @@ pub async fn org_loyalty_qr(
 
 // ── GET /orgs/{id}/links-qr ──────────────────────────────────────────────────
 
+/// Which page a links-editor code opens.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LinksQrTarget {
+    /// Omitted: the links page itself (the paid `branding` feature).
+    /// `menu_display`: the menu without prices, which every plan has.
+    pub target: Option<String>,
+}
+
 /// The code for the shop's links page — the one address that leads to
-/// everything else (menu, ordering, rewards, bookings, socials).
+/// everything else (menu, ordering, rewards, bookings, socials) — or, with
+/// `target=menu_display`, for the menu without prices on the same editor.
 #[utoipa::path(
     get,
     path = "/orgs/{id}/links-qr",
@@ -1334,6 +1362,7 @@ pub async fn org_loyalty_qr(
     params(
         ("id" = Uuid, Path, description = "Organization ID"),
         QrRenderQuery,
+        LinksQrTarget,
     ),
     responses(
         (status = 200, description = "The links page QR", body = QrResponse),
@@ -1347,6 +1376,7 @@ pub async fn org_links_qr(
     provider: web::Data<Arc<dyn ShortLinkProvider>>,
     id: web::Path<Uuid>,
     q: web::Query<QrRenderQuery>,
+    target: web::Query<LinksQrTarget>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     let org_id = *id;
@@ -1359,16 +1389,31 @@ pub async fn org_links_qr(
         None,
     )
     .await?;
-    crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Branding).await?;
 
-    let shop = links_page_origin(pool.get_ref(), org_id).await?;
-    let long_url = org_links_url(shop.as_deref(), org_id)?;
+    let (kind, long_url) = match target.target.as_deref() {
+        None | Some("") | Some("links") => {
+            crate::plan::require_feature(pool.get_ref(), org_id, madar_plan::Feature::Branding)
+                .await?;
+            let shop = links_page_origin(pool.get_ref(), org_id).await?;
+            ("org_links", org_links_url(shop.as_deref(), org_id)?)
+        }
+        // Every plan: the menu without prices has no plan gate.
+        Some("menu_display") => (
+            "org_menu_display",
+            menu_display_url(pool.get_ref(), org_id).await?,
+        ),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "target is `links` or `menu_display`".into(),
+            ));
+        }
+    };
     let row = db::get_or_create_short_link(
         pool.get_ref(),
         provider.get_ref().as_ref(),
         org_id,
         None,
-        "org_links",
+        kind,
         &org_id.to_string(),
         &long_url,
         None,
@@ -1379,7 +1424,7 @@ pub async fn org_links_qr(
     let brand = card_brand_for(pool.get_ref(), org_id).await?;
     let qr_data_url = render_data_url(&row.short_url, &q, brand.as_ref(), &row.kind)?;
     Ok(HttpResponse::Ok().json(QrResponse {
-        kind: "org_links".into(),
+        kind: kind.into(),
         long_url: row.long_url,
         short_url: row.short_url,
         short_code: row.short_code,

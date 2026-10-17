@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(SELECT 1 FROM branches\n                 WHERE id = $1 AND org_id = $2 AND is_active AND deleted_at IS NULL\n                   AND kind = 'branch') AS \"ours!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ours!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "638a5415041b7652a31d15eec9a87569d2f515dbb53bd916e8b75cda842caa4c"
+}

@@ -140,6 +140,16 @@ pub(crate) async fn resolve_org(pool: &PgPool, query: &BrandQuery) -> Result<Uui
     Ok(org)
 }
 
+/// The shop behind a guest page, on ANY plan. Only for a page every plan has
+/// (the menu without prices, `orgs::menu_display`): everything else answers a
+/// Free shop like no shop at all, through [`resolve_org`].
+pub(crate) async fn resolve_org_any_plan(
+    pool: &PgPool,
+    query: &BrandQuery,
+) -> Result<Uuid, AppError> {
+    resolve_org_unchecked(pool, query).await
+}
+
 async fn resolve_org_unchecked(pool: &PgPool, query: &BrandQuery) -> Result<Uuid, AppError> {
     match (
         query.org_id,
