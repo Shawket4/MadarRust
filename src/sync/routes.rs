@@ -9,7 +9,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/sync")
             .wrap(JwtMiddleware)
-            .route("/replay", web::post().to(super::handlers::replay))
+            .route("/replay", web::post().to(super::handlers::replay_single))
             // Protocol v2: many queued ops per round trip (old tills keep the
             // single-op route above). Its own body limit: a batch of sales.
             .service(

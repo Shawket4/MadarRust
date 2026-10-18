@@ -602,6 +602,25 @@ pub async fn replay(
     .await
 }
 
+/// The `POST /sync/replay` route: [`replay`], with a refusal 409 answered
+/// as a 422 (same body) to a POS build that would ack it and lose the op
+/// (`old_till`). Everyone else, and `/sync/replay/batch`, get [`replay`]'s
+/// answer untouched.
+pub async fn replay_single(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: web::Data<BranchEventHub>,
+    body: web::Json<serde_json::Value>,
+) -> Result<HttpResponse, AppError> {
+    let old_till = super::old_till::acks_every_conflict(req.headers());
+    let res = replay(req, pool, hub, body).await;
+    if old_till {
+        res.map_err(super::old_till::for_old_till)
+    } else {
+        res
+    }
+}
+
 /// One attempt of [`replay`].
 async fn replay_once(
     req: HttpRequest,
