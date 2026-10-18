@@ -162,6 +162,10 @@ async fn run() -> std::io::Result<()> {
     // The bookings sweep: reminders, "party arriving" nudges, no-show and
     // completion roll-overs. Idempotent; publishes on the realtime bus.
     bookings::jobs::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
+    // The delivery sweep: rejects (and tells the customer about) an online
+    // order nobody accepted within its branch's `auto_reject_minutes`, for
+    // orders at most a day past that window. Off with DELIVERY_SWEEP_ENABLED=0.
+    madar_rust::delivery::jobs::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
 
     // Public demo playground (DEMO_MODE). Throwaway per-visitor orgs with a TTL;
     // the sweeper GCs expired ones. Spawned ONCE (single instance). Off by

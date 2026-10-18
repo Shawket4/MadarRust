@@ -55,3 +55,4 @@ pub mod legacy_catalog;
 pub mod members;
 pub mod shops;
 pub mod sizes;
+pub mod whatsapp;
