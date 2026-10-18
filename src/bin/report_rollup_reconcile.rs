@@ -13,6 +13,13 @@
 //! calendar month, all history (no bounds), and a window that starts and ends
 //! mid-day (so the live intervals are exercised too).
 //!
+//! The item rows' `menu_total` / `extras_total` / `avg_extra` (the Items
+//! table's price and avg extra) are part of that JSON. On top, for each
+//! branch over all history, the report's per-item figures are checked against
+//! an independent set-based computation straight from the order lines (no
+//! `order_line_extras()`, no rollups): Σ unit_price × quantity, and Σ add-on
+//! (line_total + staff_comp_minor) + Σ optional price × line quantity.
+//!
 //! ```text
 //! DATABASE_URL=postgres://.../<prod copy> cargo run --bin report-rollup-reconcile
 //! ```
@@ -27,6 +34,10 @@ use uuid::Uuid;
 struct Tally {
     compared: u64,
     diffs: u64,
+    /// Item rows checked against the set-based line formula, and how many of
+    /// them carry an extra (so the check is known to have bitten).
+    items_checked: u64,
+    items_with_extras: u64,
     org_days: u64,
     /// Time spent in each computation, all-history windows only (where the
     /// rollups matter most).
@@ -100,6 +111,65 @@ async fn branch_sales_pair(
             serde_json::to_value(rolled).unwrap(),
         );
     }
+}
+
+/// The report's per-item menu and extras totals, over all history, against
+/// the order lines summed directly.
+async fn items_extra_check(pool: &PgPool, t: &mut Tally, label: &str, ids: &[Uuid]) {
+    let report = sales::branch_sales_report(pool, ids, Uuid::nil(), String::new(), None, None, Some(1000), None, Source::Rollups)
+        .await
+        .expect("rolled branch sales");
+    let mut got: std::collections::BTreeMap<Uuid, (i64, i64, i64)> = Default::default();
+    for item in report.by_category.iter().flat_map(|c| c.items.iter()) {
+        let e = got.entry(item.menu_item_id).or_default();
+        e.0 += item.quantity_sold;
+        e.1 += item.menu_total.expect("menu_total");
+        e.2 += item.extras_total.expect("extras_total");
+        let avg = item.avg_extra.expect("avg_extra");
+        let exact = item.extras_total.unwrap() as f64 / item.quantity_sold as f64;
+        if (avg as f64 - exact).abs() > 0.5 {
+            t.diffs += 1;
+            println!("DIFF avg_extra {label} {}: {avg} vs {exact}", item.menu_item_id);
+        }
+    }
+    let want = sqlx::query!(
+        r#"WITH l AS (
+               SELECT oi.id, oi.menu_item_id, oi.quantity, oi.unit_price
+                 FROM order_items oi JOIN orders o ON o.id = oi.order_id
+                WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
+                  AND oi.line_kind <> 'combo'),
+           a AS (SELECT x.order_item_id, SUM(x.line_total::bigint + x.staff_comp_minor) AS v
+                   FROM order_item_addons x JOIN l ON l.id = x.order_item_id GROUP BY 1),
+           f AS (SELECT y.order_item_id, SUM(y.price::bigint) AS v
+                   FROM order_item_optionals y JOIN l ON l.id = y.order_item_id GROUP BY 1)
+           SELECT l.menu_item_id AS "menu_item_id!",
+                  SUM(l.quantity)::bigint AS "q!",
+                  SUM(l.unit_price::bigint * l.quantity)::bigint AS "menu!",
+                  SUM(COALESCE(a.v, 0) + l.quantity * COALESCE(f.v, 0))::bigint AS "extras!"
+             FROM l LEFT JOIN a ON a.order_item_id = l.id LEFT JOIN f ON f.order_item_id = l.id
+            WHERE l.menu_item_id IS NOT NULL
+            GROUP BY l.menu_item_id"#,
+        ids
+    )
+    .fetch_all(pool)
+    .await
+    .expect("set-based item extras");
+    t.compared += 1;
+    let want: std::collections::BTreeMap<Uuid, (i64, i64, i64)> =
+        want.into_iter().map(|r| (r.menu_item_id, (r.q, r.menu, r.extras))).collect();
+    if want != got {
+        t.diffs += 1;
+        for (id, w) in &want {
+            if got.get(id) != Some(w) {
+                println!("DIFF items_extra {label} {id}: lines {w:?} vs report {:?}", got.get(id));
+            }
+        }
+        for id in got.keys().filter(|id| !want.contains_key(id)) {
+            println!("DIFF items_extra {label} {id}: only in the report");
+        }
+    }
+    t.items_checked += got.len() as u64;
+    t.items_with_extras += got.values().filter(|v| v.2 > 0).count() as u64;
 }
 
 async fn timeseries_pair(
@@ -216,6 +286,8 @@ async fn main() {
     let mut t = Tally {
         compared: 0,
         diffs: 0,
+        items_checked: 0,
+        items_with_extras: 0,
         org_days: 0,
         live_all: Default::default(),
         rolled_all: Default::default(),
@@ -247,6 +319,7 @@ async fn main() {
             }
             org_since = Some(org_since.map_or(since, |s| s.min(since)));
             org_through = Some(org_through.map_or(through, |s| s.max(through)));
+            items_extra_check(&pool, &mut t, &b.id.to_string(), &[b.id]).await;
             for w in windows(&pool, &b.tz, since, through).await {
                 branch_sales_pair(&pool, &mut t, &b.id.to_string(), &[b.id], b.id, &w).await;
                 timeseries_pair(&pool, &mut t, &b.id.to_string(), &[b.id], &b.tz, &w).await;
@@ -270,6 +343,10 @@ async fn main() {
         t.compared,
         t.diffs,
         started.elapsed()
+    );
+    println!(
+        "item extras vs order lines: {} item rows checked, {} with an extra",
+        t.items_checked, t.items_with_extras
     );
     println!(
         "branch sales over all history: live {:?} vs rollups {:?} (sum over scopes)",

@@ -150,6 +150,23 @@ pub struct ItemSales {
     pub item_name_translations: serde_json::Value,
     pub quantity_sold: i64,
     pub revenue: i64,
+    /// Piastres: the menu price of the size each unit was sold in, AT SALE
+    /// TIME, summed (`order_items.unit_price × quantity`; no add-ons, swaps,
+    /// optional fields, discounts or rewards). Additive (2026-10-18): absent
+    /// from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu_total: Option<i64>,
+    /// Piastres charged on top of those size prices, before any discount:
+    /// every add-on and swap on the lines (their charge, a staff comp added
+    /// back) plus optional fields × quantity. `paid − menu price of the size`,
+    /// summed; never below zero (see `order_line_extras` in
+    /// migrations/20261023100000_rollup_item_extras.sql). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extras_total: Option<i64>,
+    /// Piastres per unit sold: `extras_total / quantity_sold`, rounded to the
+    /// piastre (half away from zero). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avg_extra: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

@@ -80676,6 +80676,22 @@
           "revenue"
         ],
         "properties": {
+          "avg_extra": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres per unit sold: `extras_total / quantity_sold`, rounded to the\npiastre (half away from zero). Additive."
+          },
+          "extras_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres charged on top of those size prices, before any discount:\nevery add-on and swap on the lines (their charge, a staff comp added\nback) plus optional fields × quantity. `paid − menu price of the size`,\nsummed; never below zero (see `order_line_extras` in\nmigrations/20261023100000_rollup_item_extras.sql). Additive."
+          },
           "item_name": {
             "type": "string"
           },
@@ -80685,6 +80701,14 @@
           "menu_item_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "menu_total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Piastres: the menu price of the size each unit was sold in, AT SALE\nTIME, summed (`order_items.unit_price × quantity`; no add-ons, swaps,\noptional fields, discounts or rewards). Additive (2026-10-18): absent\nfrom older servers."
           },
           "quantity_sold": {
             "type": "integer",

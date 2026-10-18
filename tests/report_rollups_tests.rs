@@ -50,7 +50,8 @@ async fn local_noon(pool: &PgPool, s: &Shop, days_ago: i32) -> DateTime<Utc> {
     .unwrap()
 }
 
-/// A sale with a line, an add-on, a payment and a tip.
+/// A sale with a line (two units), an add-on, an optional field, a payment
+/// and a tip. The line's extras: 5 + 2 × 7 = 19.
 #[allow(clippy::too_many_arguments)]
 async fn sale(pool: &PgPool, s: &Shop, at: DateTime<Utc>, status: &str, total: i32, item: &str, method: &str) -> Uuid {
     let id = Uuid::new_v4();
@@ -67,6 +68,7 @@ async fn sale(pool: &PgPool, s: &Shop, at: DateTime<Utc>, status: &str, total: i
               VALUES ('{line}', '{id}', md5('{org}{item}')::uuid, '{item}', {total}, 2, {total}, '{{\"ar\": \"{item}\"}}');
          INSERT INTO order_item_addons (order_item_id, addon_item_id, addon_name, unit_price, quantity, line_total)
               VALUES ('{line}', gen_random_uuid(), 'Oat', 5, 1, 5);
+         INSERT INTO order_item_optionals (order_item_id, field_name, price) VALUES ('{line}', 'Hot', 7);
          INSERT INTO order_payments (order_id, method, amount, till_id) VALUES ('{id}', '{method}', {total}, '{t}');",
         b = s.branch,
         org = s.org,
@@ -200,6 +202,16 @@ async fn closed_days_come_from_the_rollups_and_match_the_live_reports(pool: PgPo
     assert!(rollup_days(&pool, &s, Some(from), Some(to)).await >= 4, "closed days are read from rollups");
     assert_same(&pool, &s, Some(from), Some(to), "last 7 days").await;
     assert_same(&pool, &s, None, None, "all history").await;
+    // The Items table's figures come out of the rollups too: the four closed
+    // days' completed Lattes (2 units each) plus today's, 19 of extras a line.
+    let r = sales::branch_sales_report(&pool, &[s.branch], s.branch, "Main".into(), None, None, None, None, Source::Rollups)
+        .await
+        .unwrap();
+    let latte = r.by_category.iter().flat_map(|c| c.items.iter()).find(|i| i.item_name == "Latte").unwrap();
+    assert_eq!(latte.quantity_sold, 10);
+    assert_eq!(latte.menu_total, Some(4 * 2 * 300 + 2 * 400));
+    assert_eq!(latte.extras_total, Some(5 * 19));
+    assert_eq!(latte.avg_extra, Some(10), "9.5 rounds half away from zero");
     // A window that starts and ends mid-day: those days are partly live.
     assert_same(&pool, &s, Some(from + Duration::hours(13)), Some(to - Duration::hours(30)), "mid-day").await;
     // Today alone is never a rollup day.
