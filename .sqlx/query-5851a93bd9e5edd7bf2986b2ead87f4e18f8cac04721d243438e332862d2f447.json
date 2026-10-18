@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH due AS (\n             SELECT d.id\n               FROM delivery_orders d\n               JOIN branch_delivery_settings s ON s.branch_id = d.branch_id\n              WHERE s.auto_reject_minutes IS NOT NULL\n                AND NOT EXISTS (SELECT 1 FROM organizations fo\n                                 WHERE fo.id = d.org_id AND fo.plan = 'free')\n                AND d.status = 'received'\n                AND d.created_at <  now() - make_interval(mins => s.auto_reject_minutes)\n                AND d.created_at >= now() - make_interval(mins => s.auto_reject_minutes, hours => $2)\n              FOR UPDATE OF d SKIP LOCKED)\n           UPDATE delivery_orders d\n              SET status = 'rejected', rejected_at = now(),\n                  cancel_reason = $1, cancel_restocked = true, updated_at = now()\n             FROM due\n            WHERE d.id = due.id AND d.status = 'received'\n        RETURNING d.id, d.branch_id, d.delivery_ref, d.customer_phone",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "delivery_ref",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "customer_phone",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "5851a93bd9e5edd7bf2986b2ead87f4e18f8cac04721d243438e332862d2f447"
+}

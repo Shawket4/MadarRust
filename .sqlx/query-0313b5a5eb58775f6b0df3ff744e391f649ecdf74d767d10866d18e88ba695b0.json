@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"n!\"\n             FROM delivery_orders d\n             JOIN branch_delivery_settings s ON s.branch_id = d.branch_id\n            WHERE s.auto_reject_minutes IS NOT NULL\n              AND NOT EXISTS (SELECT 1 FROM organizations fo\n                               WHERE fo.id = d.org_id AND fo.plan = 'free')\n              AND d.status = 'received'\n              AND d.created_at < now() - make_interval(mins => s.auto_reject_minutes, hours => $1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0313b5a5eb58775f6b0df3ff744e391f649ecdf74d767d10866d18e88ba695b0"
+}

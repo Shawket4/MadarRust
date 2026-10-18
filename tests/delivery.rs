@@ -1636,6 +1636,250 @@ mod it {
         );
     }
 
+    // ── The auto-reject sweep, end to end (`delivery::jobs::sweep`) ──
+
+    /// A branch with `auto_reject_minutes = 10`, a till, a priced item.
+    async fn sweep_shop(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
+        let org = seed_org(pool).await;
+        let branch = seed_branch(pool, org).await;
+        let teller = seed_user(pool, org, "teller").await;
+        seed_settings(pool, branch, true, false, 0).await;
+        set_auto_reject(pool, branch, Some(10)).await;
+        seed_shift(pool, branch, teller).await;
+        let item = seed_item(pool, org, 500).await;
+        seed_recipe(pool, org, branch, item, 20.0, 1000.0).await;
+        (org, branch, item)
+    }
+    async fn set_auto_reject(pool: &PgPool, branch: Uuid, mins: Option<i32>) {
+        sqlx::query(
+            "UPDATE branch_delivery_settings SET auto_reject_minutes = $2 WHERE branch_id = $1",
+        )
+        .bind(branch)
+        .bind(mins)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    async fn age(pool: &PgPool, ids: &[Uuid], by: &str) {
+        sqlx::query(&format!(
+            "UPDATE delivery_orders SET created_at = now() - interval '{by}' WHERE id = ANY($1)"
+        ))
+        .bind(ids.to_vec())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    async fn status_text(pool: &PgPool, id: Uuid) -> String {
+        sqlx::query_scalar("SELECT status::text FROM delivery_orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+    /// The phrase only the auto-reject WhatsApp carries.
+    const REJECTED_WORDS: &str = "You have not been charged";
+
+    /// A fresh order past its window: rejected on the first tick, the
+    /// customer told exactly once, the till's queue told, the changefeed
+    /// re-emits it; every later tick does nothing.
+    #[sqlx::test]
+    async fn sweep_rejects_a_fresh_overdue_order_once_with_one_message(pool: PgPool) {
+        let gateway = crate::common::whatsapp::gateway().await;
+        let (_org, branch, item) = sweep_shop(&pool).await;
+        let id = place_in_mall_order(&pool, branch, item, 1).await;
+        age(&pool, &[id], "11 minutes").await;
+        let seq_before: i64 = sqlx::query_scalar(
+            "SELECT seq FROM sync_changes WHERE type = 'delivery' AND entity_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let hub = madar_rust::realtime::hub::BranchEventHub::new();
+        let mut rx = hub.subscribe(branch);
+        let tick = madar_rust::delivery::jobs::sweep(&pool, &hub)
+            .await
+            .unwrap();
+        assert_eq!(
+            tick.rejected.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert_eq!(tick.stale, 0);
+        assert_eq!(status_text(&pool, id).await, "rejected");
+
+        let ev = rx.try_recv().expect("the till hears the rejection");
+        assert_eq!(ev.event_type, "delivery.updated");
+        assert_eq!(ev.data["status"], "rejected");
+        assert!(rx.try_recv().is_err(), "one event");
+
+        let (op, seq_after): (String, i64) = sqlx::query_as(
+            "SELECT op, seq FROM sync_changes WHERE type = 'delivery' AND entity_id = $1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(op, "upsert", "a rejected order stays on the feed for 48 h");
+        assert!(seq_after > seq_before, "the feed re-emits the rejection");
+
+        // Idempotent: nothing is rejected, published or sent again.
+        for _ in 0..2 {
+            let again = madar_rust::delivery::jobs::sweep(&pool, &hub)
+                .await
+                .unwrap();
+            assert!(again.rejected.is_empty());
+        }
+        assert!(rx.try_recv().is_err(), "no second event");
+        crate::common::whatsapp::whatsapp_to(&gateway, REJECTED_WORDS).await;
+        assert_eq!(
+            crate::common::whatsapp::count_containing(&gateway, REJECTED_WORDS, 300).await,
+            1,
+            "exactly one rejection message: {:?}",
+            gateway.lock().unwrap()
+        );
+    }
+
+    /// Accepted orders, branches with auto-reject off (NULL) or with no
+    /// settings row at all are never touched, however long they wait.
+    #[sqlx::test]
+    async fn sweep_leaves_accepted_orders_and_branches_without_auto_reject(pool: PgPool) {
+        let gateway = crate::common::whatsapp::gateway().await;
+        let (org, branch, item) = sweep_shop(&pool).await;
+        let off = seed_branch_named(&pool, org, "Off").await;
+        let unset = seed_branch_named(&pool, org, "Unset").await;
+        for b in [off, unset] {
+            seed_settings(&pool, b, true, false, 0).await;
+            let t = seed_user(&pool, org, "teller").await;
+            seed_shift(&pool, b, t).await;
+        }
+        set_auto_reject(&pool, off, None).await;
+
+        let accepted = place_in_mall_order(&pool, branch, item, 1).await;
+        assert!(
+            madar_rust::delivery::staff::advance_status(&pool, accepted, "received", "confirmed")
+                .await
+                .unwrap()
+        );
+        let at_off = place_in_mall_order(&pool, off, item, 1).await;
+        let at_unset = place_in_mall_order(&pool, unset, item, 1).await;
+        // "Unset": the branch has no delivery settings row at all.
+        sqlx::query("DELETE FROM branch_delivery_settings WHERE branch_id = $1")
+            .bind(unset)
+            .execute(&pool)
+            .await
+            .unwrap();
+        age(&pool, &[accepted, at_off, at_unset], "2 hours").await;
+
+        let hub = madar_rust::realtime::hub::BranchEventHub::new();
+        let tick = madar_rust::delivery::jobs::sweep(&pool, &hub)
+            .await
+            .unwrap();
+        assert!(tick.rejected.is_empty(), "{:?}", tick.rejected);
+        assert_eq!(
+            tick.stale, 0,
+            "branches without auto-reject have no stale rows"
+        );
+        assert_eq!(status_text(&pool, accepted).await, "confirmed");
+        assert_eq!(status_text(&pool, at_off).await, "received");
+        assert_eq!(status_text(&pool, at_unset).await, "received");
+        assert_eq!(
+            crate::common::whatsapp::count_containing(&gateway, REJECTED_WORDS, 300).await,
+            0
+        );
+    }
+
+    /// The first-run guard: an order more than GRACE_HOURS past its window
+    /// is stale. It is left `received`, never messaged, and only counted;
+    /// one just inside the grace is still rejected.
+    #[sqlx::test]
+    async fn sweep_leaves_stale_orders_alone_and_counts_them(pool: PgPool) {
+        use madar_rust::delivery::jobs::{GRACE_HOURS, count_stale, sweep};
+        assert_eq!(GRACE_HOURS, 24);
+        let gateway = crate::common::whatsapp::gateway().await;
+        let (_org, branch, item) = sweep_shop(&pool).await;
+        let ancient = place_in_mall_order(&pool, branch, item, 1).await;
+        let just_stale = place_in_mall_order(&pool, branch, item, 1).await;
+        let inside = place_in_mall_order(&pool, branch, item, 1).await;
+        age(&pool, &[ancient], "40 days").await;
+        // window (10 min) + 24 h + 1 min: just outside the grace.
+        age(&pool, &[just_stale], "24 hours 11 minutes").await;
+        // window + 23 h: inside it.
+        age(&pool, &[inside], "23 hours 10 minutes").await;
+        assert_eq!(count_stale(&pool).await.unwrap(), 2);
+
+        let hub = madar_rust::realtime::hub::BranchEventHub::new();
+        let tick = sweep(&pool, &hub).await.unwrap();
+        assert_eq!(
+            tick.rejected.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![inside]
+        );
+        assert_eq!(tick.stale, 2);
+        assert_eq!(status_text(&pool, ancient).await, "received");
+        assert_eq!(status_text(&pool, just_stale).await, "received");
+        assert_eq!(status_text(&pool, inside).await, "rejected");
+        crate::common::whatsapp::whatsapp_to(&gateway, REJECTED_WORDS).await;
+        assert_eq!(
+            crate::common::whatsapp::count_containing(&gateway, REJECTED_WORDS, 300).await,
+            1,
+            "only the order inside the grace is messaged"
+        );
+    }
+
+    /// Two instances ticking at the same moment: every overdue order is
+    /// rejected by exactly one of them, and each customer hears once.
+    #[sqlx::test]
+    async fn concurrent_sweeps_reject_each_order_once(pool: PgPool) {
+        use madar_rust::delivery::jobs::sweep;
+        let gateway = crate::common::whatsapp::gateway().await;
+        let (_org, branch, item) = sweep_shop(&pool).await;
+        let mut ids = Vec::new();
+        for _ in 0..8 {
+            ids.push(place_in_mall_order(&pool, branch, item, 1).await);
+        }
+        age(&pool, &ids, "15 minutes").await;
+
+        for _ in 0..3 {
+            sqlx::query(
+                "UPDATE delivery_orders SET status = 'received', rejected_at = NULL, \
+                 cancel_reason = NULL, cancel_restocked = NULL WHERE id = ANY($1)",
+            )
+            .bind(&ids)
+            .execute(&pool)
+            .await
+            .unwrap();
+            gateway.lock().unwrap().clear();
+            let (hub_a, hub_b) = (
+                madar_rust::realtime::hub::BranchEventHub::new(),
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            );
+            let (pa, pb) = (pool.clone(), pool.clone());
+            let a = tokio::spawn(async move { sweep(&pa, &hub_a).await.unwrap() });
+            let b = tokio::spawn(async move { sweep(&pb, &hub_b).await.unwrap() });
+            let (a, b) = (a.await.unwrap(), b.await.unwrap());
+            let mut won: Vec<Uuid> = a.rejected.iter().chain(&b.rejected).map(|r| r.id).collect();
+            won.sort();
+            let mut want = ids.clone();
+            want.sort();
+            assert_eq!(won, want, "each order claimed by exactly one tick");
+            for id in &ids {
+                assert_eq!(status_text(&pool, *id).await, "rejected");
+            }
+            // Every customer heard once (all eight share one phone; count bodies).
+            for _ in 0..100 {
+                if crate::common::whatsapp::count_containing(&gateway, REJECTED_WORDS, 0).await >= 8
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                crate::common::whatsapp::count_containing(&gateway, REJECTED_WORDS, 300).await,
+                8
+            );
+        }
+    }
+
     #[sqlx::test]
     async fn status_jump_clears_skipped_and_rejects_non_steps(pool: PgPool) {
         // Jumping to any step stamps only the landed step and clears the rest, so
