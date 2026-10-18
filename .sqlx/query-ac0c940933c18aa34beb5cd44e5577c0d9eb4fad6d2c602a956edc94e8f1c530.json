@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.kind AS \"kind!\", u.id AS \"id!\", u.name AS \"name!\", u.detail AS \"detail?\"\n        FROM (\n            SELECT DISTINCT 'recipe'::text AS kind, mi.id, mi.name, ms.label AS detail, 1 AS ord\n              FROM recipe_lines rl\n              JOIN menu_item_sizes ms ON ms.id = rl.owner_id\n              JOIN menu_items mi      ON mi.id = ms.menu_item_id\n             WHERE rl.owner_type = 'item_size' AND rl.ingredient_id = $1\n               AND mi.org_id = $2 AND mi.deleted_at IS NULL AND mi.is_active AND ms.is_active\n            UNION\n            SELECT DISTINCT 'modifier_option', mo.id, mo.name, g.name, 2\n              FROM recipe_lines rl\n              JOIN modifier_options mo ON mo.id = rl.owner_id\n              JOIN modifier_groups g   ON g.id = mo.group_id\n             WHERE rl.owner_type = 'modifier_option' AND rl.ingredient_id = $1\n               AND g.org_id = $2 AND mo.is_active AND g.is_active\n            UNION\n            SELECT 'swap', mo.id, mo.name, g.name, 3\n              FROM modifier_options mo\n              JOIN modifier_groups g ON g.id = mo.group_id\n             WHERE mo.replaces_ingredient_id = $1\n               AND g.org_id = $2 AND mo.is_active AND g.is_active\n            UNION\n            SELECT DISTINCT 'recipe_base', rb.id, rb.name, NULL, 4\n              FROM recipe_base_lines bl\n              JOIN recipe_bases rb ON rb.id = bl.base_id\n             WHERE bl.ingredient_id = $1\n               AND rb.org_id = $2 AND rb.deleted_at IS NULL AND rb.is_active\n            UNION\n            SELECT DISTINCT 'packaging_rule', pr.id, pr.name, NULL, 5\n              FROM packaging_rule_lines pl\n              JOIN packaging_rules pr ON pr.id = pl.rule_id\n             WHERE pl.ingredient_id = $1 AND pr.org_id = $2 AND pr.is_active\n            UNION\n            SELECT DISTINCT 'purchase_order', po.id,\n                   COALESCE(NULLIF(po.reference, ''), s.name, 'PO'), b.name, 6\n              FROM purchase_order_lines l\n              JOIN purchase_orders po ON po.id = l.purchase_order_id\n              JOIN branches b         ON b.id = po.branch_id\n              LEFT JOIN suppliers s   ON s.id = po.supplier_id\n             WHERE l.org_ingredient_id = $1 AND po.org_id = $2\n               AND po.status IN ('draft', 'ordered', 'partially_received')\n            UNION\n            SELECT DISTINCT 'stocktake', st.id, b.name, NULL, 7\n              FROM stocktake_items si\n              JOIN stocktakes st ON st.id = si.stocktake_id\n              JOIN branches b    ON b.id = st.branch_id\n             WHERE si.org_ingredient_id = $1 AND st.org_id = $2\n               AND st.status IN ('draft', 'in_progress')\n            UNION\n            SELECT DISTINCT 'transfer', t.id, '#' || t.number::text, src.name || ' → ' || dst.name, 8\n              FROM stock_transfer_lines l\n              JOIN stock_transfers t ON t.id = l.transfer_id\n              JOIN branches src      ON src.id = t.source_branch_id\n              JOIN branches dst      ON dst.id = t.destination_branch_id\n             WHERE l.org_ingredient_id = $1 AND t.org_id = $2\n               AND t.status IN ('requested', 'draft', 'dispatched')\n        ) u\n        ORDER BY u.ord, u.name, u.detail NULLS FIRST\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "detail?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "ac0c940933c18aa34beb5cd44e5577c0d9eb4fad6d2c602a956edc94e8f1c530"
+}

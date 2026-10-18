@@ -77,6 +77,17 @@ pub struct OrgIngredient {
     pub is_active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Set when the ingredient is archived: hidden from pickers, stock-count
+    /// sheets (once no branch holds stock) and reorder suggestions, but kept
+    /// for history and still deducted by any recipe that uses it. `null` =
+    /// active. Independent of `is_active` (which the POS feed reads).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Who archived it; `null` when active.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub archived_by: Option<Uuid>,
 }
 
 /// One catalog ingredient as seen from a branch. Every live catalog ingredient
@@ -109,6 +120,12 @@ pub struct BranchStockRow {
     /// Last ledger movement of any kind; `null` = never.
     pub last_movement_at: Option<chrono::DateTime<chrono::Utc>>,
     pub has_activity: bool,
+    /// The ingredient's archive time; `null` = active. An archived ingredient
+    /// still holding stock here keeps appearing so it can be counted or
+    /// wasted down.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, sqlx::FromRow, ToSchema)]
@@ -123,6 +140,11 @@ pub struct StockMovement {
     pub org_ingredient_id: Uuid,
     pub ingredient_name: String,
     pub unit: String,
+    /// The ingredient's archive time (history keeps showing an archived
+    /// ingredient, with a badge); `null` = active.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub ingredient_archived_at: Option<chrono::DateTime<chrono::Utc>>,
     pub branch_stock_id: Option<Uuid>,
     /// inventory_movement_type: sale | void_restock | adjustment_add |
     /// adjustment_remove | waste | transfer_out | transfer_in | purchase_in |
@@ -343,6 +365,45 @@ pub struct CreateWasteRequest {
     pub note: Option<String>,
 }
 
+/// Which ingredients a catalog or stock list returns, by archive state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveFilter {
+    /// Not archived: what pickers offer.
+    Active,
+    /// Archived only (the "Archived" tab).
+    Archived,
+    /// Both, archived rows carrying `archived_at`.
+    All,
+}
+
+impl ArchiveFilter {
+    /// The SQL condition over `oi` (an `org_ingredients` alias).
+    fn sql(self) -> &'static str {
+        match self {
+            ArchiveFilter::Active => " AND oi.archived_at IS NULL",
+            ArchiveFilter::Archived => " AND oi.archived_at IS NOT NULL",
+            ArchiveFilter::All => "",
+        }
+    }
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ArchiveStatusQuery {
+    /// `active` | `archived` | `all`. Omitted = `all`: every non-deleted
+    /// ingredient, exactly the rows older dashboards and tills read (they look
+    /// names and costs up in this list, so an archived ingredient a recipe
+    /// still uses must stay in it). Pickers ask for `active`.
+    pub status: Option<ArchiveFilter>,
+}
+
+impl ArchiveStatusQuery {
+    fn filter(&self) -> ArchiveFilter {
+        self.status.unwrap_or(ArchiveFilter::All)
+    }
+}
+
 // ── Shared SELECT fragments ───────────────────────────────────
 
 const ORG_INGREDIENT_SELECT: &str = r#"
@@ -351,7 +412,8 @@ const ORG_INGREDIENT_SELECT: &str = r#"
            oi.description, oi.cost_per_unit,
            oi.supplier_id, s.name AS supplier_name,
            oi.pack_unit, oi.pack_size, oi.yield_pct, oi.density_g_per_ml,
-           oi.is_active, oi.created_at, oi.updated_at
+           oi.is_active, oi.created_at, oi.updated_at,
+           oi.archived_at, oi.archived_by
     FROM org_ingredients oi
     JOIN ingredient_categories ic ON ic.id = oi.category_id
     LEFT JOIN suppliers s ON s.id = oi.supplier_id
@@ -376,7 +438,8 @@ const BRANCH_STOCK_SELECT: &str = r#"
            bs.par_max::float8 AS par_max,
            (COALESCE(bs.par_min, 0) > 0 AND COALESCE(bs.on_hand, 0) <= bs.par_min) AS below_par,
            bs.last_counted_at, bs.last_movement_at,
-           (bs.id IS NOT NULL) AS has_activity
+           (bs.id IS NOT NULL) AS has_activity,
+           oi.archived_at
     FROM org_ingredients oi
     JOIN ingredient_categories ic ON ic.id = oi.category_id
     LEFT JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = $1
@@ -602,7 +665,7 @@ pub async fn delete_ingredient_category(
     get,
     path = "/inventory/orgs/{org_id}/catalog",
     tag = "inventory",
-    params(("org_id" = Uuid, Path, description = "Organization ID")),
+    params(("org_id" = Uuid, Path, description = "Organization ID"), ArchiveStatusQuery),
     responses((status = 200, description = "List catalog items", body = Vec<OrgIngredient>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
@@ -610,13 +673,15 @@ pub async fn list_catalog(
     req: HttpRequest,
     pool: crate::db::Db,
     org_id: web::Path<Uuid>,
+    query: web::Query<ArchiveStatusQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
     require_org_access(&claims, *org_id)?;
 
     let sql = format!(
-        "{ORG_INGREDIENT_SELECT} WHERE oi.org_id = $1 AND oi.deleted_at IS NULL ORDER BY oi.name"
+        "{ORG_INGREDIENT_SELECT} WHERE oi.org_id = $1 AND oi.deleted_at IS NULL{} ORDER BY oi.name",
+        query.filter().sql()
     );
     let rows = sqlx::query_as::<_, OrgIngredient>(&sql)
         .bind(*org_id)
@@ -665,7 +730,7 @@ pub async fn create_catalog_item(
 
     // No cost supplied ⟹ stored as NULL = unknown. Never default to 0 —
     // zero means "genuinely free" and would flow into every cost rollup.
-    let id: Uuid = sqlx::query_scalar(
+    let id: Result<Uuid, sqlx::Error> = sqlx::query_scalar(
         r#"
         INSERT INTO org_ingredients
             (org_id, name, unit, category_id, description, cost_per_unit, supplier_id,
@@ -686,13 +751,15 @@ pub async fn create_catalog_item(
     .bind(body.yield_pct)
     .bind(body.density_g_per_ml)
     .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
-            AppError::Conflict("An ingredient with this name already exists in the catalog".into())
+    .await;
+    let id = match id {
+        Ok(id) => id,
+        Err(e) if is_unique_violation(&e) => {
+            drop(tx);
+            return Err(name_taken(pool.get_ref(), *org_id, body.name.trim()).await);
         }
-        _ => AppError::Db(e),
-    })?;
+        Err(e) => return Err(AppError::Db(e)),
+    };
 
     // Seed the first cost history row — only when a cost actually exists.
     if let Some(cost) = body.cost_per_unit {
@@ -856,7 +923,7 @@ pub async fn update_catalog_item(
         }
     }
 
-    let updated: Option<Uuid> = sqlx::query_scalar(
+    let updated: Result<Option<Uuid>, sqlx::Error> = sqlx::query_scalar(
         r#"
         UPDATE org_ingredients SET
             name             = COALESCE($2, name),
@@ -888,13 +955,16 @@ pub async fn update_catalog_item(
     .bind(body.yield_pct)
     .bind(body.density_g_per_ml)
     .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
-            AppError::Conflict("An ingredient with this name already exists in the catalog".into())
+    .await;
+    let updated = match updated {
+        Ok(u) => u,
+        Err(e) if is_unique_violation(&e) => {
+            drop(tx);
+            let name = body.name.as_deref().map(str::trim).unwrap_or_default();
+            return Err(name_taken(pool.get_ref(), org_id, name).await);
         }
-        _ => AppError::Db(e),
-    })?;
+        Err(e) => return Err(AppError::Db(e)),
+    };
     updated.ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
 
     // Maintain cost history whenever the org standard cost actually changed.
@@ -1020,6 +1090,341 @@ pub async fn delete_catalog_item(
     Ok(HttpResponse::NoContent().finish())
 }
 
+// ── Archive ───────────────────────────────────────────────────
+
+/// One live thing that uses an ingredient.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+pub struct IngredientUsageRef {
+    /// `recipe` (a menu item size's recipe) | `modifier_option` (an add-on's
+    /// or option's recipe line) | `swap` (an option that replaces it, e.g. a
+    /// milk swap) | `recipe_base` | `packaging_rule` | `purchase_order` (open:
+    /// draft, ordered, partially received) | `stocktake` (open count) |
+    /// `transfer` (requested, draft or dispatched).
+    pub kind: String,
+    /// The using entity's id (menu item, option, base, rule, PO, count, transfer).
+    pub id: Uuid,
+    /// Its display name (menu item / option / base / rule name, PO reference
+    /// or supplier, the count's branch, `#<number>` for a transfer).
+    pub name: String,
+    /// Extra context: the size label, the option's group, the PO's branch, the
+    /// transfer's route.
+    pub detail: Option<String>,
+}
+
+/// Non-zero book stock of the ingredient at one branch.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+pub struct IngredientBranchStock {
+    pub branch_id: Uuid,
+    pub branch_name: String,
+    /// In the ingredient's base unit; may be negative.
+    pub on_hand: f64,
+}
+
+/// Where an ingredient is still used, for the archive confirmation.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
+pub struct IngredientUsage {
+    pub ingredient_id: Uuid,
+    pub name: String,
+    pub unit: String,
+    pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Active recipes, add-on/option lines, swaps, bases, packaging rules and
+    /// open documents that reference it. Archiving does NOT change them:
+    /// those recipes keep deducting and costing the ingredient.
+    pub usages: Vec<IngredientUsageRef>,
+    /// Branches holding non-zero stock of it. Archiving leaves the balances
+    /// alone; such a branch keeps seeing it in counts until it reaches zero.
+    pub stock: Vec<IngredientBranchStock>,
+    /// `usages` or `stock` is non-empty: an archive must send `confirm: true`.
+    pub needs_confirmation: bool,
+    /// Nothing references it at all, history included (no movement, recipe,
+    /// PO, count, transfer or waste row), so a delete loses nothing.
+    pub never_used: bool,
+}
+
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct ArchiveIngredientRequest {
+    /// Required (`true`) when the ingredient is still used or holds stock
+    /// (`GET …/usage` says so); otherwise the archive answers 409
+    /// `ARCHIVE_NEEDS_CONFIRMATION`.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+async fn load_usage(
+    conn: &mut sqlx::PgConnection,
+    org_id: Uuid,
+    id: Uuid,
+) -> Result<IngredientUsage, AppError> {
+    let head = sqlx::query!(
+        r#"SELECT name, unit::text AS "unit!", archived_at
+             FROM org_ingredients
+            WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL"#,
+        id,
+        org_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
+
+    let usages = sqlx::query_as!(
+        IngredientUsageRef,
+        r#"
+        SELECT u.kind AS "kind!", u.id AS "id!", u.name AS "name!", u.detail AS "detail?"
+        FROM (
+            SELECT DISTINCT 'recipe'::text AS kind, mi.id, mi.name, ms.label AS detail, 1 AS ord
+              FROM recipe_lines rl
+              JOIN menu_item_sizes ms ON ms.id = rl.owner_id
+              JOIN menu_items mi      ON mi.id = ms.menu_item_id
+             WHERE rl.owner_type = 'item_size' AND rl.ingredient_id = $1
+               AND mi.org_id = $2 AND mi.deleted_at IS NULL AND mi.is_active AND ms.is_active
+            UNION
+            SELECT DISTINCT 'modifier_option', mo.id, mo.name, g.name, 2
+              FROM recipe_lines rl
+              JOIN modifier_options mo ON mo.id = rl.owner_id
+              JOIN modifier_groups g   ON g.id = mo.group_id
+             WHERE rl.owner_type = 'modifier_option' AND rl.ingredient_id = $1
+               AND g.org_id = $2 AND mo.is_active AND g.is_active
+            UNION
+            SELECT 'swap', mo.id, mo.name, g.name, 3
+              FROM modifier_options mo
+              JOIN modifier_groups g ON g.id = mo.group_id
+             WHERE mo.replaces_ingredient_id = $1
+               AND g.org_id = $2 AND mo.is_active AND g.is_active
+            UNION
+            SELECT DISTINCT 'recipe_base', rb.id, rb.name, NULL, 4
+              FROM recipe_base_lines bl
+              JOIN recipe_bases rb ON rb.id = bl.base_id
+             WHERE bl.ingredient_id = $1
+               AND rb.org_id = $2 AND rb.deleted_at IS NULL AND rb.is_active
+            UNION
+            SELECT DISTINCT 'packaging_rule', pr.id, pr.name, NULL, 5
+              FROM packaging_rule_lines pl
+              JOIN packaging_rules pr ON pr.id = pl.rule_id
+             WHERE pl.ingredient_id = $1 AND pr.org_id = $2 AND pr.is_active
+            UNION
+            SELECT DISTINCT 'purchase_order', po.id,
+                   COALESCE(NULLIF(po.reference, ''), s.name, 'PO'), b.name, 6
+              FROM purchase_order_lines l
+              JOIN purchase_orders po ON po.id = l.purchase_order_id
+              JOIN branches b         ON b.id = po.branch_id
+              LEFT JOIN suppliers s   ON s.id = po.supplier_id
+             WHERE l.org_ingredient_id = $1 AND po.org_id = $2
+               AND po.status IN ('draft', 'ordered', 'partially_received')
+            UNION
+            SELECT DISTINCT 'stocktake', st.id, b.name, NULL, 7
+              FROM stocktake_items si
+              JOIN stocktakes st ON st.id = si.stocktake_id
+              JOIN branches b    ON b.id = st.branch_id
+             WHERE si.org_ingredient_id = $1 AND st.org_id = $2
+               AND st.status IN ('draft', 'in_progress')
+            UNION
+            SELECT DISTINCT 'transfer', t.id, '#' || t.number::text, src.name || ' → ' || dst.name, 8
+              FROM stock_transfer_lines l
+              JOIN stock_transfers t ON t.id = l.transfer_id
+              JOIN branches src      ON src.id = t.source_branch_id
+              JOIN branches dst      ON dst.id = t.destination_branch_id
+             WHERE l.org_ingredient_id = $1 AND t.org_id = $2
+               AND t.status IN ('requested', 'draft', 'dispatched')
+        ) u
+        ORDER BY u.ord, u.name, u.detail NULLS FIRST
+        "#,
+        id,
+        org_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let stock = sqlx::query_as!(
+        IngredientBranchStock,
+        r#"
+        SELECT bs.branch_id AS "branch_id!", b.name AS "branch_name!",
+               bs.on_hand::float8 AS "on_hand!"
+          FROM branch_stock bs
+          JOIN branches b ON b.id = bs.branch_id AND b.deleted_at IS NULL
+         WHERE bs.org_ingredient_id = $1 AND b.org_id = $2 AND bs.on_hand <> 0
+         ORDER BY b.name
+        "#,
+        id,
+        org_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let never_used = sqlx::query_scalar!(
+        r#"
+        SELECT NOT (
+               EXISTS (SELECT 1 FROM inventory_movements    WHERE org_ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM recipe_lines           WHERE ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM recipe_base_lines      WHERE ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM packaging_rule_lines   WHERE ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM modifier_options       WHERE replaces_ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM purchase_order_lines   WHERE org_ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM goods_receipt_lines    WHERE org_ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM stocktake_items        WHERE org_ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM stock_transfer_lines   WHERE org_ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM waste_events           WHERE org_ingredient_id = $1)
+            OR EXISTS (SELECT 1 FROM branch_stock           WHERE org_ingredient_id = $1 AND on_hand <> 0)
+        ) AS "never_used!"
+        "#,
+        id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    let needs_confirmation = !usages.is_empty() || !stock.is_empty();
+    Ok(IngredientUsage {
+        ingredient_id: id,
+        name: head.name,
+        unit: head.unit,
+        archived_at: head.archived_at,
+        usages,
+        stock,
+        needs_confirmation,
+        never_used,
+    })
+}
+
+#[utoipa::path(
+    get,
+    path = "/inventory/orgs/{org_id}/catalog/{id}/usage",
+    tag = "inventory",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("id" = Uuid, Path, description = "Ingredient ID")
+    ),
+    responses((status = 200, description = "Where the ingredient is still used, and the stock it holds", body = IngredientUsage), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn get_catalog_item_usage(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<(Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
+    let (org_id, id) = path.into_inner();
+    require_org_access(&claims, org_id)?;
+    let mut conn = pool.get_ref().acquire().await?;
+    let usage = load_usage(&mut conn, org_id, id).await?;
+    Ok(HttpResponse::Ok().json(usage))
+}
+
+#[utoipa::path(
+    post,
+    path = "/inventory/orgs/{org_id}/catalog/{id}/archive",
+    tag = "inventory",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("id" = Uuid, Path, description = "Ingredient ID")
+    ),
+    request_body(content = Option<ArchiveIngredientRequest>, description = "`{confirm: true}` when the ingredient is still used or holds stock"),
+    responses(
+        (status = 200, description = "Archived (idempotent: an archived ingredient is returned unchanged)", body = OrgIngredient),
+        (status = 409, description = "`ARCHIVE_NEEDS_CONFIRMATION`: still used or holding stock; resend with `confirm: true`"),
+        AppErrorResponse
+    ),
+    security(("bearer_jwt" = []))
+)]
+/// Archive an ingredient: it leaves pickers, reorder suggestions and (once no
+/// branch holds stock) stock-count sheets. Nothing else changes: recipes that
+/// use it keep deducting and costing it, every till keeps it in its mirror,
+/// history keeps showing it, no movement is posted and no balance moves.
+pub async fn archive_catalog_item(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<(Uuid, Uuid)>,
+    body: Option<web::Json<ArchiveIngredientRequest>>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "update").await?;
+    let (org_id, id) = path.into_inner();
+    require_org_access(&claims, org_id)?;
+    let confirm = body.map(|b| b.confirm).unwrap_or(false);
+
+    let mut tx = pool.get_ref().begin().await?;
+    let locked = sqlx::query!(
+        "SELECT archived_at FROM org_ingredients \
+         WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR UPDATE",
+        id,
+        org_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
+
+    if locked.archived_at.is_none() {
+        let usage = load_usage(&mut tx, org_id, id).await?;
+        if usage.needs_confirmation && !confirm {
+            return Err(AppError::CodedVars {
+                status: 409,
+                code: "ARCHIVE_NEEDS_CONFIRMATION",
+                reason: format!(
+                    "This ingredient is still used in {} place(s) and has stock at {} branch(es). \
+                     Archiving keeps those recipes deducting it; confirm to archive.",
+                    usage.usages.len(),
+                    usage.stock.len()
+                ),
+                vars: serde_json::json!({
+                    "usage_count": usage.usages.len(),
+                    "branches_with_stock": usage.stock.len(),
+                }),
+            });
+        }
+        sqlx::query!(
+            "UPDATE org_ingredients SET archived_at = now(), archived_by = $3 \
+             WHERE id = $1 AND org_id = $2",
+            id,
+            org_id,
+            claims.user_id()
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let row = fetch_ingredient(&mut *tx, id).await?;
+    tx.commit().await?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
+#[utoipa::path(
+    post,
+    path = "/inventory/orgs/{org_id}/catalog/{id}/unarchive",
+    tag = "inventory",
+    params(
+        ("org_id" = Uuid, Path, description = "Organization ID"),
+        ("id" = Uuid, Path, description = "Ingredient ID")
+    ),
+    responses((status = 200, description = "Active again (idempotent)", body = OrgIngredient), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+/// Bring an archived ingredient back: pickers and counts list it again. Its
+/// name never left it, so this cannot conflict.
+pub async fn unarchive_catalog_item(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<(Uuid, Uuid)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "inventory", "update").await?;
+    let (org_id, id) = path.into_inner();
+    require_org_access(&claims, org_id)?;
+
+    let mut tx = pool.get_ref().begin().await?;
+    let found = sqlx::query_scalar!(
+        "UPDATE org_ingredients SET archived_at = NULL, archived_by = NULL \
+         WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL \
+         RETURNING id",
+        id,
+        org_id
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    found.ok_or_else(|| AppError::NotFound("Ingredient not found".into()))?;
+    let row = fetch_ingredient(&mut *tx, id).await?;
+    tx.commit().await?;
+    Ok(HttpResponse::Ok().json(row))
+}
+
 // ── Org settings ──────────────────────────────────────────────
 
 #[utoipa::path(
@@ -1097,7 +1502,7 @@ pub async fn update_inventory_settings(
     get,
     path = "/inventory/branches/{branch_id}/stock",
     tag = "inventory",
-    params(("branch_id" = Uuid, Path, description = "Branch ID")),
+    params(("branch_id" = Uuid, Path, description = "Branch ID"), ArchiveStatusQuery),
     responses((status = 200, description = "Every catalog ingredient as seen from this branch", body = Vec<BranchStockRow>), AppErrorResponse),
     security(("bearer_jwt" = []))
 )]
@@ -1105,6 +1510,7 @@ pub async fn list_branch_stock(
     req: HttpRequest,
     pool: crate::db::Db,
     branch_id: web::Path<Uuid>,
+    query: web::Query<ArchiveStatusQuery>,
 ) -> Result<HttpResponse, AppError> {
     let claims = extract_claims(&req)?;
     check_permission(pool.get_ref(), &claims, "inventory", "read").await?;
@@ -1112,8 +1518,9 @@ pub async fn list_branch_stock(
     let org_id = branch_org(pool.get_ref(), *branch_id).await?;
 
     let sql = format!(
-        "{BRANCH_STOCK_SELECT} WHERE oi.org_id = $2 AND oi.deleted_at IS NULL \
-         ORDER BY ic.sort_order, ic.name, oi.name"
+        "{BRANCH_STOCK_SELECT} WHERE oi.org_id = $2 AND oi.deleted_at IS NULL{} \
+         ORDER BY ic.sort_order, ic.name, oi.name",
+        query.filter().sql()
     );
     let rows = sqlx::query_as::<_, BranchStockRow>(&sql)
         .bind(*branch_id)
@@ -1209,6 +1616,7 @@ pub async fn list_movements(
             m.id, m.branch_id, m.org_ingredient_id,
             oi.name       AS ingredient_name,
             oi.unit::text AS unit,
+            oi.archived_at AS ingredient_archived_at,
             m.branch_stock_id,
             m.type::text  AS movement_type,
             m.quantity, m.balance_after, m.unit_cost, m.reason, m.below_zero,
@@ -1385,6 +1793,7 @@ pub async fn list_waste(
             b.name AS branch_name,
             m.org_ingredient_id,
             oi.name AS ingredient_name, oi.unit::text AS unit,
+            oi.archived_at AS ingredient_archived_at,
             m.branch_stock_id, m.type::text AS movement_type,
             m.quantity, m.balance_after, m.unit_cost, m.reason, m.below_zero,
             m.source_type, m.source_id, m.note, m.created_by,
@@ -1438,6 +1847,34 @@ pub async fn list_waste(
 }
 
 // ── Helpers ───────────────────────────────────────────────────
+
+fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.code().as_deref() == Some("23505"))
+}
+
+/// The refusal for a name the catalog already holds. An archived ingredient
+/// keeps its name (the partial unique index only frees a DELETED row's), so
+/// when the holder is archived the client is told to unarchive it instead —
+/// one ingredient, one history, rather than a twin with an empty ledger.
+async fn name_taken(pool: &PgPool, org_id: Uuid, name: &str) -> AppError {
+    let archived = sqlx::query!(
+        "SELECT id, name FROM org_ingredients \
+         WHERE org_id = $1 AND name = $2 AND deleted_at IS NULL AND archived_at IS NOT NULL",
+        org_id,
+        name
+    )
+    .fetch_optional(pool)
+    .await;
+    match archived {
+        Ok(Some(row)) => AppError::CodedVars {
+            status: 409,
+            code: "INGREDIENT_NAME_ARCHIVED",
+            reason: "An archived ingredient already has this name. Unarchive it instead of creating a new one.".into(),
+            vars: serde_json::json!({ "ingredient_id": row.id, "name": row.name }),
+        },
+        _ => AppError::Conflict("An ingredient with this name already exists in the catalog".into()),
+    }
+}
 
 fn extract_claims(req: &HttpRequest) -> Result<Claims, AppError> {
     req.extensions()
@@ -1687,6 +2124,7 @@ where
         SELECT
             m.id, m.branch_id, m.org_ingredient_id,
             oi.name AS ingredient_name, oi.unit::text AS unit,
+            oi.archived_at AS ingredient_archived_at,
             m.branch_stock_id, m.type::text AS movement_type,
             m.quantity, m.balance_after, m.unit_cost, m.reason, m.below_zero,
             m.source_type, m.source_id, m.note, m.created_by,

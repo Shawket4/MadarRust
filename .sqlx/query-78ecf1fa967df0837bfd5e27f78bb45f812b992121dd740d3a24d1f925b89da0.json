@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE org_ingredients SET archived_at = now(), archived_by = $3 WHERE id = $1 AND org_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "78ecf1fa967df0837bfd5e27f78bb45f812b992121dd740d3a24d1f925b89da0"
+}

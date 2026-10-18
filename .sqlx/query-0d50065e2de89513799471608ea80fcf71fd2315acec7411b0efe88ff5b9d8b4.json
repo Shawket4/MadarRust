@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT NOT (\n               EXISTS (SELECT 1 FROM inventory_movements    WHERE org_ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM recipe_lines           WHERE ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM recipe_base_lines      WHERE ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM packaging_rule_lines   WHERE ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM modifier_options       WHERE replaces_ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM purchase_order_lines   WHERE org_ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM goods_receipt_lines    WHERE org_ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM stocktake_items        WHERE org_ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM stock_transfer_lines   WHERE org_ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM waste_events           WHERE org_ingredient_id = $1)\n            OR EXISTS (SELECT 1 FROM branch_stock           WHERE org_ingredient_id = $1 AND on_hand <> 0)\n        ) AS \"never_used!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "never_used!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0d50065e2de89513799471608ea80fcf71fd2315acec7411b0efe88ff5b9d8b4"
+}

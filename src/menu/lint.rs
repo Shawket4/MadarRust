@@ -298,6 +298,7 @@ const RULES: &[Rule] = &[
                 FROM org_ingredients oi
                 JOIN ingredient_categories ic ON ic.id = oi.category_id
                WHERE oi.org_id = $1 AND oi.deleted_at IS NULL AND oi.is_active
+                 AND oi.archived_at IS NULL
                  AND ic.slug IN ('milk', 'coffee_bean')
                  AND NOT EXISTS (
                        SELECT 1 FROM recipe_lines rl
@@ -424,6 +425,7 @@ const RULES: &[Rule] = &[
                 FROM org_ingredients oi
                 LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id
                WHERE oi.org_id = $1 AND oi.deleted_at IS NULL AND oi.is_active
+                 AND oi.archived_at IS NULL
                  AND oi.name ~* '\\m(cups?|lids?|straws?|sleeves?)\\M'
                  AND ic.slug IS DISTINCT FROM 'packaging'
                ORDER BY oi.name",

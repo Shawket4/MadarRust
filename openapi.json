@@ -16505,6 +16505,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`active` | `archived` | `all`. Omitted = `all`: every non-deleted\ningredient, exactly the rows older dashboards and tills read (they look\nnames and costs up in this list, so an archived ingredient a recipe\nstill uses must stay in it). Pickers ask for `active`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ArchiveFilter"
+            }
           }
         ],
         "responses": {
@@ -17081,6 +17090,15 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`active` | `archived` | `all`. Omitted = `all`: every non-deleted\ningredient, exactly the rows older dashboards and tills read (they look\nnames and costs up in this list, so an archived ingredient a recipe\nstill uses must stay in it). Pickers ask for `active`.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ArchiveFilter"
+            }
           }
         ],
         "responses": {
@@ -17413,6 +17431,346 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OrgIngredient"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/orgs/{org_id}/catalog/{id}/archive": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Archive an ingredient: it leaves pickers, reorder suggestions and (once no\nbranch holds stock) stock-count sheets. Nothing else changes: recipes that\nuse it keep deducting and costing it, every till keeps it in its mirror,\nhistory keeps showing it, no movement is posted and no balance moves.",
+        "operationId": "archive_catalog_item",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Ingredient ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "`{confirm: true}` when the ingredient is still used or holds stock",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ArchiveIngredientRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Archived (idempotent: an archived ingredient is returned unchanged)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgIngredient"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/orgs/{org_id}/catalog/{id}/unarchive": {
+      "post": {
+        "tags": [
+          "inventory"
+        ],
+        "summary": "Bring an archived ingredient back: pickers and counts list it again. Its\nname never left it, so this cannot conflict.",
+        "operationId": "unarchive_catalog_item",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Ingredient ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active again (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrgIngredient"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/inventory/orgs/{org_id}/catalog/{id}/usage": {
+      "get": {
+        "tags": [
+          "inventory"
+        ],
+        "operationId": "get_catalog_item_usage",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Ingredient ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where the ingredient is still used, and the stock it holds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngredientUsage"
                 }
               }
             }
@@ -67516,6 +67874,24 @@
           }
         }
       },
+      "ArchiveFilter": {
+        "type": "string",
+        "description": "Which ingredients a catalog or stock list returns, by archive state.",
+        "enum": [
+          "active",
+          "archived",
+          "all"
+        ]
+      },
+      "ArchiveIngredientRequest": {
+        "type": "object",
+        "properties": {
+          "confirm": {
+            "type": "boolean",
+            "description": "Required (`true`) when the ingredient is still used or holds stock\n(`GET …/usage` says so); otherwise the archive answers 409\n`ARCHIVE_NEEDS_CONFIRMATION`."
+          }
+        }
+      },
       "AskSwap": {
         "type": "object",
         "required": [
@@ -70224,6 +70600,14 @@
           "has_activity"
         ],
         "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The ingredient's archive time; `null` = active. An archived ingredient\nstill holding stock here keeps appearing so it can be counted or\nwasted down."
+          },
           "below_par": {
             "type": "boolean"
           },
@@ -80436,6 +80820,29 @@
           }
         }
       },
+      "IngredientBranchStock": {
+        "type": "object",
+        "description": "Non-zero book stock of the ingredient at one branch.",
+        "required": [
+          "branch_id",
+          "branch_name",
+          "on_hand"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "branch_name": {
+            "type": "string"
+          },
+          "on_hand": {
+            "type": "number",
+            "format": "double",
+            "description": "In the ingredient's base unit; may be negative."
+          }
+        }
+      },
       "IngredientCategory": {
         "type": "object",
         "required": [
@@ -80485,6 +80892,91 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "IngredientUsage": {
+        "type": "object",
+        "description": "Where an ingredient is still used, for the archive confirmation.",
+        "required": [
+          "ingredient_id",
+          "name",
+          "unit",
+          "usages",
+          "stock",
+          "needs_confirmation",
+          "never_used"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "needs_confirmation": {
+            "type": "boolean",
+            "description": "`usages` or `stock` is non-empty: an archive must send `confirm: true`."
+          },
+          "never_used": {
+            "type": "boolean",
+            "description": "Nothing references it at all, history included (no movement, recipe,\nPO, count, transfer or waste row), so a delete loses nothing."
+          },
+          "stock": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngredientBranchStock"
+            },
+            "description": "Branches holding non-zero stock of it. Archiving leaves the balances\nalone; such a branch keeps seeing it in counts until it reaches zero."
+          },
+          "unit": {
+            "type": "string"
+          },
+          "usages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngredientUsageRef"
+            },
+            "description": "Active recipes, add-on/option lines, swaps, bases, packaging rules and\nopen documents that reference it. Archiving does NOT change them:\nthose recipes keep deducting and costing the ingredient."
+          }
+        }
+      },
+      "IngredientUsageRef": {
+        "type": "object",
+        "description": "One live thing that uses an ingredient.",
+        "required": [
+          "kind",
+          "id",
+          "name"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Extra context: the size label, the option's group, the PO's branch, the\ntransfer's route."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The using entity's id (menu item, option, base, rule, PO, count, transfer)."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`recipe` (a menu item size's recipe) | `modifier_option` (an add-on's\nor option's recipe line) | `swap` (an option that replaces it, e.g. a\nmilk swap) | `recipe_base` | `packaging_rule` | `purchase_order` (open:\ndraft, ordered, partially received) | `stocktake` (open count) |\n`transfer` (requested, draft or dispatched)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its display name (menu item / option / base / rule name, PO reference\nor supplier, the count's branch, `#<number>` for a transfer)."
           }
         }
       },
@@ -87399,6 +87891,22 @@
           "updated_at"
         ],
         "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Set when the ingredient is archived: hidden from pickers, stock-count\nsheets (once no branch holds stock) and reorder suggestions, but kept\nfor history and still deducted by any recipe that uses it. `null` =\nactive. Independent of `is_active` (which the POS feed reads)."
+          },
+          "archived_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Who archived it; `null` when active."
+          },
           "category_id": {
             "type": "string",
             "format": "uuid"
@@ -98933,6 +99441,14 @@
           "id": {
             "type": "string",
             "format": "uuid"
+          },
+          "ingredient_archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The ingredient's archive time (history keeps showing an archived\ningredient, with a badge); `null` = active."
           },
           "ingredient_name": {
             "type": "string"

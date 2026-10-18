@@ -712,6 +712,8 @@ pub async fn branch_stock(
             LEFT JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = ANY($1)
             WHERE oi.org_id = $2 AND oi.deleted_at IS NULL
             GROUP BY oi.id, oi.name, oi.unit, oi.cost_per_unit
+            -- An archived ingredient stays listed only while stock remains.
+            HAVING oi.archived_at IS NULL OR COALESCE(SUM(bs.on_hand), 0) <> 0
             ORDER BY below_par DESC, oi.name ASC
             "#,
         )
@@ -732,6 +734,8 @@ pub async fn branch_stock(
             FROM org_ingredients oi
             LEFT JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = ANY($1)
             WHERE oi.org_id = $2 AND oi.deleted_at IS NULL
+              -- An archived ingredient stays listed only while stock remains.
+              AND (oi.archived_at IS NULL OR COALESCE(bs.on_hand, 0) <> 0)
             ORDER BY (COALESCE(bs.par_min, 0) > 0 AND COALESCE(bs.on_hand, 0) <= bs.par_min) DESC, oi.name ASC
             "#,
         )
@@ -1472,7 +1476,8 @@ pub async fn org_low_stock(
         FROM branch_stock bs
         JOIN branches b        ON b.id = bs.branch_id AND b.org_id = $1 AND b.deleted_at IS NULL
         JOIN org_ingredients oi ON oi.id = bs.org_ingredient_id AND oi.deleted_at IS NULL
-        WHERE bs.par_min > 0 AND bs.on_hand <= bs.par_min
+        -- An archived ingredient is not reordered.
+        WHERE bs.par_min > 0 AND bs.on_hand <= bs.par_min AND oi.archived_at IS NULL
         ORDER BY b.name ASC, oi.name ASC
         "#,
     )
@@ -1519,6 +1524,7 @@ pub async fn branch_low_stock(
         JOIN org_ingredients oi ON oi.id = bs.org_ingredient_id AND oi.deleted_at IS NULL
         WHERE bs.branch_id = ANY($1)
           AND bs.par_min > 0 AND bs.on_hand <= bs.par_min
+          AND oi.archived_at IS NULL -- an archived ingredient is not reordered
         ORDER BY b.name ASC, oi.name ASC
         "#,
     )

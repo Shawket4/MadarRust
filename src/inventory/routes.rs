@@ -42,6 +42,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 "/orgs/{org_id}/catalog/{id}",
                 web::delete().to(handlers::delete_catalog_item),
             )
+            .route(
+                "/orgs/{org_id}/catalog/{id}/usage",
+                web::get().to(handlers::get_catalog_item_usage),
+            )
+            .route(
+                "/orgs/{org_id}/catalog/{id}/archive",
+                web::post().to(handlers::archive_catalog_item),
+            )
+            .route(
+                "/orgs/{org_id}/catalog/{id}/unarchive",
+                web::post().to(handlers::unarchive_catalog_item),
+            )
             // ── Org-level inventory settings ──────────────────────────
             .route(
                 "/orgs/{org_id}/settings",

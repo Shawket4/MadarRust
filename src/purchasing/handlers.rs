@@ -998,6 +998,7 @@ pub async fn reorder_suggestions(
         FROM org_ingredients oi
         JOIN branch_stock bs ON bs.org_ingredient_id = oi.id AND bs.branch_id = $1
         WHERE oi.deleted_at IS NULL
+          AND oi.archived_at IS NULL -- an archived ingredient is not reordered
           AND COALESCE(bs.par_min, 0) > 0
           AND COALESCE(bs.on_hand, 0) <= bs.par_min
         ORDER BY oi.supplier_id NULLS LAST, oi.name
