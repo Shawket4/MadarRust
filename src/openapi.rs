@@ -657,6 +657,7 @@ paths(
         crate::purchasing::handlers::create_order,
         crate::purchasing::handlers::list_orders,
         crate::purchasing::handlers::list_org_orders,
+        crate::purchasing::handlers::list_last_prices,
         crate::purchasing::handlers::reorder_suggestions,
         crate::purchasing::handlers::create_return,
         crate::purchasing::handlers::list_po_receipts,

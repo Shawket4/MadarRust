@@ -39061,6 +39061,127 @@
         ]
       }
     },
+    "/purchasing/orgs/{org_id}/last-prices": {
+      "get": {
+        "tags": [
+          "purchasing"
+        ],
+        "summary": "The last price paid per ingredient, to prefill a new purchase order line.",
+        "description": "For each ingredient: the most recent PO line from `supplier_id`, preferring\na received line (at the price its delivery was invoiced at) over one only\nordered, and either over a cancelled order's; failing that, the same pick\nover every supplier (`source = \"any\"`). Ingredients never purchased are\nabsent. Read-only, derived from purchase orders and goods receipts.",
+        "operationId": "list_purchase_last_prices",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "supplier_id",
+            "in": "query",
+            "description": "The supplier the order is for. Its own last price wins; when it never\nsold the ingredient (or none is given) the last price from any supplier\nis returned, with `source = \"any\"`.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "ingredient_ids",
+            "in": "query",
+            "description": "Comma-separated ingredient ids. Omitted: every ingredient the org has\never put on a purchase order.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Last price per ingredient",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LastPrice"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/purchasing/orgs/{org_id}/orders": {
       "get": {
         "tags": [
@@ -81785,6 +81906,92 @@
           }
         }
       },
+      "LastPrice": {
+        "type": "object",
+        "description": "The last price paid for one ingredient, the default for a new PO line.",
+        "required": [
+          "org_ingredient_id",
+          "source",
+          "po_id",
+          "po_status",
+          "received",
+          "ordered_at",
+          "unit",
+          "unit_price",
+          "prices"
+        ],
+        "properties": {
+          "ordered_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the purchase order was raised."
+          },
+          "org_ingredient_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "po_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The purchase order the price comes from."
+          },
+          "po_status": {
+            "type": "string"
+          },
+          "prices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LastUnitPrice"
+            },
+            "description": "The same price in every unit a new line for this ingredient can be\nordered in (its measure's units and its named pack), converted through\nthe ingredient's units. A unit that does not convert is left out: the\nclient then offers no default for it."
+          },
+          "received": {
+            "type": "boolean",
+            "description": "True when the price is what a delivery was actually invoiced at (a\ngoods receipt), false when it is only what was ordered."
+          },
+          "received_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the delivery the price comes from was received (`received` only)."
+          },
+          "source": {
+            "$ref": "#/components/schemas/LastPriceSource"
+          },
+          "supplier_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "supplier_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit": {
+            "type": "string",
+            "description": "The remembered line's purchase unit."
+          },
+          "unit_price": {
+            "type": "number",
+            "format": "double",
+            "description": "Piastres per one `unit`, exact (6 dp)."
+          }
+        }
+      },
+      "LastPriceSource": {
+        "type": "string",
+        "description": "Where a remembered price came from.",
+        "enum": [
+          "supplier",
+          "any"
+        ]
+      },
       "LastTillWarning": {
         "type": "object",
         "required": [
@@ -81808,6 +82015,24 @@
           "seated_tables_count": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "LastUnitPrice": {
+        "type": "object",
+        "description": "The remembered price expressed per one purchase unit.",
+        "required": [
+          "unit",
+          "unit_price"
+        ],
+        "properties": {
+          "unit": {
+            "type": "string"
+          },
+          "unit_price": {
+            "type": "number",
+            "format": "double",
+            "description": "Piastres per one `unit`, exact (6 dp)."
           }
         }
       },

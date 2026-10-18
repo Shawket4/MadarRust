@@ -1,0 +1,108 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH cand AS (\n            SELECT l.org_ingredient_id,\n                   po.supplier_id,\n                   s.name AS supplier_name,\n                   po.id AS po_id,\n                   po.status::text AS po_status,\n                   po.created_at AS ordered_at,\n                   r.received_at,\n                   l.purchase_unit,\n                   l.units_per_purchase_unit,\n                   -- a receipt's cost is per base stock unit; × the line's\n                   -- factor is per purchase unit, like the ordered price.\n                   COALESCE(r.unit_cost_exact * l.units_per_purchase_unit, l.unit_cost_exact) AS unit_price,\n                   CASE WHEN r.received_at IS NOT NULL THEN 0\n                        WHEN po.status = 'cancelled' THEN 2\n                        ELSE 1 END AS tier,\n                   ($2::uuid IS NOT NULL AND po.supplier_id IS NOT DISTINCT FROM $2) AS from_supplier,\n                   oi.unit::text AS base_unit,\n                   oi.pack_unit,\n                   oi.pack_size,\n                   oi.density_g_per_ml\n            FROM purchase_order_lines l\n            JOIN purchase_orders po  ON po.id = l.purchase_order_id AND po.org_id = $1\n            JOIN org_ingredients oi  ON oi.id = l.org_ingredient_id AND oi.deleted_at IS NULL\n            LEFT JOIN suppliers s    ON s.id = po.supplier_id\n            LEFT JOIN LATERAL (\n                SELECT gr.received_at, grl.unit_cost_exact\n                FROM goods_receipt_lines grl\n                JOIN goods_receipts gr ON gr.id = grl.goods_receipt_id\n                WHERE grl.purchase_order_line_id = l.id\n                  AND NOT gr.is_return\n                  AND grl.quantity > 0\n                  AND grl.unit_cost_exact IS NOT NULL\n                ORDER BY gr.received_at DESC\n                LIMIT 1\n            ) r ON true\n            WHERE l.org_id = $1\n              AND ($3::uuid[] IS NULL OR l.org_ingredient_id = ANY($3))\n        )\n        SELECT DISTINCT ON (org_ingredient_id)\n               org_ingredient_id AS \"org_ingredient_id!\",\n               supplier_id,\n               supplier_name AS \"supplier_name?\",\n               po_id AS \"po_id!\",\n               po_status AS \"po_status!\",\n               ordered_at AS \"ordered_at!\",\n               received_at AS \"received_at?\",\n               purchase_unit AS \"purchase_unit!\",\n               units_per_purchase_unit AS \"units_per_purchase_unit!: Decimal\",\n               unit_price AS \"unit_price!: Decimal\",\n               from_supplier AS \"from_supplier!\",\n               base_unit AS \"base_unit!\",\n               pack_unit AS \"pack_unit?\",\n               pack_size AS \"pack_size?: Decimal\",\n               density_g_per_ml AS \"density_g_per_ml?: Decimal\"\n        FROM cand\n        ORDER BY org_ingredient_id, from_supplier DESC, tier,\n                 COALESCE(received_at, ordered_at) DESC, po_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "org_ingredient_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "supplier_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "supplier_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "po_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
+        "name": "po_status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "ordered_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "received_at?",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "purchase_unit!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "units_per_purchase_unit!: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 9,
+        "name": "unit_price!: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 10,
+        "name": "from_supplier!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "base_unit!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "pack_unit?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "pack_size?: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 14,
+        "name": "density_g_per_ml?: Decimal",
+        "type_info": "Numeric"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      null,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4ef0bb2d281c586f93f07bb07569bf890f5b4731a5a1070f92ea1cbb51078b96"
+}

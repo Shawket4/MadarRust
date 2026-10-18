@@ -44,6 +44,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(handlers::list_po_receipts),
             )
             .route(
+                "/orgs/{org_id}/last-prices",
+                web::get().to(handlers::list_last_prices),
+            )
+            .route(
                 "/orgs/{org_id}/orders",
                 web::get().to(handlers::list_org_orders),
             )
