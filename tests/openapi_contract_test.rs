@@ -120,3 +120,60 @@ fn transfer_receive_body_is_its_own() {
             .is_some()
     );
 }
+
+/// Every `$ref` in the spec resolves to a schema the spec defines: a
+/// dangling one breaks both generated clients (orval and the Flutter
+/// dashboard's `dashboard_api`).
+#[test]
+fn no_dangling_schema_refs() {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(m) => {
+                if let Some(Value::String(r)) = m.get("$ref") {
+                    out.push(r.clone());
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let doc = doc();
+    let schemas = doc["components"]["schemas"].as_object().unwrap();
+    let mut refs = Vec::new();
+    walk(&doc, &mut refs);
+    assert!(!refs.is_empty());
+    let dangling: Vec<&String> = refs
+        .iter()
+        .filter(|r| match r.strip_prefix("#/components/schemas/") {
+            Some(name) => !schemas.contains_key(name),
+            None => true,
+        })
+        .collect();
+    assert!(dangling.is_empty(), "dangling $refs: {dangling:?}");
+}
+
+/// The Items table's per-item figures (2026-10-18) are additive: optional and
+/// nullable, so clients generated before them and servers older than them
+/// both keep working.
+#[test]
+fn item_sales_extras_are_additive() {
+    let doc = doc();
+    let s = &doc["components"]["schemas"]["ItemSales"];
+    let mut required: Vec<&str> = s["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    required.sort_unstable();
+    for f in ["menu_total", "extras_total", "avg_extra"] {
+        assert!(s["properties"].get(f).is_some(), "{f} documented");
+        assert!(!required.contains(&f), "{f} must stay optional");
+        assert_eq!(s["properties"][f]["type"], serde_json::json!(["integer", "null"]), "{f}");
+    }
+    assert_eq!(
+        required,
+        ["item_name", "item_name_translations", "menu_item_id", "quantity_sold", "revenue"]
+    );
+}
