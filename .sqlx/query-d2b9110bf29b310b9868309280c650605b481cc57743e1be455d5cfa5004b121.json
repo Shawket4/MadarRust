@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.id AS \"mimg_id!\", a.menu_item_id AS \"menu_item_id!\", g.id AS \"group_id!\",\n                      COALESCE(a.min_override, g.min_selections) AS \"min!\",\n                      COALESCE(a.is_required_override, g.is_required) AS \"required!\",\n                      a.option_allowlist AS \"allowlist?\",\n                      g.effect AS \"effect!\", g.legacy_addon_type AS \"legacy?\"\n                 FROM menu_item_modifier_groups a\n                 JOIN modifier_groups g ON g.id = a.group_id AND g.is_active\n                WHERE a.menu_item_id = ANY($1)\n                ORDER BY a.menu_item_id, a.sort, g.name, g.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mimg_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "menu_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "group_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "min!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "required!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "allowlist?",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "effect!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "legacy?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d2b9110bf29b310b9868309280c650605b481cc57743e1be455d5cfa5004b121"
+}

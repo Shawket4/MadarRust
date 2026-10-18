@@ -23187,11 +23187,20 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "shape",
+            "in": "query",
+            "description": "OPT-IN, with `full=true` only: `compact` answers an OBJECT\n`{shape: \"compact-1\", items, group_options}` instead of the array —\nevery attached choice group's options once in `group_options` (keyed by\ngroup id) rather than copied into each item's `pricing.groups`, and\nwithout the fields no client reads (`org_id`, `image`, `created_at`,\n`updated_at`). See `menu::compact`. Any other value, or none, is the\ndefault array, unchanged.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract). Carries an `ETag` when served through the menu cache.",
+            "description": "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract). Carries an `ETag` when served through the menu cache. With `full=true&shape=compact` (opt-in) the body is instead an object `{shape: \"compact-1\", items, group_options}`: see the `shape` parameter.",
             "content": {
               "application/json": {
                 "schema": {
@@ -36157,7 +36166,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "The menu without prices. Carries an `ETag` and `Cache-Control: public, no-cache`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -36165,6 +36174,9 @@
                 }
               }
             }
+          },
+          "304": {
+            "description": "`If-None-Match` held the current menu's ETag. No body."
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -37633,7 +37645,7 @@
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "The menu. Carries an `ETag` and `Cache-Control: public, no-cache`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -37641,6 +37653,9 @@
                 }
               }
             }
+          },
+          "304": {
+            "description": "`If-None-Match` held the current menu's ETag. No body."
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",

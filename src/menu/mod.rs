@@ -1,6 +1,8 @@
 pub mod bases;
 pub mod cache;
 pub mod catalog_sync;
+pub mod compact;
+pub mod full_feed;
 pub mod handlers;
 pub mod linked;
 pub mod lint;

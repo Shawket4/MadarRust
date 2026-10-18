@@ -413,3 +413,28 @@ async fn lint_is_refused_without_menu_read_and_served_to_a_teller(pool: PgPool) 
         assert_eq!(resp.status().as_u16(), want, "{who}");
     }
 }
+
+/// The lint is cached per org under the menu fingerprint: an unchanged menu
+/// reads the cached findings, and a catalogue write is in the next lint.
+#[sqlx::test]
+async fn the_lint_after_a_write_is_fresh(pool: PgPool) {
+    let org = org(&pool).await;
+    let (_, milk, _) = clean_latte(&pool, org).await;
+    assert!(lint_org(&pool, org).await.unwrap().is_empty());
+    assert!(lint_org(&pool, org).await.unwrap().is_empty(), "a hit");
+    // The F4 fixture, one write at a time: each write is seen.
+    let tea = item(&pool, org, "Tea latte").await;
+    let s = size(&pool, tea, "one_size", 0).await;
+    let tea_leaf = ingredient(&pool, org, "Tea", "g", "general").await;
+    line(&pool, "item_size", s, tea_leaf, "5", "g").await;
+    assert!(only(&lint_org(&pool, org).await.unwrap(), "F4").is_empty());
+    attach(&pool, tea, milk).await;
+    assert_eq!(only(&lint_org(&pool, org).await.unwrap(), "F4").len(), 1);
+    sqlx::query("UPDATE menu_items SET name = 'Chai latte' WHERE id = $1")
+        .bind(tea)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let issues = lint_org(&pool, org).await.unwrap();
+    assert_eq!(only(&issues, "F4")[0].entity_name, "Chai latte");
+}

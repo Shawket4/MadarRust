@@ -165,6 +165,11 @@ impl Catalog {
         self.options.get(&id)
     }
 
+    /// Move an item out (a feed that serializes each view once needs no copy).
+    pub fn take_item(&mut self, id: Uuid) -> Option<LoadedItem> {
+        self.items.remove(&id)
+    }
+
     /// The rule's view of `item` with every loaded option.
     pub fn view(&self, item: Uuid) -> CatalogView {
         CatalogView {
@@ -323,94 +328,101 @@ impl Catalog {
         // as the staff pool always read them: attachment sort, group name, id,
         // then option sort, name, id.
         //
-        // The attachment's allow-list (`mimg_included_options`) is worked out
-        // once per attachment in the CTE, not once per joined OPTION row: as a
-        // select-list call it ran for every option of every group (72 times
-        // for a two-line sale on the prod copy, the largest share of a sale's
-        // database time). Same rows, same values, same order.
-        let group_rows: Vec<(
-            Uuid,
-            Uuid,
-            i32,
-            bool,
-            Option<Vec<Uuid>>,
-            String,
-            Option<String>,
-            Uuid,
-            i32,
-            Option<i32>,
-            bool,
-            bool,
-        )> = sqlx::query!(
-            r#"WITH a AS MATERIALIZED (
-                    SELECT a.id, a.menu_item_id, a.group_id, a.sort, a.min_override,
-                           a.is_required_override,
-                           mimg_included_options(a.id, a.option_allowlist) AS included
-                      FROM menu_item_modifier_groups a
-                     WHERE a.menu_item_id = ANY($1))
-             SELECT a.menu_item_id AS "menu_item_id!", g.id AS "group_id!",
-                    COALESCE(a.min_override, g.min_selections) AS "min!",
-                    COALESCE(a.is_required_override, g.is_required) AS "required!",
-                    a.included AS "included?",
-                    g.effect AS "effect!", g.legacy_addon_type AS "legacy?",
-                    mo.id AS "option_id!", mo.price AS "price!", bao.price AS "branch_price?",
-                    mo.is_default AS "is_default!",
-                    (mo.is_active AND COALESCE(bao.is_available, true)) AS "on!"
-               FROM a
-               JOIN modifier_groups g ON g.id = a.group_id AND g.is_active
-               JOIN modifier_options mo ON mo.group_id = g.id AND mo.legacy_source = 'addon'
-               LEFT JOIN menu_price_overrides bao
-                      ON bao.scope = 'branch' AND bao.target_type = 'modifier_option'
-                     AND bao.target_id = mo.id AND bao.branch_id = $2
-              ORDER BY a.menu_item_id, a.sort, g.name, g.id, mo.sort, mo.name, mo.id"#,
+        // Three narrow reads merged here, not one join: the attachments, their
+        // allow-lists, and each referenced group's options ONCE. The join
+        // repeated every option of a shared group once per item that attaches
+        // it (1,109 rows for 69 items on the prod copy, sorted by name) and ran
+        // the allow-list function once per attachment through SPI; together
+        // they were the largest statement of a menu build and of a sale. Same
+        // groups, same options, same values, same order: a group that has no
+        // add-on option is left out, as the inner join left it out.
+        let attachments = sqlx::query!(
+            r#"SELECT a.id AS "mimg_id!", a.menu_item_id AS "menu_item_id!", g.id AS "group_id!",
+                      COALESCE(a.min_override, g.min_selections) AS "min!",
+                      COALESCE(a.is_required_override, g.is_required) AS "required!",
+                      a.option_allowlist AS "allowlist?",
+                      g.effect AS "effect!", g.legacy_addon_type AS "legacy?"
+                 FROM menu_item_modifier_groups a
+                 JOIN modifier_groups g ON g.id = a.group_id AND g.is_active
+                WHERE a.menu_item_id = ANY($1)
+                ORDER BY a.menu_item_id, a.sort, g.name, g.id"#,
             ids,
-            branch,
         )
         .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|r| {
-            (
-                r.menu_item_id,
-                r.group_id,
-                r.min,
-                r.required,
-                r.included,
-                r.effect,
-                r.legacy,
-                r.option_id,
-                r.price,
-                r.branch_price,
-                r.is_default,
-                r.on,
+        .await?;
+        let mut allowlists: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        let listed: Vec<Uuid> = attachments
+            .iter()
+            .filter(|a| a.allowlist == Some(true))
+            .map(|a| a.mimg_id)
+            .collect();
+        if !listed.is_empty() {
+            // `mimg_included_options`, batched: the array in (sort, option) order.
+            for r in sqlx::query!(
+                r#"SELECT x.mimg_id, array_agg(x.option_id ORDER BY x.sort, x.option_id) AS "ids!"
+                     FROM menu_item_modifier_group_options x
+                    WHERE x.mimg_id = ANY($1) GROUP BY x.mimg_id"#,
+                &listed,
             )
-        })
-        .collect();
+            .fetch_all(&mut *conn)
+            .await?
+            {
+                allowlists.insert(r.mimg_id, r.ids);
+            }
+        }
+        let mut group_ids: Vec<Uuid> = attachments.iter().map(|a| a.group_id).collect();
+        group_ids.sort();
+        group_ids.dedup();
+        let mut options_of: HashMap<Uuid, Vec<GroupOption>> = HashMap::new();
+        if !group_ids.is_empty() {
+            for r in sqlx::query!(
+                r#"SELECT mo.group_id AS "group_id!", mo.id AS "option_id!", mo.price AS "price!",
+                          bao.price AS "branch_price?", mo.is_default AS "is_default!",
+                          (mo.is_active AND COALESCE(bao.is_available, true)) AS "on!"
+                     FROM modifier_options mo
+                     LEFT JOIN menu_price_overrides bao
+                            ON bao.scope = 'branch' AND bao.target_type = 'modifier_option'
+                           AND bao.target_id = mo.id AND bao.branch_id = $2
+                    WHERE mo.group_id = ANY($1) AND mo.legacy_source = 'addon'
+                    ORDER BY mo.group_id, mo.sort, mo.name, mo.id"#,
+                &group_ids,
+                branch,
+            )
+            .fetch_all(&mut *conn)
+            .await?
+            {
+                options_of.entry(r.group_id).or_default().push(GroupOption {
+                    id: s(r.option_id),
+                    price: i64::from(r.price),
+                    branch_price: r.branch_price.map(i64::from),
+                    is_default: r.is_default,
+                    is_active: r.on,
+                });
+            }
+        }
         let mut groups_of: HashMap<Uuid, Vec<GroupView>> = HashMap::new();
-        for (item, gid, min, required, included, effect, legacy, oid, price, bp, default, on) in
-            group_rows
-        {
-            let groups = groups_of.entry(item).or_default();
-            if groups.last().is_none_or(|g| g.id != s(gid)) {
-                groups.push(GroupView {
-                    id: s(gid),
-                    min: i64::from(min),
-                    is_required: required,
-                    effect,
-                    legacy_type: legacy,
-                    included: included.map(|ids| ids.into_iter().map(s).collect()),
-                    options: Vec::new(),
-                });
-            }
-            if let Some(g) = groups.last_mut() {
-                g.options.push(GroupOption {
-                    id: s(oid),
-                    price: i64::from(price),
-                    branch_price: bp.map(i64::from),
-                    is_default: default,
-                    is_active: on,
-                });
-            }
+        for a in attachments {
+            let Some(options) = options_of.get(&a.group_id) else {
+                continue;
+            };
+            let included = match a.allowlist {
+                Some(true) => Some(
+                    allowlists
+                        .get(&a.mimg_id)
+                        .map(|ids| ids.iter().copied().map(s).collect())
+                        .unwrap_or_default(),
+                ),
+                _ => None,
+            };
+            groups_of.entry(a.menu_item_id).or_default().push(GroupView {
+                id: s(a.group_id),
+                min: i64::from(a.min),
+                is_required: a.required,
+                effect: a.effect,
+                legacy_type: a.legacy,
+                included,
+                options: options.clone(),
+            });
         }
 
         let optionals: Vec<(
@@ -507,6 +519,34 @@ impl Catalog {
         }
 
         let mut recipes = recipes;
+        // Grouped once (every query above is item-ordered), not filtered per item.
+        let mut sizes_of: HashMap<Uuid, Vec<SizeView>> = HashMap::new();
+        for z in sizes {
+            sizes_of.entry(z.0).or_default().push(SizeView {
+                label: z.1,
+                price: z.2.map(i64::from),
+                is_active: z.3,
+                branch_price: z.4.map(i64::from),
+            });
+        }
+        let mut default_size_of: HashMap<Uuid, Option<String>> = HashMap::new();
+        for (id, label) in default_sizes {
+            default_size_of.entry(id).or_insert(label);
+        }
+        let mut optionals_of: HashMap<Uuid, Vec<OptionalRow>> = HashMap::new();
+        for o in optionals {
+            optionals_of.entry(o.0).or_default().push(OptionalRow {
+                id: o.1,
+                name: o.2,
+                name_translations: o.9,
+                price: o.3,
+                ingredient_id: o.4,
+                ingredient_name: o.5,
+                ingredient_unit: o.6,
+                quantity_used: o.7,
+                size_label: o.8,
+            });
+        }
         for &id in ids {
             let recipe = recipes.remove(&id).unwrap_or_default();
             let mut ing_order: Vec<Uuid> = Vec::new();
@@ -521,38 +561,12 @@ impl Catalog {
                 Some((r, bp)) => (Some(r), bp),
                 None => (None, None),
             };
-            let item_optionals: Vec<OptionalRow> = optionals
-                .iter()
-                .filter(|o| o.0 == id)
-                .map(|o| OptionalRow {
-                    id: o.1,
-                    name: o.2.clone(),
-                    name_translations: o.9.clone(),
-                    price: o.3,
-                    ingredient_id: o.4,
-                    ingredient_name: o.5.clone(),
-                    ingredient_unit: o.6.clone(),
-                    quantity_used: o.7,
-                    size_label: o.8.clone(),
-                })
-                .collect();
+            let item_optionals: Vec<OptionalRow> = optionals_of.remove(&id).unwrap_or_default();
             let view = ItemView {
                 id: s(id),
                 branch_price: branch_price.map(i64::from),
-                sizes: sizes
-                    .iter()
-                    .filter(|z| z.0 == id)
-                    .map(|z| SizeView {
-                        label: z.1.clone(),
-                        price: z.2.map(i64::from),
-                        is_active: z.3,
-                        branch_price: z.4.map(i64::from),
-                    })
-                    .collect(),
-                default_recipe_size: default_sizes
-                    .iter()
-                    .find(|d| d.0 == id)
-                    .and_then(|d| d.1.clone()),
+                sizes: sizes_of.remove(&id).unwrap_or_default(),
+                default_recipe_size: default_size_of.remove(&id).flatten(),
                 recipe: recipe
                     .iter()
                     .map(|r| RecipeLine {

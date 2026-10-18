@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT mimg.menu_item_id, mimg.id AS mimg_id, mg.id AS group_id, mg.name,\n                  mg.name_translations, mg.selection_type,\n                  COALESCE(mimg.min_override, mg.min_selections) AS \"min!\",\n                  COALESCE(mimg.max_override, mg.max_selections) AS max,\n                  COALESCE(mimg.is_required_override, mg.is_required) AS \"is_required!\",\n                  mg.legacy_addon_type, mimg.option_allowlist AS \"allowlist?\",\n                  mg.effect, mg.swap_category_id, sc.slug AS \"swap_category_slug?\"\n             FROM menu_item_modifier_groups mimg\n             JOIN modifier_groups mg ON mg.id = mimg.group_id\n             LEFT JOIN ingredient_categories sc ON sc.id = mg.swap_category_id\n            WHERE mimg.menu_item_id = ANY($1) AND mg.is_active = true\n            ORDER BY mimg.menu_item_id, mimg.sort, mg.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "menu_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "mimg_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "group_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "name_translations",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 5,
+        "name": "selection_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "min!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "max",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "is_required!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "legacy_addon_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "allowlist?",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "effect",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "swap_category_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 13,
+        "name": "swap_category_slug?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "f401d6458e133be2b4bfbc893341829b3e56ac3e56fad9737a02704fd8dfaf2c"
+}

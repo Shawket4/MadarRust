@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.id AS \"id!\",\n                      ARRAY(SELECT addon_item_id FROM compat.menu_item_allowed_addons\n                             WHERE menu_item_id = m.id\n                             ORDER BY sort_order ASC, created_at ASC) AS \"ids!: Vec<Uuid>\"\n                 FROM unnest($1::uuid[]) AS m(id)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "ids!: Vec<Uuid>",
+        "type_info": "UuidArray"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "eda6a3840f0c361443a9398d8e69e3c4b6549218f9bb85ccb17f6cfc38f49336"
+}

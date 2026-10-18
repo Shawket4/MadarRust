@@ -55,6 +55,7 @@ pub const REGISTRY: &[Shim] = &[
                            are what older builds price from)",
         sites: &[
             "src/menu/handlers.rs",
+            "src/menu/full_feed.rs",
             "src/recipes/handlers.rs",
             "src/delivery/settings.rs",
         ],

@@ -1,0 +1,58 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT aii.addon_item_id AS \"addon_item_id!\", aii.org_ingredient_id,\n                  aii.quantity_used AS \"quantity_used!: sqlx::types::BigDecimal\",\n                  aii.ingredient_name AS \"ingredient_name!\", aii.ingredient_unit AS \"ingredient_unit!\",\n                  ic.id AS \"category_id?\", ic.slug AS \"category_slug?\"\n             FROM compat.addon_item_ingredients aii\n             LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id\n             LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id\n            WHERE aii.addon_item_id = ANY($1)\n            ORDER BY aii.addon_item_id, aii.ingredient_name, aii.org_ingredient_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "addon_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "org_ingredient_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "quantity_used!: sqlx::types::BigDecimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 3,
+        "name": "ingredient_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "ingredient_unit!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "category_id?",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "category_slug?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "eccdd268a8e46e5044c7ab749203bbc53440b30ac8fb0a57cd82840e66cf05d1"
+}

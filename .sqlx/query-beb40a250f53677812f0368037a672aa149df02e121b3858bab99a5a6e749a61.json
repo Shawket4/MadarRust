@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT mo.group_id AS \"group_id!\", mo.id AS \"option_id!\", mo.price AS \"price!\",\n                          bao.price AS \"branch_price?\", mo.is_default AS \"is_default!\",\n                          (mo.is_active AND COALESCE(bao.is_available, true)) AS \"on!\"\n                     FROM modifier_options mo\n                     LEFT JOIN menu_price_overrides bao\n                            ON bao.scope = 'branch' AND bao.target_type = 'modifier_option'\n                           AND bao.target_id = mo.id AND bao.branch_id = $2\n                    WHERE mo.group_id = ANY($1) AND mo.legacy_source = 'addon'\n                    ORDER BY mo.group_id, mo.sort, mo.name, mo.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "option_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "price!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "branch_price?",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "is_default!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "on!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "beb40a250f53677812f0368037a672aa149df02e121b3858bab99a5a6e749a61"
+}

@@ -340,6 +340,14 @@ pub struct MenuItemQuery {
     /// and items disabled at this branch are excluded — the per-branch menu the POS
     /// consumes. Omitted → the plain org catalog (legacy behaviour).
     pub branch_id: Option<Uuid>,
+    /// OPT-IN, with `full=true` only: `compact` answers an OBJECT
+    /// `{shape: "compact-1", items, group_options}` instead of the array —
+    /// every attached choice group's options once in `group_options` (keyed by
+    /// group id) rather than copied into each item's `pricing.groups`, and
+    /// without the fields no client reads (`org_id`, `image`, `created_at`,
+    /// `updated_at`). See `menu::compact`. Any other value, or none, is the
+    /// default array, unchanged.
+    pub shape: Option<String>,
 }
 
 /// Query for the dashboard catalog endpoint: paginated menu items with embedded
@@ -892,7 +900,7 @@ pub async fn reorder_categories(
     tag = "menu",
     operation_id = "list_menu_items",
     params(MenuItemQuery),
-    responses((status = 200, description = "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract). Carries an `ETag` when served through the menu cache.", body = Vec<MenuItem>),
+    responses((status = 200, description = "List menu items as a plain array; ?full=true embeds sizes/addons/optionals/recipes (POS contract). Carries an `ETag` when served through the menu cache. With `full=true&shape=compact` (opt-in) the body is instead an object `{shape: \"compact-1\", items, group_options}`: see the `shape` parameter.", body = Vec<MenuItem>),
               (status = 304, description = "`If-None-Match` held the current body's ETag. No body."),
               AppErrorResponse),
     security(("bearer_jwt" = []))
@@ -924,13 +932,16 @@ pub async fn list_menu_items(
         _ => None,
     };
     let cache = cache.filter(|_| fingerprint.is_some());
+    let compact = query.full.unwrap_or(false)
+        && query.shape.as_deref() == Some(crate::menu::compact::SHAPE);
     let variant = format!(
-        "menu|{}|{}|{}|{}|{}",
+        "menu|{}|{}|{}|{}|{}{}",
         fingerprint.as_deref().unwrap_or(""),
         query.category_id.map(|c| c.to_string()).unwrap_or_default(),
         query.branch_id.map(|b| b.to_string()).unwrap_or_default(),
         query.full.unwrap_or(false),
         sells_combos,
+        if compact { "|compact" } else { "" },
     );
     if let Some(c) = &cache
         && let Some(entry) = c.get_entry(query.org_id, &variant).await
@@ -938,6 +949,9 @@ pub async fn list_menu_items(
         return Ok(crate::menu::cache::respond(&req, entry).await);
     }
 
+    // Phase timings of an uncached build, at debug level
+    // (`RUST_LOG=madar::menu_build=debug`): where a build's time goes.
+    let t0 = std::time::Instant::now();
     // When branch_id is supplied, prices are branch-effective (override replaces
     // base_price) and branch-disabled items are excluded — the per-branch menu the POS
     // consumes. When null the LEFT JOIN matches nothing (NULL branch_id) so this is the
@@ -948,17 +962,9 @@ pub async fn list_menu_items(
                 COALESCE(bmo.price_override, mi.base_price) AS base_price,
                 mi.is_active,
                 mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
-                (
-                    SELECT a.id::text
-                    FROM compat.menu_item_recipes r
-                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
-                    WHERE r.menu_item_id = mi.id
-                      AND a.type = 'milk_type'
-                    -- Deterministic: the group's display order (component_resolve agrees).
-                    ORDER BY (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id
-                    LIMIT 1
-                ) AS default_milk_addon_id
+                -- Filled below for every item in one query
+                -- (`full_feed::default_milk_ids`), not a subquery per row.
+                NULL::text AS default_milk_addon_id
          FROM menu_items mi
          LEFT JOIN compat.branch_menu_overrides bmo
                 ON bmo.menu_item_id = mi.id AND bmo.branch_id = $3
@@ -975,75 +981,84 @@ pub async fn list_menu_items(
     .fetch_all(pool.get_ref())
     .await?;
 
+    let full = query.full.unwrap_or(false);
+    // Steps for the whole org in ONE query, then handed out per item: this
+    // endpoint is what the POS syncs, and a query per item would grow with the
+    // menu. These two take their own connection, so they run before the one
+    // below is held.
+    let mut steps_by_item = if full {
+        crate::recipes::steps::fetch_org_steps(pool.get_ref(), query.org_id).await?
+    } else {
+        Default::default()
+    };
+    attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
+    // Every query below runs on ONE connection, in a fixed number of
+    // statements whatever the menu's size (`menu::full_feed`).
+    let mut conn = pool.get_ref().acquire().await?;
+    let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
+    let mut milk = crate::menu::full_feed::default_milk_ids(&mut conn, &ids).await?;
+    for i in items.iter_mut() {
+        i.default_milk_addon_id = milk.remove(&i.id);
+    }
+
     // ?full=true embeds sizes + addon_slots + optionals + recipes + steps per item.
-    if query.full.unwrap_or(false) {
-        // Steps for the whole org in ONE query, then handed out per item: this
-        // endpoint is what the POS syncs, and a query per item would grow with
-        // the menu.
-        let mut steps_by_item =
-            crate::recipes::steps::fetch_org_steps(pool.get_ref(), query.org_id).await?;
-        let mut result: Vec<MenuItemFull> = vec![];
-        attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
+    if full {
+        let mut result: Vec<MenuItemFull> = Vec::with_capacity(items.len());
         // Every item's pricing view in one batched load (the order path's).
         let mut pricing = crate::orders::catalog_view::Catalog::new(query.branch_id);
-        let ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
-        pricing.ensure_on(pool.get_ref(), &ids, &[]).await?;
+        pricing.ensure(&mut conn, &ids, &[]).await?;
         // Combos: the `combo` object of every combo row and the "make it a
         // meal" link of every item row (additive; old tills ignore both).
-        let (mut combo_feeds, meals) = {
-            let mut conn = pool.get_ref().acquire().await?;
-            let combo_ids: Vec<Uuid> = items
-                .iter()
-                .filter(|i| i.kind == "combo")
-                .map(|i| i.id)
-                .collect();
-            let feeds = crate::combos::load::feeds_for(
-                &mut conn,
-                query.org_id,
-                query.branch_id,
-                &combo_ids,
-            )
-            .await?;
-            let meals = if sells_combos {
-                crate::combos::load::meal_links(&mut conn, query.org_id).await?
-            } else {
-                Default::default()
-            };
-            (feeds, meals)
+        let combo_ids: Vec<Uuid> = items
+            .iter()
+            .filter(|i| i.kind == "combo")
+            .map(|i| i.id)
+            .collect();
+        let mut combo_feeds =
+            crate::combos::load::feeds_for(&mut conn, query.org_id, query.branch_id, &combo_ids)
+                .await?;
+        let meals = if sells_combos {
+            crate::combos::load::meal_links(&mut conn, query.org_id).await?
+        } else {
+            Default::default()
         };
+        let mut parts =
+            crate::menu::full_feed::FullParts::load(&mut conn, &ids, query.branch_id).await?;
+        drop(conn);
+        let t_db = t0.elapsed();
         for item in items {
-            let mut sizes = fetch_sizes(pool.get_ref(), item.id).await?;
-            let mut all_sizes = fetch_all_sizes(pool.get_ref(), item.id).await?;
-            // Branch menu (branch_id set): overlay this branch's per-size price overrides
-            // so the POS sees branch-effective size prices, not just the catalog ones.
-            if let Some(branch_id) = query.branch_id {
-                apply_branch_size_overrides(pool.get_ref(), branch_id, item.id, &mut sizes).await?;
-                apply_branch_size_overrides(pool.get_ref(), branch_id, item.id, &mut all_sizes)
-                    .await?;
-            }
-            let addon_slots = fetch_addon_slots(pool.get_ref(), item.id).await?;
-            let optional_fields = fetch_optional_fields(pool.get_ref(), item.id).await?;
-            let recipes = fetch_item_recipes(pool.get_ref(), item.id).await?;
-            let allowed_addon_ids = fetch_allowed_addon_ids(pool.get_ref(), item.id).await?;
-            let recipe_steps = steps_by_item.remove(&item.id).unwrap_or_default();
-            let item_pricing = pricing.item(item.id).map(|i| i.view.clone());
-            let meal = meals.get(&item.id).copied();
-            let combo = combo_feeds.remove(&item.id);
+            let id = item.id;
             result.push(MenuItemFull {
+                sizes: parts.sizes.remove(&id).unwrap_or_default(),
+                all_sizes: parts.all_sizes.remove(&id).unwrap_or_default(),
+                addon_slots: parts.addon_slots.remove(&id).unwrap_or_default(),
+                optional_fields: parts.optional_fields.remove(&id).unwrap_or_default(),
+                recipes: parts.recipes.remove(&id).unwrap_or_default(),
+                recipe_steps: steps_by_item.remove(&id).unwrap_or_default(),
+                allowed_addon_ids: parts.allowed_addon_ids.remove(&id).unwrap_or_default(),
+                // Moved out, not cloned: each view is serialized once.
+                pricing: pricing.take_item(id).map(|i| i.view),
+                meal: meals.get(&id).copied(),
+                combo: combo_feeds.remove(&id),
                 item,
-                sizes,
-                all_sizes,
-                addon_slots,
-                optional_fields,
-                recipes,
-                recipe_steps,
-                allowed_addon_ids,
-                pricing: item_pricing,
-                meal,
-                combo,
             });
         }
-        let body = web::Bytes::from(serde_json::to_vec(&result).map_err(|_| AppError::Internal)?);
+        let t_assembled = t0.elapsed();
+        let body = if compact {
+            serde_json::to_vec(&crate::menu::compact::build(&result))
+        } else {
+            serde_json::to_vec(&result)
+        };
+        let body = web::Bytes::from(body.map_err(|_| AppError::Internal)?);
+        tracing::debug!(
+            target: "madar::menu_build",
+            items = result.len(),
+            bytes = body.len(),
+            db_us = t_db.as_micros() as u64,
+            assemble_us = (t_assembled - t_db).as_micros() as u64,
+            serialize_us = (t0.elapsed() - t_assembled).as_micros() as u64,
+            "menu-items full build"
+        );
         if let Some(c) = &cache {
             let entry = c.put_entry(query.org_id, &variant, body).await;
             return Ok(crate::menu::cache::respond(&req, entry).await);
@@ -1053,7 +1068,7 @@ pub async fn list_menu_items(
             .body(body));
     }
 
-    attach_item_refs(pool.get_ref(), query.org_id, &mut items).await?;
+    drop(conn);
     let body = web::Bytes::from(serde_json::to_vec(&items).map_err(|_| AppError::Internal)?);
     if let Some(c) = &cache {
         let entry = c.put_entry(query.org_id, &variant, body).await;
@@ -1810,8 +1825,12 @@ pub async fn list_addon_items(
     .fetch_all(pool.get_ref())
     .await?;
 
+    // Every add-on's ingredient lines in one query (was one per add-on).
+    let mut ingredients =
+        addon_ingredients_by_ids(pool.get_ref(), &rows.iter().map(|a| a.id).collect::<Vec<_>>())
+            .await?;
     for addon in &mut rows {
-        addon.ingredients = fetch_addon_ingredients(pool.get_ref(), addon.id).await?;
+        addon.ingredients = ingredients.remove(&addon.id).unwrap_or_default();
     }
     // Each option's pricing view, branch-effective, in one batched load.
     {
@@ -2366,50 +2385,6 @@ async fn branch_in_scope(
     Ok(org_id)
 }
 
-/// Per-(branch, item) size price overrides, ordered for stable output.
-async fn fetch_branch_size_overrides(
-    pool: &PgPool,
-    branch_id: Uuid,
-    menu_item_id: Uuid,
-) -> Result<Vec<BranchSizeOverride>, AppError> {
-    Ok(sqlx::query_as::<_, BranchSizeOverride>(
-        "SELECT size_label::text AS size_label, price_override
-         FROM compat.branch_menu_size_overrides
-         WHERE branch_id = $1 AND menu_item_id = $2
-         ORDER BY size_label",
-    )
-    .bind(branch_id)
-    .bind(menu_item_id)
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Overlay a branch's size price overrides onto catalog sizes (POS branch menu).
-async fn apply_branch_size_overrides(
-    pool: &PgPool,
-    branch_id: Uuid,
-    menu_item_id: Uuid,
-    sizes: &mut [ItemSize],
-) -> Result<(), AppError> {
-    if sizes.is_empty() {
-        return Ok(());
-    }
-    let overrides = fetch_branch_size_overrides(pool, branch_id, menu_item_id).await?;
-    if overrides.is_empty() {
-        return Ok(());
-    }
-    let map: std::collections::HashMap<String, i32> = overrides
-        .into_iter()
-        .map(|o| (o.size_label, o.price_override))
-        .collect();
-    for s in sizes.iter_mut() {
-        if let Some(p) = map.get(&s.label) {
-            s.price_override = *p;
-        }
-    }
-    Ok(())
-}
-
 #[utoipa::path(
     get,
     path = "/branch-menu-overrides",
@@ -2808,22 +2783,44 @@ pub(crate) async fn addon_items_by_ids(
     Ok(out)
 }
 
-async fn fetch_addon_ingredients(
+/// The ingredient lines of every add-on of `ids`, keyed by add-on, each in the
+/// order the per-add-on query read them (ingredient name, then ingredient).
+async fn addon_ingredients_by_ids(
     pool: &PgPool,
-    addon_item_id: Uuid,
-) -> Result<Vec<AddonItemIngredient>, AppError> {
-    Ok(sqlx::query_as::<_, AddonItemIngredient>(
-        "SELECT aii.org_ingredient_id, aii.quantity_used, aii.ingredient_name, aii.ingredient_unit,
-                ic.id AS category_id, ic.slug AS category_slug
-         FROM   compat.addon_item_ingredients aii
-         LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id
-         LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id
-         WHERE  aii.addon_item_id = $1
-         ORDER BY aii.ingredient_name, aii.org_ingredient_id",
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<AddonItemIngredient>>, AppError> {
+    let mut out: std::collections::HashMap<Uuid, Vec<AddonItemIngredient>> =
+        std::collections::HashMap::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    for r in sqlx::query!(
+        r#"SELECT aii.addon_item_id AS "addon_item_id!", aii.org_ingredient_id,
+                  aii.quantity_used AS "quantity_used!: sqlx::types::BigDecimal",
+                  aii.ingredient_name AS "ingredient_name!", aii.ingredient_unit AS "ingredient_unit!",
+                  ic.id AS "category_id?", ic.slug AS "category_slug?"
+             FROM compat.addon_item_ingredients aii
+             LEFT JOIN org_ingredients oi ON oi.id = aii.org_ingredient_id
+             LEFT JOIN ingredient_categories ic ON ic.id = oi.category_id
+            WHERE aii.addon_item_id = ANY($1)
+            ORDER BY aii.addon_item_id, aii.ingredient_name, aii.org_ingredient_id"#,
+        ids
     )
-    .bind(addon_item_id)
     .fetch_all(pool)
-    .await?)
+    .await?
+    {
+        out.entry(r.addon_item_id)
+            .or_default()
+            .push(AddonItemIngredient {
+                org_ingredient_id: r.org_ingredient_id,
+                quantity_used: r.quantity_used,
+                ingredient_name: r.ingredient_name,
+                ingredient_unit: r.ingredient_unit,
+                category_id: r.category_id,
+                category_slug: r.category_slug,
+            });
+    }
+    Ok(out)
 }
 
 pub(crate) fn deserialize_double_option<'de, T, D>(
