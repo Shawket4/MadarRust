@@ -14,6 +14,23 @@
 //! jsonb) and break ranking ties on the id, so the two are comparable byte for
 //! byte; before, the pick and the tie order were whatever the plan produced.
 //!
+//! Each sold item also carries `menu_total`, `extras_total` and `avg_extra`
+//! (the Items table's "Avg extra", 2026-10-18). Per order line, in piastres:
+//!
+//! ```text
+//! menu   = unit_price × quantity        the size's price as rung, at sale time
+//! extras = Σ add-on rows (line_total + staff_comp_minor)   add-ons and swaps
+//!        + quantity × Σ optional-field rows (price)
+//! paid (before any discount) = menu + extras,  so  extra = paid − menu = extras
+//! avg_extra = round(Σ extras / Σ quantity)
+//! ```
+//!
+//! Discounts never enter it (order-level ones are not on the line; a line's
+//! deal, reward and staff comp come off `line_total`, which is not read, and an
+//! add-on's staff comp is added back), so an extra is never negative. SQL:
+//! `order_line_extras()` (migrations/20261023100000_rollup_item_extras.sql),
+//! rolled up per day in `sales_daily_sold_item.menu_total / extras_total`.
+//!
 //! `MADAR_REPORTS_FROM_ROLLUPS=0` turns the rollup read off (live everywhere).
 //! Hourly timeseries are always live (the rollups are per day).
 
@@ -59,6 +76,8 @@ struct CategoryItemRow {
     item_name_translations: serde_json::Value,
     quantity_sold: i64,
     revenue: i64,
+    menu_total: Option<i64>,
+    extras_total: Option<i64>,
 }
 
 struct ModeRow {
@@ -120,6 +139,7 @@ pub async fn branch_sales_report(
             rolled_modes(pool, &ids, from, to).await?,
         ),
     };
+    let top_items = top_items.into_iter().map(with_avg_extra).collect();
     Ok(BranchSalesReport {
         branch_id,
         branch_name,
@@ -147,16 +167,39 @@ pub async fn branch_sales_report(
     })
 }
 
+/// An item row's `avg_extra`: its `extras_total` over the units sold,
+/// rounded to the piastre, half away from zero (the SQL leaves it NULL so the
+/// line formula is evaluated once per line).
+fn with_avg_extra(mut item: ItemSales) -> ItemSales {
+    item.avg_extra = item
+        .extras_total
+        .and_then(|extras| avg_rounded(extras, item.quantity_sold));
+    item
+}
+
+/// `n / d` rounded half away from zero; `None` when nothing was sold.
+fn avg_rounded(n: i64, d: i64) -> Option<i64> {
+    if d <= 0 {
+        return None;
+    }
+    let (n, d) = (i128::from(n), i128::from(d));
+    let q = (2 * n.abs() + d) / (2 * d);
+    i64::try_from(if n < 0 { -q } else { q }).ok()
+}
+
 fn group_categories(cat_rows: Vec<CategoryItemRow>) -> Vec<CategorySales> {
     let mut by_category: Vec<CategorySales> = Vec::new();
     for row in cat_rows {
-        let item = ItemSales {
+        let item = with_avg_extra(ItemSales {
             menu_item_id: row.menu_item_id,
             item_name: row.item_name,
             item_name_translations: row.item_name_translations,
             quantity_sold: row.quantity_sold,
             revenue: row.revenue,
-        };
+            menu_total: row.menu_total,
+            extras_total: row.extras_total,
+            avg_extra: None,
+        });
         match by_category
             .iter_mut()
             .find(|c| c.category_id == row.category_id)
@@ -311,7 +354,10 @@ async fn live_top_items(
         SELECT oi.menu_item_id AS "menu_item_id!", oi.item_name,
                COALESCE((array_agg(oi.name_translations ORDER BY oi.name_translations DESC))[1], '{}'::jsonb) AS "item_name_translations!",
                SUM(oi.quantity)::bigint   AS "quantity_sold!",
-               SUM(oi.line_total)::bigint AS "revenue!"
+               SUM(oi.line_total)::bigint AS "revenue!",
+               SUM(oi.unit_price::bigint * oi.quantity)::bigint AS "menu_total?",
+               SUM(order_line_extras(oi.id, oi.quantity))::bigint AS "extras_total?",
+               NULL::bigint AS "avg_extra?"
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
         WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')
@@ -350,7 +396,9 @@ async fn live_category_rows(
             oi.item_name,
             COALESCE((array_agg(oi.name_translations ORDER BY oi.name_translations DESC))[1], '{}'::jsonb) AS "item_name_translations!",
             SUM(oi.quantity)::bigint   AS "quantity_sold!",
-            SUM(oi.line_total)::bigint AS "revenue!"
+            SUM(oi.line_total)::bigint AS "revenue!",
+            SUM(oi.unit_price::bigint * oi.quantity)::bigint AS "menu_total?",
+            SUM(order_line_extras(oi.id, oi.quantity))::bigint AS "extras_total?"
         FROM order_items oi
         JOIN orders o     ON o.id  = oi.order_id
         LEFT JOIN menu_items m ON m.id  = oi.menu_item_id
@@ -568,18 +616,23 @@ async fn rolled_top_items(
         d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         rows AS (
             SELECT oi.menu_item_id, oi.item_name, oi.name_translations AS tr,
-                   oi.quantity::bigint AS q, oi.line_total::bigint AS r
+                   oi.quantity::bigint AS q, oi.line_total::bigint AS r,
+                   oi.unit_price::bigint * oi.quantity AS mt, order_line_extras(oi.id, oi.quantity) AS ex
               FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
               JOIN order_items oi ON oi.order_id = o.id
              WHERE o.status NOT IN ('voided', 'refunded') AND oi.line_kind <> 'combo'
             UNION ALL
-            SELECT si.menu_item_id, si.item_name, si.name_translations, si.quantity, si.revenue
+            SELECT si.menu_item_id, si.item_name, si.name_translations, si.quantity, si.revenue,
+                   si.menu_total, si.extras_total
               FROM d CROSS JOIN LATERAL (SELECT si.* FROM sales_daily_sold_item si WHERE si.branch_id = d.branch_id AND si.business_date = ANY(d.days) OFFSET 0) si
         )
         SELECT menu_item_id AS "menu_item_id!", item_name AS "item_name!",
                COALESCE((array_agg(tr ORDER BY tr DESC))[1], '{}'::jsonb) AS "item_name_translations!",
                SUM(q)::bigint AS "quantity_sold!",
-               SUM(r)::bigint AS "revenue!"
+               SUM(r)::bigint AS "revenue!",
+               SUM(mt)::bigint AS "menu_total?",
+               SUM(ex)::bigint AS "extras_total?",
+               NULL::bigint AS "avg_extra?"
           FROM rows
          GROUP BY menu_item_id, item_name
          ORDER BY 4 DESC, 5 DESC, item_name COLLATE "C", menu_item_id
@@ -608,12 +661,14 @@ async fn rolled_category_rows(
         d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),
         rows AS (
             SELECT oi.menu_item_id, oi.item_name, oi.name_translations AS tr,
-                   oi.quantity::bigint AS q, oi.line_total::bigint AS r
+                   oi.quantity::bigint AS q, oi.line_total::bigint AS r,
+                   oi.unit_price::bigint * oi.quantity AS mt, order_line_extras(oi.id, oi.quantity) AS ex
               FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o
               JOIN order_items oi ON oi.order_id = o.id
              WHERE o.status NOT IN ('voided', 'refunded') AND oi.line_kind <> 'combo'
             UNION ALL
-            SELECT si.menu_item_id, si.item_name, si.name_translations, si.quantity, si.revenue
+            SELECT si.menu_item_id, si.item_name, si.name_translations, si.quantity, si.revenue,
+                   si.menu_total, si.extras_total
               FROM d CROSS JOIN LATERAL (SELECT si.* FROM sales_daily_sold_item si WHERE si.branch_id = d.branch_id AND si.business_date = ANY(d.days) OFFSET 0) si
         )
         SELECT
@@ -624,7 +679,9 @@ async fn rolled_category_rows(
             x.item_name AS "item_name!",
             COALESCE((array_agg(x.tr ORDER BY x.tr DESC))[1], '{}'::jsonb) AS "item_name_translations!",
             SUM(x.q)::bigint AS "quantity_sold!",
-            SUM(x.r)::bigint AS "revenue!"
+            SUM(x.r)::bigint AS "revenue!",
+            SUM(x.mt)::bigint AS "menu_total?",
+            SUM(x.ex)::bigint AS "extras_total?"
           FROM rows x
           LEFT JOIN menu_items m ON m.id = x.menu_item_id
           LEFT JOIN categories c ON c.id = m.category_id
@@ -1101,4 +1158,20 @@ async fn rolled_comparison(
     )
     .fetch_all(pool)
     .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::avg_rounded;
+
+    #[test]
+    fn avg_extra_rounds_half_away_from_zero() {
+        assert_eq!(avg_rounded(2200, 4), Some(550));
+        assert_eq!(avg_rounded(1000, 3), Some(333));
+        assert_eq!(avg_rounded(2000, 3), Some(667));
+        assert_eq!(avg_rounded(5, 2), Some(3));
+        assert_eq!(avg_rounded(-5, 2), Some(-3));
+        assert_eq!(avg_rounded(0, 7), Some(0));
+        assert_eq!(avg_rounded(10, 0), None);
+    }
 }

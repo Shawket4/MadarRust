@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH l AS (\n               SELECT oi.id, oi.menu_item_id, oi.quantity, oi.unit_price\n                 FROM order_items oi JOIN orders o ON o.id = oi.order_id\n                WHERE o.branch_id = ANY($1) AND o.status NOT IN ('voided', 'refunded')\n                  AND oi.line_kind <> 'combo'),\n           a AS (SELECT x.order_item_id, SUM(x.line_total::bigint + x.staff_comp_minor) AS v\n                   FROM order_item_addons x JOIN l ON l.id = x.order_item_id GROUP BY 1),\n           f AS (SELECT y.order_item_id, SUM(y.price::bigint) AS v\n                   FROM order_item_optionals y JOIN l ON l.id = y.order_item_id GROUP BY 1)\n           SELECT l.menu_item_id AS \"menu_item_id!\",\n                  SUM(l.quantity)::bigint AS \"q!\",\n                  SUM(l.unit_price::bigint * l.quantity)::bigint AS \"menu!\",\n                  SUM(COALESCE(a.v, 0) + l.quantity * COALESCE(f.v, 0))::bigint AS \"extras!\"\n             FROM l LEFT JOIN a ON a.order_item_id = l.id LEFT JOIN f ON f.order_item_id = l.id\n            WHERE l.menu_item_id IS NOT NULL\n            GROUP BY l.menu_item_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "menu_item_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "q!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "menu!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "extras!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "d2c0cccab53b083cbf2656626360497653f7ac844f241f09ffc3d6f8fcff612a"
+}
