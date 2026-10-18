@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH p AS (SELECT * FROM sales_daily_plan($1::uuid[], $2::timestamptz, $3::timestamptz, true, $4)),\n        w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),\n        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),\n        per AS (\n            SELECT date_trunc($5, o.created_at AT TIME ZONE $4) AS pv,\n                   COUNT(o.id) FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint AS orders,\n                   COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))\n                            FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,\n                   COALESCE(SUM(rf.refunded_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS refunded,\n                   COUNT(o.id) FILTER (WHERE o.status = 'voided')::bigint AS voided,\n                   COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,\n                   COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax,\n                   0::bigint AS line_items, 0::bigint AS addons\n              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o\n              LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id\n             GROUP BY 1\n            UNION ALL\n            SELECT date_trunc($5, o3.created_at AT TIME ZONE $4), 0, 0, 0, 0, 0, 0,\n                   COALESCE(SUM(oi3.quantity), 0)::bigint, 0\n              FROM w CROSS JOIN LATERAL (SELECT o3.* FROM orders o3 WHERE o3.branch_id = w.branch_id AND o3.created_at >= w.lo AND o3.created_at < w.hi OFFSET 0) o3\n              JOIN order_items oi3 ON oi3.order_id = o3.id\n             WHERE oi3.line_kind <> 'combo' AND o3.status NOT IN ('voided', 'refunded')\n             GROUP BY 1\n            UNION ALL\n            SELECT date_trunc($5, o4.created_at AT TIME ZONE $4), 0, 0, 0, 0, 0, 0, 0,\n                   COALESCE(SUM(oia4.quantity), 0)::bigint\n              FROM w CROSS JOIN LATERAL (SELECT o4.* FROM orders o4 WHERE o4.branch_id = w.branch_id AND o4.created_at >= w.lo AND o4.created_at < w.hi OFFSET 0) o4\n              JOIN order_items oi4 ON oi4.order_id = o4.id\n              JOIN order_item_addons oia4 ON oia4.order_item_id = oi4.id\n             WHERE o4.status NOT IN ('voided', 'refunded')\n             GROUP BY 1\n            UNION ALL\n            SELECT date_trunc($5, s.business_date::timestamp), SUM(s.sold_orders)::bigint,\n                   SUM(s.revenue_net)::bigint, SUM(s.refunded_amount)::bigint, SUM(s.voided_orders)::bigint,\n                   SUM(s.discount)::bigint, SUM(s.tax_net)::bigint, SUM(s.line_items)::bigint, SUM(s.addons)::bigint\n              FROM d CROSS JOIN LATERAL (SELECT s.* FROM sales_daily_sold s WHERE s.branch_id = d.branch_id AND s.business_date = ANY(d.days) OFFSET 0) s\n             GROUP BY 1\n        ),\n        periods AS (\n            SELECT pv, SUM(orders)::bigint AS orders, SUM(revenue)::bigint AS revenue,\n                   SUM(refunded)::bigint AS refunded, SUM(voided)::bigint AS voided,\n                   SUM(discount)::bigint AS discount, SUM(tax)::bigint AS tax,\n                   SUM(line_items)::bigint AS line_items, SUM(addons)::bigint AS addons\n              FROM per GROUP BY pv\n        ),\n        -- A period exists when it had an order: the live half by its orders,\n        -- the rollup half by its day rows (a row exists only for a day with one).\n        present AS (\n            SELECT DISTINCT date_trunc($5, o.created_at AT TIME ZONE $4) AS pv\n              FROM w CROSS JOIN LATERAL (SELECT o.* FROM orders o WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi OFFSET 0) o\n            UNION\n            SELECT DISTINCT date_trunc($5, s.business_date::timestamp)\n              FROM d CROSS JOIN LATERAL (SELECT s.* FROM sales_daily_sold s WHERE s.branch_id = d.branch_id AND s.business_date = ANY(d.days) OFFSET 0) s\n        ),\n        methods AS (\n            SELECT pv, json_object_agg(method, rev) AS revenue_by_method FROM (\n                SELECT pv, method, SUM(amount)::bigint AS rev FROM (\n                    SELECT date_trunc($5, o2.created_at AT TIME ZONE $4) AS pv, op2.method, op2.amount::bigint AS amount\n                      FROM w CROSS JOIN LATERAL (SELECT o2.* FROM orders o2 WHERE o2.branch_id = w.branch_id AND o2.created_at >= w.lo AND o2.created_at < w.hi OFFSET 0) o2\n                      JOIN order_payments op2 ON op2.order_id = o2.id\n                     WHERE o2.status NOT IN ('voided', 'refunded')\n                    UNION ALL\n                    SELECT date_trunc($5, sm.business_date::timestamp), sm.method, sm.amount\n                      FROM d CROSS JOIN LATERAL (SELECT sm.* FROM sales_daily_sold_method sm WHERE sm.branch_id = d.branch_id AND sm.business_date = ANY(d.days) OFFSET 0) sm\n                ) u GROUP BY 1, 2\n            ) m GROUP BY pv\n        )\n        SELECT to_char(pr.pv, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS \"period!\",\n               COALESCE(p2.orders, 0)::bigint AS \"orders!\",\n               COALESCE(p2.revenue, 0)::bigint AS \"revenue!\",\n               COALESCE(p2.refunded, 0)::bigint AS \"refunded!\",\n               COALESCE(p2.voided, 0)::bigint AS \"voided!\",\n               COALESCE(p2.discount, 0)::bigint AS \"discount!\",\n               COALESCE(p2.tax, 0)::bigint AS \"tax!\",\n               COALESCE(m.revenue_by_method, '{}'::json) AS \"revenue_by_method!: serde_json::Value\",\n               COALESCE(p2.line_items, 0)::bigint AS \"line_items!\",\n               COALESCE(p2.addons, 0)::bigint AS \"addons!\"\n          FROM present pr\n          LEFT JOIN periods p2 ON p2.pv = pr.pv\n          LEFT JOIN methods m ON m.pv = pr.pv\n         ORDER BY pr.pv ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "period!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "revenue!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "refunded!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "voided!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "discount!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "tax!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "revenue_by_method!: serde_json::Value",
+        "type_info": "Json"
+      },
+      {
+        "ordinal": 8,
+        "name": "line_items!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "addons!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "282eb3867f3d4d774a078c52036fbea7887ff12daefa8a0c41083e1a6ef5a2ee"
+}
