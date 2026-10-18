@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT ON (e.branch_id) e.branch_id AS \"branch_id!\", e.id FROM archive.till_entities e WHERE e.branch_id = ANY($1) AND e.is_default AND e.deleted_at IS NULL ORDER BY e.branch_id, e.created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "70f963cc9c545c3b2eb87dcb79f638d95ebcfa47a1a61df7eb7022244a6d9147"
+}

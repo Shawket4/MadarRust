@@ -199,27 +199,42 @@ pub async fn reconcile(pool: &PgPool, dir: &Path) -> Result<(), sqlx::Error> {
         return Ok(());
     }
     let slugs: Vec<String> = scanned.iter().map(|s| s.slug.clone()).collect();
-    for s in &scanned {
-        sqlx::query(
-            "INSERT INTO recipe_step_presets (slug, name, name_ar, note, note_ar, sha256, bytes, sort_order) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-             ON CONFLICT (slug) DO UPDATE SET \
-                name = EXCLUDED.name, name_ar = EXCLUDED.name_ar, \
-                note = EXCLUDED.note, note_ar = EXCLUDED.note_ar, \
-                sha256 = EXCLUDED.sha256, bytes = EXCLUDED.bytes, \
-                sort_order = EXCLUDED.sort_order, is_active = true, updated_at = now()",
-        )
-        .bind(&s.slug)
-        .bind(&s.entry_name)
-        .bind(&s.entry_name_ar)
-        .bind(&s.note)
-        .bind(&s.note_ar)
-        .bind(&s.sha256)
-        .bind(s.bytes)
-        .bind(s.sort_order)
-        .execute(pool)
-        .await?;
-    }
+    // One statement for the whole library, and a preset is written ONLY when
+    // something about it changed. Every write fires the `sync_emit` trigger,
+    // which re-emits every menu item using that preset to every till, so an
+    // unconditional upsert made each till re-pull those items after every
+    // deploy for no change at all.
+    let names: Vec<String> = scanned.iter().map(|s| s.entry_name.clone()).collect();
+    let names_ar: Vec<String> = scanned.iter().map(|s| s.entry_name_ar.clone()).collect();
+    let notes: Vec<Option<String>> = scanned.iter().map(|s| s.note.clone()).collect();
+    let notes_ar: Vec<Option<String>> = scanned.iter().map(|s| s.note_ar.clone()).collect();
+    let hashes: Vec<String> = scanned.iter().map(|s| s.sha256.clone()).collect();
+    let sizes: Vec<i32> = scanned.iter().map(|s| s.bytes).collect();
+    let orders: Vec<i16> = scanned.iter().map(|s| s.sort_order).collect();
+    sqlx::query!(
+        "INSERT INTO recipe_step_presets AS p (slug, name, name_ar, note, note_ar, sha256, bytes, sort_order) \
+         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], \
+                              $6::text[], $7::int[], $8::smallint[]) \
+         ON CONFLICT (slug) DO UPDATE SET \
+            name = EXCLUDED.name, name_ar = EXCLUDED.name_ar, \
+            note = EXCLUDED.note, note_ar = EXCLUDED.note_ar, \
+            sha256 = EXCLUDED.sha256, bytes = EXCLUDED.bytes, \
+            sort_order = EXCLUDED.sort_order, is_active = true, updated_at = now() \
+          WHERE (p.name, p.name_ar, p.note, p.note_ar, p.sha256, p.bytes, p.sort_order, p.is_active) \
+                IS DISTINCT FROM \
+                (EXCLUDED.name, EXCLUDED.name_ar, EXCLUDED.note, EXCLUDED.note_ar, \
+                 EXCLUDED.sha256, EXCLUDED.bytes, EXCLUDED.sort_order, true)",
+        &slugs,
+        &names,
+        &names_ar,
+        &notes as &[Option<String>],
+        &notes_ar as &[Option<String>],
+        &hashes,
+        &sizes,
+        &orders,
+    )
+    .execute(pool)
+    .await?;
     // Asset store (Track B4, §11.5 W8): each shipped animation is ingested once
     // as a global zstd asset; source-hash dedup makes later boots a lookup.
     for s in &scanned {
@@ -236,11 +251,14 @@ pub async fn reconcile(pool: &PgPool, dir: &Path) -> Result<(), sqlx::Error> {
         .await
         {
             Ok(o) => {
-                sqlx::query(
-                    "UPDATE recipe_step_presets SET animation_group_id = $1, updated_at = now() WHERE slug = $2",
+                // Only when the asset actually moved (the same file dedups to
+                // the same group on every later boot): see the upsert above.
+                sqlx::query!(
+                    "UPDATE recipe_step_presets SET animation_group_id = $1, updated_at = now() \
+                      WHERE slug = $2 AND animation_group_id IS DISTINCT FROM $1",
+                    o.group_id,
+                    &s.slug,
                 )
-                .bind(o.group_id)
-                .bind(&s.slug)
                 .execute(pool)
                 .await?;
             }

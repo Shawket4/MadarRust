@@ -550,7 +550,11 @@ async fn the_loyalty_jobs_skip_a_free_org(pool: PgPool) {
         "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, source, created_at)
          VALUES ($1,$2,$3,'adjust','points',1,'manual', now() - interval '10 days')",
     ).bind(g.org).bind(g.member).bind(g.branch).execute(&pool).await.unwrap();
-    sqlx::query("UPDATE customers SET birth_month = EXTRACT(MONTH FROM now())::smallint, birth_day = EXTRACT(DAY FROM now())::smallint WHERE id = $1")
+    // Born "today" in the ORG's zone, which is the date the job reads: a UTC
+    // date is already tomorrow in Cairo from 21:00 UTC (and failed nightly).
+    sqlx::query("UPDATE customers c SET birth_month = EXTRACT(MONTH FROM (now() AT TIME ZONE o.timezone::text))::smallint, \
+                        birth_day = EXTRACT(DAY FROM (now() AT TIME ZONE o.timezone::text))::smallint \
+                   FROM organizations o WHERE o.id = c.org_id AND c.id = $1")
         .bind(g.member).execute(&pool).await.unwrap();
     sqlx::query("UPDATE loyalty_customers SET google_object_id = 'g-1', pass_updated_at = NULL WHERE id = $1")
         .bind(g.member).execute(&pool).await.unwrap();

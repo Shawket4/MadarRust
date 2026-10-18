@@ -481,3 +481,18 @@ async fn sync_live_rows_since_matches_for_branch(pool: PgPool) {
     assert_eq!(kept, vec![till]);
     let _ = head(&pool, s.branch).await;
 }
+
+/// `SYNC_SWEEP_ENABLED` reads falsy values like every other background switch
+/// (it used to honour only the literal `false`, so `=0` left it running), and
+/// unset keeps the default: on.
+#[::core::prelude::v1::test]
+fn sync_sweep_switch_accepts_every_falsy_spelling() {
+    use madar_rust::sync::pull::sweeper::disabled_by;
+    for v in ["0", "false", "no", "off"] {
+        assert!(disabled_by(Some(v)), "{v} switches the sweep off");
+    }
+    for v in ["1", "true", "yes", "on", ""] {
+        assert!(!disabled_by(Some(v)), "{v:?} leaves it on");
+    }
+    assert!(!disabled_by(None), "unset: on by default");
+}

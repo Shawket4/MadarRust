@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO recipe_step_presets AS p (slug, name, name_ar, note, note_ar, sha256, bytes, sort_order) SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::int[], $8::smallint[]) ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, name_ar = EXCLUDED.name_ar, note = EXCLUDED.note, note_ar = EXCLUDED.note_ar, sha256 = EXCLUDED.sha256, bytes = EXCLUDED.bytes, sort_order = EXCLUDED.sort_order, is_active = true, updated_at = now() WHERE (p.name, p.name_ar, p.note, p.note_ar, p.sha256, p.bytes, p.sort_order, p.is_active) IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.name_ar, EXCLUDED.note, EXCLUDED.note_ar, EXCLUDED.sha256, EXCLUDED.bytes, EXCLUDED.sort_order, true)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "Int4Array",
+        "Int2Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6ec266134cb9f937d845629692b492b66fee67104668056ac3acb2d7a5c0e155"
+}

@@ -463,3 +463,155 @@ async fn legacy_delete_shift_route(pool: PgPool) {
         .unwrap();
     assert_eq!(n, 1);
 }
+
+/// Query survey #7: `GET /shifts/branches/{id}` resolves the legacy drawer
+/// entity once per branch instead of once per till. Old tills (v0.5.x/v0.6.x)
+/// call it with no `page`/`per_page` and read every till, so the default stays
+/// unpaged, and every body must be byte-for-byte what mapping
+/// `legacy_shift(.., TillAndBranch)` over the list produced.
+#[sqlx::test]
+async fn legacy_branch_list_is_byte_identical_to_the_per_till_lookup(pool: PgPool) {
+    use madar_rust::tills::legacy::{
+        LegacyJoins, PaginatedShifts, legacy_shift, synthesized_till_id,
+    };
+    madar_rust::permissions::seeder::seed_role_permissions(&pool)
+        .await
+        .unwrap();
+    let seed =
+        std::fs::read_to_string(format!("{ROOT}/scripts/legacy_till_golden/seed.sql")).unwrap();
+    sqlx::raw_sql(&seed).execute(&pool).await.expect("seed.sql");
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(JwtSecret(SECRET.into())))
+            .app_data(web::Data::new(
+                madar_rust::realtime::hub::BranchEventHub::new(),
+            ))
+            .configure(madar_rust::tills::legacy_routes::configure),
+    )
+    .await;
+    let org = uuid::Uuid::parse_str("10000000-0000-4000-8000-000000000001").unwrap();
+    let admin = uuid::Uuid::parse_str("10000000-0000-4000-8000-00000000ad01").unwrap();
+    let a = uuid::Uuid::parse_str("10000000-0000-4000-8000-0000000000a1").unwrap();
+    let b = uuid::Uuid::parse_str("10000000-0000-4000-8000-0000000000b1").unwrap();
+    let c = uuid::Uuid::parse_str("10000000-0000-4000-8000-0000000000c1").unwrap();
+    let tok = create_token(
+        &JwtSecret(SECRET.into()),
+        admin,
+        Some(org),
+        UserRole::OrgAdmin,
+        None,
+        24,
+    )
+    .unwrap();
+    let auth = ("Authorization", format!("Bearer {tok}"));
+
+    // Branch A keeps an archived drawer entity (the oldest live default wins
+    // over a newer one, a deleted one and a non-default); B has none, so it
+    // gets the synthesized id.
+    let kept = uuid::Uuid::new_v4();
+    for (id, is_default, deleted, age_days) in [
+        (uuid::Uuid::new_v4(), true, true, 30),
+        (kept, true, false, 20),
+        (uuid::Uuid::new_v4(), true, false, 10),
+        (uuid::Uuid::new_v4(), false, false, 40),
+    ] {
+        sqlx::query(
+            "INSERT INTO archive.till_entities (id, org_id, branch_id, name, is_default, is_active, \
+                 created_at, updated_at, deleted_at) \
+             VALUES ($1, $2, $3, 'Till', $4, true, now() - make_interval(days => $5), now(), \
+                     CASE WHEN $6 THEN now() END)",
+        )
+        .bind(id)
+        .bind(org)
+        .bind(a)
+        .bind(is_default)
+        .bind(age_days)
+        .bind(deleted)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Two closed tills on A, one open on B.
+    for (branch, close) in [(a, true), (a, true), (b, false)] {
+        let id = uuid::Uuid::new_v4();
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri(&format!("/shifts/branches/{branch}/open"))
+                .insert_header(auth.clone())
+                .set_json(serde_json::json!({ "id": id, "opening_cash": 100 }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 201);
+        if close {
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(&format!("/shifts/{id}/close"))
+                    .insert_header(auth.clone())
+                    .set_json(serde_json::json!({ "closing_cash_declared": 100 }))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), 200);
+        }
+    }
+
+    let nil = uuid::Uuid::nil();
+    for (uri, rows) in [
+        // What old tills send: no paging, every till.
+        (format!("/shifts/branches/{nil}"), 3),
+        (format!("/shifts/branches/{a}"), 2),
+        (format!("/shifts/branches/{b}"), 1),
+        (format!("/shifts/branches/{c}"), 0),
+        // Paging only when asked.
+        (format!("/shifts/branches/{nil}?page=2&per_page=2"), 1),
+    ] {
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&uri)
+                .insert_header(auth.clone())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), 200, "{uri}");
+        let body = test::read_body(resp).await;
+        let got: PaginatedShifts = serde_json::from_slice(&body).unwrap();
+        assert_eq!(got.data.len(), rows, "{uri}");
+        // The old per-till path, rebuilt from the same tills.
+        let mut data = Vec::new();
+        for s in &got.data {
+            data.push(
+                legacy_shift(&pool, s.till.clone(), LegacyJoins::TillAndBranch)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let old = PaginatedShifts {
+            data,
+            ..got.clone()
+        };
+        assert_eq!(
+            String::from_utf8(serde_json::to_vec(&old).unwrap()).unwrap(),
+            String::from_utf8(body.to_vec()).unwrap(),
+            "{uri}: byte-identical to the per-till lookup"
+        );
+        for s in &got.data {
+            let want = if s.till.branch_id == a {
+                kept
+            } else {
+                synthesized_till_id(s.till.branch_id)
+            };
+            assert_eq!(s.till_id, Some(want), "{uri}");
+            assert_eq!(s.till_name.as_deref(), Some("Till 1"));
+            assert!(
+                s.till.branch_name.is_some(),
+                "the branch list keeps the branch join"
+            );
+        }
+    }
+}

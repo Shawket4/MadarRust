@@ -5638,3 +5638,149 @@ async fn the_earning_item_list_saves_inherits_and_stays_inside_its_tenant(pool: 
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+/// Query survey #11: the win-back selection computes each member's last
+/// visit ONCE (a MATERIALIZED CTE) instead of up to four times. The members
+/// it picks — and their `since` and `seq`, the idempotency key — must be
+/// exactly what the previous statement, kept here verbatim, picks.
+#[sqlx::test]
+async fn winback_picks_exactly_the_members_the_previous_statement_picked(pool: PgPool) {
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Main").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    sqlx::query(
+        "INSERT INTO loyalty_settings (org_id, enabled, winback_enabled) VALUES ($1, true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // A member per last-visit age (days), through the ledger, an order, both
+    // (the later wins) or neither; one opted out; one already nudged.
+    let ages: [(Option<i64>, Option<i64>); 12] = [
+        (Some(3), None),
+        (Some(8), None),
+        (None, Some(9)),
+        (Some(20), Some(10)),
+        (Some(15), Some(30)),
+        (Some(40), None),
+        (None, Some(59)),
+        (Some(61), None),
+        (Some(200), Some(100)),
+        (None, None),
+        (Some(12), None),
+        (Some(16), None),
+    ];
+    let mut order_number = 1;
+    let mut members = Vec::new();
+    for (i, (txn, order)) in ages.iter().enumerate() {
+        let m = common::members::seed_loyalty_member(
+            &pool,
+            org,
+            &format!("+2010000000{i:02}"),
+            &format!("M{i}"),
+            &format!("wb-{i}"),
+        )
+        .await;
+        if let Some(d) = txn {
+            sqlx::query(
+                "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, source, created_at) \
+                 VALUES ($1, $2, $3, 'adjust', 'points', 1, 'manual', now() - make_interval(days => $4) - interval '1 hour')",
+            )
+            .bind(org)
+            .bind(m)
+            .bind(branch)
+            .bind(*d as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        if let Some(d) = order {
+            let o = seed_order(&pool, branch, teller, order_number).await;
+            order_number += 1;
+            sqlx::query(
+                "UPDATE orders SET loyalty_customer_id = $2, \
+                        created_at = now() - make_interval(days => $3) - interval '2 hours' \
+                  WHERE id = $1",
+            )
+            .bind(o)
+            .bind(m)
+            .bind(*d as i32)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        members.push(m);
+    }
+    sqlx::query("UPDATE customers SET marketing_opt_out = true WHERE id = $1")
+        .bind(members[10])
+        .execute(&pool)
+        .await
+        .unwrap();
+    // members[11] is 16 days away, so the second nudge (seq 2) is due — and
+    // it is already on record for this spell, so nobody is nudged twice.
+    sqlx::query(
+        "INSERT INTO loyalty_winbacks (customer_id, org_id, since, seq) \
+         SELECT $1, $2, max(created_at), 2 FROM loyalty_transactions WHERE customer_id = $1",
+    )
+    .bind(members[11])
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let previous = |cap: i64| {
+        sqlx::query_as::<_, (Uuid, chrono::DateTime<chrono::Utc>, i16)>(
+            "WITH seen AS ( \
+                 SELECT c.id, c.org_id, c.name, c.locale, c.member_token, \
+                        GREATEST( \
+                          (SELECT max(t.created_at) FROM loyalty_transactions t \
+                            WHERE t.customer_id = c.id), \
+                          (SELECT max(o.created_at) FROM orders o \
+                            WHERE o.loyalty_customer_id = c.id) \
+                        ) AS since \
+                   FROM loyalty_members_v c \
+                   JOIN loyalty_settings s \
+                     ON s.org_id = c.org_id AND s.branch_id IS NULL \
+                  WHERE s.enabled AND s.winback_enabled \
+                    AND NOT EXISTS (SELECT 1 FROM organizations fo \
+                                     WHERE fo.id = c.org_id AND fo.plan = 'free') \
+                    AND NOT c.marketing_opt_out \
+                    AND c.deleted_at IS NULL), \
+             ranked AS ( \
+                 SELECT seen.*, \
+                        CASE WHEN now() - since >= make_interval(days => $2::int) \
+                             THEN 2 ELSE 1 END::smallint AS seq, \
+                        row_number() OVER (PARTITION BY org_id ORDER BY since) AS rn \
+                   FROM seen \
+                  WHERE since IS NOT NULL \
+                    AND now() - since >= make_interval(days => $1::int) \
+                    AND now() - since <= make_interval(days => $3::int)) \
+             SELECT id, since, seq \
+               FROM ranked r \
+              WHERE rn <= $4 \
+                AND NOT EXISTS ( \
+                    SELECT 1 FROM loyalty_winbacks w \
+                     WHERE w.customer_id = r.id AND w.since = r.since AND w.seq = r.seq)",
+        )
+        .bind(7)
+        .bind(14)
+        .bind(60)
+        .bind(cap)
+    };
+    let expected = previous(200).fetch_all(&pool).await.unwrap();
+    let got = madar_rust::loyalty::winback::due_members(&pool).await.unwrap();
+    assert_eq!(got, expected, "the same members, since and seq, in the same order");
+    let picked: Vec<usize> = got
+        .iter()
+        .map(|(id, _, _)| members.iter().position(|m| m == id).unwrap())
+        .collect();
+    let mut sorted = picked.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, vec![1, 2, 3, 4, 5, 6], "{picked:?}");
+    // The per-org cap keeps the longest-away first.
+    unsafe { std::env::set_var("LOYALTY_WINBACK_MAX_PER_ORG_PER_TICK", "2") };
+    let capped = madar_rust::loyalty::winback::due_members(&pool).await.unwrap();
+    unsafe { std::env::remove_var("LOYALTY_WINBACK_MAX_PER_ORG_PER_TICK") };
+    assert_eq!(capped, previous(2).fetch_all(&pool).await.unwrap());
+}

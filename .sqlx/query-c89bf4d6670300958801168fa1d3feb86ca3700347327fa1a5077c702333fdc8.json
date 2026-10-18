@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM payroll_deductions d USING unnest($1::uuid[], $2::text[]) AS k(record_id, source) WHERE d.attendance_record_id = k.record_id AND d.source = k.source AND d.waived_at IS NULL AND d.overridden_at IS NULL AND d.created_by IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c89bf4d6670300958801168fa1d3feb86ca3700347327fa1a5077c702333fdc8"
+}

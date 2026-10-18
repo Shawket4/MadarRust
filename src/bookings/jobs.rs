@@ -91,15 +91,17 @@ async fn announce_arrivals(
     pool: &PgPool,
     hub: &BranchEventHub,
 ) -> Result<(), crate::errors::AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
+        // The branch's hold read straight off its settings row (one per
+        // branch, the primary key), not through a join of every booking ever.
         "UPDATE bookings b SET arriving_notified_at = now(), updated_at = now() \
-         FROM (SELECT b2.id, COALESCE(s.hold_minutes, 15) AS hold \
-               FROM bookings b2 LEFT JOIN branch_booking_settings s ON s.branch_id = b2.branch_id) h \
-         WHERE h.id = b.id AND b.status = 'confirmed' AND b.arriving_notified_at IS NULL \
+         WHERE b.status = 'confirmed' AND b.arriving_notified_at IS NULL \
            AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
                             WHERE fb.id = b.branch_id AND fo.plan = 'free') \
-           AND b.starts_at - make_interval(mins => h.hold) <= now() \
            AND b.starts_at + interval '30 minutes' > now() \
+           AND b.starts_at - make_interval(mins => COALESCE( \
+                 (SELECT s.hold_minutes FROM branch_booking_settings s \
+                   WHERE s.branch_id = b.branch_id), 15)) <= now() \
          RETURNING b.id",
     )
     .fetch_all(pool)
@@ -111,15 +113,18 @@ async fn announce_arrivals(
 }
 
 async fn roll_no_shows(pool: &PgPool, hub: &BranchEventHub) -> Result<(), crate::errors::AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
+        // Grace read straight off the branch's settings row, as above; no
+        // settings row, or no grace, means "once the booking has ended".
+        // `starts_at < now()` adds nothing (ends_at > starts_at and grace >= 5
+        // are CHECKs), it only bounds the scan of the partial index.
         "UPDATE bookings b SET status = 'no_show', no_show_at = now(), updated_at = now() \
-         FROM (SELECT b2.id, s.auto_no_show_minutes AS grace \
-               FROM bookings b2 LEFT JOIN branch_booking_settings s ON s.branch_id = b2.branch_id) h \
-         WHERE h.id = b.id AND b.status = 'confirmed' \
+         WHERE b.status = 'confirmed' AND b.starts_at < now() \
            AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
                             WHERE fb.id = b.branch_id AND fo.plan = 'free') \
-           AND ((h.grace IS NOT NULL AND b.starts_at + make_interval(mins => h.grace) < now()) \
-                OR (h.grace IS NULL AND b.ends_at < now())) \
+           AND COALESCE(b.starts_at + make_interval(mins => \
+                 (SELECT s.auto_no_show_minutes FROM branch_booking_settings s \
+                   WHERE s.branch_id = b.branch_id)), b.ends_at) < now() \
          RETURNING b.id",
     )
     .fetch_all(pool)
@@ -149,9 +154,10 @@ async fn complete_finished(
     pool: &PgPool,
     hub: &BranchEventHub,
 ) -> Result<(), crate::errors::AppError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
+    let ids: Vec<Uuid> = sqlx::query_scalar!(
         "UPDATE bookings b SET status = 'completed', completed_at = now(), updated_at = now() \
          WHERE b.status = 'seated' AND b.ends_at + interval '60 minutes' < now() \
+           AND b.starts_at < now() \
            AND NOT EXISTS (SELECT 1 FROM branches fb JOIN organizations fo ON fo.id = fb.org_id \
                             WHERE fb.id = b.branch_id AND fo.plan = 'free') \
            AND NOT EXISTS (SELECT 1 FROM open_tickets ot \

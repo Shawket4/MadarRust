@@ -86,11 +86,14 @@ fn idle_recheck() -> chrono::Duration {
     ))
 }
 
+/// `SYNC_SWEEP_ENABLED` is falsy: `0`, `false`, `no` or `off`, exactly like
+/// every other background switch. Unset (or anything else) keeps it on.
+pub fn disabled_by(value: Option<&str>) -> bool {
+    value.is_some_and(|v| matches!(v, "0" | "false" | "no" | "off"))
+}
+
 pub fn spawn(pool: PgPool) {
-    if std::env::var("SYNC_SWEEP_ENABLED")
-        .map(|v| v == "false")
-        .unwrap_or(false)
-    {
+    if disabled_by(std::env::var("SYNC_SWEEP_ENABLED").ok().as_deref()) {
         tracing::info!("sync changefeed sweep disabled (SYNC_SWEEP_ENABLED)");
         return;
     }
