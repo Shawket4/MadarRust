@@ -77,6 +77,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # BuildKit secret for the private madar-shared dependency (Dockerfile
+          # mounts it per RUN; empty secret = anonymous fetch, as before).
+          secrets: |
+            madar_shared_token=${{ secrets.MADAR_SHARED_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

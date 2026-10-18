@@ -1,9 +1,22 @@
+# madar-shared (git dependency) is PRIVATE. Each cargo RUN below mounts the
+# BuildKit secret `madar_shared_token` (docker build --secret
+# id=madar_shared_token,env=...) and, only inside that RUN, points git at it via
+# GIT_CONFIG_* env (nothing is written to disk, so no layer or cache entry holds
+# the token). Secret absent or empty: the RUN is the same anonymous build as before.
 # ── Stage 1: generate cargo-chef recipe ──────────────────────────────────────
 FROM rust:1.88-slim AS planner
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
+RUN --mount=type=secret,id=madar_shared_token \
+    set -e; \
+    if [ -s /run/secrets/madar_shared_token ]; then \
+      apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*; \
+      export CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/madar_shared_token)@github.com/Shawket4/madar-shared.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/Shawket4/madar-shared"; \
+    fi; \
+    cargo chef prepare --recipe-path recipe.json
 
 # ── Stage 2: compile dependencies (cached layer) ──────────────────────────────
 FROM rust:1.88-slim AS builder
@@ -22,10 +35,26 @@ COPY --from=planner /app/recipe.json recipe.json
 # so dependencies cooked under one LTO value are compiled again under another
 # (a deploy compiled all of them twice, ~4 min, until this was the same on both).
 ARG LTO_MODE=fat
-RUN CARGO_PROFILE_RELEASE_LTO=${LTO_MODE} cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=secret,id=madar_shared_token \
+    set -e; \
+    if [ -s /run/secrets/madar_shared_token ]; then \
+      apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*; \
+      export CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/madar_shared_token)@github.com/Shawket4/madar-shared.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/Shawket4/madar-shared"; \
+    fi; \
+    CARGO_PROFILE_RELEASE_LTO=${LTO_MODE} cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
-RUN CARGO_PROFILE_RELEASE_LTO=${LTO_MODE} cargo build --release --bin madar-rust
+RUN --mount=type=secret,id=madar_shared_token \
+    set -e; \
+    if [ -s /run/secrets/madar_shared_token ]; then \
+      apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*; \
+      export CARGO_NET_GIT_FETCH_WITH_CLI=true GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/madar_shared_token)@github.com/Shawket4/madar-shared.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/Shawket4/madar-shared"; \
+    fi; \
+    CARGO_PROFILE_RELEASE_LTO=${LTO_MODE} cargo build --release --bin madar-rust
 
 # ── Stage 3: minimal runtime ──────────────────────────────────────────────────
 FROM debian:bookworm-slim
