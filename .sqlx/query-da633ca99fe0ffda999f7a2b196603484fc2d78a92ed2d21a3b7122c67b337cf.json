@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE menu_item_price_epochs e SET effective_until = now()\n           FROM menu_items m\n          WHERE e.menu_item_id = m.id AND m.org_id = $1 AND m.deleted_at IS NULL\n            AND e.effective_until IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "da633ca99fe0ffda999f7a2b196603484fc2d78a92ed2d21a3b7122c67b337cf"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE menu_items SET deleted_at = now() WHERE org_id = $1 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74565f6ff8429eb01d7e185e1315b3526d35c47fd5a6b6d5b81c68cbf1e18bf4"
+}

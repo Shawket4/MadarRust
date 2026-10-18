@@ -334,6 +334,13 @@ pub const ROUTE_LIMITS: &[RouteLimitDef] = &[
         ms_per_request: 30_000,
         guards: "per IP: creating a shop (POST /public/signup)",
     },
+    RouteLimitDef {
+        area: "MENU",
+        limiter: "BULK",
+        burst: 20,
+        ms_per_request: 3_000,
+        guards: "per IP: the self-serve menu import, dry runs included (POST /menu/bulk; an org also gets 20 real imports a day)",
+    },
 ];
 
 /// A route governor's numbers after the environment.
@@ -1017,6 +1024,8 @@ mod tests {
             ("SIGNUP", "OTP", 3, 60),
             ("SIGNUP", "VERIFY", 5, 12),
             ("SIGNUP", "CREATE", 3, 60),
+            // Added at the doubled numbers, like the public delivery menu.
+            ("MENU", "BULK", 10, 6),
         ];
         assert_eq!(before.len(), ROUTE_LIMITS.len(), "every limiter is listed");
         for (area, limiter, burst, secs) in before {

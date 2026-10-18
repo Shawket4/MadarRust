@@ -1,4 +1,5 @@
 pub mod bases;
+pub mod bulk;
 pub mod cache;
 pub mod catalog_sync;
 pub mod compact;

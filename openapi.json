@@ -26697,6 +26697,128 @@
         ]
       }
     },
+    "/menu/bulk": {
+      "post": {
+        "tags": [
+          "menu"
+        ],
+        "operationId": "bulk_menu",
+        "parameters": [
+          {
+            "name": "dry_run",
+            "in": "query",
+            "description": "Check and write, then roll back: nothing is kept.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkMenuRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Dry run: checked and rolled back",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkMenuResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The menu was written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkMenuResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "BULK_MENU_INVALID / BULK_MENU_UNSUPPORTED_VERSION (`vars` is madar-menu's BulkRefusal), MENU_REPLACE_NOT_CONFIRMED (`vars` has the sentence in EN and AR)"
+          },
+          "429": {
+            "description": "MENU_IMPORT_LIMIT (an org's imports a day) or RATE_LIMITED"
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/menu/lint": {
       "get": {
         "tags": [
@@ -70870,6 +70992,345 @@
           }
         }
       },
+      "BulkArchived": {
+        "type": "object",
+        "description": "What a `replace` archived.",
+        "required": [
+          "categories",
+          "items",
+          "groups"
+        ],
+        "properties": {
+          "categories": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "groups": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "BulkCategory": {
+        "type": "object",
+        "required": [
+          "key",
+          "name"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BulkFamily": {
+        "type": "string",
+        "description": "Which kind of choice a group is, the `legacy_addon_type` the POS reads.",
+        "enum": [
+          "milk_type",
+          "coffee_type",
+          "extra"
+        ]
+      },
+      "BulkGroup": {
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "min",
+          "family",
+          "options"
+        ],
+        "properties": {
+          "family": {
+            "$ref": "#/components/schemas/BulkFamily"
+          },
+          "key": {
+            "type": "string"
+          },
+          "max": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`None`: as many as there are options.",
+            "minimum": 0
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The group's own limits; an item's link may differ ([`BulkLink`]).",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkOption"
+            }
+          }
+        }
+      },
+      "BulkItem": {
+        "type": "object",
+        "required": [
+          "name",
+          "category",
+          "price",
+          "is_active"
+        ],
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "A [`BulkCategory::key`]."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkLink"
+            },
+            "description": "The item's groups, in the order the till shows them."
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "optionals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkOptional"
+            },
+            "description": "Free-form extras the item alone offers."
+          },
+          "price": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The item's price; with no `sizes` it is the one price it sells at."
+          },
+          "sizes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkSize"
+            },
+            "description": "Each size's full price (not a difference over `price`)."
+          }
+        }
+      },
+      "BulkLink": {
+        "type": "object",
+        "description": "An item's use of a group, with the limits that apply on this item.",
+        "required": [
+          "group",
+          "min"
+        ],
+        "properties": {
+          "group": {
+            "type": "string",
+            "description": "A [`BulkGroup::key`]."
+          },
+          "max": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "BulkMenu": {
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkCategory"
+            }
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkGroup"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BulkItem"
+            }
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "BulkMenuRequest": {
+        "type": "object",
+        "required": [
+          "menu"
+        ],
+        "properties": {
+          "confirm": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`replace` only: the sentence the owner typed\n(`madar_menu::replace_sentence`, either language)."
+          },
+          "menu": {
+            "$ref": "#/components/schemas/BulkMenu"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/BulkMode"
+          }
+        }
+      },
+      "BulkMenuResponse": {
+        "type": "object",
+        "required": [
+          "dry_run",
+          "mode",
+          "summary"
+        ],
+        "properties": {
+          "archived": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BulkArchived",
+                "description": "`replace` only."
+              }
+            ]
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "import_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The `menu_imports` row; `None` on a dry run."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/BulkMode"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/BulkSummary",
+            "description": "What was written (or, on a dry run, would be)."
+          }
+        }
+      },
+      "BulkMode": {
+        "type": "string",
+        "enum": [
+          "add",
+          "replace"
+        ]
+      },
+      "BulkOption": {
+        "type": "object",
+        "required": [
+          "name",
+          "price",
+          "is_active"
+        ],
+        "properties": {
+          "is_active": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "BulkOptional": {
+        "type": "object",
+        "required": [
+          "name",
+          "price"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "BulkReviewPending": {
         "type": "object",
         "required": [
@@ -70940,6 +71401,69 @@
               "format": "int64"
             },
             "description": "Ids that are now reviewed (already reviewed counts as resolved too —\nresubmitting the same batch never fails or double-records)."
+          }
+        }
+      },
+      "BulkSize": {
+        "type": "object",
+        "required": [
+          "label",
+          "price",
+          "is_active"
+        ],
+        "properties": {
+          "is_active": {
+            "type": "boolean"
+          },
+          "label": {
+            "type": "string"
+          },
+          "price": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "BulkSummary": {
+        "type": "object",
+        "description": "What a valid menu holds, for the preview and the server's answer.",
+        "required": [
+          "categories",
+          "items",
+          "sizes",
+          "groups",
+          "options",
+          "links",
+          "optionals"
+        ],
+        "properties": {
+          "categories": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "groups": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "links": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "optionals": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "options": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "sizes": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       },

@@ -6,9 +6,11 @@ use crate::{
     menu::modifiers,
     menu::preview,
     menu::studio,
-    menu::{bases, linked, packaging},
+    menu::{bases, bulk, linked, packaging},
+    rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled, route_governor},
 };
-use actix_web::web;
+use actix_governor::Governor;
+use actix_web::{middleware::Condition, web};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg
@@ -130,7 +132,23 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(
             web::scope("/menu")
                 .wrap(JwtMiddleware)
-                .route("/lint", web::get().to(lint::get_menu_lint)),
+                .route("/lint", web::get().to(lint::get_menu_lint))
+                // The self-serve import: its own body limit and rate limit.
+                .service(
+                    web::resource("/bulk")
+                        .app_data(
+                            web::JsonConfig::default()
+                                .limit(bulk::MAX_BODY_BYTES)
+                                .error_handler(|err, _req| {
+                                    crate::errors::AppError::BadRequest(err.to_string()).into()
+                                }),
+                        )
+                        .wrap(Condition::new(
+                            rate_limiting_enabled(),
+                            Governor::new(&route_governor(PeerIpOrLocalhost, "MENU", "BULK")),
+                        ))
+                        .route(web::post().to(bulk::bulk_menu)),
+                ),
         )
         // ── Reusable modifier groups (new unified tables) ─────────────────────
         .service(

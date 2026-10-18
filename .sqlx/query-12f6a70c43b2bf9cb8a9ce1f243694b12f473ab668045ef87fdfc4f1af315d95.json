@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO menu_item_sizes (menu_item_id, label, price, sort, is_active)\n         SELECT item, label, price, sort, active\n           FROM UNNEST($1::uuid[], $2::text[], $3::int4[], $4::int4[], $5::bool[])\n                AS t(item, label, price, sort, active)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray",
+        "Int4Array",
+        "Int4Array",
+        "BoolArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "12f6a70c43b2bf9cb8a9ce1f243694b12f473ab668045ef87fdfc4f1af315d95"
+}
