@@ -249,47 +249,127 @@ struct SalesRow {
     snapshot_cost: Option<i64>,
 }
 
-/// Aggregate non-voided item sales per SKU over a window.
+/// Aggregate non-voided item sales per SKU over the current window and, when
+/// given, the previous one, in ONE statement (one read of the lines, one
+/// grouping, each figure FILTERed by window) instead of the same aggregate
+/// twice. Each window is inclusive at both ends, as before (an order at
+/// exactly `from` counts in both).
 async fn sales_agg(
     pool: &PgPool,
     branch_ids: &[Uuid],
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
-) -> Result<Vec<SalesRow>, AppError> {
-    let rows = sqlx::query_as::<_, SalesRow>(
+    prev: Option<(DateTime<Utc>, DateTime<Utc>)>,
+) -> Result<(Vec<SalesRow>, Vec<SalesRow>), AppError> {
+    #[derive(sqlx::FromRow)]
+    struct BothRow {
+        menu_item_id: Uuid,
+        size_label: String,
+        category_id: Option<Uuid>,
+        category_name: Option<String>,
+        cur_lines: i64,
+        cur_item_name: Option<String>,
+        cur_quantity: Option<i64>,
+        cur_revenue: Option<i64>,
+        cur_cost_missing: Option<bool>,
+        cur_cost: Option<i64>,
+        prev_lines: i64,
+        prev_item_name: Option<String>,
+        prev_quantity: Option<i64>,
+        prev_revenue: Option<i64>,
+        prev_cost_missing: Option<bool>,
+        prev_cost: Option<i64>,
+    }
+    let (prev_from, prev_to) = (prev.map(|p| p.0), prev.map(|p| p.1));
+    let rows = sqlx::query_as::<_, BothRow>(
         r#"
-        SELECT
-            oi.menu_item_id,
-            COALESCE(oi.size_label::text, 'one_size') AS size_label,
-            (array_agg(oi.item_name ORDER BY o.created_at DESC))[1] AS item_name,
-            mi.category_id,
-            c.name AS category_name,
-            SUM(oi.quantity)::bigint   AS quantity_sold,
-            SUM(oi.line_total)::bigint AS revenue,
-            CASE
-                WHEN bool_or(oi.unit_cost IS NULL) THEN NULL
-                ELSE SUM(oi.unit_cost * oi.quantity)::bigint
-            END AS snapshot_cost
-        FROM order_items oi
-        JOIN orders o ON o.id = oi.order_id
-        JOIN menu_items mi ON mi.id = oi.menu_item_id
-        LEFT JOIN categories c ON c.id = mi.category_id
-        WHERE o.branch_id = ANY($1)
-          AND o.status NOT IN ('voided', 'refunded')
-          AND oi.menu_item_id IS NOT NULL
-          AND oi.line_kind <> 'combo'
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oi.menu_item_id, COALESCE(oi.size_label::text, 'one_size'),
-                 mi.category_id, c.name
+        WITH l AS (
+            SELECT oi.menu_item_id, oi.size_label,
+                   -- The latest line's name wins: a fixed-width UTC stamp (to the
+                   -- microsecond) in front of the name, so max() picks it without
+                   -- a sort per group.
+                   to_char(o.created_at AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISSUS') || oi.item_name AS k,
+                   oi.quantity, oi.line_total, oi.unit_cost,
+                   (($2::timestamptz IS NULL OR o.created_at >= $2)
+                    AND ($3::timestamptz IS NULL OR o.created_at <= $3)) AS cur,
+                   ($4::timestamptz IS NOT NULL AND o.created_at >= $4 AND o.created_at <= $5) AS prev
+              FROM order_items oi
+              JOIN orders o ON o.id = oi.order_id
+             WHERE o.branch_id = ANY($1)
+               AND o.status NOT IN ('voided', 'refunded')
+               AND oi.menu_item_id IS NOT NULL
+               AND oi.line_kind <> 'combo'
+               -- the union of both windows (the previous one ends where this starts)
+               AND ($2::timestamptz IS NULL OR o.created_at >= LEAST($2, $4))
+               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        ),
+        g AS (
+            SELECT
+                l.menu_item_id,
+                COALESCE(l.size_label::text, 'one_size') COLLATE "C" AS size_label,
+                COUNT(*) FILTER (WHERE l.cur) AS cur_lines,
+                substr(max(l.k COLLATE "C") FILTER (WHERE l.cur), 21) AS cur_item_name,
+                (SUM(l.quantity) FILTER (WHERE l.cur))::bigint AS cur_quantity,
+                (SUM(l.line_total) FILTER (WHERE l.cur))::bigint AS cur_revenue,
+                bool_or(l.unit_cost IS NULL) FILTER (WHERE l.cur) AS cur_cost_missing,
+                (SUM(l.unit_cost * l.quantity) FILTER (WHERE l.cur))::bigint AS cur_cost,
+                COUNT(*) FILTER (WHERE l.prev) AS prev_lines,
+                substr(max(l.k COLLATE "C") FILTER (WHERE l.prev), 21) AS prev_item_name,
+                (SUM(l.quantity) FILTER (WHERE l.prev))::bigint AS prev_quantity,
+                (SUM(l.line_total) FILTER (WHERE l.prev))::bigint AS prev_revenue,
+                bool_or(l.unit_cost IS NULL) FILTER (WHERE l.prev) AS prev_cost_missing,
+                (SUM(l.unit_cost * l.quantity) FILTER (WHERE l.prev))::bigint AS prev_cost
+            FROM l
+            -- COLLATE "C": the same groups (a deterministic collation's equality
+            -- is byte equality), without the locale's comparison.
+            GROUP BY l.menu_item_id, COALESCE(l.size_label::text, 'one_size') COLLATE "C"
+        )
+        -- The catalog join after grouping (an item's category is one row of
+        -- menu_items, so the groups are the old ones); the inner join still
+        -- drops lines whose item is gone, as before.
+        SELECT g.*, mi.category_id, c.name AS category_name
+          FROM g
+          JOIN menu_items mi ON mi.id = g.menu_item_id
+          LEFT JOIN categories c ON c.id = mi.category_id
         "#,
     )
     .bind(branch_ids)
     .bind(from)
     .bind(to)
+    .bind(prev_from)
+    .bind(prev_to)
     .fetch_all(pool)
     .await?;
-    Ok(rows)
+    // The old statement's figures, per window: a group exists in a window when
+    // it had a line there; its cost is NULL when any of those lines had none.
+    let (mut cur, mut prev_rows) = (Vec::new(), Vec::new());
+    for r in rows {
+        if r.cur_lines > 0 {
+            cur.push(SalesRow {
+                menu_item_id: r.menu_item_id,
+                size_label: r.size_label.clone(),
+                item_name: r.cur_item_name.unwrap_or_default(),
+                category_id: r.category_id,
+                category_name: r.category_name.clone(),
+                quantity_sold: r.cur_quantity.unwrap_or(0),
+                revenue: r.cur_revenue.unwrap_or(0),
+                snapshot_cost: if r.cur_cost_missing == Some(true) { None } else { r.cur_cost },
+            });
+        }
+        if r.prev_lines > 0 {
+            prev_rows.push(SalesRow {
+                menu_item_id: r.menu_item_id,
+                size_label: r.size_label,
+                item_name: r.prev_item_name.unwrap_or_default(),
+                category_id: r.category_id,
+                category_name: r.category_name,
+                quantity_sold: r.prev_quantity.unwrap_or(0),
+                revenue: r.prev_revenue.unwrap_or(0),
+                snapshot_cost: if r.prev_cost_missing == Some(true) { None } else { r.prev_cost },
+            });
+        }
+    }
+    Ok((cur, prev_rows))
 }
 
 /// The org's ACTIVE catalog SKUs (so zero-sale SKUs appear in the ledger —
@@ -790,16 +870,9 @@ async fn build_ledger(
 
     // Every input is independent — fetch concurrently (this runs on the
     // dashboard home page; serial awaits were pure added latency).
-    let prev_fut = async {
-        if prev_from.is_some() {
-            sales_agg(pool, branch_ids, prev_from, prev_to).await
-        } else {
-            Ok(Vec::new())
-        }
-    };
-    let (sales, prev, catalog, (target_pct, target_source), spikes, supp, outcomes, bars, skus) = tokio::try_join!(
-        sales_agg(pool, branch_ids, from, to),
-        prev_fut,
+    let prev_window = prev_from.zip(prev_to);
+    let (sales_both, catalog, (target_pct, target_source), spikes, supp, outcomes, bars, skus) = tokio::try_join!(
+        sales_agg(pool, branch_ids, from, to, prev_window),
         catalog_skus(pool, org_id),
         resolve_target(pool, org_id, branch_scope),
         cost_spikes(pool, org_id, from, to),
@@ -808,6 +881,7 @@ async fn build_ledger(
         kind_bars(pool, org_id, branch_scope),
         crate::costing::org_sku_costs(pool, org_id, branch_scope),
     )?;
+    let (sales, prev) = sales_both;
 
     // Current recipe rollups: the cost source under `current`, and the
     // recipe-incomplete signal under both bases.

@@ -7,6 +7,8 @@
 //!   * `GET /reports/branches/{id}/sales`        — each branch, and "all branches"
 //!   * `GET /reports/branches/{id}/sales/timeseries` (daily, monthly)
 //!   * `GET /reports/orgs/{id}/comparison`
+//!   * `GET /reports/branches/{id}/sales/peak-hours` and `…/peak-days`
+//!   * `GET /reports/branches/{id}/addons`
 //! over the dashboard's day window (local midnight to midnight − 1 ms), each
 //! calendar month, all history (no bounds), and a window that starts and ends
 //! mid-day (so the live intervals are exercised too).
@@ -17,6 +19,7 @@
 //! Prints one line per difference and a summary; exits 1 when anything differs.
 
 use chrono::{DateTime, Duration, Utc};
+use madar_rust::reports::peaks;
 use madar_rust::reports::sales::{self, Source};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -122,6 +125,30 @@ async fn timeseries_pair(
     }
 }
 
+async fn peaks_pair(pool: &PgPool, t: &mut Tally, label: &str, ids: &[Uuid], tz: &str, w: &Window) {
+    let live = peaks::peak_hours(pool, ids, tz, w.1, w.2, Source::Live).await.expect("live peak hours");
+    let rolled = peaks::peak_hours(pool, ids, tz, w.1, w.2, Source::Rollups).await.expect("rolled peak hours");
+    t.check(
+        &format!("peak_hours {label} {}", w.0),
+        serde_json::to_value(live).unwrap(),
+        serde_json::to_value(rolled).unwrap(),
+    );
+    let live = peaks::peak_days(pool, ids, tz, w.1, w.2, Source::Live).await.expect("live peak days");
+    let rolled = peaks::peak_days(pool, ids, tz, w.1, w.2, Source::Rollups).await.expect("rolled peak days");
+    t.check(
+        &format!("peak_days {label} {}", w.0),
+        serde_json::to_value(live).unwrap(),
+        serde_json::to_value(rolled).unwrap(),
+    );
+    let live = peaks::addon_sales(pool, ids, w.1, w.2, Source::Live).await.expect("live addons");
+    let rolled = peaks::addon_sales(pool, ids, w.1, w.2, Source::Rollups).await.expect("rolled addons");
+    t.check(
+        &format!("addons {label} {}", w.0),
+        serde_json::to_value(live).unwrap(),
+        serde_json::to_value(rolled).unwrap(),
+    );
+}
+
 async fn comparison_pair(pool: &PgPool, t: &mut Tally, org: Uuid, w: &Window) {
     let live = sales::org_comparison(pool, org, w.1, w.2, Source::Live)
         .await
@@ -223,6 +250,7 @@ async fn main() {
             for w in windows(&pool, &b.tz, since, through).await {
                 branch_sales_pair(&pool, &mut t, &b.id.to_string(), &[b.id], b.id, &w).await;
                 timeseries_pair(&pool, &mut t, &b.id.to_string(), &[b.id], &b.tz, &w).await;
+                peaks_pair(&pool, &mut t, &b.id.to_string(), &[b.id], &b.tz, &w).await;
             }
         }
         // Org-wide: "all branches", the comparison, the org-zone timeseries.
@@ -232,6 +260,7 @@ async fn main() {
         for w in &ws {
             branch_sales_pair(&pool, &mut t, "all-branches", &ids, Uuid::nil(), w).await;
             timeseries_pair(&pool, &mut t, "all-branches", &ids, &org.tz, w).await;
+            peaks_pair(&pool, &mut t, "all-branches", &ids, &org.tz, w).await;
             comparison_pair(&pool, &mut t, org.id, w).await;
         }
     }

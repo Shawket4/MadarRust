@@ -25,7 +25,24 @@ const DEFAULT_PER_PAGE_BRANCH: i64 = 100;
 const MAX_PER_PAGE: i64 = 1000;
 
 // ── Shared SELECT fragment ────────────────────────────────────
-const ORDER_SELECT: &str =
+/// One order row, as every order read returns it. Two spellings of the SAME
+/// row, chosen by how many rows a statement reads:
+///
+/// * [`ORDER_SELECT`] — paged and single reads (the list, by id / key / ref /
+///   ticket): unchanged. Its per-order lookups (the tender legs, the zone,
+///   the discount issuer and approver names) are subqueries in the select
+///   list, which run after the list's ORDER BY … LIMIT, for the page's rows
+///   only. As joins they ran for every order of the scope before the sort:
+///   measured on the prod copy (RLS, custom plan) the page got slower.
+/// * [`ORDER_SELECT_ALL`] — reads of a whole scope (the export), where each
+///   of those ran once per order (the two names as seq scans of `users` /
+///   `approvals`, the zone as a function call): the names and the zone (the
+///   body of `effective_timezone`, NULL when the branch or its org is not
+///   visible, as the function returns) are joins on primary keys, so no join
+///   fans a row out. The tender legs stay one index probe per order.
+macro_rules! order_select {
+    ($tz:literal, $applied_by:literal, $approved_by:literal, $joins:literal) => {
+        concat!(
     "SELECT o.id, o.branch_id, o.till_id, o.till_id AS shift_id, o.teller_id, u.name AS teller_name,
      o.waiter_id, w.name AS waiter_name,
      o.order_number, o.order_ref, o.status::text, o.payment_method::text,
@@ -39,7 +56,9 @@ const ORDER_SELECT: &str =
      o.voided_at, o.void_reason::text, o.void_note, o.voided_by,
      o.loyalty_customer_id, lc.name AS loyalty_member_name,
      o.price_flagged, o.price_expected_total, o.created_at,
-     effective_timezone(o.branch_id) AS timezone,
+",
+            $tz,
+            " AS timezone,
      o.idempotency_key, o.open_ticket_id,
      o.device_id, o.device_code, CASE WHEN o.device_code IS NOT NULL THEN o.device_code || '-' || o.order_number ELSE o.order_number::text END AS display_number, o.verification,
      o.tax_inclusive, o.tax_rate_applied, o.service_charge_rate_applied, o.service_charge_taxable_applied,
@@ -47,16 +66,42 @@ const ORDER_SELECT: &str =
      o.service_charge_waived_at, o.service_charge_waived_amount,
      o.started_by, sb.name AS started_by_name,
      o.discount_kind, o.discount_percent_bps, o.discount_applied_by,
-     (SELECT name FROM users WHERE id = o.discount_applied_by) AS discount_applied_by_name,
+     ",
+            $applied_by,
+            " AS discount_applied_by_name,
      o.discount_approval_id, o.service_mode,
-     (SELECT au.name FROM approvals ap JOIN users au ON au.id = ap.approver_user_id
-       WHERE ap.id = o.discount_approval_id) AS discount_approved_by_name
+     ",
+            $approved_by,
+            " AS discount_approved_by_name
      FROM orders o JOIN users u ON u.id = o.teller_id
      LEFT JOIN users sb ON sb.id = o.started_by
      LEFT JOIN users w ON w.id = o.waiter_id
      LEFT JOIN users sw ON sw.id = o.service_charge_waived_by
      LEFT JOIN delivery_orders d ON d.id = o.delivery_order_id
-     LEFT JOIN customers lc ON lc.id = o.loyalty_customer_id ";
+     LEFT JOIN customers lc ON lc.id = o.loyalty_customer_id",
+            $joins,
+            " "
+        )
+    };
+}
+const ORDER_SELECT: &str = order_select!(
+    "effective_timezone(o.branch_id)",
+    "(SELECT name FROM users WHERE id = o.discount_applied_by)",
+    "(SELECT au.name FROM approvals ap JOIN users au ON au.id = ap.approver_user_id
+       WHERE ap.id = o.discount_approval_id)",
+    ""
+);
+const ORDER_SELECT_ALL: &str = order_select!(
+    "CASE WHEN tzo.id IS NOT NULL THEN COALESCE(tzb.timezone::text, tzo.timezone::text, 'Africa/Cairo') END",
+    "dab.name",
+    "apu.name",
+    "
+     LEFT JOIN users dab ON dab.id = o.discount_applied_by
+     LEFT JOIN approvals ap ON ap.id = o.discount_approval_id
+     LEFT JOIN users apu ON apu.id = ap.approver_user_id
+     LEFT JOIN branches tzb ON tzb.id = o.branch_id
+     LEFT JOIN organizations tzo ON tzo.id = tzb.org_id"
+);
 
 // ── Shared summary aggregate ──────────────────────────────────
 /// The statement hydrating [OrderSummary] (by name, via `FromRow`) over every
@@ -939,6 +984,9 @@ pub struct OrderExport {
     pub payments: Vec<OrderPayment>,
 }
 
+/// The export's body. Documented here and written by `export_orders` as a
+/// stream in exactly this shape (`ExportTail` is everything after `data`).
+#[allow(dead_code)]
 #[derive(Serialize, ToSchema)]
 pub struct ExportResponse {
     pub data: Vec<OrderExport>,
@@ -5223,15 +5271,14 @@ pub async fn export_orders(
         }};
     }
 
-    let count_sql = format!(
-        "SELECT COUNT(*) FROM orders o JOIN users u ON u.id = o.teller_id \
-         LEFT JOIN users w ON w.id = o.waiter_id WHERE {} {}",
-        scope_condition, filter
-    );
-
-    let total: i64 = bind_export_filters!(sqlx::query_scalar(&count_sql).bind(scope_id))
+    // `total` (the 50 000 cap) and the summary are one statement: the
+    // summary's `total` is the COUNT(*) of exactly these rows (same joins,
+    // one row per order).
+    let summary_sql = order_summary_sql(scope_condition, &filter, None);
+    let summary_row = bind_export_filters!(sqlx::query(&summary_sql).bind(scope_id))
         .fetch_one(pool.get_ref())
         .await?;
+    let total: i64 = sqlx::Row::try_get(&summary_row, "total")?;
 
     if total > 50_000 {
         return Err(AppError::BadRequest(format!(
@@ -5239,17 +5286,11 @@ pub async fn export_orders(
             total
         )));
     }
-
-    let summary_sql = order_summary_sql(scope_condition, &filter, None);
-
-    let summary: OrderSummary =
-        bind_export_filters!(sqlx::query_as::<_, OrderSummary>(&summary_sql).bind(scope_id))
-            .fetch_one(pool.get_ref())
-            .await?;
+    let summary = <OrderSummary as sqlx::FromRow<'_, sqlx::postgres::PgRow>>::from_row(&summary_row)?;
 
     let data_sql = format!(
         "{} WHERE {} {} ORDER BY o.created_at DESC",
-        ORDER_SELECT, scope_condition, filter
+        ORDER_SELECT_ALL, scope_condition, filter
     );
 
     let orders: Vec<Order> =
@@ -5257,43 +5298,31 @@ pub async fn export_orders(
             .fetch_all(pool.get_ref())
             .await?;
 
+    use std::collections::{HashMap, HashSet};
+
     let order_ids: Vec<Uuid> = orders.iter().map(|o| o.id).collect();
-    let payments_rows = if order_ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_as::<_, OrderPayment>(
+    let mut payments_by_order: HashMap<Uuid, Vec<OrderPayment>> = HashMap::new();
+    if !order_ids.is_empty() {
+        for p in sqlx::query_as::<_, OrderPayment>(
             "SELECT id, order_id, method::text AS method, amount, reference \
              FROM order_payments WHERE order_id = ANY($1) ORDER BY id",
         )
         .bind(&order_ids)
         .fetch_all(pool.get_ref())
         .await?
-    };
-
-    use std::collections::HashMap;
-    let mut payments_by_order: HashMap<Uuid, Vec<OrderPayment>> = HashMap::new();
-    for p in payments_rows {
-        payments_by_order.entry(p.order_id).or_default().push(p);
+        {
+            payments_by_order.entry(p.order_id).or_default().push(p);
+        }
     }
 
-    let mut data = Vec::with_capacity(orders.len());
-    for order in orders {
-        let order_id = order.id;
-        let items = fetch_order_items_full(pool.get_ref(), order_id).await?;
-        let payments = payments_by_order.remove(&order_id).unwrap_or_default();
-        data.push(OrderExport {
-            order,
-            items,
-            payments,
-        });
-    }
-
-    use std::collections::HashSet;
+    // Every order's lines, add-ons and optionals in three set queries (the
+    // batched loader the list's include_items uses), not three per order.
+    let mut items_by_order = fetch_orders_items_full_batch(pool.get_ref(), &order_ids).await?;
 
     // Collect every distinct org_ingredient_id from all deduction snapshots
-    let ingredient_ids: Vec<Uuid> = data
-        .iter()
-        .flat_map(|o| o.items.iter())
+    let ingredient_ids: Vec<Uuid> = items_by_order
+        .values()
+        .flatten()
         .flat_map(|i| {
             i.item
                 .deductions_snapshot
@@ -5336,13 +5365,77 @@ pub async fn export_orders(
             .collect()
     };
 
-    Ok(HttpResponse::Ok().json(ExportResponse {
-        data,
+    // The body is [ExportResponse], byte for byte, but written as a stream:
+    // each order is assembled from the loaded maps and serialized in chunks,
+    // so the year's ~50 MB of JSON never sits in memory as one string beside
+    // the rows it came from. Everything the database had to say was read
+    // above; the stream holds no connection.
+    let tail = ExportTail {
         total,
         generated_at: chrono::Utc::now(),
         summary,
         ingredient_costs,
-    }))
+    };
+    let mut orders = orders.into_iter();
+    let mut tail = Some(tail);
+    let mut first = true;
+    let body = futures::stream::poll_fn(move |_| {
+        const CHUNK_ORDERS: usize = 200;
+        let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+        if first {
+            buf.extend_from_slice(b"{\"data\":[");
+        }
+        let mut n = 0;
+        for order in orders.by_ref() {
+            if !first {
+                buf.push(b',');
+            }
+            first = false;
+            let order_id = order.id;
+            let row = OrderExport {
+                order,
+                items: items_by_order.remove(&order_id).unwrap_or_default(),
+                payments: payments_by_order.remove(&order_id).unwrap_or_default(),
+            };
+            if let Err(e) = serde_json::to_writer(&mut buf, &row) {
+                return std::task::Poll::Ready(Some(Err(std::io::Error::other(e))));
+            }
+            n += 1;
+            if n == CHUNK_ORDERS {
+                return std::task::Poll::Ready(Some(Ok(actix_web::web::Bytes::from(buf))));
+            }
+        }
+        match tail.take() {
+            Some(t) => {
+                first = false;
+                buf.extend_from_slice(b"],");
+                // `{"total":…,…}` with its opening brace dropped: the fields
+                // continue the outer object in ExportResponse's order.
+                match serde_json::to_vec(&t) {
+                    Ok(v) => buf.extend_from_slice(&v[1..]),
+                    Err(e) => {
+                        return std::task::Poll::Ready(Some(Err(std::io::Error::other(e))));
+                    }
+                }
+                std::task::Poll::Ready(Some(Ok(actix_web::web::Bytes::from(buf))))
+            }
+            None => std::task::Poll::Ready(None),
+        }
+    });
+
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .streaming(body))
+}
+
+/// The fields of [ExportResponse] after `data`, in its order (the streamed
+/// export writes `data` itself, then these).
+#[derive(Serialize)]
+struct ExportTail {
+    total: i64,
+    generated_at: chrono::DateTime<chrono::Utc>,
+    summary: OrderSummary,
+    ingredient_costs: std::collections::HashMap<Uuid, i32>,
 }
 
 /// Refuse a table-less till sale where the organisation requires one.

@@ -821,112 +821,16 @@ pub async fn branch_sales_peak_hours(
     // branch's effective zone, or the org's for "all branches".
     let tz: String = crate::tz::scope_tz_name(pool.get_ref(), *branch_id, org).await?;
 
-    // Always return all 24 hours so the chart has a complete x-axis.
-    // Also surfaces per-day averages and share-of-total percentages for each bucket.
-    let rows = sqlx::query_as::<_, PeakHourPoint>(
-        r#"
-        WITH all_hours AS (
-            SELECT generate_series(0, 23)::int AS hour
-        ),
-        -- Number of calendar days in the requested range (branch-local time).
-        -- Uses the explicit date span when from/to are bound; otherwise counts
-        -- distinct order dates so we still normalise correctly for open ranges.
-        day_count AS (
-            SELECT GREATEST(1,
-                COALESCE(
-                    CASE WHEN $2::timestamptz IS NOT NULL AND $3::timestamptz IS NOT NULL
-                         THEN (($3::timestamptz AT TIME ZONE $4)::date
-                               - ($2::timestamptz AT TIME ZONE $4)::date)::int + 1
-                    END,
-                    (SELECT COUNT(DISTINCT (o2.created_at AT TIME ZONE $4)::date)::int
-                     FROM orders o2
-                     WHERE o2.branch_id = ANY($1)
-                       AND ($2::timestamptz IS NULL OR o2.created_at >= $2)
-                       AND ($3::timestamptz IS NULL OR o2.created_at <= $3))
-                )
-            )::int AS days
-        ),
-        aggregated AS (
-            SELECT
-                EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
-                COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
-                COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
-                         FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
-                COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
-                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
-                COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
-            FROM orders o
-            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-            WHERE o.branch_id = ANY($1)
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY 1
-        ),
-        -- order_items/order_item_addons fan out orders, so they're summed in
-        -- their own bucketed CTEs rather than joined into `aggregated` above.
-        line_items_agg AS (
-            SELECT
-                EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
-                COALESCE(SUM(oi.quantity), 0)::bigint AS line_items
-            FROM order_items oi
-            JOIN orders o ON o.id = oi.order_id
-            WHERE o.branch_id = ANY($1)
-              AND oi.line_kind <> 'combo'
-              AND o.status NOT IN ('voided', 'refunded')
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY 1
-        ),
-        addons_agg AS (
-            SELECT
-                EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,
-                COALESCE(SUM(oia.quantity), 0)::bigint AS addons
-            FROM order_item_addons oia
-            JOIN order_items oi ON oi.id = oia.order_item_id
-            JOIN orders o ON o.id = oi.order_id
-            WHERE o.branch_id = ANY($1)
-              AND o.status NOT IN ('voided', 'refunded')
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY 1
-        ),
-        totals AS (
-            SELECT
-                COALESCE(SUM(revenue), 0) AS total_revenue,
-                COALESCE(SUM(orders),  0) AS total_orders
-            FROM aggregated
-        )
-        SELECT
-            h.hour,
-            COALESCE(a.orders,   0)::bigint AS orders,
-            COALESCE(a.revenue,  0)::bigint AS revenue,
-            COALESCE(a.voided,   0)::bigint AS voided,
-            COALESCE(a.discount, 0)::bigint AS discount,
-            COALESCE(a.tax,      0)::bigint AS tax,
-            COALESCE(li.line_items, 0)::bigint AS line_items,
-            COALESCE(ad.addons,     0)::bigint AS addons,
-            ROUND(COALESCE(a.revenue, 0)::numeric / d.days)::bigint        AS avg_revenue_per_day,
-            (COALESCE(a.orders,  0)::float8 / d.days::float8)              AS avg_orders_per_day,
-            CASE WHEN t.total_revenue > 0
-                 THEN ROUND(COALESCE(a.revenue, 0)::numeric / t.total_revenue * 100, 1)::float8
-                 ELSE 0.0::float8 END                                       AS revenue_pct,
-            CASE WHEN t.total_orders > 0
-                 THEN ROUND(COALESCE(a.orders,  0)::numeric / t.total_orders  * 100, 1)::float8
-                 ELSE 0.0::float8 END                                       AS orders_pct
-        FROM all_hours h
-        CROSS JOIN day_count d
-        CROSS JOIN totals t
-        LEFT JOIN aggregated a ON a.hour = h.hour
-        LEFT JOIN line_items_agg li ON li.hour = h.hour
-        LEFT JOIN addons_agg ad ON ad.hour = h.hour
-        ORDER BY h.hour ASC
-        "#,
+    // Closed days from the rollups (`sales_daily_sold_hour`), the rest live
+    // (reports::peaks).
+    let rows = super::peaks::peak_hours(
+        pool.get_ref(),
+        &branch_ids,
+        &tz,
+        query.from,
+        query.to,
+        super::sales::Source::configured(),
     )
-    .bind(&branch_ids)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&tz)
-    .fetch_all(pool.get_ref())
     .await?;
 
     Ok(HttpResponse::Ok().json(rows))
@@ -982,109 +886,16 @@ pub async fn branch_sales_peak_days(
     // branch's effective zone, or the org's for "all branches".
     let tz: String = crate::tz::scope_tz_name(pool.get_ref(), *branch_id, org).await?;
 
-    // Always return all 7 weekdays so the chart has a complete x-axis.
-    // "Per occurrence" averages divide by how many times that weekday actually
-    // fell in the range (via day_occurrences), not the range's total day count —
-    // a range with 4 Mondays and 5 Tuesdays would otherwise understate Mondays.
-    let rows = sqlx::query_as::<_, PeakDayPoint>(
-        r#"
-        WITH all_days AS (
-            SELECT generate_series(0, 6)::int AS day_of_week
-        ),
-        day_occurrences AS (
-            SELECT EXTRACT(dow FROM d)::int AS day_of_week, COUNT(*)::int AS occurrences
-            FROM generate_series(
-                COALESCE(
-                    ($2::timestamptz AT TIME ZONE $4)::date,
-                    (SELECT MIN((created_at AT TIME ZONE $4)::date) FROM orders WHERE branch_id = ANY($1))
-                ),
-                COALESCE(
-                    ($3::timestamptz AT TIME ZONE $4)::date,
-                    (SELECT MAX((created_at AT TIME ZONE $4)::date) FROM orders WHERE branch_id = ANY($1))
-                ),
-                interval '1 day'
-            ) d
-            GROUP BY 1
-        ),
-        aggregated AS (
-            SELECT
-                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,
-                COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,
-                COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
-                         FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,
-                COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,
-                COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,
-                COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax
-            FROM orders o
-            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-            WHERE o.branch_id = ANY($1)
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY 1
-        ),
-        line_items_agg AS (
-            SELECT
-                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,
-                COALESCE(SUM(oi.quantity), 0)::bigint AS line_items
-            FROM order_items oi
-            JOIN orders o ON o.id = oi.order_id
-            WHERE o.branch_id = ANY($1)
-              AND oi.line_kind <> 'combo'
-              AND o.status NOT IN ('voided', 'refunded')
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY 1
-        ),
-        addons_agg AS (
-            SELECT
-                EXTRACT(dow FROM o.created_at AT TIME ZONE $4)::int AS day_of_week,
-                COALESCE(SUM(oia.quantity), 0)::bigint AS addons
-            FROM order_item_addons oia
-            JOIN order_items oi ON oi.id = oia.order_item_id
-            JOIN orders o ON o.id = oi.order_id
-            WHERE o.branch_id = ANY($1)
-              AND o.status NOT IN ('voided', 'refunded')
-              AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-              AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-            GROUP BY 1
-        ),
-        totals AS (
-            SELECT
-                COALESCE(SUM(revenue), 0) AS total_revenue,
-                COALESCE(SUM(orders),  0) AS total_orders
-            FROM aggregated
-        )
-        SELECT
-            w.day_of_week,
-            COALESCE(a.orders,   0)::bigint AS orders,
-            COALESCE(a.revenue,  0)::bigint AS revenue,
-            COALESCE(a.voided,   0)::bigint AS voided,
-            COALESCE(a.discount, 0)::bigint AS discount,
-            COALESCE(a.tax,      0)::bigint AS tax,
-            COALESCE(li.line_items, 0)::bigint AS line_items,
-            COALESCE(ad.addons,     0)::bigint AS addons,
-            ROUND(COALESCE(a.revenue, 0)::numeric / GREATEST(1, COALESCE(o.occurrences, 1)))::bigint AS avg_revenue_per_day,
-            (COALESCE(a.orders,  0)::float8 / GREATEST(1, COALESCE(o.occurrences, 1))::float8)        AS avg_orders_per_day,
-            CASE WHEN t.total_revenue > 0
-                 THEN ROUND(COALESCE(a.revenue, 0)::numeric / t.total_revenue * 100, 1)::float8
-                 ELSE 0.0::float8 END                                       AS revenue_pct,
-            CASE WHEN t.total_orders > 0
-                 THEN ROUND(COALESCE(a.orders,  0)::numeric / t.total_orders  * 100, 1)::float8
-                 ELSE 0.0::float8 END                                       AS orders_pct
-        FROM all_days w
-        CROSS JOIN totals t
-        LEFT JOIN aggregated a ON a.day_of_week = w.day_of_week
-        LEFT JOIN line_items_agg li ON li.day_of_week = w.day_of_week
-        LEFT JOIN addons_agg ad ON ad.day_of_week = w.day_of_week
-        LEFT JOIN day_occurrences o ON o.day_of_week = w.day_of_week
-        ORDER BY w.day_of_week ASC
-        "#,
+    // Closed days from the rollups (a weekday is a sum of business days in
+    // `sales_daily_sold`), the rest live (reports::peaks).
+    let rows = super::peaks::peak_days(
+        pool.get_ref(),
+        &branch_ids,
+        &tz,
+        query.from,
+        query.to,
+        super::sales::Source::configured(),
     )
-    .bind(&branch_ids)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&tz)
-    .fetch_all(pool.get_ref())
     .await?;
 
     Ok(HttpResponse::Ok().json(rows))
@@ -1264,33 +1075,15 @@ pub async fn branch_addon_sales(
     let (branch_ids, _org) =
         resolve_report_branches(pool.get_ref(), &claims, &req, *branch_id).await?;
 
-    let rows = sqlx::query_as::<_, AddonSalesRow>(
-        r#"
-        SELECT
-            oia.addon_item_id,
-            oia.addon_name,
-            COALESCE((array_agg(oia.name_translations))[1], '{}'::jsonb) AS addon_name_translations,
-            COALESCE(mg.legacy_addon_type, 'extra') AS addon_type,
-            SUM(oia.quantity)::bigint  AS quantity_sold,
-            SUM(oia.line_total)::bigint AS revenue
-        FROM order_item_addons oia
-        JOIN order_items oi ON oi.id  = oia.order_item_id
-        JOIN orders o       ON o.id   = oi.order_id
-        -- An add-on's type is its group's legacy_addon_type (the old addon_items).
-        LEFT JOIN modifier_options mo ON mo.id = oia.addon_item_id AND mo.legacy_source = 'addon'
-        LEFT JOIN modifier_groups mg ON mg.id = mo.group_id
-        WHERE o.branch_id = ANY($1)
-          AND o.status NOT IN ('voided', 'refunded')
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY oia.addon_item_id, oia.addon_name, mg.legacy_addon_type
-        ORDER BY quantity_sold DESC, revenue DESC, oia.addon_name COLLATE "C"
-        "#,
+    // Closed days from the rollups (`sales_daily_sold_addon`), the rest live
+    // (reports::peaks).
+    let rows = super::peaks::addon_sales(
+        pool.get_ref(),
+        &branch_ids,
+        query.from,
+        query.to,
+        super::sales::Source::configured(),
     )
-    .bind(&branch_ids)
-    .bind(query.from)
-    .bind(query.to)
-    .fetch_all(pool.get_ref())
     .await?;
 
     Ok(HttpResponse::Ok().json(rows))
@@ -2896,83 +2689,115 @@ pub async fn branch_till_sessions(
     // report never disagree by a piastre. A `correction` movement counts
     // against the bucket it corrects, exactly as `CashMovementSummaryRow::bucket`;
     // one that names nothing (or another correction) stays an adjustment.
-    let sql = format!(
+    //
+    // The page of tills is picked first (`s`); then each figure is ONE grouped
+    // pass over the page's rows (orders with their cash legs, refunds,
+    // movements; each a materialized aggregate read by an
+    // index on `till_id = ANY(the page)`, which a generic prepared plan keeps,
+    // and is never re-run per till), joined back by till, instead of five
+    // correlated lookups per till.
+    // (`o.status::text <> 'voided'` is `crate::orders::TENDERED` and
+    // `o.status::text NOT IN ('voided', 'refunded')` is `crate::orders::SOLD`,
+    // spelled out for the compile-time check.)
+    let rows = sqlx::query_as!(
+        TillSessionRow,
         r#"
-        SELECT
-            s.id AS till_id,
-            (s.opened_at AT TIME ZONE effective_timezone(s.branch_id))::date AS business_date,
-            s.branch_id,
-            b.name AS branch_name,
-            b.code AS branch_code,
-            s.teller_id,
-            u.name AS teller_name,
-            s.opened_at,
-            s.status::text AS status,
-            s.opening_cash::bigint AS opening_cash,
-            (
-              COALESCE((SELECT SUM(op.amount) FROM order_payments op JOIN orders o ON o.id = op.order_id
-                    WHERE o.till_id = s.id AND COALESCE(op.is_cash, op.method = 'cash') = true AND o.{TENDERED}), 0)
-            + COALESCE((SELECT SUM(o.tip_amount) FROM orders o
-                    WHERE o.till_id = s.id
-                      AND COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
-                      AND o.{TENDERED}), 0)
-            - COALESCE((SELECT SUM(r.amount) FROM order_refunds r WHERE r.till_id = s.id AND r.is_cash), 0)
-            )::bigint AS net_cash_payment,
-            COALESCE(mv.pay_ins, 0)::bigint AS pay_ins,
-            COALESCE(mv.pay_outs, 0)::bigint AS pay_outs,
-            COALESCE(mv.cash_drops, 0)::bigint AS cash_drops,
-            COALESCE(mv.cash_adjustments, 0)::bigint AS cash_adjustments,
-            s.closing_cash_declared::bigint AS closing_cash_declared,
-            s.closing_cash_system::bigint AS closing_cash_system,
-            s.cash_discrepancy::bigint AS cash_discrepancy,
-            s.closed_at,
-            COALESCE(sal.orders_count, 0)::bigint AS orders_count,
-            COALESCE(sal.net_sales, 0)::bigint AS net_sales
-        FROM tills s
-        JOIN users u ON u.id = s.teller_id
-        JOIN branches b ON b.id = s.branch_id
-        LEFT JOIN LATERAL (
-            SELECT
+        WITH s AS MATERIALIZED (
+            SELECT s.id, s.branch_id, s.teller_id, s.opened_at, s.status::text AS status,
+                   s.opening_cash, s.closing_cash_declared, s.closing_cash_system,
+                   s.cash_discrepancy, s.closed_at,
+                   b.name AS branch_name, b.code AS branch_code, u.name AS teller_name,
+                   -- effective_timezone(s.branch_id), inlined
+                   CASE WHEN tzo.id IS NOT NULL
+                        THEN COALESCE(b.timezone::text, tzo.timezone::text, 'Africa/Cairo') END AS tz
+              FROM tills s
+              JOIN users u ON u.id = s.teller_id
+              JOIN branches b ON b.id = s.branch_id
+              LEFT JOIN organizations tzo ON tzo.id = b.org_id
+             WHERE s.branch_id = ANY($1) AND s.deleted_at IS NULL
+               AND ($2::timestamptz IS NULL OR s.opened_at >= $2)
+               AND ($3::timestamptz IS NULL OR s.opened_at <= $3)
+               AND (s.branch_id = ANY($4) OR s.teller_id = $5)
+             ORDER BY s.opened_at DESC, s.id
+             LIMIT $6
+        ),
+        ord AS MATERIALIZED (
+            SELECT o.till_id,
+                   SUM(pc.cash) FILTER (WHERE o.status::text <> 'voided') AS cash_payments,
+                   SUM(o.tip_amount) FILTER (
+                       WHERE COALESCE(o.tip_is_cash, COALESCE(o.tip_payment_method, o.payment_method) = 'cash') = true
+                         AND o.status::text <> 'voided') AS cash_tips,
+                   COUNT(*) FILTER (WHERE o.status::text NOT IN ('voided', 'refunded')) AS orders_count,
+                   SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))
+                       FILTER (WHERE o.status::text NOT IN ('voided', 'refunded')) AS net_sales
+              FROM orders o
+              LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
+              LEFT JOIN LATERAL (
+                  SELECT SUM(op.amount) AS cash FROM order_payments op
+                   WHERE op.order_id = o.id AND COALESCE(op.is_cash, op.method = 'cash') = true
+              ) pc ON TRUE
+             WHERE o.till_id = ANY(ARRAY(SELECT id FROM s))
+             GROUP BY o.till_id
+        ),
+        ref AS MATERIALIZED (
+            SELECT r.till_id, SUM(r.amount) AS cash
+              FROM order_refunds r
+             WHERE r.till_id = ANY(ARRAY(SELECT id FROM s)) AND r.is_cash
+             GROUP BY r.till_id
+        ),
+        mv AS MATERIALIZED (
+            SELECT m.till_id,
                 SUM(m.amount) FILTER (WHERE bucket = 'pay_in')     AS pay_ins,
                -SUM(m.amount) FILTER (WHERE bucket = 'pay_out')    AS pay_outs,
                -SUM(m.amount) FILTER (WHERE bucket = 'safe_drop')  AS cash_drops,
                 SUM(m.amount) FILTER (WHERE bucket = 'correction') AS cash_adjustments
             FROM (
-                SELECT m.amount,
+                SELECT m.till_id, m.amount,
                        CASE WHEN m.kind = 'correction' AND c.kind IS NOT NULL
                             THEN c.kind ELSE m.kind END AS bucket
                 FROM till_cash_movements m
                 LEFT JOIN till_cash_movements c ON c.id = m.corrects_id
-                WHERE m.till_id = s.id
+               WHERE m.till_id = ANY(ARRAY(SELECT id FROM s))
             ) m
-        ) mv ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT COUNT(*) AS orders_count,
-                   SUM(o.total_amount - COALESCE(rf.refunded_amount, 0)) AS net_sales
-            FROM orders o
-            LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id
-            WHERE o.till_id = s.id AND o.{SOLD}
-        ) sal ON TRUE
-        WHERE s.branch_id = ANY($1) AND s.deleted_at IS NULL
-          AND ($2::timestamptz IS NULL OR s.opened_at >= $2)
-          AND ($3::timestamptz IS NULL OR s.opened_at <= $3)
-          AND (s.branch_id = ANY($4) OR s.teller_id = $5)
+            GROUP BY m.till_id
+        )
+        SELECT
+            s.id AS "till_id!",
+            (s.opened_at AT TIME ZONE s.tz)::date AS "business_date!",
+            s.branch_id AS "branch_id!",
+            s.branch_name AS "branch_name!",
+            s.branch_code AS "branch_code!",
+            s.teller_id AS "teller_id!",
+            s.teller_name AS "teller_name!",
+            s.opened_at AS "opened_at!",
+            s.status AS "status!",
+            s.opening_cash::bigint AS "opening_cash!",
+            (COALESCE(ord.cash_payments, 0) + COALESCE(ord.cash_tips, 0) - COALESCE(ref.cash, 0))::bigint AS "net_cash_payment!",
+            COALESCE(mv.pay_ins, 0)::bigint AS "pay_ins!",
+            COALESCE(mv.pay_outs, 0)::bigint AS "pay_outs!",
+            COALESCE(mv.cash_drops, 0)::bigint AS "cash_drops!",
+            COALESCE(mv.cash_adjustments, 0)::bigint AS "cash_adjustments!",
+            s.closing_cash_declared::bigint AS "closing_cash_declared?",
+            s.closing_cash_system::bigint AS "closing_cash_system?",
+            s.cash_discrepancy::bigint AS "cash_discrepancy?",
+            s.closed_at AS "closed_at?",
+            COALESCE(ord.orders_count, 0)::bigint AS "orders_count!",
+            COALESCE(ord.net_sales, 0)::bigint AS "net_sales!"
+        FROM s
+        LEFT JOIN ord ON ord.till_id = s.id
+        LEFT JOIN ref ON ref.till_id = s.id
+        LEFT JOIN mv ON mv.till_id = s.id
         ORDER BY s.opened_at DESC, s.id
-        LIMIT $6
         "#,
-        TENDERED = crate::orders::TENDERED,
-        SOLD = crate::orders::SOLD
-    );
-
-    let rows = sqlx::query_as::<_, TillSessionRow>(&sql)
-        .bind(&branch_ids)
-        .bind(query.from)
-        .bind(query.to)
-        .bind(&sees_all)
-        .bind(claims.user_id())
-        .bind(MAX_TILL_SESSIONS + 1)
-        .fetch_all(pool.get_ref())
-        .await?;
+        &branch_ids,
+        query.from,
+        query.to,
+        &sees_all,
+        claims.user_id(),
+        MAX_TILL_SESSIONS + 1,
+    )
+    .fetch_all(pool.get_ref())
+    .await?;
     if rows.len() as i64 > MAX_TILL_SESSIONS {
         return Err(AppError::BadRequest(format!(
             "More than {MAX_TILL_SESSIONS} till sessions in this range; narrow `from`/`to`"

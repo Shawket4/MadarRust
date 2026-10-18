@@ -1136,17 +1136,8 @@ pub async fn list_menu_catalog(
                 mi.description, mi.description_translations, mi.image_url,
                 mi.base_price, mi.is_active,
                 mi.created_at, mi.updated_at, mi.deleted_at, mi.kind,
-                (
-                    SELECT a.id::text
-                    FROM compat.menu_item_recipes r
-                    JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
-                    JOIN compat.addon_items a ON a.id = ai.addon_item_id
-                    WHERE r.menu_item_id = mi.id
-                      AND a.type = 'milk_type'
-                    -- Deterministic: the group's display order (component_resolve agrees).
-                    ORDER BY (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id
-                    LIMIT 1
-                ) AS default_milk_addon_id
+                -- Filled below for the whole page in one statement.
+                NULL::text AS default_milk_addon_id
          FROM menu_items mi
          LEFT JOIN compat.branch_menu_overrides bmo ON bmo.menu_item_id = mi.id AND bmo.branch_id = $4
          WHERE mi.org_id = $1 AND mi.deleted_at IS NULL
@@ -1177,6 +1168,11 @@ pub async fn list_menu_catalog(
         ((total as f64) / (per_page as f64)).ceil() as i64
     };
 
+    let milk = default_milk_addons(pool.get_ref(), &rows.iter().map(|m| m.id).collect::<Vec<_>>()).await?;
+    for m in rows.iter_mut() {
+        m.default_milk_addon_id = milk.get(&m.id).cloned();
+    }
+
     // Same `image` asset refs as GET /menu-items/{id}.
     attach_item_refs(pool.get_ref(), query.org_id, &mut rows).await?;
 
@@ -1206,6 +1202,34 @@ pub async fn list_menu_catalog(
         per_page,
         total_pages,
     }))
+}
+
+/// Each item's default milk add-on (the first milk-type add-on whose
+/// ingredient is in its recipe, in the group's display order), for a page of
+/// items in ONE statement: the same pick the per-row subquery made, which ran
+/// once per item and walked every milk add-on's recipe lines each time.
+async fn default_milk_addons(
+    pool: &PgPool,
+    item_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, String>, AppError> {
+    if item_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let rows = sqlx::query!(
+        r#"SELECT DISTINCT ON (r.menu_item_id) r.menu_item_id AS "menu_item_id!", a.id::text AS "addon_id!"
+             FROM compat.menu_item_recipes r
+             JOIN compat.addon_item_ingredients ai ON ai.org_ingredient_id = r.org_ingredient_id
+             JOIN compat.addon_items a ON a.id = ai.addon_item_id
+            WHERE r.menu_item_id = ANY($1)
+              AND a.type = 'milk_type'
+            -- Deterministic: the group's display order (component_resolve agrees).
+            ORDER BY r.menu_item_id,
+                     (SELECT mo.sort FROM modifier_options mo WHERE mo.id = a.id) NULLS LAST, a.name, a.id"#,
+        item_ids
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.menu_item_id, r.addon_id)).collect())
 }
 
 #[utoipa::path(

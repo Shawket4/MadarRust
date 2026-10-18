@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            oia.addon_item_id,\n            oia.addon_name,\n            COALESCE((array_agg(oia.name_translations ORDER BY oia.name_translations DESC))[1], '{}'::jsonb) AS \"addon_name_translations!\",\n            COALESCE(mg.legacy_addon_type, 'extra') AS \"addon_type!\",\n            SUM(oia.quantity)::bigint  AS \"quantity_sold!\",\n            SUM(oia.line_total)::bigint AS \"revenue!\"\n        FROM order_item_addons oia\n        JOIN order_items oi ON oi.id  = oia.order_item_id\n        JOIN orders o       ON o.id   = oi.order_id\n        -- An add-on's type is its group's legacy_addon_type (the old addon_items).\n        LEFT JOIN modifier_options mo ON mo.id = oia.addon_item_id AND mo.legacy_source = 'addon'\n        LEFT JOIN modifier_groups mg ON mg.id = mo.group_id\n        WHERE o.branch_id = ANY($1)\n          AND o.status NOT IN ('voided', 'refunded')\n          AND ($2::timestamptz IS NULL OR o.created_at >= $2)\n          AND ($3::timestamptz IS NULL OR o.created_at <= $3)\n        GROUP BY oia.addon_item_id, oia.addon_name, mg.legacy_addon_type\n        ORDER BY 5 DESC, 6 DESC, oia.addon_name COLLATE \"C\", oia.addon_item_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "addon_item_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "addon_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "addon_name_translations!",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "addon_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "quantity_sold!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "revenue!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f56802156ae5735f41ef05b932243ba7e8912ddc12e1da0cf5e957be4361e15f"
+}

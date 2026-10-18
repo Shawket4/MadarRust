@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH p AS (SELECT * FROM sales_daily_plan($1::uuid[], $2::timestamptz, $3::timestamptz, true, $4)),\n        w AS (SELECT p.branch_id, p.lo, p.hi FROM p WHERE p.day IS NULL),\n        d AS (SELECT p.branch_id, array_agg(p.day) AS days FROM p WHERE p.day IS NOT NULL GROUP BY p.branch_id),\n        all_hours AS (\n            SELECT generate_series(0, 23)::int AS hour\n        ),\n        day_count AS (\n            SELECT GREATEST(1,\n                COALESCE(\n                    CASE WHEN $2::timestamptz IS NOT NULL AND $3::timestamptz IS NOT NULL\n                         THEN (($3::timestamptz AT TIME ZONE $4)::date\n                               - ($2::timestamptz AT TIME ZONE $4)::date)::int + 1\n                    END,\n                    (SELECT COUNT(DISTINCT (o2.created_at AT TIME ZONE $4)::date)::int\n                     FROM orders o2\n                     WHERE o2.branch_id = ANY($1)\n                       AND ($2::timestamptz IS NULL OR o2.created_at >= $2)\n                       AND ($3::timestamptz IS NULL OR o2.created_at <= $3))\n                )\n            )::int AS days\n        ),\n        lo AS (\n            SELECT o.* FROM w CROSS JOIN LATERAL (\n                SELECT o.id, o.status, o.created_at, o.total_amount, o.discount_amount, o.tax_amount\n                  FROM orders o\n                 WHERE o.branch_id = w.branch_id AND o.created_at >= w.lo AND o.created_at < w.hi\n                OFFSET 0\n            ) o\n        ),\n        aggregated AS (\n            SELECT hour, SUM(orders) AS orders, SUM(revenue) AS revenue, SUM(voided) AS voided,\n                   SUM(discount) AS discount, SUM(tax) AS tax\n              FROM (\n                SELECT\n                    EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour,\n                    COUNT(o.id)   FILTER (WHERE o.status NOT IN ('voided', 'refunded'))::bigint  AS orders,\n                    COALESCE(SUM(o.total_amount - COALESCE(rf.refunded_amount, 0))\n                             FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS revenue,\n                    COUNT(o.id)   FILTER (WHERE o.status  = 'voided')::bigint  AS voided,\n                    COALESCE(SUM(o.discount_amount) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS discount,\n                    COALESCE(SUM(o.tax_amount - COALESCE(rf.refunded_tax, 0)) FILTER (WHERE o.status NOT IN ('voided', 'refunded')), 0)::bigint AS tax\n                FROM lo o\n                LEFT JOIN v_order_refund_totals rf ON rf.order_id = o.id\n                GROUP BY 1\n                UNION ALL\n                SELECT h.hour::int, h.sold_orders, h.revenue_net, h.voided_orders, h.discount, h.tax_net\n                  FROM d CROSS JOIN LATERAL (SELECT h.* FROM sales_daily_sold_hour h WHERE h.branch_id = d.branch_id AND h.business_date = ANY(d.days) OFFSET 0) h\n              ) u\n             GROUP BY hour\n        ),\n        line_items_agg AS (\n            SELECT hour, SUM(q) AS line_items FROM (\n                SELECT EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour, oi.quantity::bigint AS q\n                  FROM lo o JOIN order_items oi ON oi.order_id = o.id\n                 WHERE oi.line_kind <> 'combo' AND o.status NOT IN ('voided', 'refunded')\n                UNION ALL\n                SELECT h.hour::int, h.line_items\n                  FROM d CROSS JOIN LATERAL (SELECT h.* FROM sales_daily_sold_hour h WHERE h.branch_id = d.branch_id AND h.business_date = ANY(d.days) OFFSET 0) h\n            ) u GROUP BY hour\n        ),\n        addons_agg AS (\n            SELECT hour, SUM(q) AS addons FROM (\n                SELECT EXTRACT(hour FROM o.created_at AT TIME ZONE $4)::int AS hour, oia.quantity::bigint AS q\n                  FROM lo o JOIN order_items oi ON oi.order_id = o.id\n                  JOIN order_item_addons oia ON oia.order_item_id = oi.id\n                 WHERE o.status NOT IN ('voided', 'refunded')\n                UNION ALL\n                SELECT h.hour::int, h.addons\n                  FROM d CROSS JOIN LATERAL (SELECT h.* FROM sales_daily_sold_hour h WHERE h.branch_id = d.branch_id AND h.business_date = ANY(d.days) OFFSET 0) h\n            ) u GROUP BY hour\n        ),\n        totals AS (\n            SELECT\n                COALESCE(SUM(revenue), 0) AS total_revenue,\n                COALESCE(SUM(orders),  0) AS total_orders\n            FROM aggregated\n        )\n        SELECT\n            h.hour AS \"hour!\",\n            COALESCE(a.orders,   0)::bigint AS \"orders!\",\n            COALESCE(a.revenue,  0)::bigint AS \"revenue!\",\n            COALESCE(a.voided,   0)::bigint AS \"voided!\",\n            COALESCE(a.discount, 0)::bigint AS \"discount!\",\n            COALESCE(a.tax,      0)::bigint AS \"tax!\",\n            COALESCE(li.line_items, 0)::bigint AS \"line_items!\",\n            COALESCE(ad.addons,     0)::bigint AS \"addons!\",\n            ROUND(COALESCE(a.revenue, 0)::numeric / dc.days)::bigint        AS \"avg_revenue_per_day!\",\n            (COALESCE(a.orders,  0)::float8 / dc.days::float8)              AS \"avg_orders_per_day!\",\n            CASE WHEN t.total_revenue > 0\n                 THEN ROUND(COALESCE(a.revenue, 0)::numeric / t.total_revenue * 100, 1)::float8\n                 ELSE 0.0::float8 END                                       AS \"revenue_pct!\",\n            CASE WHEN t.total_orders > 0\n                 THEN ROUND(COALESCE(a.orders,  0)::numeric / t.total_orders  * 100, 1)::float8\n                 ELSE 0.0::float8 END                                       AS \"orders_pct!\"\n        FROM all_hours h\n        CROSS JOIN day_count dc\n        CROSS JOIN totals t\n        LEFT JOIN aggregated a ON a.hour = h.hour\n        LEFT JOIN line_items_agg li ON li.hour = h.hour\n        LEFT JOIN addons_agg ad ON ad.hour = h.hour\n        ORDER BY h.hour ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hour!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "orders!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "revenue!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "voided!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "discount!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "tax!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "line_items!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "addons!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "avg_revenue_per_day!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "avg_orders_per_day!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 10,
+        "name": "revenue_pct!",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 11,
+        "name": "orders_pct!",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "a80b66d39a1973da240479c91d5b09736cd45ebaacd22a84912b5063b77feb85"
+}

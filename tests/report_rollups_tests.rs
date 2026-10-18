@@ -4,6 +4,7 @@
 //! a day in half.
 
 use chrono::{DateTime, Duration, Utc};
+use madar_rust::reports::peaks;
 use madar_rust::reports::sales::{self, Source};
 use madar_rust::rollups;
 use sqlx::PgPool;
@@ -143,6 +144,16 @@ async fn assert_same(pool: &PgPool, s: &Shop, from: Option<DateTime<Utc>>, to: O
         serde_json::to_value(rolled).unwrap(),
         "comparison, {what}"
     );
+    // Peak hours / peak days / add-ons (the hour and add-on grains).
+    let live = peaks::peak_hours(pool, &ids, &s.tz, from, to, Source::Live).await.unwrap();
+    let rolled = peaks::peak_hours(pool, &ids, &s.tz, from, to, Source::Rollups).await.unwrap();
+    assert_eq!(serde_json::to_value(live).unwrap(), serde_json::to_value(rolled).unwrap(), "peak hours, {what}");
+    let live = peaks::peak_days(pool, &ids, &s.tz, from, to, Source::Live).await.unwrap();
+    let rolled = peaks::peak_days(pool, &ids, &s.tz, from, to, Source::Rollups).await.unwrap();
+    assert_eq!(serde_json::to_value(live).unwrap(), serde_json::to_value(rolled).unwrap(), "peak days, {what}");
+    let live = peaks::addon_sales(pool, &ids, from, to, Source::Live).await.unwrap();
+    let rolled = peaks::addon_sales(pool, &ids, from, to, Source::Rollups).await.unwrap();
+    assert_eq!(serde_json::to_value(live).unwrap(), serde_json::to_value(rolled).unwrap(), "add-ons, {what}");
 }
 
 /// The dashboard's window for `days_ago .. 0` (today included).
@@ -254,15 +265,17 @@ async fn a_timezone_change_drops_the_branchs_rollups(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let left: (i64, i64) = sqlx::query_as(
+    let left: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT (SELECT count(*) FROM sales_daily_coverage WHERE branch_id = $1),
-                (SELECT count(*) FROM sales_daily_sold WHERE branch_id = $1)",
+                (SELECT count(*) FROM sales_daily_sold WHERE branch_id = $1),
+                (SELECT count(*) FROM sales_daily_sold_hour WHERE branch_id = $1),
+                (SELECT count(*) FROM sales_daily_sold_addon WHERE branch_id = $1)",
     )
     .bind(s.branch)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(left, (0, 0));
+    assert_eq!(left, (0, 0, 0, 0));
     let s = Shop { tz: "Asia/Dubai".into(), ..s };
     let (from, to) = dashboard_window(&pool, &s, 6).await;
     assert_eq!(rollup_days(&pool, &s, Some(from), Some(to)).await, 0, "all live until rebuilt");
@@ -309,7 +322,14 @@ async fn the_rollup_tables_are_tenant_scoped(pool: PgPool) {
         .await
         .unwrap();
     sqlx::query("SET LOCAL ROLE madar_app").execute(&mut *tx).await.unwrap();
-    for t in ["sales_daily_sold", "sales_daily_sold_item", "sales_daily_sold_method", "sales_daily_coverage"] {
+    for t in [
+        "sales_daily_sold",
+        "sales_daily_sold_item",
+        "sales_daily_sold_method",
+        "sales_daily_coverage",
+        "sales_daily_sold_hour",
+        "sales_daily_sold_addon",
+    ] {
         let other: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {t} WHERE org_id <> $1"))
             .bind(a.org)
             .fetch_one(&mut *tx)
@@ -553,4 +573,35 @@ async fn a_till_close_settles_its_branch(pool: PgPool) {
     assert_eq!(rollups::settle_till(&pool, s.till).await.unwrap(), 0, "idempotent");
     let (from, to) = dashboard_window(&pool, &s, 6).await;
     assert_same(&pool, &s, Some(from), Some(to), "after the close").await;
+}
+
+/// The hour and add-on grains are rewritten with their day: a late add-on on
+/// a closed day marks it dirty, it is read live, and after the recompute the
+/// rollups agree with the ledger again, hour by hour and add-on by add-on.
+#[sqlx::test]
+async fn the_hour_and_addon_grains_follow_their_day(pool: PgPool) {
+    let s = shop(&pool).await;
+    let ids = seed_history(&pool, &s).await;
+    tick(&pool).await;
+    let hours: i64 = sqlx::query_scalar("SELECT count(*) FROM sales_daily_sold_hour WHERE branch_id = $1")
+        .bind(s.branch)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(hours, 16, "four closed days x four sale hours");
+    // One add-on id sold on two days merges into one row of the report.
+    let oat = Uuid::new_v4();
+    sqlx::query("UPDATE order_item_addons SET addon_item_id = $1 WHERE order_item_id IN (SELECT id FROM order_items WHERE order_id = ANY($2))")
+        .bind(oat)
+        .bind(vec![ids[0], ids[4]])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (from, to) = dashboard_window(&pool, &s, 6).await;
+    assert_same(&pool, &s, Some(from), Some(to), "after a late add-on change, live").await;
+    tick(&pool).await;
+    assert_same(&pool, &s, Some(from), Some(to), "after the recompute").await;
+    let rows = peaks::addon_sales(&pool, &[s.branch], Some(from), Some(to), Source::Rollups).await.unwrap();
+    let merged = rows.iter().find(|r| r.addon_item_id == oat).expect("merged add-on");
+    assert_eq!(merged.quantity_sold, 2);
 }

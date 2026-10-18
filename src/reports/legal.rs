@@ -322,118 +322,140 @@ pub async fn discounts_audit(
     let org_id = org_id.into_inner();
     let scope = guard(&req, pool.get_ref(), org_id).await?;
 
-    let (total_count, total_amount_minor): (i64, i64) = sqlx::query_as(&format!(
+    // One pass: the window's discounted sales are read once (`f`), and the
+    // total, the three breakdowns and the newest entries are all cut from
+    // that set; they used to be five statements, each its own scan of the
+    // org's orders. Section 0 = total, 1 = by discount, 2 = by issuer,
+    // 3 = by kind, 4 = entries, each in its own rank order. A breakdown tie
+    // on `count` now breaks on the label (and the person's id), where it
+    // used to fall wherever the plan put it.
+    // (`o.status::text NOT IN ('voided', 'refunded')` is `crate::orders::SOLD`,
+    // spelled out for the compile-time check.)
+    let rows = sqlx::query!(
         r#"
-        SELECT COUNT(*)::bigint,
-               COALESCE(SUM(o.discount_amount), 0)::bigint
-        FROM orders o
-        JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        WITH f AS MATERIALIZED (
+            SELECT o.id, o.order_ref, o.created_at, b.name AS branch_name,
+                   o.discount_amount, o.discount_type::text AS discount_type, o.discount_id,
+                   o.discount_kind, o.discount_percent_bps, o.discount_approval_id,
+                   COALESCE(o.discount_applied_by, o.teller_id) AS issuer
+              FROM orders o
+              JOIN branches b ON b.id = o.branch_id
+             WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4))
+               AND o.status::text NOT IN ('voided', 'refunded') AND o.discount_amount > 0
+               AND ($2::timestamptz IS NULL OR o.created_at >= $2)
+               AND ($3::timestamptz IS NULL OR o.created_at <= $3)
+        ),
+        by_reason AS (
+            SELECT COALESCE(d.name, f.discount_type, 'unspecified') AS label,
+                   COUNT(*)::bigint AS count, COALESCE(SUM(f.discount_amount), 0)::bigint AS amount,
+                   -- A named discount is its own words; a bare type or nothing is a code.
+                   MIN(CASE WHEN d.name IS NULL
+                            THEN COALESCE(f.discount_type, 'unspecified') END) AS code,
+                   row_number() OVER (ORDER BY COUNT(*) DESC, COALESCE(d.name, f.discount_type, 'unspecified')) AS rn
+              FROM f LEFT JOIN discounts d ON d.id = f.discount_id
+             GROUP BY COALESCE(d.name, f.discount_type, 'unspecified')
+        ),
+        by_issuer AS (
+            SELECT u.name AS label, COUNT(*)::bigint AS count,
+                   COALESCE(SUM(f.discount_amount), 0)::bigint AS amount,
+                   row_number() OVER (ORDER BY COUNT(*) DESC, u.name, u.id) AS rn
+              FROM f JOIN users u ON u.id = f.issuer
+             GROUP BY u.id, u.name
+        ),
+        by_kind AS (
+            SELECT COALESCE(f.discount_kind, 'unattributed') AS label,
+                   COUNT(*)::bigint AS count, COALESCE(SUM(f.discount_amount), 0)::bigint AS amount,
+                   row_number() OVER (ORDER BY COUNT(*) DESC, COALESCE(f.discount_kind, 'unattributed')) AS rn
+              FROM f
+             GROUP BY COALESCE(f.discount_kind, 'unattributed')
+        ),
+        entries AS (
+            SELECT f.*, d.name AS preset_name, u.name AS applied_by_name, au.name AS approved_by_name,
+                   EXISTS (SELECT 1 FROM authz_replay_flags fl
+                            WHERE fl.subject_id = f.id AND fl.capability LIKE 'orders.discount.%') AS flagged,
+                   row_number() OVER (ORDER BY f.created_at DESC) AS rn
+              FROM f
+              LEFT JOIN discounts d ON d.id = f.discount_id
+              LEFT JOIN users u ON u.id = f.issuer
+              LEFT JOIN approvals ap ON ap.id = f.discount_approval_id
+              LEFT JOIN users au ON au.id = ap.approver_user_id
+             ORDER BY f.created_at DESC
+             LIMIT 200
+        )
+        SELECT section AS "section!", rn AS "rn!", label, count, amount, code,
+               order_id, order_ref, branch_name, created_at, kind, preset_id, preset_name,
+               percent_bps, applied_by_name, approval_id, approved_by_name, flagged
+          FROM (
+            SELECT 0 AS section, 0::bigint AS rn, NULL::text AS label, COUNT(*)::bigint AS count,
+                   COALESCE(SUM(f.discount_amount), 0)::bigint AS amount, NULL::text AS code,
+                   NULL::uuid AS order_id, NULL::text AS order_ref, NULL::text AS branch_name,
+                   NULL::timestamptz AS created_at, NULL::text AS kind, NULL::uuid AS preset_id,
+                   NULL::text AS preset_name, NULL::int AS percent_bps, NULL::text AS applied_by_name,
+                   NULL::uuid AS approval_id, NULL::text AS approved_by_name, NULL::bool AS flagged
+              FROM f
+            UNION ALL
+            SELECT 1, rn, label, count, amount, code, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, NULL, NULL, NULL
+              FROM by_reason WHERE rn <= 10
+            UNION ALL
+            SELECT 2, rn, label, count, amount, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, NULL, NULL, NULL
+              FROM by_issuer WHERE rn <= 10
+            UNION ALL
+            SELECT 3, rn, label, count, amount, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                   NULL, NULL, NULL, NULL, NULL
+              FROM by_kind
+            UNION ALL
+            SELECT 4, rn, NULL, NULL, discount_amount::bigint, NULL, id, order_ref, branch_name,
+                   created_at, discount_kind, discount_id, preset_name, discount_percent_bps,
+                   applied_by_name, discount_approval_id, approved_by_name, flagged
+              FROM entries
+          ) x
+         ORDER BY section, rn
         "#,
-    ))
-    .bind(org_id)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&scope)
-    .fetch_one(pool.get_ref())
-    .await?;
-
-    let by_reason: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
-        SELECT COALESCE(d.name, o.discount_type::text, 'unspecified') AS label,
-               COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor,
-               -- A named discount is its own words; a bare type or nothing is a code.
-               MIN(CASE WHEN d.name IS NULL
-                        THEN COALESCE(o.discount_type::text, 'unspecified') END) AS code
-        FROM orders o
-        JOIN branches b ON b.id = o.branch_id
-        LEFT JOIN discounts d ON d.id = o.discount_id
-        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY COALESCE(d.name, o.discount_type::text, 'unspecified')
-        ORDER BY count DESC
-        LIMIT 10
-        "#,
-    ))
-    .bind(org_id)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&scope)
+        org_id,
+        query.from,
+        query.to,
+        scope.as_deref(),
+    )
     .fetch_all(pool.get_ref())
     .await?;
 
-    let by_issuer: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
-        SELECT u.name AS label, COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
-        FROM orders o
-        JOIN branches b ON b.id = o.branch_id
-        JOIN users u ON u.id = COALESCE(o.discount_applied_by, o.teller_id)
-        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY u.id, u.name
-        ORDER BY count DESC
-        LIMIT 10
-        "#,
-    ))
-    .bind(org_id)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&scope)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    let by_kind: Vec<AuditBreakdownEntry> = sqlx::query_as(&format!(
-        r#"
-        SELECT COALESCE(o.discount_kind, 'unattributed') AS label,
-               COUNT(*)::bigint AS count, COALESCE(SUM(o.discount_amount), 0)::bigint AS amount_minor
-        FROM orders o
-        JOIN branches b ON b.id = o.branch_id
-        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        GROUP BY COALESCE(o.discount_kind, 'unattributed')
-        ORDER BY count DESC
-        "#,
-    ))
-    .bind(org_id)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&scope)
-    .fetch_all(pool.get_ref())
-    .await?;
-
-    let entries: Vec<DiscountAuditEntry> = sqlx::query_as(&format!(
-        r#"
-        SELECT o.id AS order_id, o.order_ref, b.name AS branch_name, o.created_at,
-               o.discount_kind AS kind, o.discount_id AS preset_id, d.name AS preset_name,
-               o.discount_amount::bigint AS amount_minor, o.discount_percent_bps AS percent_bps,
-               u.name AS applied_by_name, o.discount_approval_id AS approval_id,
-               au.name AS approved_by_name,
-               EXISTS (SELECT 1 FROM authz_replay_flags f
-                        WHERE f.subject_id = o.id AND f.capability LIKE 'orders.discount.%') AS flagged
-        FROM orders o
-        JOIN branches b ON b.id = o.branch_id
-        LEFT JOIN discounts d ON d.id = o.discount_id
-        LEFT JOIN users u ON u.id = COALESCE(o.discount_applied_by, o.teller_id)
-        LEFT JOIN approvals ap ON ap.id = o.discount_approval_id
-        LEFT JOIN users au ON au.id = ap.approver_user_id
-        WHERE b.org_id = $1 AND ($4::uuid[] IS NULL OR b.id = ANY($4)) AND o.{SOLD} AND o.discount_amount > 0
-          AND ($2::timestamptz IS NULL OR o.created_at >= $2)
-          AND ($3::timestamptz IS NULL OR o.created_at <= $3)
-        ORDER BY o.created_at DESC
-        LIMIT 200
-        "#,
-    ))
-    .bind(org_id)
-    .bind(query.from)
-    .bind(query.to)
-    .bind(&scope)
-    .fetch_all(pool.get_ref())
-    .await?;
+    let (mut total_count, mut total_amount_minor) = (0i64, 0i64);
+    let (mut by_reason, mut by_issuer, mut by_kind, mut entries) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for r in rows {
+        let entry = || AuditBreakdownEntry {
+            label: r.label.clone().unwrap_or_default(),
+            count: r.count.unwrap_or(0),
+            amount_minor: r.amount.unwrap_or(0),
+            code: r.code.clone(),
+        };
+        match r.section {
+            0 => {
+                total_count = r.count.unwrap_or(0);
+                total_amount_minor = r.amount.unwrap_or(0);
+            }
+            1 => by_reason.push(entry()),
+            2 => by_issuer.push(entry()),
+            3 => by_kind.push(entry()),
+            _ => entries.push(DiscountAuditEntry {
+                order_id: r.order_id.unwrap_or_default(),
+                order_ref: r.order_ref,
+                branch_name: r.branch_name.unwrap_or_default(),
+                created_at: r.created_at.unwrap_or_default(),
+                kind: r.kind,
+                preset_id: r.preset_id,
+                preset_name: r.preset_name,
+                amount_minor: r.amount.unwrap_or(0),
+                percent_bps: r.percent_bps,
+                applied_by_name: r.applied_by_name,
+                approval_id: r.approval_id,
+                approved_by_name: r.approved_by_name,
+                flagged: r.flagged.unwrap_or(false),
+            }),
+        }
+    }
 
     Ok(HttpResponse::Ok().json(AuditReport {
         from: query.from,
