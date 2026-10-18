@@ -291,6 +291,10 @@ pub async fn create_stocktake(
         WHERE oi.org_id = $3 AND oi.deleted_at IS NULL
           AND ($4::uuid[] IS NULL OR oi.id = ANY($4))
           AND ($5::uuid   IS NULL OR oi.category_id = $5)
+          -- An archived ingredient joins a full or category count only while
+          -- the branch still holds some (so it can be counted down); a count
+          -- of chosen items takes whatever was chosen.
+          AND (oi.archived_at IS NULL OR COALESCE(bs.on_hand, 0) <> 0 OR $4::uuid[] IS NOT NULL)
         "#,
     )
     .bind(header_id)

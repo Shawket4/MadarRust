@@ -324,7 +324,7 @@ pub async fn project(
             by_sql(
                 conn,
                 "SELECT i.id, json_build_object('id', i.id, 'name', i.name, 'unit', i.unit::text, 'is_active', i.is_active, \
-                        'cost_per_unit', i.cost_per_unit::float8) \
+                        'cost_per_unit', i.cost_per_unit::float8, 'archived_at', i.archived_at) \
                    FROM org_ingredients i WHERE i.id = ANY($1) AND i.deleted_at IS NULL",
                 ids,
             )

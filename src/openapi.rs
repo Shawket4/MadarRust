@@ -283,6 +283,9 @@ paths(
         crate::inventory::handlers::create_catalog_item,
         crate::inventory::handlers::update_catalog_item,
         crate::inventory::handlers::delete_catalog_item,
+        crate::inventory::handlers::get_catalog_item_usage,
+        crate::inventory::handlers::archive_catalog_item,
+        crate::inventory::handlers::unarchive_catalog_item,
         crate::inventory::handlers::get_inventory_settings,
         crate::inventory::handlers::update_inventory_settings,
         crate::inventory::handlers::list_branch_stock,
@@ -773,6 +776,9 @@ paths(
         // Most schemas are pulled in transitively via path responses, but
         // listing the shared error body explicitly makes it discoverable.
         crate::errors::ErrorBody,
+        // Only reached through `IntoParams` (the `status` query param), which
+        // utoipa does not register: list it or its `$ref` dangles.
+        crate::inventory::handlers::ArchiveFilter,
         crate::plan::handlers::PlanState,
         crate::plan::handlers::PlanBranch,
         crate::plan::handlers::PlanTill,

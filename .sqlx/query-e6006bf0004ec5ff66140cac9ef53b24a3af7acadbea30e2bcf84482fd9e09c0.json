@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT bs.branch_id AS \"branch_id!\", b.name AS \"branch_name!\",\n               bs.on_hand::float8 AS \"on_hand!\"\n          FROM branch_stock bs\n          JOIN branches b ON b.id = bs.branch_id AND b.deleted_at IS NULL\n         WHERE bs.org_ingredient_id = $1 AND b.org_id = $2 AND bs.on_hand <> 0\n         ORDER BY b.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "on_hand!",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "e6006bf0004ec5ff66140cac9ef53b24a3af7acadbea30e2bcf84482fd9e09c0"
+}
