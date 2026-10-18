@@ -110,6 +110,7 @@ macro_rules! app {
                 .app_data(web::Data::new(secret()))
                 .app_data(web::Data::new(BranchEventHub::new()))
                 .configure(madar_rust::bookings::routes::configure)
+                .configure(madar_rust::refunds::routes::configure)
                 .configure(madar_rust::tickets::routes::configure)
                 .configure(madar_rust::sync::routes::configure),
         )
@@ -149,6 +150,122 @@ fn refused(got: &(u16, Value), code: &str, error: &str) {
     assert_eq!(got.0, 409, "{}", got.1);
     assert_eq!(got.1["code"], code, "{}", got.1);
     assert_eq!(got.1["error"], error, "the text is what it always was");
+}
+
+/// Who sends a request: its `X-Madar-Client` and `User-Agent`.
+type Caller = (Option<&'static str>, Option<&'static str>);
+
+/// POS builds that ack every 409 on an idempotent op (before 0.15.0), as the
+/// field sends them: 0.7.0+ name their version, the core before 0.7.0 only
+/// its User-Agent.
+const OLD_TILLS: &[Caller] = &[
+    (Some("pos/0.14.1 (android)"), Some("madar-core/0.1.0")),
+    (Some("pos/0.13.10 (android)"), None),
+    (Some("pos/0.12.0 (ios)"), None),
+    (Some("pos/0.7.0 (macos)"), None),
+    (None, Some("madar-core/0.1.0")),
+];
+
+/// Callers that keep today's answers: 0.15.0 and later, and anyone the
+/// headers do not prove old.
+const TODAYS_CALLERS: &[Caller] = &[
+    (Some("pos/0.15.0 (ios)"), Some("madar-core/0.1.0")),
+    (Some("pos/0.16.0 (android)"), None),
+    (Some("pos/kitchen/0.1.0 (ios)"), None),
+    (Some("dashboard"), None),
+    (None, Some("Dart/3.13 (dart:io)")),
+];
+
+async fn send<S>(app: &S, req: test::TestRequest, caller: Caller) -> (u16, Value)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let mut req = req;
+    if let Some(client) = caller.0 {
+        req = req.insert_header(("X-Madar-Client", client));
+    }
+    if let Some(ua) = caller.1 {
+        req = req.insert_header(("User-Agent", ua));
+    }
+    let resp = test::call_service(app, req.to_request()).await;
+    let status = resp.status().as_u16();
+    let bytes = test::read_body(resp).await;
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+fn replay_req(bearer: &str, op: &Value) -> test::TestRequest {
+    test::TestRequest::post()
+        .uri("/sync/replay")
+        .insert_header(("Authorization", format!("Bearer {bearer}")))
+        .set_json(op)
+}
+
+/// A refusal through `/sync/replay`, sent by every kind of caller (it writes
+/// nothing, so each sees the same state): today's 409 with this code and
+/// text for 0.15.0+ and unknown callers, and for an old till a 422 with the
+/// very same body, which every old build keeps as a stuck op instead of
+/// acking it away.
+async fn refused_for_each_till<S>(app: &S, bearer: &str, op: &Value, code: &str, error: &str)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let today = replay(app, bearer, op).await;
+    refused(&today, code, error);
+    for caller in TODAYS_CALLERS {
+        let got = send(app, replay_req(bearer, op), *caller).await;
+        assert_eq!(got, today, "{caller:?} keeps today's answer");
+    }
+    for caller in OLD_TILLS {
+        let got = send(app, replay_req(bearer, op), *caller).await;
+        assert_eq!(got.0, 422, "{caller:?}: {}", got.1);
+        assert_eq!(got.1, today.1, "{caller:?}: the same body");
+    }
+}
+
+/// A 409 that means "this exact op is already here": a 409 for every
+/// caller, old tills included, because acking it is right.
+async fn landed_for_each_till<S>(app: &S, bearer: &str, op: &Value, code: &str, error: &str)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let today = replay(app, bearer, op).await;
+    refused(&today, code, error);
+    for caller in TODAYS_CALLERS.iter().chain(OLD_TILLS) {
+        let got = send(app, replay_req(bearer, op), *caller).await;
+        assert_eq!(got, today, "{caller:?}: still the 409");
+    }
+}
+
+/// A live route answers an old till's refusal exactly as before: only the
+/// replay door rewrites it.
+async fn live_unchanged<S>(app: &S, req: impl Fn() -> test::TestRequest, code: &str, error: &str)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let today = send(app, req(), (None, None)).await;
+    refused(&today, code, error);
+    for caller in OLD_TILLS.iter().chain(TODAYS_CALLERS) {
+        assert_eq!(send(app, req(), *caller).await, today, "{caller:?}");
+    }
 }
 
 fn fire(s: &Shop, key: Uuid, booking: Option<Uuid>) -> Value {
@@ -236,18 +353,33 @@ async fn a_refund_of_a_sale_refunded_elsewhere_is_a_refusal(pool: PgPool) {
         "the same refund again is the original"
     );
 
-    let other = replay(&app, &s.bearer, &refund(&s, sale, 100, Uuid::new_v4())).await;
-    refused(
+    let other = refund(&s, sale, 100, Uuid::new_v4());
+    refused_for_each_till(
+        &app,
+        &s.bearer,
         &other,
         "ORDER_FULLY_REFUNDED",
         "Conflict: This order has already been refunded in full",
-    );
+    )
+    .await;
+    live_unchanged(
+        &app,
+        || {
+            test::TestRequest::post()
+                .uri("/refunds")
+                .insert_header(("Authorization", format!("Bearer {}", s.bearer)))
+                .set_json(&other["request"])
+        },
+        "ORDER_FULLY_REFUNDED",
+        "Conflict: This order has already been refunded in full",
+    )
+    .await;
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM order_refunds WHERE order_id = $1")
         .bind(sale)
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(n, 1, "the refused refund wrote nothing");
+    assert_eq!(n, 1, "the refused refunds wrote nothing");
 }
 
 /// A sale that has given money back cannot be voided. The POS read this 409
@@ -266,11 +398,14 @@ async fn a_void_of_a_refunded_sale_is_a_refusal_and_a_repeat_void_is_a_200(pool:
     );
 
     let void = |id: Uuid| json!({ "op": "void_order", "teller_id": s.admin, "order_id": id, "request": { "reason": "wrong_order" } });
-    refused(
-        &replay(&app, &s.bearer, &void(sale)).await,
+    refused_for_each_till(
+        &app,
+        &s.bearer,
+        &void(sale),
         "ORDER_REFUNDED",
         "Conflict: 100 has already been refunded against this sale, so it cannot be voided — refund the remainder instead.",
-    );
+    )
+    .await;
 
     let clean = order(&pool, &s, 300).await;
     assert_eq!(replay(&app, &s.bearer, &void(clean)).await.0, 200);
@@ -307,11 +442,14 @@ async fn a_second_correction_of_one_movement_is_a_refusal(pool: PgPool) {
         200,
         "its own retry"
     );
-    refused(
-        &replay(&app, &s.bearer, &undo(Uuid::new_v4())).await,
+    refused_for_each_till(
+        &app,
+        &s.bearer,
+        &undo(Uuid::new_v4()),
         "CASH_ALREADY_CORRECTED",
         "Conflict: That movement has already been corrected",
-    );
+    )
+    .await;
 }
 
 /// A paid bill cannot be voided; a voided one voids again as a 200.
@@ -323,11 +461,26 @@ async fn a_void_of_a_paid_bill_is_a_refusal(pool: PgPool) {
 
     let paid = fired(&app, &s).await;
     settle(&app, &s, paid).await;
-    refused(
-        &replay(&app, &s.bearer, &void(paid)).await,
+    refused_for_each_till(
+        &app,
+        &s.bearer,
+        &void(paid),
         "TICKET_SETTLED",
         "Conflict: Cannot void a settled ticket",
-    );
+    )
+    .await;
+    live_unchanged(
+        &app,
+        || {
+            test::TestRequest::post()
+                .uri(&format!("/open-tickets/{paid}/void"))
+                .insert_header(("Authorization", format!("Bearer {}", s.bearer)))
+                .set_json(json!({ "reason": "wrong_order" }))
+        },
+        "TICKET_SETTLED",
+        "Conflict: Cannot void a settled ticket",
+    )
+    .await;
 
     let torn = fired(&app, &s).await;
     assert_eq!(replay(&app, &s.bearer, &void(torn)).await.0, 200);
@@ -365,11 +518,14 @@ async fn a_line_void_says_whether_it_is_on_record(pool: PgPool) {
     let paid = fired(&app, &s).await;
     let line = line_of(paid).await;
     settle(&app, &s, paid).await;
-    refused(
-        &replay(&app, &s.bearer, &void_line(paid, line)).await,
+    refused_for_each_till(
+        &app,
+        &s.bearer,
+        &void_line(paid, line),
         "TICKET_SETTLED",
         SETTLED,
-    );
+    )
+    .await;
 
     // Voided first (its answer lost), the bill paid, the retry arrives.
     let kept = fired(&app, &s).await;
@@ -382,22 +538,28 @@ async fn a_line_void_says_whether_it_is_on_record(pool: PgPool) {
     let line = line_of(kept).await;
     assert_eq!(replay(&app, &s.bearer, &void_line(kept, line)).await.0, 200);
     settle(&app, &s, kept).await;
-    refused(
-        &replay(&app, &s.bearer, &void_line(kept, line)).await,
+    landed_for_each_till(
+        &app,
+        &s.bearer,
+        &void_line(kept, line),
         "LINE_ALREADY_VOIDED",
         SETTLED,
-    );
+    )
+    .await;
 
     // The whole bill torn up.
     let torn = fired(&app, &s).await;
     let line = line_of(torn).await;
     let void = json!({ "op": "void_open_ticket", "teller_id": s.admin, "ticket_id": torn, "request": { "reason": "wrong_order" } });
     assert_eq!(replay(&app, &s.bearer, &void).await.0, 200);
-    refused(
-        &replay(&app, &s.bearer, &void_line(torn, line)).await,
+    landed_for_each_till(
+        &app,
+        &s.bearer,
+        &void_line(torn, line),
         "TICKET_VOIDED",
         "Conflict: That bill was voided",
-    );
+    )
+    .await;
 }
 
 /// The sweep rolls a late party to no-show while the waiter's seat and fire
@@ -438,11 +600,14 @@ async fn a_booking_that_is_no_longer_active_refuses_with_a_code(pool: PgPool) {
         200,
         "a no-show again is a 200"
     );
-    refused(
-        &replay(&app, &s.bearer, &seat(late)).await,
+    refused_for_each_till(
+        &app,
+        &s.bearer,
+        &seat(late),
         "BOOKING_NOT_ACTIVE",
         "Conflict: Booking is no_show",
-    );
+    )
+    .await;
     let key = Uuid::new_v4();
     let r = replay(&app, &s.bearer, &fire(&s, key, Some(late))).await;
     assert_eq!(r.0, 201, "the fire lands, without the booking: {}", r.1);
@@ -455,11 +620,44 @@ async fn a_booking_that_is_no_longer_active_refuses_with_a_code(pool: PgPool) {
         200,
         "seated again is a 200"
     );
-    refused(
-        &replay(&app, &s.bearer, &no_show(sat)).await,
+    refused_for_each_till(
+        &app,
+        &s.bearer,
+        &no_show(sat),
         "BOOKING_SEATED",
         "Conflict: The party was seated — cancel the booking if they left",
-    );
+    )
+    .await;
+    live_unchanged(
+        &app,
+        || {
+            test::TestRequest::post()
+                .uri(&format!("/bookings/{sat}/no-show"))
+                .insert_header(("Authorization", format!("Bearer {}", s.bearer)))
+        },
+        "BOOKING_SEATED",
+        "Conflict: The party was seated — cancel the booking if they left",
+    )
+    .await;
+
+    // Seated already, and the queued seat names other tables.
+    let table: Uuid = sqlx::query_scalar(
+        "INSERT INTO branch_tables (org_id, branch_id, label, seats) VALUES ($1, $2, 'T7', 4) RETURNING id",
+    )
+    .bind(s.org)
+    .bind(s.branch)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let reseat = json!({ "op": "seat_booking", "teller_id": s.admin, "booking_id": sat, "request": { "table_ids": [table] } });
+    refused_for_each_till(
+        &app,
+        &s.bearer,
+        &reseat,
+        "BOOKING_SEATED_ELSEWHERE",
+        "Conflict: The party is already seated — move them on the floor",
+    )
+    .await;
 }
 
 /// A booking at `branch`, through the live route (`force`: no slot rules).
@@ -657,10 +855,15 @@ async fn a_fire_that_loses_the_race_to_its_own_copy_says_it_landed(pool: PgPool)
         .await
         .unwrap();
     let second = fire(&s, key, None);
-    let (got, ()) = tokio::join!(replay(&app, &s.bearer, &second), async {
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        holder.commit().await.unwrap();
-    });
+    // Sent by an old till: this 409 is the one it is right to ack, so it
+    // stays a 409 for it too.
+    let (got, ()) = tokio::join!(
+        send(&app, replay_req(&s.bearer, &second), OLD_TILLS[0]),
+        async {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            holder.commit().await.unwrap();
+        }
+    );
     assert_eq!(got.0, 409, "{}", got.1);
     assert_eq!(got.1["code"], "REPLAY_ALREADY_APPLIED", "{}", got.1);
     let text = got.1["error"].as_str().unwrap();
