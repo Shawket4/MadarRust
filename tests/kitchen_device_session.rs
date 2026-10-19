@@ -341,3 +341,79 @@ async fn retiring_a_screen_in_the_dashboard_ends_its_kitchen_access_at_once(pool
         StatusCode::UNAUTHORIZED
     );
 }
+
+/// A kitchen screen's own session drains its queued bumps through
+/// `/sync/replay` (the KDS core is outbox-first): the bump must land.
+#[sqlx::test]
+async fn a_kitchen_screens_queued_bump_lands(pool: PgPool) {
+    let w = world(&pool).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(secret()))
+            .app_data(web::Data::new(w.hub.clone()))
+            .configure(madar_rust::auth::routes::configure)
+            .configure(madar_rust::devices::routes::configure)
+            .configure(madar_rust::kitchen::routes::configure)
+            .configure(madar_rust::sync::routes::configure),
+    )
+    .await;
+    let (device, credential) = activate(&app, &pool, &w, "kds").await;
+    let (st, s) = send(&app, session_req(device, &credential)).await;
+    assert_eq!(st, StatusCode::OK, "{s}");
+    let token = s["token"].as_str().unwrap().to_string();
+    let me: Uuid = s["user"]["id"].as_str().unwrap().parse().unwrap();
+
+    let ot: Uuid = sqlx::query_scalar(
+        "INSERT INTO open_tickets (org_id, branch_id, opened_by) VALUES ($1,$2,$3) RETURNING id",
+    )
+    .bind(w.org)
+    .bind(w.branch)
+    .bind(me)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let round: Uuid = sqlx::query_scalar(
+        "INSERT INTO open_ticket_rounds (open_ticket_id, round_number, fired_by) VALUES ($1, 1, $2) RETURNING id",
+    )
+    .bind(ot)
+    .bind(me)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let kt: Uuid = sqlx::query_scalar(
+        "INSERT INTO kitchen_tickets (org_id, branch_id, open_ticket_id, round_id) VALUES ($1,$2,$3,$4) RETURNING id",
+    )
+    .bind(w.org)
+    .bind(w.branch)
+    .bind(ot)
+    .bind(round)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let item: Uuid = sqlx::query_scalar(
+        "INSERT INTO kitchen_ticket_items (kitchen_ticket_id, line) VALUES ($1,'{\"name\":\"Latte\"}') RETURNING id",
+    )
+    .bind(kt)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let (st, b) = send(
+        &app,
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .insert_header(("Authorization", format!("Bearer {token}")))
+            .insert_header(("X-Madar-Device", device.to_string()))
+            .set_json(json!({ "op": "bump_kitchen_item", "teller_id": me, "item_id": item })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "the screen's queued bump: {b}");
+    let bumped: bool =
+        sqlx::query_scalar("SELECT bumped_at IS NOT NULL FROM kitchen_ticket_items WHERE id = $1")
+            .bind(item)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(bumped);
+}

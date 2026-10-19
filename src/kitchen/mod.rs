@@ -121,25 +121,34 @@ pub enum KitchenSource {
         open_ticket_id: Uuid,
         round_id: Uuid,
     },
+    /// A counter cart sent ahead of its sale (the till's "Send to kitchen"),
+    /// by the key the sale will carry. The sale takes the ticket over.
+    Cart(Uuid),
 }
 
 impl KitchenSource {
     fn order_id(self) -> Option<Uuid> {
         match self {
             KitchenSource::Order(id) => Some(id),
-            KitchenSource::Round { .. } => None,
+            _ => None,
         }
     }
     fn open_ticket_id(self) -> Option<Uuid> {
         match self {
-            KitchenSource::Order(_) => None,
             KitchenSource::Round { open_ticket_id, .. } => Some(open_ticket_id),
+            _ => None,
         }
     }
     fn round_id(self) -> Option<Uuid> {
         match self {
-            KitchenSource::Order(_) => None,
             KitchenSource::Round { round_id, .. } => Some(round_id),
+            _ => None,
+        }
+    }
+    fn cart_key(self) -> Option<Uuid> {
+        match self {
+            KitchenSource::Cart(key) => Some(key),
+            _ => None,
         }
     }
 }
@@ -320,40 +329,42 @@ pub(crate) async fn emit_kitchen_ticket(
     // eventual server row share one id; else let Postgres generate it.
     let ticket_id: Uuid = match ctx.kitchen_ticket_id {
         Some(cid) => {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO kitchen_tickets \
                     (id, org_id, branch_id, order_id, open_ticket_id, round_id, \
-                     table_label, kitchen_ref, round_number) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING",
+                     table_label, kitchen_ref, round_number, cart_key) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING",
+                cid,
+                ctx.org_id,
+                ctx.branch_id,
+                ctx.source.order_id(),
+                ctx.source.open_ticket_id(),
+                ctx.source.round_id(),
+                ctx.table_label,
+                ctx.kitchen_ref,
+                ctx.round_number,
+                ctx.source.cart_key(),
             )
-            .bind(cid)
-            .bind(ctx.org_id)
-            .bind(ctx.branch_id)
-            .bind(ctx.source.order_id())
-            .bind(ctx.source.open_ticket_id())
-            .bind(ctx.source.round_id())
-            .bind(ctx.table_label)
-            .bind(ctx.kitchen_ref)
-            .bind(ctx.round_number)
             .execute(&mut **tx)
             .await?;
             cid
         }
         None => {
-            sqlx::query_scalar(
+            sqlx::query_scalar!(
                 "INSERT INTO kitchen_tickets \
                 (org_id, branch_id, order_id, open_ticket_id, round_id, \
-                 table_label, kitchen_ref, round_number) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+                 table_label, kitchen_ref, round_number, cart_key) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+                ctx.org_id,
+                ctx.branch_id,
+                ctx.source.order_id(),
+                ctx.source.open_ticket_id(),
+                ctx.source.round_id(),
+                ctx.table_label,
+                ctx.kitchen_ref,
+                ctx.round_number,
+                ctx.source.cart_key(),
             )
-            .bind(ctx.org_id)
-            .bind(ctx.branch_id)
-            .bind(ctx.source.order_id())
-            .bind(ctx.source.open_ticket_id())
-            .bind(ctx.source.round_id())
-            .bind(ctx.table_label)
-            .bind(ctx.kitchen_ref)
-            .bind(ctx.round_number)
             .fetch_one(&mut **tx)
             .await?
         }
@@ -392,6 +403,173 @@ pub(crate) async fn emit_kitchen_ticket(
     .execute(&mut **tx)
     .await?;
     Ok(Some(ticket_id))
+}
+
+// ── A counter cart sent ahead ─────────────────────────────────
+
+/// A sent cart's lines, numbered as the till numbers its projection: the line
+/// at `index` is [`derive_kitchen_item_id`] of the cart's ticket.
+pub(crate) fn cart_kitchen_lines(req: &madar_sync::kitchen::SendCartRequest) -> Vec<KitchenLine> {
+    let kt = derive_kitchen_ticket_id(req.cart_key);
+    req.lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| KitchenLine {
+            menu_item_id: l.menu_item_id,
+            name: l.name.clone(),
+            qty: l.qty.max(1),
+            size_label: l.size_label.clone(),
+            modifiers: l.modifiers.clone(),
+            notes: l.notes.clone(),
+            kitchen_item_id: Some(derive_kitchen_item_id(kt, i)),
+            open_ticket_item_id: None,
+            combo: None,
+        })
+        .collect()
+}
+
+/// Bring a ticket that already exists in line with `lines` (each carrying its
+/// id): a line still there takes its new quantity and words, a line that is
+/// gone is voided, and a ticket the kitchen had finished reopens when it has
+/// work again. A line the cook finished stays finished. New lines are the
+/// caller's (`emit_kitchen_ticket` inserts them, idempotently by id).
+pub(crate) async fn refresh_kitchen_lines(
+    tx: &mut Transaction<'_, Postgres>,
+    ticket_id: Uuid,
+    lines: &[KitchenLine],
+) -> Result<(), AppError> {
+    let ids: Vec<Uuid> = lines.iter().filter_map(|l| l.kitchen_item_id).collect();
+    let line_json: Vec<serde_json::Value> = lines
+        .iter()
+        .filter(|l| l.kitchen_item_id.is_some())
+        .map(|l| serde_json::to_value(l).unwrap_or(serde_json::Value::Null))
+        .collect();
+    let qty: Vec<i32> = lines
+        .iter()
+        .filter(|l| l.kitchen_item_id.is_some())
+        .map(|l| l.qty)
+        .collect();
+    sqlx::query!(
+        "UPDATE kitchen_ticket_items k SET line = u.line, qty = u.qty \
+           FROM UNNEST($2::uuid[], $3::jsonb[], $4::int4[]) AS u(id, line, qty) \
+          WHERE k.id = u.id AND k.kitchen_ticket_id = $1 AND k.voided_at IS NULL",
+        ticket_id,
+        &ids,
+        &line_json,
+        &qty,
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query!(
+        "UPDATE kitchen_ticket_items SET voided_at = now() \
+          WHERE kitchen_ticket_id = $1 AND voided_at IS NULL AND id <> ALL($2)",
+        ticket_id,
+        &ids,
+    )
+    .execute(&mut **tx)
+    .await?;
+    // A finished ticket with work again is the kitchen's again; only the
+    // kitchen's own close ("bumped") is undone, as a recall would.
+    sqlx::query!(
+        "UPDATE kitchen_tickets SET status = 'firing', ready_at = NULL, closed_at = NULL, \
+                close_reason = NULL, closed_by = NULL \
+          WHERE id = $1 AND close_reason = 'bumped' AND EXISTS ( \
+                SELECT 1 FROM kitchen_ticket_items \
+                 WHERE kitchen_ticket_id = $1 AND voided_at IS NULL AND bumped_at IS NULL)",
+        ticket_id,
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// The sale of a cart sent ahead takes that cart's kitchen ticket over: it is
+/// this order's from now on, numbered as the order. `None` when the cart was
+/// never sent (the sale fires its own ticket as before).
+pub(crate) async fn take_over_cart_ticket(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: Uuid,
+    cart_key: Uuid,
+    order_id: Uuid,
+    kitchen_ref: Option<&str>,
+) -> Result<Option<Uuid>, AppError> {
+    Ok(sqlx::query_scalar!(
+        "UPDATE kitchen_tickets SET order_id = $3, cart_key = NULL, \
+                kitchen_ref = COALESCE($4, kitchen_ref) \
+          WHERE org_id = $1 AND cart_key = $2 RETURNING id",
+        org_id,
+        cart_key,
+        order_id,
+        kitchen_ref,
+    )
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+/// Send a counter cart to the kitchen (live route and replay). The first send
+/// fires (`kitchen.fired`, which also pushes a screen that is not watching);
+/// a send again of the same cart updates the ticket (`kitchen.changed`). A
+/// cart already sold is a no-op: its ticket is the order's now.
+pub(crate) async fn send_cart_inner(
+    pool: &sqlx::PgPool,
+    hub: Option<&BranchEventHub>,
+    org_id: Uuid,
+    req: &madar_sync::kitchen::SendCartRequest,
+) -> Result<Option<Uuid>, AppError> {
+    let kt = derive_kitchen_ticket_id(req.cart_key);
+    let lines = cart_kitchen_lines(req);
+    let mut tx = pool.begin().await?;
+    let existing: Option<Option<Uuid>> = sqlx::query_scalar!(
+        "SELECT cart_key FROM kitchen_tickets WHERE id = $1 AND org_id = $2 FOR UPDATE",
+        kt,
+        org_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if matches!(existing, Some(None)) {
+        return Ok(Some(kt));
+    }
+    let emitted = emit_kitchen_ticket(
+        &mut tx,
+        &EmitKitchen {
+            org_id,
+            branch_id: req.branch_id,
+            source: KitchenSource::Cart(req.cart_key),
+            round_number: 1,
+            table_label: None,
+            kitchen_ref: req.kitchen_ref.as_deref(),
+            kitchen_ticket_id: Some(kt),
+        },
+        &lines,
+    )
+    .await?;
+    if existing.is_some() {
+        refresh_kitchen_lines(&mut tx, kt, &lines).await?;
+        if let Some(r) = req.kitchen_ref.as_deref() {
+            sqlx::query!(
+                "UPDATE kitchen_tickets SET kitchen_ref = $2 WHERE id = $1",
+                kt,
+                r
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    tx.commit().await?;
+    let ticket = if existing.is_some() {
+        Some(kt)
+    } else {
+        emitted
+    };
+    if let (Some(hub), Some(id)) = (hub, ticket) {
+        let event = if existing.is_some() {
+            "kitchen.changed"
+        } else {
+            "kitchen.fired"
+        };
+        publish_kitchen(pool, hub, req.branch_id, event, id).await;
+    }
+    Ok(ticket)
 }
 
 // ── Finishing ─────────────────────────────────────────────────

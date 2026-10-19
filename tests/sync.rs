@@ -2305,3 +2305,252 @@ async fn a_replayed_modifier_priced_below_nothing_is_refused_even_inside_a_posit
         "no negative add-on row may reach the revenue reports"
     );
 }
+
+/// A till sends every sale through its queue, online or not, so a fresh
+/// replayed counter sale fires to the kitchen (spec PS-2), under ids derived
+/// from its key as a round's are; one older than the cut-off is an offline
+/// backlog and never reaches the board.
+#[sqlx::test]
+async fn a_fresh_replayed_sale_fires_to_the_kitchen_and_an_old_one_does_not(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let item = seed_menu_item(&pool, org, 500).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (r, a) in [
+        ("orders", "create"),
+        ("orders", "read"),
+        ("order_items", "create"),
+        ("payments", "create"),
+    ] {
+        grant(&pool, "teller", r, a).await;
+    }
+    let bearer = token(teller, org, UserRole::Teller);
+    let sale = |key: Uuid, minutes_ago: i64| {
+        serde_json::json!({
+            "op": "create_order",
+            "teller_id": teller,
+            "request": {
+                "branch_id": branch,
+                "shift_id": shift,
+                "payment_method": "cash",
+                "idempotency_key": key,
+                "created_at": (chrono::Utc::now() - chrono::Duration::minutes(minutes_ago)).to_rfc3339(),
+                "items": [{ "menu_item_id": item, "quantity": 1, "unit_price": 500 }],
+                "total_amount": 570
+            }
+        })
+    };
+    let tickets = |key: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT kt.id, kti.id FROM kitchen_tickets kt JOIN kitchen_ticket_items kti ON kti.kitchen_ticket_id = kt.id \
+                 JOIN orders o ON o.id = kt.order_id WHERE o.idempotency_key = $1",
+            )
+            .bind(key)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    let fresh = Uuid::new_v4();
+    let r = replay(&app, &bearer, &sale(fresh, 2)).await;
+    assert!(r.status().is_success(), "{:?}", r.status());
+    let kt = madar_rust::kitchen::derive_kitchen_ticket_id(fresh);
+    assert_eq!(
+        tickets(fresh).await,
+        vec![(kt, madar_rust::kitchen::derive_kitchen_item_id(kt, 0))],
+        "a fresh sale fires, under its derived ids"
+    );
+
+    let old = Uuid::new_v4();
+    let minutes = madar_rust::orders::handlers::REPLAYED_SALE_FIRES_MINUTES + 1;
+    let r = replay(&app, &bearer, &sale(old, minutes)).await;
+    assert!(r.status().is_success(), "{:?}", r.status());
+    assert!(
+        tickets(old).await.is_empty(),
+        "an offline backlog stays off the board"
+    );
+}
+
+/// "Send to kitchen" on a counter cart reaches the server (so a closed
+/// kitchen screen is pushed): one ticket under ids derived from the cart's
+/// key, updated by a send again, and taken over by the sale, which keeps what
+/// the cook already finished.
+#[sqlx::test]
+async fn a_cart_sent_to_the_kitchen_is_one_ticket_through_its_sale(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let burger = seed_menu_item(&pool, org, 500).await;
+    let fries = seed_menu_item(&pool, org, 300).await;
+    let teller = seed_user(&pool, org, "teller").await;
+    let shift = open_shift_row(&pool, branch, teller).await;
+    sqlx::query(
+        "INSERT INTO org_payment_methods (org_id, name, color, icon, is_cash, is_active) \
+         VALUES ($1, 'cash', '#000', 'cash', true, true)",
+    )
+    .bind(org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bearer = token(teller, org, UserRole::Teller);
+    let cart = Uuid::new_v4();
+    let send_as = |who: Uuid, lines: serde_json::Value| {
+        serde_json::json!({
+            "op": "send_cart_to_kitchen",
+            "teller_id": who,
+            "request": { "branch_id": branch, "cart_key": cart, "lines": lines }
+        })
+    };
+    let send = |lines: serde_json::Value| send_as(teller, lines);
+    let two = serde_json::json!([
+        { "menu_item_id": burger, "name": "Burger", "qty": 1 },
+        { "menu_item_id": fries, "name": "Fries", "qty": 1 }
+    ]);
+
+    // No `orders.create` (a waiter, by default): who may not sell it may not
+    // send it ahead.
+    let waiter = seed_user(&pool, org, "waiter").await;
+    let r = replay(&app, &bearer, &send_as(waiter, two.clone())).await;
+    assert_eq!(r.status(), 403, "gated on orders.create");
+    for (r, a) in [
+        ("orders", "create"),
+        ("orders", "read"),
+        ("order_items", "create"),
+        ("payments", "create"),
+    ] {
+        grant(&pool, "teller", r, a).await;
+    }
+
+    let r = replay(&app, &bearer, &send(two)).await;
+    assert_eq!(r.status(), 200);
+    let kt = madar_rust::kitchen::derive_kitchen_ticket_id(cart);
+    let body: serde_json::Value = test::read_body_json(r).await;
+    assert_eq!(body["kitchen_ticket_id"], kt.to_string());
+    let line = |i| madar_rust::kitchen::derive_kitchen_item_id(kt, i);
+    let source: (String, Option<Uuid>) =
+        sqlx::query_as("SELECT source_type, cart_key FROM kitchen_tickets WHERE id = $1")
+            .bind(kt)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(source, ("cart".into(), Some(cart)));
+
+    // The cook finishes the burger; the teller drops the fries and sends again.
+    sqlx::query("UPDATE kitchen_ticket_items SET bumped_at = now() WHERE id = $1")
+        .bind(line(0))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let r = replay(
+        &app,
+        &bearer,
+        &send(serde_json::json!([{ "menu_item_id": burger, "name": "Burger", "qty": 2 }])),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let items = |pool: PgPool| async move {
+        sqlx::query_as::<_, (Uuid, i32, bool, bool)>(
+            "SELECT id, qty, bumped_at IS NOT NULL, voided_at IS NOT NULL FROM kitchen_ticket_items \
+              WHERE kitchen_ticket_id = $1 ORDER BY id",
+        )
+        .bind(kt)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let mut want = vec![(line(0), 2, true, false), (line(1), 1, false, true)];
+    want.sort();
+    assert_eq!(
+        items(pool.clone()).await,
+        want,
+        "updated in place: the burger stays done, the fries are off"
+    );
+
+    // The sale, under the cart's key, takes the ticket over: still one ticket.
+    let r = replay(
+        &app,
+        &bearer,
+        &serde_json::json!({
+            "op": "create_order",
+            "teller_id": teller,
+            "request": {
+                "branch_id": branch,
+                "shift_id": shift,
+                "payment_method": "cash",
+                "idempotency_key": cart,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "items": [{ "menu_item_id": burger, "quantity": 2, "unit_price": 500 }],
+                "total_amount": 1140
+            }
+        }),
+    )
+    .await;
+    assert!(r.status().is_success(), "{:?}", r.status());
+    let tickets: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT kt.id, kt.source_type, kt.cart_key FROM kitchen_tickets kt \
+           JOIN orders o ON o.id = kt.order_id WHERE o.idempotency_key = $1",
+    )
+    .bind(cart)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        tickets,
+        vec![(kt, "order".into(), None)],
+        "the sale's ticket is the one already on the board"
+    );
+    assert!(
+        items(pool.clone())
+            .await
+            .contains(&(line(0), 2, true, false)),
+        "what the cook finished stays finished"
+    );
+
+    // Sent again after the sale: nothing to do, the ticket is the order's.
+    let r = replay(
+        &app,
+        &bearer,
+        &send(serde_json::json!([{ "name": "Late", "qty": 1 }])),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(items(pool.clone()).await.len(), 2);
+}
+
+/// The live route takes the same send, and refuses one that is not a cart.
+#[sqlx::test]
+async fn the_live_cart_send_route_checks_what_it_is_sent(pool: PgPool) {
+    let app = app!(pool);
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org).await;
+    let owner = seed_user(&pool, org, "org_admin").await;
+    let bearer = token(owner, org, UserRole::OrgAdmin);
+    let post = |lines: serde_json::Value| {
+        test::TestRequest::post()
+            .uri("/kitchen/cart-sends")
+            .insert_header(("Authorization", format!("Bearer {bearer}")))
+            .set_json(serde_json::json!({ "branch_id": branch, "cart_key": Uuid::new_v4(), "lines": lines }))
+            .to_request()
+    };
+    let r = test::call_service(&app, post(serde_json::json!([]))).await;
+    assert_eq!(r.status(), 400, "no lines");
+    let r = test::call_service(&app, post(serde_json::json!([{ "name": " ", "qty": 1 }]))).await;
+    assert_eq!(r.status(), 400, "a line with no name");
+    let r = test::call_service(&app, post(serde_json::json!([{ "name": "Tea", "qty": 1 }]))).await;
+    assert_eq!(r.status(), 200);
+    let body: serde_json::Value = test::read_body_json(r).await;
+    assert!(body["kitchen_ticket_id"].is_string(), "{body}");
+}

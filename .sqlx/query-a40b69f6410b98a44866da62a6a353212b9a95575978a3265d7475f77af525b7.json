@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kitchen_tickets SET order_id = $3, cart_key = NULL, kitchen_ref = COALESCE($4, kitchen_ref) WHERE org_id = $1 AND cart_key = $2 RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a40b69f6410b98a44866da62a6a353212b9a95575978a3265d7475f77af525b7"
+}

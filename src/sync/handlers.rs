@@ -163,6 +163,12 @@ pub enum ReplayOp {
         teller_id: Uuid,
         item_id: Uuid,
     },
+    /// A counter cart sent to the kitchen ahead of its sale (madar-shared
+    /// `madar_sync::kitchen::SendCartRequest`).
+    SendCartToKitchen {
+        teller_id: Uuid,
+        request: madar_sync::kitchen::SendCartRequest,
+    },
     UnbumpKitchenItem {
         teller_id: Uuid,
         item_id: Uuid,
@@ -281,6 +287,7 @@ impl ReplayOp {
             | ReplayOp::VoidOpenTicket { teller_id, .. }
             | ReplayOp::VoidTicketLine { teller_id, .. }
             | ReplayOp::BumpKitchenItem { teller_id, .. }
+            | ReplayOp::SendCartToKitchen { teller_id, .. }
             | ReplayOp::UnbumpKitchenItem { teller_id, .. }
             | ReplayOp::SwapTables { teller_id, .. }
             | ReplayOp::CreateTableTransfer { teller_id, .. }
@@ -345,6 +352,7 @@ impl ReplayOp {
             ReplayOp::VoidOpenTicket { .. } => "VoidOpenTicket",
             ReplayOp::VoidTicketLine { .. } => "VoidTicketLine",
             ReplayOp::BumpKitchenItem { .. } => "BumpKitchenItem",
+            ReplayOp::SendCartToKitchen { .. } => "SendCartToKitchen",
             ReplayOp::UnbumpKitchenItem { .. } => "UnbumpKitchenItem",
             ReplayOp::SwapTables { .. } => "SwapTables",
             ReplayOp::CreateTableTransfer { .. } => "CreateTableTransfer",
@@ -472,6 +480,9 @@ impl ReplayOp {
             ReplayOp::BumpKitchenItem { .. } | ReplayOp::UnbumpKitchenItem { .. } => {
                 &[("kitchen_orders", "update")]
             }
+            // Sending a cart ahead is part of ringing it up: same grant as the
+            // sale itself, and the live route's (`orders.create`).
+            ReplayOp::SendCartToKitchen { .. } => &[("orders", "create")],
             // Swap checks the moved tickets inside the core, and so does clear.
             ReplayOp::SwapTables { .. } | ReplayOp::ClearTable { .. } => &[],
             // Parking an order on a table is the same authority as working the
@@ -1577,13 +1588,14 @@ async fn replay_dispatch(
             if request.device_code.is_none() {
                 request.device_code = device_code;
             }
-            // Replay never fires to the KDS (the order is historical) → hub = None.
+            // A fresh replayed sale fires to the KDS (`create_order_inner`'s
+            // `fire_kitchen`), so it publishes like the live route.
             // A replayed direct sale has no waiter (only ticket settles do) → None.
             crate::orders::handlers::create_order_inner(
                 pool.clone(),
                 web::Json(request),
                 actor,
-                None,
+                Some(hub.get_ref()),
                 None,
             )
             .await
@@ -1730,6 +1742,13 @@ async fn replay_dispatch(
         ReplayOp::UnbumpKitchenItem { item_id, .. } => {
             crate::kitchen::kds::set_bump_inner(pool, Some(hub.get_ref()), &actor, item_id, false)
                 .await
+        }
+        ReplayOp::SendCartToKitchen { request, .. } => {
+            crate::kitchen::kds::validate_cart_send(&request)?;
+            let kitchen_ticket_id =
+                crate::kitchen::send_cart_inner(pool, Some(hub.get_ref()), actor.org_id, &request)
+                    .await?;
+            Ok(HttpResponse::Ok().json(crate::kitchen::kds::CartSent { kitchen_ticket_id }))
         }
         // Cross-table floor ops: publish (hub = Some) so other tills' canvases
         // update live; the cores dedup before publishing, same as tickets.
@@ -2004,6 +2023,12 @@ async fn op_branch_must_be_in_org(
             .bind(ticket_id)
             .fetch_optional(pool)
             .await?
+        }
+        ReplayOp::SendCartToKitchen { request, .. } => {
+            sqlx::query_as::<_, (Uuid, Uuid)>("SELECT id, org_id FROM branches WHERE id = $1")
+                .bind(request.branch_id)
+                .fetch_optional(pool)
+                .await?
         }
         ReplayOp::BumpKitchenItem { item_id, .. } | ReplayOp::UnbumpKitchenItem { item_id, .. } => {
             sqlx::query_as::<_, (Uuid, Uuid)>(

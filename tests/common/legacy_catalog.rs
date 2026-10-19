@@ -247,7 +247,12 @@ impl<'a> Optional<'a> {
         self.id = Some(id);
         self
     }
-    pub fn recipe(mut self, ingredient: Uuid, quantity: impl std::fmt::Display, unit: &'a str) -> Self {
+    pub fn recipe(
+        mut self,
+        ingredient: Uuid,
+        quantity: impl std::fmt::Display,
+        unit: &'a str,
+    ) -> Self {
         self.recipe = Some((ingredient, quantity.to_string(), unit));
         self
     }
@@ -350,7 +355,10 @@ async fn upsert_override(
         return;
     }
     let (scope, conflict) = match channel {
-        None => ("branch", "(target_type, target_id, branch_id) WHERE scope = 'branch'"),
+        None => (
+            "branch",
+            "(target_type, target_id, branch_id) WHERE scope = 'branch'",
+        ),
         Some(_) => (
             "branch_channel",
             "(target_type, target_id, branch_id, channel) WHERE scope = 'branch_channel'",
@@ -392,7 +400,16 @@ pub async fn branch_menu_override(
     }
     if !is_available {
         for size in sizes_of(pool, menu_item).await {
-            upsert_override(pool, branch, None, "menu_item_size", size, None, Some(false)).await;
+            upsert_override(
+                pool,
+                branch,
+                None,
+                "menu_item_size",
+                size,
+                None,
+                Some(false),
+            )
+            .await;
         }
     }
 }
@@ -422,7 +439,16 @@ pub async fn branch_size_override(
 ) {
     // A size the item does not have: the legacy row priced nothing.
     if let Some(size) = find_size(pool, menu_item, size_label).await {
-        upsert_override(pool, branch, None, "menu_item_size", size, Some(price), None).await;
+        upsert_override(
+            pool,
+            branch,
+            None,
+            "menu_item_size",
+            size,
+            Some(price),
+            None,
+        )
+        .await;
     }
 }
 
@@ -467,12 +493,29 @@ pub async fn channel_menu_override(
     is_available: Option<bool>,
 ) {
     if let (Some(_), Some(one)) = (price, find_size(pool, menu_item, "one_size").await) {
-        upsert_override(pool, branch, Some(channel), "menu_item_size", one, price, None).await;
+        upsert_override(
+            pool,
+            branch,
+            Some(channel),
+            "menu_item_size",
+            one,
+            price,
+            None,
+        )
+        .await;
     }
     if is_available.is_some() {
         for size in sizes_of(pool, menu_item).await {
-            upsert_override(pool, branch, Some(channel), "menu_item_size", size, None, is_available)
-                .await;
+            upsert_override(
+                pool,
+                branch,
+                Some(channel),
+                "menu_item_size",
+                size,
+                None,
+                is_available,
+            )
+            .await;
         }
     }
 }
@@ -496,16 +539,26 @@ pub async fn channel_addon_override(
     .execute(pool)
     .await
     .expect("reset channel add-on override");
-    upsert_override(pool, branch, Some(channel), "modifier_option", addon_id, price, is_available)
-        .await;
+    upsert_override(
+        pool,
+        branch,
+        Some(channel),
+        "modifier_option",
+        addon_id,
+        price,
+        is_available,
+    )
+    .await;
 }
 
 async fn sizes_of(pool: &PgPool, menu_item: Uuid) -> Vec<Uuid> {
-    sqlx::query_scalar("SELECT id FROM menu_item_sizes WHERE menu_item_id = $1 ORDER BY sort, label")
-        .bind(menu_item)
-        .fetch_all(pool)
-        .await
-        .expect("read sizes")
+    sqlx::query_scalar(
+        "SELECT id FROM menu_item_sizes WHERE menu_item_id = $1 ORDER BY sort, label",
+    )
+    .bind(menu_item)
+    .fetch_all(pool)
+    .await
+    .expect("read sizes")
 }
 
 /// `DELETE FROM branch_menu_overrides [WHERE branch_id = …]`: every

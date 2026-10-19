@@ -19734,6 +19734,102 @@
         ]
       }
     },
+    "/kitchen/cart-sends": {
+      "post": {
+        "tags": [
+          "kitchen"
+        ],
+        "summary": "\"Send to kitchen\" on a counter cart: puts it on the branch's kitchen\nscreens now, and pushes a screen that is not watching. Sending the same\ncart again updates its ticket; the sale takes it over. Needs\n`orders.create` at the branch.",
+        "operationId": "send_cart",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendCartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CartSent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/kitchen/items/{item_id}/bump": {
       "post": {
         "tags": [
@@ -71261,6 +71357,49 @@
           }
         }
       },
+      "CartKitchenLine": {
+        "type": "object",
+        "description": "One line of a sent cart, as the kitchen reads it. Display only: no price.",
+        "required": [
+          "name",
+          "qty"
+        ],
+        "properties": {
+          "menu_item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Routes the line to its station; `None` for a line the menu no longer has."
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "qty": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "CartLineInput": {
         "type": "object",
         "description": "One line of a public cart. Prices are NOT taken from the client — the server\nresolves them. `addons` reuses [`AddonInput`] but its `unit_price` is ignored.",
@@ -71351,6 +71490,19 @@
             "type": "integer",
             "format": "int32",
             "description": "`items_total − deal_discount` (before the channel discount, tax and fees)."
+          }
+        }
+      },
+      "CartSent": {
+        "type": "object",
+        "description": "The answer to a cart send: the kitchen ticket it is on, `null` when the\nbranch routes nothing to a kitchen (`off`, or no line routes in `kds`).",
+        "properties": {
+          "kitchen_ticket_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -97129,6 +97281,38 @@
           "section_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "SendCartRequest": {
+        "type": "object",
+        "description": "`POST /kitchen/cart-sends` (and the `send_cart_to_kitchen` replay op's\n`request`): a counter cart sent to the kitchen before it is paid. The\nkitchen ticket is keyed by `cart_key`, the key the till will sell the order\nunder: its id is [`derive_kitchen_ticket_id`]`(cart_key)` and the line at\n`index` is [`derive_kitchen_item_id`]. Sending the same cart again updates\nthat ticket; the sale takes it over. Gated by `orders.create` at the\nbranch: whoever may sell the order may send it ahead.",
+        "required": [
+          "branch_id",
+          "cart_key",
+          "lines"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cart_key": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kitchen_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The order number the board calls out, when the till has one yet."
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CartKitchenLine"
+            }
           }
         }
       },

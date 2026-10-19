@@ -32,6 +32,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             // KDS feed + bump
             .route("/orders", web::get().to(kds::feed))
             .route("/items/{item_id}/bump", web::post().to(kds::bump))
-            .route("/items/{item_id}/unbump", web::post().to(kds::unbump)),
+            .route("/items/{item_id}/unbump", web::post().to(kds::unbump))
+            // A counter cart sent ahead of its sale
+            .route("/cart-sends", web::post().to(kds::send_cart)),
     );
 }

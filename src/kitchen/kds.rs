@@ -273,3 +273,71 @@ pub async fn unbump(
 ) -> Result<HttpResponse, AppError> {
     set_bump(req, pool, hub, item_id.into_inner(), false).await
 }
+
+/// The answer to a cart send: the kitchen ticket it is on, `null` when the
+/// branch routes nothing to a kitchen (`off`, or no line routes in `kds`).
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CartSent {
+    pub kitchen_ticket_id: Option<Uuid>,
+}
+
+/// The most lines one send may carry: a counter order, not a menu dump.
+const MAX_CART_LINES: usize = 200;
+
+/// What a cart send may not be: no lines, too many, or a line that is not a
+/// line (no name, no quantity). The words reach the kitchen as they are.
+pub(crate) fn validate_cart_send(
+    req: &madar_sync::kitchen::SendCartRequest,
+) -> Result<(), AppError> {
+    if req.lines.is_empty() {
+        return Err(AppError::BadRequest(
+            "A cart sent to the kitchen needs at least one line".into(),
+        ));
+    }
+    if req.lines.len() > MAX_CART_LINES {
+        return Err(AppError::BadRequest(format!(
+            "At most {MAX_CART_LINES} lines go to the kitchen at once"
+        )));
+    }
+    if req
+        .lines
+        .iter()
+        .any(|l| l.qty < 1 || l.name.trim().is_empty() || l.name.len() > 200)
+    {
+        return Err(AppError::BadRequest(
+            "Every kitchen line needs a name and a quantity".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// "Send to kitchen" on a counter cart: puts it on the branch's kitchen
+/// screens now, and pushes a screen that is not watching. Sending the same
+/// cart again updates its ticket; the sale takes it over. Needs
+/// `orders.create` at the branch.
+#[utoipa::path(post, path = "/kitchen/cart-sends", tag = "kitchen",
+    request_body = madar_sync::kitchen::SendCartRequest,
+    responses((status = 200, body = CartSent), AppErrorResponse), security(("bearer_jwt" = [])))]
+pub async fn send_cart(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    hub: web::Data<BranchEventHub>,
+    body: web::Json<madar_sync::kitchen::SendCartRequest>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    crate::authz::require::require(
+        pool.get_ref(),
+        &claims,
+        crate::authz::Cap::OrdersCreate,
+        Some(body.branch_id),
+    )
+    .await?;
+    require_branch_access(pool.get_ref(), &claims, body.branch_id).await?;
+    validate_cart_send(&body)?;
+    let org = claims
+        .org_id()
+        .ok_or_else(|| AppError::Unauthorized("Token has no organization".into()))?;
+    let kitchen_ticket_id =
+        super::send_cart_inner(pool.get_ref(), Some(hub.get_ref()), org, &body).await?;
+    Ok(HttpResponse::Ok().json(CartSent { kitchen_ticket_id }))
+}

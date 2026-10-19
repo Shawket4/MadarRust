@@ -27,6 +27,7 @@ fn op_of(op: &ReplayOp) -> &'static str {
         ReplayOp::VoidOpenTicket { .. } => "void_open_ticket",
         ReplayOp::VoidTicketLine { .. } => "void_ticket_line",
         ReplayOp::BumpKitchenItem { .. } => "bump_kitchen_item",
+        ReplayOp::SendCartToKitchen { .. } => "send_cart_to_kitchen",
         ReplayOp::UnbumpKitchenItem { .. } => "unbump_kitchen_item",
         ReplayOp::SwapTables { .. } => "swap_tables",
         ReplayOp::CreateTableTransfer { .. } => "create_table_transfer",
