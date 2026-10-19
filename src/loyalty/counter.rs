@@ -135,16 +135,26 @@ struct Ctx {
     settings: super::settings::LoyaltySettings,
 }
 
-async fn context(
+/// Who is asking, and may they: `loyalty.use` (the teller's "scan cards,
+/// award points and redeem rewards"). First, before any input is checked, so
+/// a person without it gets 403 and learns nothing about what a valid request
+/// looks like.
+async fn authorize(
     req: &HttpRequest,
+    pool: &PgPool,
+) -> Result<crate::auth::jwt::Claims, AppError> {
+    let claims = extract_claims(req)?;
+    check_permission(pool, &claims, "loyalty", "update").await?;
+    Ok(claims)
+}
+
+async fn context(
+    claims: &crate::auth::jwt::Claims,
     pool: &PgPool,
     branch_id: Uuid,
     customer_id: Uuid,
 ) -> Result<(Ctx, Option<Uuid>), AppError> {
-    let claims = extract_claims(req)?;
-    // `loyalty.use`: the teller's "scan cards, award points and redeem rewards".
-    check_permission(pool, &claims, "loyalty", "update").await?;
-    require_branch_access(pool, &claims, branch_id).await?;
+    require_branch_access(pool, claims, branch_id).await?;
     let org_id = resolve_branch_org(pool, branch_id).await?;
     let member = model::find_by_id(pool, customer_id)
         .await?
@@ -208,13 +218,14 @@ pub async fn stamp(
     body: web::Json<CounterStampRequest>,
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
+    let claims = authorize(&req, pool).await?;
     let key = valid_key(&body.idempotency_key)?;
     if !(1..=MAX_ITEMS).contains(&body.items) {
         return Err(AppError::BadRequest(format!(
             "items: 1 to {MAX_ITEMS} on one visit"
         )));
     }
-    let (ctx, actor) = context(&req, pool, body.branch_id, body.customer_id).await?;
+    let (ctx, actor) = context(&claims, pool, body.branch_id, body.customer_id).await?;
     if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "earn").await? {
         return result(pool, &ctx, p, true).await;
     }
@@ -280,8 +291,9 @@ pub async fn redeem(
     body: web::Json<CounterRedeemRequest>,
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
+    let claims = authorize(&req, pool).await?;
     let key = valid_key(&body.idempotency_key)?;
-    let (ctx, actor) = context(&req, pool, body.branch_id, body.customer_id).await?;
+    let (ctx, actor) = context(&claims, pool, body.branch_id, body.customer_id).await?;
     if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "redeem").await? {
         return result(pool, &ctx, p, true).await;
     }

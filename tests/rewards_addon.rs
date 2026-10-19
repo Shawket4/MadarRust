@@ -611,3 +611,40 @@ async fn after_upgrading_the_counters_stamps_stay_and_orders_earn_on_top(pool: P
     .unwrap();
     assert_eq!(sources, vec!["counter", "sale"]);
 }
+
+// ── No permission is a 403 before any input is judged ───────────────────────
+
+#[sqlx::test]
+async fn a_teller_without_loyalty_gets_403_before_any_400(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    let m = member(&pool, s.org, "01001234567").await;
+    let t = teller(&s);
+    // Free without the add-on: the teller does not hold `loyalty.use`.
+    set_plan(&pool, s.org, "free").await;
+    stamp_card(&pool, s.org, "visits", 5, true).await;
+    let bad = [
+        stamp_req(&s, m, 1, "short"),
+        stamp_req(&s, m, 0, "key-ffff-0001"),
+        stamp_req(&s, m, 51, "key-ffff-0002"),
+        redeem_req(&s, m, "short"),
+    ];
+    for req in bad {
+        let (st, r) = call(&app, req, Some(&t)).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "no permission is 403, never 400: {r}");
+    }
+
+    // With it, the same requests are the 400s they always were.
+    rewards_shop(&app, &pool, &s).await;
+    let bad = [
+        stamp_req(&s, m, 1, "short"),
+        stamp_req(&s, m, 0, "key-ffff-0001"),
+        stamp_req(&s, m, 51, "key-ffff-0002"),
+        redeem_req(&s, m, "short"),
+    ];
+    for req in bad {
+        let (st, r) = call(&app, req, Some(&t)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+    }
+    assert_eq!(visits(&pool, m).await, 0, "nothing was stamped");
+}
