@@ -162,6 +162,17 @@ pub const REGISTRY: &[Shim] = &[
         sites: &[],
         parked: None,
     },
+    Shim {
+        id: "onboarding_checklist",
+        counter: cs::KIND_ONBOARDING_ROUTE,
+        introduced_in: "readiness (2026-10-19), Flutter dashboard dash-v0.1.0 to 0.5.x",
+        replaces: "GET /orgs/{id}/readiness (the Setup page)",
+        sunset_condition: "the Flutter dashboard sends no versioned X-Madar-Client, so the \
+                           counter alone decides: no hit for 30 days means no old build left; \
+                           then drop organizations.onboarding_completed_at too",
+        sites: &["src/orgs/onboarding.rs"],
+        parked: None,
+    },
 ];
 
 /// The registered shim with this id.

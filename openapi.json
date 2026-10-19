@@ -31797,7 +31797,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Derived onboarding checklist",
+            "description": "Deprecated: always completed. Use GET /orgs/{id}/readiness",
             "content": {
               "application/json": {
                 "schema": {
@@ -31894,7 +31894,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Onboarding marked complete (idempotent)",
+            "description": "Deprecated: a no-op, always completed",
             "content": {
               "application/json": {
                 "schema": {
@@ -32270,6 +32270,103 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/QrResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/orgs/{id}/readiness": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "operationId": "get_readiness",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Organization ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whether the shop can sell, and what stops it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
                 }
               }
             }
@@ -72790,6 +72887,13 @@
           }
         }
       },
+      "CheckLevel": {
+        "type": "string",
+        "enum": [
+          "blocking",
+          "advice"
+        ]
+      },
       "CheckOutRequest": {
         "type": "object",
         "properties": {
@@ -86217,12 +86321,11 @@
         ],
         "properties": {
           "can_complete": {
-            "type": "boolean",
-            "description": "True when every `required` step is done (the Finish button enabler)."
+            "type": "boolean"
           },
           "completed": {
             "type": "boolean",
-            "description": "Derived terminal flag (`completed_at IS NOT NULL`) — the dashboard\nroutes into the wizard while this is false."
+            "description": "Always true: old builds never open their wizard."
           },
           "completed_at": {
             "type": [
@@ -86237,8 +86340,7 @@
           },
           "recipe_coverage": {
             "type": "number",
-            "format": "double",
-            "description": "Recipe coverage across active menu items (0..1) — drives the cost\nengine; surfaced separately because it's a percentage, not a bool."
+            "format": "double"
           },
           "steps": {
             "type": "array",
@@ -86250,7 +86352,7 @@
       },
       "OnboardingStep": {
         "type": "object",
-        "description": "One derived setup step.",
+        "description": "One step of the old checklist. The shim sends none.",
         "required": [
           "key",
           "done",
@@ -86260,20 +86362,16 @@
         "properties": {
           "count": {
             "type": "integer",
-            "format": "int64",
-            "description": "Supporting count (branches created, items added, …)."
+            "format": "int64"
           },
           "done": {
-            "type": "boolean",
-            "description": "True when the underlying data exists."
+            "type": "boolean"
           },
           "key": {
-            "type": "string",
-            "description": "Stable key the dashboard switches on — never localized."
+            "type": "string"
           },
           "required": {
-            "type": "boolean",
-            "description": "Steps that are encouraged but not blocking (`required = false`\nnever gates `can_complete`)."
+            "type": "boolean"
           }
         }
       },
@@ -94615,6 +94713,143 @@
               "format": "uuid"
             },
             "description": "Empty = all of them."
+          }
+        }
+      },
+      "Readiness": {
+        "type": "object",
+        "required": [
+          "org_id",
+          "ready",
+          "live",
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadinessCheck"
+            },
+            "description": "Blocking checks first, then advice. Empty for an org without the POS."
+          },
+          "first_order_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "live": {
+            "type": "boolean",
+            "description": "The shop has taken an order."
+          },
+          "org_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "Every blocking check passes: a cashier can ring up and take payment."
+          }
+        }
+      },
+      "ReadinessCheck": {
+        "type": "object",
+        "required": [
+          "key",
+          "level",
+          "ok",
+          "count",
+          "problems",
+          "more"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many things the check counted: problems when it names them, else the\nthings found (branches, sellable items, people)."
+          },
+          "key": {
+            "type": "string",
+            "description": "Stable key the dashboards switch on, never localized: `branch`, `menu`,\n`payment`, `sign_in`, `tablet`, `items_no_category`, `items_zero_price`,\n`required_group_empty`, `menu_lint`, `recipes`, `ingredient_costs`, `team`, `receipt`."
+          },
+          "level": {
+            "$ref": "#/components/schemas/CheckLevel"
+          },
+          "more": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Problems past the first 20."
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadinessProblem"
+            },
+            "description": "Up to 20 named problems."
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "What `count` is out of, when that reads better as a share (recipes: of active items)."
+          }
+        }
+      },
+      "ReadinessProblem": {
+        "type": "object",
+        "description": "One named thing a check found wrong: a branch, an item, an attachment, an ingredient.",
+        "required": [
+          "entity_type",
+          "entity_id",
+          "name"
+        ],
+        "properties": {
+          "entity_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "entity_type": {
+            "type": "string",
+            "description": "`branch` | `item` | `attachment` | `option` | `ingredient`."
+          },
+          "group_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The modifier group to open, when the problem is about one."
+          },
+          "item_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The item to open, when the problem is about one."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The lint's sentence, English, for the menu-lint problems only."
+          },
+          "name": {
+            "type": "string"
+          },
+          "rule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The menu lint rule (`F1`…) when the problem comes from the lint."
           }
         }
       },

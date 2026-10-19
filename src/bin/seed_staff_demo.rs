@@ -233,11 +233,9 @@ async fn wipe(pool: &PgPool) -> Result<(), sqlx::Error> {
 }
 
 async fn create_org(pool: &PgPool) -> Result<Uuid, sqlx::Error> {
-    // Onboarding is marked complete so the dashboard lands on the real app
-    // instead of the first-run wizard.
     sqlx::query_scalar(
-        "INSERT INTO organizations (name, slug, timezone, onboarding_completed_at, modules) \
-         VALUES ($1, $2, 'Africa/Cairo'::timezone_name, now(), '{pos,dawam}') RETURNING id",
+        "INSERT INTO organizations (name, slug, timezone, modules) \
+         VALUES ($1, $2, 'Africa/Cairo'::timezone_name, '{pos,dawam}') RETURNING id",
     )
     .bind(ORG_NAME)
     .bind(ORG_SLUG)

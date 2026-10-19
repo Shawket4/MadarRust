@@ -77,7 +77,6 @@ pub async fn create_session(
     let org_id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
     let expires_at = Utc::now() + Duration::hours(cfg.ttl_hours);
-    let onboarding_at: Option<DateTime<Utc>> = if full { Some(Utc::now()) } else { None };
     let slug = format!("demo-{}", org_id.simple());
     let email = format!("demo-{}@madar.demo", &org_id.simple().to_string()[..8]);
 
@@ -85,14 +84,13 @@ pub async fn create_session(
 
     sqlx::query(
         "INSERT INTO organizations \
-         (id, name, slug, currency_code, tax_rate, timezone, is_active, is_demo, demo_expires_at, onboarding_completed_at) \
-         VALUES ($1, $2, $3, 'EGP', 0.14, 'Africa/Cairo', true, true, $4, $5)",
+         (id, name, slug, currency_code, tax_rate, timezone, is_active, is_demo, demo_expires_at) \
+         VALUES ($1, $2, $3, 'EGP', 0.14, 'Africa/Cairo', true, true, $4)",
     )
     .bind(org_id)
     .bind("Demo Café")
     .bind(&slug)
     .bind(expires_at)
-    .bind(onboarding_at)
     .execute(&mut *tx)
     .await?;
 

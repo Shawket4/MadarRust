@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT oi.id, oi.name FROM org_ingredients oi\n              WHERE oi.org_id = $1 AND oi.deleted_at IS NULL AND oi.is_active\n                AND oi.archived_at IS NULL AND COALESCE(oi.cost_per_unit, 0) = 0\n                AND EXISTS (SELECT 1 FROM recipe_lines r WHERE r.ingredient_id = oi.id)\n              ORDER BY oi.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "78b0adba7673bb7743feaa78d87cbbcaeae858cf2bb8d63e0f2043c8b6dfd22b"
+}

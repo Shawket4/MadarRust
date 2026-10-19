@@ -1,6 +1,7 @@
 //! Menu modeling lint (`GET /menu/lint`): pure read-only checks for menu states the
 //! dashboard allows but the POS, the legacy shim views or the deduction engine
-//! silently mishandle. Rules follow MENU_MODELING_AUDIT.md §3 (F1–F11, F13–F15).
+//! silently mishandle. Rules follow MENU_MODELING_AUDIT.md §3 (F1–F11, F13–F15),
+//! plus F16 (a required group with nothing to pick).
 //!
 //! Every rule reads the UNIFIED tables (`modifier_groups`, `modifier_options`,
 //! `menu_item_modifier_groups`, `menu_item_sizes`, `recipe_lines`) — on prod the
@@ -457,6 +458,26 @@ const RULES: &[Rule] = &[
                                                 WHERE b.item_id = a.item_id AND b.has_pack))
              ORDER BY a.item_name, a.sort, a.label"
         ),
+    },
+    // Not in the audit: a required group with nothing to pick is hidden by the
+    // POS (madar-core cart.rs), so the item sells without the choice it requires.
+    Rule {
+        id: "F16",
+        severity: LintSeverity::Error,
+        entity_type: "attachment",
+        sql: "SELECT m.id, i.name || ' / ' || g.name, NULL::text,
+                     'Required group \"' || g.name || '\" has no active option on \"' || i.name
+                     || '\": the till hides it and sells the item without the choice',
+                     i.id, g.id
+                FROM menu_item_modifier_groups m
+                JOIN menu_items i ON i.id = m.menu_item_id
+                JOIN modifier_groups g ON g.id = m.group_id AND g.is_active
+               WHERE i.org_id = $1 AND i.deleted_at IS NULL AND i.is_active
+                 AND COALESCE(m.is_required_override, g.is_required)
+                 AND NOT EXISTS (SELECT 1 FROM modifier_options o
+                                  WHERE o.group_id = g.id AND o.is_active
+                                    AND (NOT m.option_allowlist OR o.id = ANY(m.included_option_ids)))
+               ORDER BY i.name, g.name",
     },
 ];
 

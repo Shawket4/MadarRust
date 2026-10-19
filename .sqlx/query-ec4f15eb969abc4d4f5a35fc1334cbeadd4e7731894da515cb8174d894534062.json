@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT modules, logo_url IS NOT NULL AS \"logo_set!\" FROM organizations WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "modules",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 1,
+        "name": "logo_set!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "ec4f15eb969abc4d4f5a35fc1334cbeadd4e7731894da515cb8174d894534062"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.name FROM menu_items i\n              WHERE i.org_id = $1 AND i.deleted_at IS NULL AND i.is_active\n                AND (NOT EXISTS (SELECT 1 FROM menu_item_sizes s\n                                  WHERE s.menu_item_id = i.id AND s.is_active)\n                     OR EXISTS (SELECT 1 FROM menu_item_sizes s\n                                 WHERE s.menu_item_id = i.id AND s.is_active\n                                   AND NOT EXISTS (SELECT 1 FROM recipe_lines r\n                                                    WHERE r.owner_type = 'item_size'\n                                                      AND r.owner_id = s.id)))\n              ORDER BY i.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "284d68b5e698f1ab49938e8b5d511ac19f70c8f5b4a21dc4617ffcbeb90b0186"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.name FROM menu_items i\n          WHERE i.org_id = $1 AND i.deleted_at IS NULL AND i.is_active AND i.base_price = 0\n            AND NOT EXISTS (SELECT 1 FROM menu_item_sizes s\n                             WHERE s.menu_item_id = i.id AND s.is_active AND s.price > 0)\n          ORDER BY i.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7b3a3f70f7346b533d5c4c7b05928c4788d983e2c342c959e7d47fb24b94b87a"
+}

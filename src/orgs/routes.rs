@@ -61,6 +61,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(handlers::offline_auth_bundle),
             )
             .route(
+                "/{id}/readiness",
+                web::get().to(crate::orgs::readiness::get_readiness),
+            )
+            .route(
                 "/{id}/onboarding",
                 web::get().to(crate::orgs::onboarding::get_onboarding),
             )

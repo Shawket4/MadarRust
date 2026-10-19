@@ -5,6 +5,7 @@ pub mod menu_display;
 pub mod onboarding;
 pub mod provision;
 pub mod public;
+pub mod readiness;
 pub mod routes;
 pub mod slugs;
 pub mod social;

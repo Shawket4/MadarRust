@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"n!\" FROM users\n          WHERE org_id = $1 AND is_active AND deleted_at IS NULL\n            AND role <> 'super_admin' AND NOT is_guest_principal",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ed7f80dba0c3987255986af0e7e8c5ad5d7bda2c7975d5f7f3579b6129a186c8"
+}

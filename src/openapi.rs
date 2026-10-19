@@ -91,6 +91,7 @@ paths(
         crate::costing::handlers::list_sku_costs,
         crate::orgs::onboarding::get_onboarding,
         crate::orgs::onboarding::complete_onboarding,
+        crate::orgs::readiness::get_readiness,
         crate::costing::handlers::list_addon_costs,
         // ── insights (menu profitability) ─────────────────────────────
         crate::integrations::handlers::analytics_orders,

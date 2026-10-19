@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT b.id, b.name FROM branches b\n          WHERE b.org_id = $1 AND b.is_active AND b.deleted_at IS NULL\n            AND NOT EXISTS (SELECT 1 FROM devices d\n                             WHERE d.branch_id = b.id AND d.kind = 'pos'\n                               AND d.retired_at IS NULL AND d.plan_inactive IS NOT TRUE)\n            AND NOT EXISTS (SELECT 1 FROM client_seen s\n                             WHERE s.org_id = $1 AND s.branch_id = b.id AND s.client LIKE 'pos/%')\n          ORDER BY b.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b1db261f1a82f9edadcea01386c2cee09d9817cf604e9de0325549060d25a7b1"
+}
