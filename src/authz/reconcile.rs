@@ -33,7 +33,7 @@
 //! 5. A `permissions` row is an org-wide override: allow adds the capability;
 //!    deny removes it unless it is core for a kind the person holds there, or
 //!    protected and the person is the owner.
-//! 6. The plan's ceiling (`madar_plan::apply`) cuts both sides alike.
+//! 6. The plan's ceiling, add-ons included (`Access::apply`), cuts both sides alike.
 //! 7. "Works here" (`owner || a role kind covers the scope`) gates both sides:
 //!    a capability at a branch the person does not work at is no decision.
 //!
@@ -48,7 +48,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use madar_plan::Plan;
+use crate::plan::Access;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -243,12 +243,7 @@ pub fn spec_drift_of(kind: RoleKind, template: Option<&str>, stored: &CapSet) ->
 }
 
 /// The old side's effective set for one person at one scope (rules 1-6).
-pub fn old_effective(
-    p: &LegacyPerson,
-    grants: &CapSet,
-    plan: Plan,
-    at: At,
-) -> EffectiveSet {
+pub fn old_effective(p: &LegacyPerson, grants: &CapSet, access: Access, at: At) -> EffectiveSet {
     let mut eff = EffectiveSet::default();
     if !p.active {
         return eff;
@@ -278,7 +273,7 @@ pub fn old_effective(
             eff.caps.remove(c);
         }
     }
-    madar_plan::apply(plan, eff)
+    access.apply(eff)
 }
 
 fn works(eff: &EffectiveSet) -> bool {
@@ -373,7 +368,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
     }
 
     let orgs = sqlx::query!(
-        r#"SELECT id, plan FROM organizations
+        r#"SELECT id, plan, org_active_addons(id) AS "addons!" FROM organizations
             WHERE ($1::uuid IS NULL OR id = $1) ORDER BY id"#,
         only_org
     )
@@ -382,7 +377,7 @@ pub async fn run(pool: &PgPool, only_org: Option<Uuid>) -> Result<Report, AppErr
     let mut conn = pool.acquire().await?;
     let now = chrono::Utc::now().timestamp();
     for org in orgs {
-        let plan = Plan::parse(&org.plan);
+        let plan = Access::new(Some(&org.plan), &org.addons);
         let branches: Vec<Uuid> = sqlx::query_scalar!(
             "SELECT id FROM branches WHERE org_id = $1 AND deleted_at IS NULL ORDER BY id",
             org.id

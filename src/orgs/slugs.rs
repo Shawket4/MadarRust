@@ -36,6 +36,10 @@ const RESERVED: &[&str] = &[
     "order",
     "reservations",
     "sentry",
+    // Rewards by Madar's teller page (loyalty sold on its own), its own vhost
+    // rewards.madar-pos.cloud. "wafa" was its working name; kept reserved.
+    "rewards",
+    "wafa",
     "www",
     "autoconfig",
     "autodiscover",
@@ -224,7 +228,9 @@ mod tests {
 
     #[test]
     fn the_names_we_are_already_using_are_refused() {
-        for taken in ["api", "loyalty", "order", "www", "legal", "demo-api"] {
+        for taken in [
+            "api", "loyalty", "order", "www", "legal", "demo-api", "wafa", "rewards",
+        ] {
             assert!(validate(taken).is_err(), "{taken} is a live host");
         }
     }

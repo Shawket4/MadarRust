@@ -139,14 +139,14 @@ pub async fn settle(
 /// Why `user_id` may not use `cap`: the plan's refusal when the plan is what
 /// removed it, else the ordinary [`denied`].
 pub async fn denial(pool: &PgPool, user_id: Uuid, cap: Cap) -> AppError {
-    let plan = match pool.acquire().await {
+    let access = match pool.acquire().await {
         Ok(mut conn) => match super::load::load(&mut conn, user_id).await {
-            Ok(Some(l)) => l.plan,
+            Ok(Some(l)) => l.access,
             _ => return denied(cap),
         },
         Err(_) => return denied(cap),
     };
-    crate::plan::refusal_for(plan, cap).unwrap_or_else(|| denied(cap))
+    crate::plan::refusal_for(access, cap).unwrap_or_else(|| denied(cap))
 }
 
 pub fn denied(cap: Cap) -> AppError {

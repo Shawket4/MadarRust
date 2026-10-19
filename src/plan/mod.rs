@@ -22,7 +22,7 @@ pub mod handlers;
 pub mod signup;
 
 use chrono::{DateTime, Utc};
-use madar_plan::{DeviceCounts, DeviceKind, Feature, Plan, Refusal};
+use madar_plan::{DeviceCounts, DeviceKind, Feature, FeatureSet, Plan, Refusal};
 use sqlx::{Executor, PgConnection, Postgres};
 use uuid::Uuid;
 
@@ -38,15 +38,58 @@ pub fn refuse(r: Refusal) -> AppError {
     AppError::PlanRefused(r)
 }
 
-/// When `cap` is refused because the plan removes it, the plan's own refusal
-/// (403 `plan_feature` naming the feature, in both languages) instead of a bare
-/// "no permission": the person can do nothing about the latter, and the
-/// former says the feature exists and how to get it.
-pub fn refusal_for(plan: Plan, cap: crate::authz::Cap) -> Option<AppError> {
+/// What an org may use: its plan plus its active add-ons (Rewards by Madar: loyalty sold
+/// alone on Free). Every feature question and the capability ceiling go
+/// through this; limits stay the plan's alone.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Access {
+    pub plan: Plan,
+    pub addons: FeatureSet,
+}
+
+impl Access {
+    /// No org (a super admin) or an unknown plan: Paid, no add-ons.
+    pub const PAID: Access = Access {
+        plan: Plan::Paid,
+        addons: FeatureSet::EMPTY,
+    };
+
+    pub fn new(plan: Option<&str>, addons: &[String]) -> Access {
+        Access {
+            plan: plan.map_or(Plan::Paid, Plan::parse),
+            addons: addons.iter().filter_map(|k| Feature::parse(k)).collect(),
+        }
+    }
+
+    pub fn has(self, f: Feature) -> bool {
+        madar_plan::entitlements_with(self.plan, self.addons).has(f)
+    }
+
+    pub fn require(self, f: Feature) -> Result<(), Refusal> {
+        madar_plan::entitlements_with(self.plan, self.addons).require(f)
+    }
+
+    pub fn ceiling(self) -> madar_authz::CapSet {
+        madar_plan::ceiling_with(self.plan, self.addons)
+    }
+
+    pub fn apply(self, eff: madar_authz::EffectiveSet) -> madar_authz::EffectiveSet {
+        madar_plan::apply_with(self.plan, self.addons, eff)
+    }
+
+    /// The active add-on keys, as the wire says them.
+    pub fn addon_keys(self) -> Vec<String> {
+        self.addons.iter().map(|f| f.as_str().to_string()).collect()
+    }
+}
+
+/// When `cap` is refused because the org's plan (and add-ons) remove it, the
+/// plan's own refusal (403 `plan_feature` naming the feature, in both
+/// languages) instead of a bare "no permission": the person can do nothing
+/// about the latter, and the former says the feature exists and how to get it.
+pub fn refusal_for(access: Access, cap: crate::authz::Cap) -> Option<AppError> {
     let f = madar_plan::Feature::all().find(|f| f.caps().contains(cap))?;
-    madar_plan::require(plan, f)
-        .err()
-        .map(AppError::PlanRefused)
+    access.require(f).err().map(AppError::PlanRefused)
 }
 
 /// The organization's plan. A missing row, or a value this server does not
@@ -62,6 +105,19 @@ where
     Ok(plan.as_deref().map_or(Plan::Paid, Plan::parse))
 }
 
+/// The org's plan and active add-ons. A missing org is Paid with none.
+pub async fn access_of<'e, E>(ex: E, org: Uuid) -> Result<Access, AppError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row: Option<(String, Vec<String>)> =
+        sqlx::query_as("SELECT plan, org_active_addons(id) FROM organizations WHERE id = $1")
+            .bind(org)
+            .fetch_optional(ex)
+            .await?;
+    Ok(row.map_or(Access::PAID, |(p, a)| Access::new(Some(&p), &a)))
+}
+
 /// The org's plan as the wire says it (`free` | `paid`); `paid` for no org.
 pub async fn plan_name<'e, E>(ex: E, org: Option<Uuid>) -> Result<String, AppError>
 where
@@ -73,19 +129,33 @@ where
     })
 }
 
+/// The org's active add-on keys; none for no org (a super admin).
+pub async fn addon_keys<'e, E>(ex: E, org: Option<Uuid>) -> Result<Vec<String>, AppError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    match org {
+        Some(o) => Ok(sqlx::query_scalar("SELECT org_active_addons($1)")
+            .bind(o)
+            .fetch_one(ex)
+            .await?),
+        None => Ok(vec![]),
+    }
+}
+
 pub async fn org_has_feature<'e, E>(ex: E, org: Uuid, f: Feature) -> Result<bool, AppError>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    Ok(madar_plan::has_feature(plan_of(ex, org).await?, f))
+    Ok(access_of(ex, org).await?.has(f))
 }
 
-/// 403 `plan_feature` unless the org's plan has `f`.
+/// 403 `plan_feature` unless the org's plan or add-ons have `f`.
 pub async fn require_feature<'e, E>(ex: E, org: Uuid, f: Feature) -> Result<(), AppError>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    madar_plan::require(plan_of(ex, org).await?, f).map_err(refuse)
+    access_of(ex, org).await?.require(f).map_err(refuse)
 }
 
 fn not_found() -> AppError {
@@ -111,14 +181,15 @@ pub async fn public_gate_branch<'e, E>(ex: E, branch: Uuid, f: Feature) -> Resul
 where
     E: Executor<'e, Database = Postgres>,
 {
-    let plan: Option<String> = sqlx::query_scalar(
-        "SELECT o.plan FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
+    let row: Option<(String, Vec<String>)> = sqlx::query_as(
+        "SELECT o.plan, org_active_addons(o.id)
+           FROM branches b JOIN organizations o ON o.id = b.org_id WHERE b.id = $1",
     )
     .bind(branch)
     .fetch_optional(ex)
     .await?;
-    match plan.as_deref().map(Plan::parse) {
-        Some(p) if !madar_plan::has_feature(p, f) => Err(not_found()),
+    match row {
+        Some((p, a)) if !Access::new(Some(&p), &a).has(f) => Err(not_found()),
         _ => Ok(()),
     }
 }

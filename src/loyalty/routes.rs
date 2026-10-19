@@ -35,6 +35,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/earning-items", web::put().to(settings::put_earning_items))
                 .route("/lookup", web::post().to(handlers::lookup))
                 .route("/award", web::post().to(award::award))
+                .route("/counter/stamp", web::post().to(super::counter::stamp))
+                .route("/counter/redeem", web::post().to(super::counter::redeem))
                 .route("/adjust", web::post().to(handlers::adjust))
                 .route(
                     "/birthday-preview",
@@ -113,6 +115,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(
             web::resource(super::wallet::google::MADAR_LOGO_PATH)
                 .route(web::get().to(public::brand_logo)),
+        )
+        .service(
+            web::resource(super::wallet::google::REWARDS_LOGO_INK_PATH)
+                .route(web::get().to(public::rewards_logo_ink)),
+        )
+        .service(
+            web::resource(super::wallet::google::REWARDS_LOGO_PAPER_PATH)
+                .route(web::get().to(public::rewards_logo_paper)),
+        )
+        .service(
+            web::resource(super::wallet::google::REWARDS_HERO_PATH)
+                .route(web::get().to(public::rewards_hero)),
         )
         .service(
             web::resource("/public/loyalty/pass/{token}/apple.pkpass")

@@ -16,6 +16,7 @@ pub mod apns;
 pub mod apple;
 pub mod google;
 pub mod i18n;
+pub mod look;
 pub mod notices;
 pub mod refresh;
 pub mod store;
@@ -359,7 +360,6 @@ pub struct PassSource {
     pub brand: crate::orgs::branding::OrgBrand,
     pub locations: Vec<PassLocation>,
     pub copy: CardCopy,
-    pub headline: String,
 }
 
 /// Gather it, in two waves instead of eleven round trips.
@@ -409,7 +409,6 @@ pub async fn pass_source(pool: &PgPool, member: &MemberRow) -> Result<PassSource
     copy.order_now_url = order_now_for(pool, member).await;
     Ok(PassSource {
         copy,
-        headline: headline_of(&settings, &rewards),
         settings,
         brand,
         locations,
@@ -494,54 +493,6 @@ pub async fn reward_lines(pool: &PgPool, org_id: Uuid) -> Vec<String> {
             .await
             .unwrap_or_default(),
     )
-}
-
-/// What the customer is working towards, in their own shop's words.
-///
-/// "Get a free drink" tells someone what the card is FOR in a way a stepper and
-/// a ratio never do — those say how far, not what for. The cheapest reward is
-/// the honest headline: a customer who can afford the espresso HAS earned
-/// something, whatever the cake costs.
-///
-/// Empty when a shop has curated nothing, and the callers then print no reward
-/// row at all — see the note on the fallback below.
-pub async fn reward_headline(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> String {
-    // "Collect five, get anything." When the whole menu is claimable the
-    // catalogue stops being the list of what MAY be had — it is only what
-    // happens to be curated — so naming one item off it would understate the
-    // offer, and naming none would hide it. The card said nothing at all.
-    if settings.reward_any_item {
-        // The SHORT form: this lands in a narrow slot on the face of the card,
-        // and the sentence with the price in it overflowed there on Android.
-        // The full line is in the details list — see `card_copy`.
-        return i18n::any_item_short().en;
-    }
-    headline_of(
-        settings,
-        &crate::loyalty::settings::load_effective_rewards_org(pool, org_id)
-            .await
-            .unwrap_or_default(),
-    )
-}
-
-/// The headline, from a catalogue the caller already holds. Pure.
-pub fn headline_of(
-    settings: &LoyaltySettings,
-    rewards: &[crate::loyalty::settings::RewardItem],
-) -> String {
-    if settings.reward_any_item {
-        return i18n::any_item_short().en;
-    }
-    match rewards.iter().min_by_key(|r| r.cost_amount) {
-        Some(r) => r.name.clone(),
-        // Nothing curated. The old fallback printed the COST here — "5 orders"
-        // under a heading that said "Reward" — which reads as though the reward
-        // IS five orders. It is not; it is the price of one, and the stepper
-        // beside it already says that. Saying nothing is better than saying
-        // something false, so the slot is left empty and the callers drop the
-        // row.
-        None => String::new(),
-    }
 }
 
 /// The customer's own page, when there is a public base to build one on.
@@ -746,13 +697,12 @@ pub async fn links_for(
     // The same lines Apple prints on the back of its pass.
     let mut copy = card_copy(pool, member.org_id, settings).await;
     copy.order_now_url = order_now_for(pool, member).await;
-    let headline = reward_headline(pool, member.org_id, settings).await;
     // Provisioning talks to Google, so it can fail in ways a signup must
     // survive: an unlinked service account, a refused class, a network blip.
     // The customer gets the Apple badge and the code on their card either way,
     // and the reason lands in the log rather than in their face.
     let google_url =
-        match google::save_url(pool, member, settings, brand, locations, &copy, &headline).await {
+        match google::save_url(pool, member, settings, brand, locations, &copy).await {
             Ok(url) => url,
             Err(e) => {
                 tracing::warn!(error = %e, "loyalty: could not build the Google Wallet save link");
@@ -962,11 +912,10 @@ mod tests {
             &s,
             &locs,
             &copy,
-            "Free espresso",
             &apple::PassBrand::default(),
         )
         .unwrap();
-        let google = google::loyalty_object("338", &m, &s, &locs, &copy, "Free espresso");
+        let google = google::loyalty_object("338", &m, &s, &locs, &copy);
 
         // Google gives a card TWO face slots where Apple gives four, so parity
         // is about which words land where, not about a field-for-field copy.
@@ -979,21 +928,17 @@ mod tests {
         // The balance's own label. Apple puts it on the big number and Google
         // on its largest slot; the words must match, or one phone calls them
         // orders while the other calls them points.
+        // (The fallback card carries it top right, as a header field.)
         assert_eq!(
-            apple["storeCard"]["primaryFields"][0]["label"],
+            apple["storeCard"]["headerFields"][0]["label"],
             google["loyaltyPoints"]["label"]
         );
 
-        // And what it is FOR, in the other — the same words on both, or a
-        // customer comparing two phones sees two different promises.
-        assert_eq!(
-            apple["storeCard"]["secondaryFields"][1]["value"],
-            google["secondaryLoyaltyPoints"]["balance"]["string"]
-        );
-        assert_eq!(
-            apple["storeCard"]["secondaryFields"][1]["label"],
-            google["secondaryLoyaltyPoints"]["label"]
-        );
+        // Neither names a reward (owner, 2026-10-19).
+        for card in [&apple, &google] {
+            let text = card.to_string();
+            assert!(!text.contains("Espresso") && !text.contains("\"Reward\""), "{text}");
+        }
 
         // The barcode carries the same thing.
         assert_eq!(apple["barcodes"][0]["message"], google["barcode"]["value"]);

@@ -560,6 +560,8 @@ pub async fn signup(
         currency_code,
         open_till: None,
         plan,
+        // A new shop has no add-ons yet (the super admin grants them).
+        addons: vec![],
     };
     Ok(HttpResponse::Created().json(SignupResponse {
         session,

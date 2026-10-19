@@ -52,6 +52,10 @@ pub struct PlanState {
     /// (madar-plan's `Entitlements`). A limit that is `null` is unlimited.
     #[schema(value_type = Object)]
     pub entitlements: madar_plan::Entitlements,
+    /// Active add-on keys (Rewards by Madar: `["loyalty"]`), already inside
+    /// `entitlements.features`.
+    #[serde(default)]
+    pub addons: Vec<String>,
     /// Live selling branches (not deleted, not warehouses).
     pub live_branches: i64,
     /// The plan's branch limit, `null` for unlimited.
@@ -65,14 +69,17 @@ pub struct PlanState {
 }
 
 pub(crate) async fn plan_state(pool: &PgPool, org: Uuid) -> Result<PlanState, AppError> {
-    let (plan, source): (String, String) =
-        sqlx::query_as("SELECT plan, signup_source FROM organizations WHERE id = $1")
-            .bind(org)
-            .fetch_optional(pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
-    let plan = Plan::parse(&plan);
-    let ent = madar_plan::entitlements(plan);
+    let (plan, source, addons): (String, String, Vec<String>) = sqlx::query_as(
+        "SELECT plan, signup_source, org_active_addons(id) FROM organizations WHERE id = $1",
+    )
+    .bind(org)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Org not found".into()))?;
+    let access = crate::plan::Access::new(Some(&plan), &addons);
+    let plan = access.plan;
+    // The plan's features plus the add-ons; limits stay the plan's.
+    let ent = madar_plan::entitlements_with(plan, access.addons);
     let branches: Vec<(Uuid, String)> = sqlx::query_as(
         "SELECT id, name FROM branches
           WHERE org_id = $1 AND deleted_at IS NULL AND kind = 'branch' ORDER BY name, id",
@@ -126,6 +133,7 @@ pub(crate) async fn plan_state(pool: &PgPool, org: Uuid) -> Result<PlanState, Ap
         plan: plan.as_str().into(),
         signup_source: source,
         entitlements: ent,
+        addons: access.addon_keys(),
         live_branches: live,
         branch_limit: ent.limits.branches,
         over_branch_limit: ent.limits.branches.is_some_and(|max| live > max as i64),
@@ -190,4 +198,110 @@ pub async fn put_active_till(
     super::set_active_till(&mut tx, *org_id, body.branch_id, body.device_id).await?;
     tx.commit().await?;
     Ok(HttpResponse::Ok().json(plan_state(pool.get_ref(), *org_id).await?))
+}
+
+#[derive(Debug, Default, Deserialize, ToSchema)]
+pub struct AddonRequest {
+    /// Why, for the record (e.g. "Rewards trial").
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+fn addon_feature(key: &str) -> Result<&'static str, AppError> {
+    // Only loyalty is sold as an add-on (Rewards by Madar); the table's CHECK agrees.
+    match madar_plan::Feature::parse(key) {
+        Some(madar_plan::Feature::Loyalty) => Ok("loyalty"),
+        _ => Err(AppError::BadRequest(format!(
+            "{key} is not sold as an add-on"
+        ))),
+    }
+}
+
+fn require_super_admin(claims: &crate::auth::jwt::Claims) -> Result<(), AppError> {
+    if claims.role == UserRole::SuperAdmin {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "Only a super admin can change add-ons".into(),
+        ))
+    }
+}
+
+/// Switch an add-on on for an org (super admin). Loyalty on a Free org is Rewards by Madar:
+/// the loyalty programme, its card and the teller page, without the paid plan.
+/// On a paid org it changes nothing (paid has every feature) and is refused,
+/// so no row claims a sale that was not made. Repeating it keeps the first
+/// start date.
+#[utoipa::path(put, path = "/orgs/{id}/addons/{feature}", tag = "orgs",
+    operation_id = "put_org_addon",
+    params(("id" = Uuid, Path, description = "Organization ID"),
+           ("feature" = String, Path, description = "The add-on: `loyalty`")),
+    request_body = AddonRequest,
+    responses(
+        (status = 200, description = "The plan as now stored", body = PlanState),
+        (status = 409, description = "ADDON_ON_PAID: the plan already includes it"),
+        AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn put_addon(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<(Uuid, String)>,
+    body: Option<web::Json<AddonRequest>>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    require_super_admin(&claims)?;
+    let (org, key) = path.into_inner();
+    let feature = addon_feature(&key)?;
+    if super::plan_of(pool.get_ref(), org).await? == Plan::Paid {
+        return Err(AppError::Refused {
+            code: "ADDON_ON_PAID",
+            reason: "The paid plan already includes this.".into(),
+        });
+    }
+    let note = body.and_then(|b| b.into_inner().note);
+    sqlx::query(
+        "INSERT INTO org_addons (org_id, feature, granted_by, note)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (org_id, feature) DO UPDATE
+            SET status = 'active', ends_at = NULL,
+                started_at = CASE WHEN org_addons.status = 'active'
+                                  THEN org_addons.started_at ELSE now() END,
+                granted_by = EXCLUDED.granted_by,
+                note = COALESCE(EXCLUDED.note, org_addons.note)",
+    )
+    .bind(org)
+    .bind(feature)
+    .bind(claims.user_id())
+    .bind(note)
+    .execute(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(plan_state(pool.get_ref(), org).await?))
+}
+
+/// End an add-on (super admin). The row is kept, ended; a member's points,
+/// passes and history stay, the features just switch off.
+#[utoipa::path(delete, path = "/orgs/{id}/addons/{feature}", tag = "orgs",
+    operation_id = "end_org_addon",
+    params(("id" = Uuid, Path, description = "Organization ID"),
+           ("feature" = String, Path, description = "The add-on: `loyalty`")),
+    responses((status = 200, description = "The plan as now stored", body = PlanState), AppErrorResponse),
+    security(("bearer_jwt" = [])))]
+pub async fn end_addon(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    path: web::Path<(Uuid, String)>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    require_super_admin(&claims)?;
+    let (org, key) = path.into_inner();
+    let feature = addon_feature(&key)?;
+    sqlx::query(
+        "UPDATE org_addons SET status = 'ended', ends_at = now()
+          WHERE org_id = $1 AND feature = $2 AND status = 'active'",
+    )
+    .bind(org)
+    .bind(feature)
+    .execute(pool.get_ref())
+    .await?;
+    Ok(HttpResponse::Ok().json(plan_state(pool.get_ref(), org).await?))
 }

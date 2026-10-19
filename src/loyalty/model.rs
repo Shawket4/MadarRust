@@ -38,6 +38,9 @@ pub enum Source {
     Manual,
     /// Two memberships of one person became one; the balance moved across.
     Merge,
+    /// Stamped, or a full card completed, at the counter with no order (Rewards by Madar's
+    /// teller page). Pairs with `earn` and `redeem` only.
+    Counter,
 }
 
 impl Source {
@@ -51,6 +54,7 @@ impl Source {
             Source::Winback => "winback",
             Source::Manual => "manual",
             Source::Merge => "merge",
+            Source::Counter => "counter",
         }
     }
 }
@@ -279,7 +283,15 @@ pub async fn member_with_context(
     Ok((row.view(mode, target), rewards))
 }
 
-/// Award the points a settled order is worth.
+/// What an earn is for: a settled order (one earn per order), or a stamp at
+/// the counter (one per idempotency key).
+#[derive(Debug, Clone, Copy)]
+pub enum EarnOrigin<'a> {
+    Order(Uuid),
+    Counter { idempotency_key: &'a str },
+}
+
+/// Award the points a settled order (or a counter visit) is worth.
 ///
 /// Called from inside `create_order_inner`'s transaction, on both the live and
 /// the `/sync/replay` path, so an offline till awards on drain with no extra
@@ -301,7 +313,7 @@ pub async fn award_for_order(
     org_id: Uuid,
     branch_id: Uuid,
     customer_id: Uuid,
-    order_id: Uuid,
+    origin: EarnOrigin<'_>,
     amounts: OrderAmounts,
     lines: &[OrderLine],
     eligible_item_ids: &[Uuid],
@@ -355,11 +367,15 @@ pub async fn award_for_order(
             trimmed
         }
     };
+    let (order_id, source, key) = match origin {
+        EarnOrigin::Order(id) => (Some(id), Source::Sale, None),
+        EarnOrigin::Counter { idempotency_key } => (None, Source::Counter, Some(idempotency_key)),
+    };
     let inserted = sqlx::query(
         "INSERT INTO loyalty_transactions \
             (org_id, customer_id, branch_id, kind, currency, points, order_id, basis_piastres, \
-             rate_piastres_per_point, created_by, source) \
-         VALUES ($1,$2,$3,'earn',$4,$5,$6,$7,$8,$9,'sale') \
+             rate_piastres_per_point, created_by, source, idempotency_key) \
+         VALUES ($1,$2,$3,'earn',$4,$5,$6,$7,$8,$9,$10,$11) \
          ON CONFLICT DO NOTHING",
     )
     .bind(org_id)
@@ -371,6 +387,8 @@ pub async fn award_for_order(
     .bind(earn::basis_piastres(amounts, rule))
     .bind(rule.piastres_per_point)
     .bind(created_by)
+    .bind(source.as_str())
+    .bind(key)
     .execute(&mut **tx)
     .await?;
     // Zero rows means this order had already earned — a replay, not a failure.
@@ -444,7 +462,7 @@ pub struct LedgerEntry {
     /// `reverse_adjust` — the last three undo the row named in `reverses_id`.
     pub kind: String,
     /// Why the row exists: `sale`, `redemption`, `void`, `refund`, `birthday`,
-    /// `winback` or `manual`. What a till or a dashboard should print as the
+    /// `winback`, `manual`, `merge` or `counter` (no order: the Rewards teller page). What a till or a dashboard should print as the
     /// reason, instead of guessing from the kind and the note.
     pub source: String,
     /// For a reversal, the row it undoes.

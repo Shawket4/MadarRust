@@ -36,6 +36,8 @@ const TTL: chrono::Duration = chrono::Duration::hours(1);
 /// off, so the next fetch rebuilds it with (or without) the link.
 fn fingerprint(member: &MemberRow, order_now: Option<&str>) -> String {
     let mut h = Sha256::new();
+    // The look: a pass stored under an older look is not served again.
+    h.update(super::look::LOOK_VERSION.to_le_bytes());
     h.update(order_now.unwrap_or("").as_bytes());
     h.update([0]);
     h.update(member.points_balance.to_le_bytes());

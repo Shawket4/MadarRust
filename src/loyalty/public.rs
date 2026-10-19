@@ -246,6 +246,24 @@ fn card_brand(
 /// the field out — that is a rejected class and a customer seeing "something
 /// went wrong". Served from the bytes already compiled into the binary, so it
 /// needs no uploads directory, no static mount and no deployment step.
+/// The Rewards by Madar gift and hero (`wallet::look`), for Google to fetch
+/// for a card whose custom branding is off. Static bytes, like Madar's mark.
+pub async fn rewards_logo_ink() -> HttpResponse {
+    static_png(crate::loyalty::wallet::look::GOOGLE_LOGO_INK)
+}
+pub async fn rewards_logo_paper() -> HttpResponse {
+    static_png(crate::loyalty::wallet::look::GOOGLE_LOGO_PAPER)
+}
+pub async fn rewards_hero() -> HttpResponse {
+    static_png(crate::loyalty::wallet::look::GOOGLE_HERO)
+}
+fn static_png(bytes: &'static [u8]) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("image/png")
+        .insert_header(("Cache-Control", "public, max-age=86400"))
+        .body(bytes)
+}
+
 pub async fn brand_logo() -> HttpResponse {
     const LOGO: &[u8] = include_bytes!("../../static/wallet/logo@3x.png");
     HttpResponse::Ok()

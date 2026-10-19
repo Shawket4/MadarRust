@@ -158,7 +158,8 @@ async fn due(pool: &PgPool) -> Result<Vec<Lapsed>, AppError> {
                  ON s.org_id = c.org_id AND s.branch_id IS NULL
               WHERE s.enabled AND s.winback_enabled
                 AND NOT EXISTS (SELECT 1 FROM organizations fo
-                                 WHERE fo.id = c.org_id AND fo.plan = 'free')
+                                 WHERE fo.id = c.org_id AND fo.plan = 'free'
+                                   AND NOT 'loyalty' = ANY(org_active_addons(fo.id)))
                 AND NOT c.marketing_opt_out
                 AND c.deleted_at IS NULL),
          ranked AS (

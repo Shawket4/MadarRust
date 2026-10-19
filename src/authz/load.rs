@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use crate::plan::Access;
 use moka::future::Cache;
-use madar_plan::Plan;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
@@ -23,10 +23,11 @@ pub struct Loaded {
     pub epoch: i64,
     pub principal: Principal,
     pub policy: OrgPolicy,
-    /// The org's plan. Part of the epoch-keyed entry, so the entry never
-    /// outlives a plan change: a trigger on `organizations.plan` bumps the
-    /// org's `authz_epoch` (migration 20261013100000).
-    pub plan: Plan,
+    /// The org's plan and add-ons. Part of the epoch-keyed entry, so the entry
+    /// never outlives a change: triggers on `organizations.plan` and
+    /// `org_addons` bump the org's `authz_epoch` (20261013100000,
+    /// 20261025100000).
+    pub access: Access,
 }
 
 impl Loaded {
@@ -34,10 +35,8 @@ impl Loaded {
     /// way to resolve a person on the server: a bare `resolve` would let a Free
     /// org's role keep a paid capability.
     pub fn resolve_at(&self, scope: super::Scope<'_>, now: i64) -> super::EffectiveSet {
-        madar_plan::apply(
-            self.plan,
-            super::resolve(&self.principal, scope, now, &self.policy),
-        )
+        self.access
+            .apply(super::resolve(&self.principal, scope, now, &self.policy))
     }
 }
 
@@ -118,15 +117,23 @@ async fn load_uncached(
     user_id: Uuid,
     epoch: i64,
 ) -> Result<Option<Loaded>, AppError> {
-    let row: Option<(Option<Uuid>, bool, bool, Option<String>)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let row: Option<(
+        Option<Uuid>,
+        bool,
+        bool,
+        Option<String>,
+        Option<Vec<String>>,
+    )> = sqlx::query_as(
         "SELECT u.org_id, (u.is_active AND u.deleted_at IS NULL), u.is_owner,
-                (SELECT o.plan FROM organizations o WHERE o.id = u.org_id)
+                (SELECT o.plan FROM organizations o WHERE o.id = u.org_id),
+                CASE WHEN u.org_id IS NULL THEN NULL ELSE org_active_addons(u.org_id) END
            FROM users u WHERE u.id = $1",
     )
     .bind(user_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((org_id, active, is_owner, plan)) = row else {
+    let Some((org_id, active, is_owner, plan, addons)) = row else {
         return Ok(None);
     };
 
@@ -248,6 +255,6 @@ async fn load_uncached(
         principal,
         policy,
         // No org (a super admin) or an unreadable plan is Paid: never lock out.
-        plan: plan.as_deref().map_or(Plan::Paid, Plan::parse),
+        access: Access::new(plan.as_deref(), &addons.unwrap_or_default()),
     }))
 }

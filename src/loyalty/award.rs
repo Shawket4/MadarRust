@@ -367,7 +367,7 @@ pub async fn award_inner(
         order.org_id,
         order.branch_id,
         member.id,
-        order.id,
+        model::EarnOrigin::Order(order.id),
         crate::loyalty::earn::OrderAmounts {
             subtotal: order.subtotal,
             discount_amount: order.discount_amount,
