@@ -50,6 +50,20 @@ const FOOTER_INK_12: &[u8] = asset!("rewards-by-madar-ink-12.png");
 const FOOTER_INK_24: &[u8] = asset!("rewards-by-madar-ink-24.png");
 const FOOTER_PAPER_12: &[u8] = asset!("rewards-by-madar-paper-12.png");
 const FOOTER_PAPER_24: &[u8] = asset!("rewards-by-madar-paper-24.png");
+// "مكافآت من مدار" for an Arabic pass: the export has no Arabic footer PNG, so
+// these are derived from `svg/endorsed-mukafaat-horizontal-{ink,paper}.svg`
+// (rsvg-convert, the present's tile cropped off), sized so the words' box is
+// as tall as the Latin footer at each scale: 19 / 36 / 54 px.
+const FOOTER_AR_INK: [&[u8]; 3] = [
+    asset!("mukafaat-min-madar-ink-19.png"),
+    asset!("mukafaat-min-madar-ink-36.png"),
+    asset!("mukafaat-min-madar-ink-54.png"),
+];
+const FOOTER_AR_PAPER: [&[u8]; 3] = [
+    asset!("mukafaat-min-madar-paper-19.png"),
+    asset!("mukafaat-min-madar-paper-36.png"),
+    asset!("mukafaat-min-madar-paper-54.png"),
+];
 
 /// Google's `programLogo` (circle-safe) and `heroImage` for a fallback card.
 pub const GOOGLE_LOGO_INK: &[u8] = asset!("logo-ink-660.png");
@@ -78,9 +92,14 @@ pub fn fallback_images(background: &str) -> Vec<(String, Vec<u8>)> {
 }
 
 /// The footer for a strip at `scale` (1, 2 or 3), in the colour that reads on
-/// the pass: paper under light text, ink under dark. 3x is the 2x file scaled
-/// by 1.5 (there is no 36 px export).
-fn footer(scale: u32, foreground_is_light: bool) -> Option<image::RgbaImage> {
+/// the pass: paper under light text, ink under dark. Latin 3x is the 2x file
+/// scaled by 1.5 (there is no 36 px export); Arabic has all three.
+fn footer(scale: u32, foreground_is_light: bool, arabic: bool) -> Option<image::RgbaImage> {
+    if arabic {
+        let set = if foreground_is_light { FOOTER_AR_PAPER } else { FOOTER_AR_INK };
+        let i = (scale.clamp(1, 3) - 1) as usize;
+        return Some(image::load_from_memory(set[i]).ok()?.to_rgba8());
+    }
     let bytes = match (scale, foreground_is_light) {
         (1, true) => FOOTER_PAPER_12,
         (1, false) => FOOTER_INK_12,
@@ -121,6 +140,10 @@ const SEGMENTED_UP_TO: i32 = 12;
 /// track of the foreground mixed into what is under it. `scale` is the strip's
 /// 1x/2x/3x. On a photograph the bottom is first veiled towards the card's
 /// ground so the bar and the footer read on any picture.
+///
+/// `arabic` is the Arabic pass's strip (`ar.lproj/strip*.png`): the footer is
+/// "مكافآت من مدار" at the right edge, and the bar fills from the right.
+#[allow(clippy::too_many_arguments)]
 pub fn finish(
     img: &mut image::RgbaImage,
     scale: u32,
@@ -129,6 +152,7 @@ pub fn finish(
     foreground: &str,
     background: &str,
     photo: bool,
+    arabic: bool,
 ) {
     let s = scale.max(1);
     let (w, h) = (img.width(), img.height());
@@ -151,7 +175,7 @@ pub fn finish(
     }
 
     let margin = 16 * s;
-    let foot = footer(s, light_text);
+    let foot = footer(s, light_text, arabic);
     let foot_h = foot.as_ref().map_or(0, |f| f.height());
     let foot_y = h.saturating_sub(12 * s + foot_h);
     let bar_h = 6 * s;
@@ -160,7 +184,10 @@ pub fn finish(
 
     let size = size.max(1);
     let filled = progress.clamp(0, size);
+    // Right to left on an Arabic strip: the same span, mirrored.
+    let mirror = |x0: u32, x1: u32| if arabic { (w - x1.min(w), w - x0.min(w)) } else { (x0, x1) };
     let paint = |img: &mut image::RgbaImage, x0: u32, x1: u32, on: bool| {
+        let (x0, x1) = mirror(x0, x1);
         for y in bar_y..(bar_y + bar_h).min(h) {
             for x in x0..x1.min(w) {
                 let p = img.get_pixel_mut(x, y);
@@ -187,6 +214,7 @@ pub fn finish(
     }
 
     if let Some(f) = foot {
-        image::imageops::overlay(img, &f, margin as i64, foot_y as i64);
+        let x = if arabic { w.saturating_sub(margin + f.width()) } else { margin };
+        image::imageops::overlay(img, &f, x as i64, foot_y as i64);
     }
 }

@@ -531,24 +531,28 @@ pub fn strip_images_squeezed(
     } else {
         None
     };
-    STRIP_SIZES
-        .iter()
-        .enumerate()
-        .filter_map(|(i, (name, w, h))| {
-            let mut band = match &photo {
-                Some(img) => {
-                    // CatmullRom, not Lanczos3: at strip sizes the two are
-                    // visually indistinguishable and Lanczos3 costs several
-                    // times more CPU.
-                    let mut scaled = img
-                        .resize_to_fill(*w, *h, image::imageops::FilterType::CatmullRom)
-                        .to_rgba8();
-                    // Apple writes the balance across this. Make it safe to write on.
-                    scrim(&mut scaled, &pass.foreground);
-                    scaled
-                }
-                None => super::look::ground(*w, *h, &pass.background),
-            };
+    // Two strips per scale: the root one (English, and any language the pass
+    // has no folder for) with the Latin footer, and `ar.lproj/` with the
+    // Arabic one. iOS picks the folder by the phone's language, exactly as it
+    // picks `ar.lproj/pass.strings`.
+    let mut out = Vec::with_capacity(STRIP_SIZES.len() * 2);
+    for (i, (name, w, h)) in STRIP_SIZES.iter().enumerate() {
+        let base = match &photo {
+            Some(img) => {
+                // CatmullRom, not Lanczos3: at strip sizes the two are
+                // visually indistinguishable and Lanczos3 costs several
+                // times more CPU.
+                let mut scaled = img
+                    .resize_to_fill(*w, *h, image::imageops::FilterType::CatmullRom)
+                    .to_rgba8();
+                // Apple writes the balance across this. Make it safe to write on.
+                scrim(&mut scaled, &pass.foreground);
+                scaled
+            }
+            None => super::look::ground(*w, *h, &pass.background),
+        };
+        for (arabic, path) in [(false, (*name).to_string()), (true, format!("ar.lproj/{name}"))] {
+            let mut band = base.clone();
             super::look::finish(
                 &mut band,
                 i as u32 + 1,
@@ -557,10 +561,14 @@ pub fn strip_images_squeezed(
                 &pass.foreground,
                 &pass.background,
                 photo.is_some(),
+                arabic,
             );
-            encode_png(&band, squeeze).map(|b| ((*name).to_string(), b))
-        })
-        .collect()
+            if let Some(bytes) = encode_png(&band, squeeze) {
+                out.push((path, bytes));
+            }
+        }
+    }
+    out
 }
 
 impl Default for PassBrand {
@@ -1753,7 +1761,17 @@ pub(crate) mod tests {
         let pass = pass_brand(&org);
         let set = strip_images_squeezed(&org, &pass, 2, 6, Squeeze::Exact);
         let names: Vec<&str> = set.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["strip.png", "strip@2x.png", "strip@3x.png"]);
+        assert_eq!(
+            names,
+            [
+                "strip.png",
+                "ar.lproj/strip.png",
+                "strip@2x.png",
+                "ar.lproj/strip@2x.png",
+                "strip@3x.png",
+                "ar.lproj/strip@3x.png"
+            ]
+        );
         let img = image::load_from_memory(&set[0].1).unwrap().to_rgba8();
         assert_eq!((img.width(), img.height()), (375, 144));
         let (fr, fg, fb) = crate::orgs::branding::parse_hex(&pass.foreground).unwrap();
@@ -1771,6 +1789,18 @@ pub(crate) mod tests {
         // are no longer the ground.
         let footer_drawn = (bar_y + 8..144).any(|y| (16..180).any(|x| img.get_pixel(x, y).0 != [br, bg, bb, 255]));
         assert!(footer_drawn, "the footer is baked in");
+
+        // The Arabic strip: the footer at the RIGHT edge (nothing drawn at the
+        // left margin below the bar), a different image from the Latin one, and
+        // the bar filled from the right (2 of 6: the rightmost step is filled,
+        // the leftmost is track).
+        let ar = image::load_from_memory(&set[1].1).unwrap().to_rgba8();
+        assert_ne!(set[0].1, set[1].1);
+        let ground_px = [br, bg, bb, 255];
+        assert!((bar_y + 8..144).all(|y| (16..120).all(|x| ar.get_pixel(x, y).0 == ground_px)), "left of the Arabic footer is empty");
+        assert!((bar_y + 8..144).any(|y| (250..359).any(|x| ar.get_pixel(x, y).0 != ground_px)), "the Arabic footer is at the right");
+        assert_eq!(ar.get_pixel(355, bar_y).0, [fr, fg, fb, 255], "the bar fills from the right");
+        assert_ne!(ar.get_pixel(20, bar_y).0, [fr, fg, fb, 255]);
     }
 
     /// Renders the real strips to LOOK at: the fallback card at a few steps,
@@ -1787,6 +1817,7 @@ pub(crate) mod tests {
         let pass = pass_brand(&org);
         for (p, n) in [(0, 6), (3, 6), (6, 6), (40, 100)] {
             for (name, bytes) in strip_images_squeezed(&org, &pass, p, n, Squeeze::Exact) {
+                let name = name.replace("ar.lproj/", "ar-");
                 let at = std::path::Path::new(&dir).join(format!("fallback-{p}of{n}-{name}"));
                 std::fs::write(&at, bytes).unwrap();
                 println!("wrote {}", at.display());
@@ -1801,6 +1832,7 @@ pub(crate) mod tests {
             ..pass.clone()
         };
         for (name, bytes) in strip_images_squeezed(&org_brand(true), &light, 4, 8, Squeeze::Exact) {
+            let name = name.replace("ar.lproj/", "ar-");
             let at = std::path::Path::new(&dir).join(format!("custom-light-4of8-{name}"));
             std::fs::write(&at, bytes).unwrap();
             println!("wrote {}", at.display());
@@ -1809,7 +1841,7 @@ pub(crate) mod tests {
             let img = image::open(&photo).expect("a readable photo");
             let mut band = img.resize_to_fill(750, 288, image::imageops::FilterType::Lanczos3).to_rgba8();
             scrim(&mut band, &pass.foreground);
-            super::super::look::finish(&mut band, 2, 3, 6, &pass.foreground, &pass.background, true);
+            super::super::look::finish(&mut band, 2, 3, 6, &pass.foreground, &pass.background, true, false);
             let at = std::path::Path::new(&dir).join("custom-photo-3of6-strip@2x.png");
             band.save(&at).unwrap();
             println!("wrote {}", at.display());
