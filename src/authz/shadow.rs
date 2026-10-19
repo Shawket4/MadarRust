@@ -90,7 +90,7 @@ pub fn decide_loaded(
         return Ok(());
     }
     Err(super::Cap::from_legacy(resource, action)
-        .and_then(|cap| crate::plan::refusal_for(loaded.plan, cap))
+        .and_then(|cap| crate::plan::refusal_for(loaded.access, cap))
         .unwrap_or_else(|| deny(resource, action)))
 }
 
@@ -266,8 +266,8 @@ async fn plan_denial(
     action: &str,
 ) -> Option<AppError> {
     let cap = super::Cap::from_legacy(resource, action)?;
-    let plan = super::load::load(conn, user_id).await.ok()??.plan;
-    crate::plan::refusal_for(plan, cap)
+    let access = super::load::load(conn, user_id).await.ok()??.access;
+    crate::plan::refusal_for(access, cap)
 }
 
 fn deny(resource: &str, action: &str) -> AppError {

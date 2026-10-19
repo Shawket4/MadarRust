@@ -46,6 +46,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route("/{id}/modules", web::get().to(handlers::get_org_modules))
             .route("/{id}/plan", web::get().to(crate::plan::handlers::get_plan))
             .route(
+                "/{id}/addons/{feature}",
+                web::put().to(crate::plan::handlers::put_addon),
+            )
+            .route(
+                "/{id}/addons/{feature}",
+                web::delete().to(crate::plan::handlers::end_addon),
+            )
+            .route(
                 "/{id}/plan/active-till",
                 web::put().to(crate::plan::handlers::put_active_till),
             )

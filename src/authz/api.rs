@@ -1094,7 +1094,8 @@ pub async fn set_assignments(
     let actor = actor_eff(pool.get_ref(), &claims, None).await?;
     let target = super::require::effective(pool.get_ref(), *id, None).await?;
     let roles = load_roles(pool.get_ref(), org).await?;
-    let plan = crate::plan::plan_of(pool.get_ref(), org).await?;
+    let access = crate::plan::access_of(pool.get_ref(), org).await?;
+    let plan = access.plan;
     let mut kinds = vec![];
     for a in &body.assignments {
         let role = roles
@@ -1111,7 +1112,7 @@ pub async fn set_assignments(
         };
         // Cut to the plan like the actor's set: a grant the plan removes is
         // held by no one in the org, so it cannot be an escalation.
-        let caps = caps.intersect(&madar_plan::ceiling(plan));
+        let caps = caps.intersect(&access.ceiling());
         g::may_assign(&actor, &actor_id(&claims), &target, &id.to_string(), &caps)
             .map_err(guard_err)?;
         if !a.all_branches && a.branch_ids.is_empty() {

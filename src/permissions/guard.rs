@@ -234,11 +234,11 @@ pub async fn require_can_create(
     }
     let actor = crate::authz::require::effective_for_claims(pool, claims, None).await?;
     let kind = kind_of(role);
-    let plan = match claims.org_id() {
-        Some(org) => crate::plan::plan_of(pool, org).await?,
-        None => madar_plan::Plan::Paid,
+    let access = match claims.org_id() {
+        Some(org) => crate::plan::access_of(pool, org).await?,
+        None => crate::plan::Access::PAID,
     };
-    may_have_kind(plan, kind)?;
+    may_have_kind(access.plan, kind)?;
     // Owners create anyone; everyone else only a role strictly below their own.
     g::may_give_kind(&actor, kind).map_err(guard_error)?;
     let wanted = if kind == RoleKind::OrgAdmin {
@@ -249,7 +249,7 @@ pub async fn require_can_create(
     // The actor's set is cut to the org's plan, so the new account's must be
     // too: on Free a teller's paid defaults (inventory, loyalty, floor…) are
     // never held by anyone, and comparing them would refuse every new account.
-    let wanted = wanted.intersect(&madar_plan::ceiling(plan));
+    let wanted = wanted.intersect(&access.ceiling());
     let missing = wanted.minus(&actor.caps);
     if !missing.is_empty() {
         return Err(guard_error(g::GuardError::NotDominant {

@@ -35,6 +35,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/earning-items", web::put().to(settings::put_earning_items))
                 .route("/lookup", web::post().to(handlers::lookup))
                 .route("/award", web::post().to(award::award))
+                .route("/counter/stamp", web::post().to(super::counter::stamp))
+                .route("/counter/redeem", web::post().to(super::counter::redeem))
                 .route("/adjust", web::post().to(handlers::adjust))
                 .route(
                     "/birthday-preview",

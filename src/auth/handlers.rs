@@ -124,6 +124,11 @@ pub struct LoginResponse {
     #[serde(default = "default_plan")]
     #[schema(example = "paid")]
     pub plan: String,
+    /// Features the org has as add-ons beside its plan (Wafa: `["loyalty"]` on
+    /// Free). Additive: an old client ignores it and sees the plan alone.
+    #[serde(default)]
+    #[schema(example = json!(["loyalty"]))]
+    pub addons: Vec<String>,
 }
 
 pub(crate) fn default_plan() -> String {
@@ -155,6 +160,10 @@ pub struct MeResponse {
     #[serde(default = "default_plan")]
     #[schema(example = "paid")]
     pub plan: String,
+    /// Features the org has as add-ons beside its plan (Wafa: `["loyalty"]`).
+    #[serde(default)]
+    #[schema(example = json!(["loyalty"]))]
+    pub addons: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -758,6 +767,7 @@ pub async fn login(
         resolve_tax_context(pool.get_ref(), user.org_id, branch_id_for_response).await?;
     let tax_rate = tax_policy.tax_rate;
     let plan = crate::plan::plan_name(pool.get_ref(), user.org_id).await?;
+    let addons = crate::plan::addon_keys(pool.get_ref(), user.org_id).await?;
 
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id_for_response;
@@ -786,6 +796,7 @@ pub async fn login(
         currency_code,
         open_till,
         plan,
+        addons,
     }))
 }
 
@@ -910,6 +921,7 @@ pub async fn device_session(
     let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), Some(org_id), Some(branch_id)).await?;
     let plan = crate::plan::plan_name(pool.get_ref(), Some(org_id)).await?;
+    let addons = crate::plan::addon_keys(pool.get_ref(), Some(org_id)).await?;
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = Some(branch_id);
     Ok(HttpResponse::Ok().json(LoginResponse {
@@ -921,6 +933,7 @@ pub async fn device_session(
         currency_code,
         open_till: None,
         plan,
+        addons,
     }))
 }
 
@@ -982,6 +995,7 @@ pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, A
     let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), user.org_id, branch_id).await?;
     let plan = crate::plan::plan_name(pool.get_ref(), user.org_id).await?;
+    let addons = crate::plan::addon_keys(pool.get_ref(), user.org_id).await?;
 
     let mut user_public = UserPublic::from(user);
     user_public.branch_id = branch_id;
@@ -993,6 +1007,7 @@ pub async fn me(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResponse, A
         require_table_for_orders,
         currency_code,
         plan,
+        addons,
     }))
 }
 
