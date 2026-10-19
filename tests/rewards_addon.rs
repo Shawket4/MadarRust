@@ -648,3 +648,134 @@ async fn a_teller_without_loyalty_gets_403_before_any_400(pool: PgPool) {
     }
     assert_eq!(visits(&pool, m).await, 0, "nothing was stamped");
 }
+
+// ── Apple's web service: Last-Modified is never missing ─────────────────────
+
+/// Configure Apple signing with a throwaway self-signed certificate (iOS would
+/// refuse it, which is right; the server path is real). nextest runs each test
+/// in its own process, so the environment is this test's alone.
+fn throwaway_apple_signing() {
+    let rsa = openssl::rsa::Rsa::generate(2048).unwrap();
+    let key = openssl::pkey::PKey::from_rsa(rsa).unwrap();
+    let mut name = openssl::x509::X509NameBuilder::new().unwrap();
+    name.append_entry_by_text("CN", "madar-test").unwrap();
+    let name = name.build();
+    let mut b = openssl::x509::X509::builder().unwrap();
+    b.set_version(2).unwrap();
+    b.set_subject_name(&name).unwrap();
+    b.set_issuer_name(&name).unwrap();
+    b.set_pubkey(&key).unwrap();
+    b.set_not_before(&openssl::asn1::Asn1Time::days_from_now(0).unwrap()).unwrap();
+    b.set_not_after(&openssl::asn1::Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.sign(&key, openssl::hash::MessageDigest::sha256()).unwrap();
+    let cert = String::from_utf8(b.build().to_pem().unwrap()).unwrap();
+    // SAFETY: one test per process (nextest); nothing else reads these here.
+    unsafe {
+        std::env::set_var("LOYALTY_APPLE_PASS_TYPE_ID", "pass.cloud.madar-pos.loyalty");
+        std::env::set_var("LOYALTY_APPLE_TEAM_ID", "TEAM123456");
+        std::env::set_var("LOYALTY_APPLE_CERT_PEM", &cert);
+        std::env::set_var(
+            "LOYALTY_APPLE_KEY_PEM",
+            String::from_utf8(key.private_key_to_pem_pkcs8().unwrap()).unwrap(),
+        );
+        std::env::set_var("LOYALTY_APPLE_WWDR_PEM", &cert);
+    }
+}
+
+#[sqlx::test]
+async fn the_pass_always_carries_last_modified_and_a_stale_card_is_never_a_304(pool: PgPool) {
+    throwaway_apple_signing();
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamp_card(&pool, s.org, "visits", 5, true).await;
+    let m = member(&pool, s.org, "01001234567").await;
+    sqlx::query(
+        "UPDATE loyalty_memberships SET apple_auth_token = 'tok-rewards-1', pass_updated_at = NULL WHERE id = $1",
+    )
+    .bind(m)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let uri = format!("/wallet/v1/passes/pass.cloud.madar-pos.loyalty/{m}");
+    let get = |since: Option<&str>| {
+        let r = test::TestRequest::get()
+            .uri(&uri)
+            .insert_header(("Authorization", "ApplePass tok-rewards-1"));
+        match since {
+            Some(h) => r.insert_header(("If-Modified-Since", h.to_string())),
+            None => r,
+        }
+    };
+
+    // Stale (NULL): a fresh pass, WITH Last-Modified, whatever the device says.
+    let resp = test::call_service(&app, get(None).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let lm = resp.headers().get("Last-Modified").expect("Last-Modified on a stale card");
+    chrono::DateTime::parse_from_rfc2822(lm.to_str().unwrap()).expect("RFC 2822");
+    let future = (chrono::Utc::now() + chrono::Duration::days(365)).to_rfc2822();
+    let resp = test::call_service(&app, get(Some(&future)).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK, "a NULL stamp is never a 304");
+    assert!(resp.headers().get("Last-Modified").is_some());
+
+    // Stamped: exactly that time, and a 304 when the device already has it.
+    let at = chrono::DateTime::parse_from_rfc3339("2026-10-01T09:30:00Z").unwrap().with_timezone(&chrono::Utc);
+    sqlx::query("UPDATE loyalty_memberships SET pass_updated_at = $2 WHERE id = $1")
+        .bind(m)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = test::call_service(&app, get(None).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("Last-Modified").unwrap().to_str().unwrap(), at.to_rfc2822());
+    let resp = test::call_service(&app, get(Some(&at.to_rfc2822())).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED);
+    let earlier = (at - chrono::Duration::hours(1)).to_rfc2822();
+    let resp = test::call_service(&app, get(Some(&earlier)).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+async fn a_stale_card_is_listed_to_its_device_whatever_it_last_saw(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    let m = member(&pool, s.org, "01001234567").await;
+    sqlx::query(
+        "INSERT INTO loyalty_pass_devices (device_library_id, customer_id, org_id, push_token) \
+         VALUES ('dev-1', $1, $2, 'push-1')",
+    )
+    .bind(m)
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let since = urlencode(&chrono::Utc::now().to_rfc3339());
+    let list = |since: &str| {
+        test::TestRequest::get().uri(&format!(
+            "/wallet/v1/devices/dev-1/registrations/pass.cloud.madar-pos.loyalty?passesUpdatedSince={since}"
+        ))
+    };
+
+    // NULL (marked stale): listed even though the device asked "since now".
+    sqlx::query("UPDATE loyalty_memberships SET pass_updated_at = NULL WHERE id = $1")
+        .bind(m)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body) = call(&app, list(&since), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["serialNumbers"], json!([m.to_string()]));
+
+    // Stamped before "since": nothing changed, 204 as before.
+    sqlx::query("UPDATE loyalty_memberships SET pass_updated_at = now() - interval '1 day' WHERE id = $1")
+        .bind(m)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, _) = call(&app, list(&since), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+}
+
+fn urlencode(s: &str) -> String {
+    s.replace('+', "%2B").replace(':', "%3A")
+}

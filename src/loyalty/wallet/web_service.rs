@@ -151,6 +151,11 @@ pub struct UpdatedSince {
 
 /// Which of this device's passes have changed since it last asked.
 ///
+/// A card whose `pass_updated_at` is NULL (marked stale, not yet refreshed) is
+/// listed whatever the device last saw: the sweep pushes BEFORE it stamps the
+/// time, so a device answering that push while the stamp is still NULL would
+/// otherwise be told nothing changed and never fetch the new pass.
+///
 /// `lastUpdated` is an opaque tag to Apple; we use the newest `pass_updated_at`
 /// we are reporting, so the device's next question is answered from where this
 /// one left off. **204, not an empty list, when nothing changed** — an empty
@@ -174,7 +179,8 @@ pub async fn serials(
            JOIN loyalty_memberships c ON c.id = d.customer_id \
           WHERE d.device_library_id = $1 \
             AND (c.deleted_at IS NULL OR c.pass_voided_at IS NOT NULL) \
-            AND ($2::timestamptz IS NULL OR c.pass_updated_at > $2)",
+            AND ($2::timestamptz IS NULL OR c.pass_updated_at IS NULL \
+                 OR c.pass_updated_at > $2)",
     )
     .bind(&device_library_id)
     .bind(since)
@@ -277,9 +283,17 @@ pub async fn latest_pass(
     };
     let mut resp = HttpResponse::Ok();
     resp.content_type("application/vnd.apple.pkpass");
-    if let Some(updated) = member.pass_updated_at {
-        resp.append_header(("Last-Modified", updated.to_rfc2822()));
-    }
+    // ALWAYS. iOS refuses a pass update that comes without one ("did not
+    // provide a 'last-modified' header"), and `pass_updated_at` is NULL for a
+    // card marked stale and not yet refreshed (the sweep stamps it after it
+    // pushes). Now is honest for those: this pass was just built.
+    resp.append_header((
+        "Last-Modified",
+        member
+            .pass_updated_at
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc2822(),
+    ));
     Ok(resp.body(bytes))
 }
 
