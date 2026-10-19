@@ -341,6 +341,21 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
     ),
     (
         "GET",
+        "/public/loyalty/brand/rewards/logo-ink.png",
+        "Rewards by Madar logo (ink) for Wallet passes: a static image Google fetches with no token",
+    ),
+    (
+        "GET",
+        "/public/loyalty/brand/rewards/logo-paper.png",
+        "Rewards by Madar logo (paper) for Wallet passes: a static image Google fetches with no token",
+    ),
+    (
+        "GET",
+        "/public/loyalty/brand/rewards/hero.png",
+        "Rewards by Madar hero strip for Wallet passes: a static image Google fetches with no token",
+    ),
+    (
+        "GET",
         "/public/loyalty/brand/{org_id}/logo/{v}.png",
         "org logo for Wallet passes (public images)",
     ),
