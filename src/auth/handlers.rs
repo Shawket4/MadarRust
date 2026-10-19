@@ -124,7 +124,7 @@ pub struct LoginResponse {
     #[serde(default = "default_plan")]
     #[schema(example = "paid")]
     pub plan: String,
-    /// Features the org has as add-ons beside its plan (Wafa: `["loyalty"]` on
+    /// Features the org has as add-ons beside its plan (Rewards by Madar: `["loyalty"]` on
     /// Free). Additive: an old client ignores it and sees the plan alone.
     #[serde(default)]
     #[schema(example = json!(["loyalty"]))]
@@ -160,7 +160,7 @@ pub struct MeResponse {
     #[serde(default = "default_plan")]
     #[schema(example = "paid")]
     pub plan: String,
-    /// Features the org has as add-ons beside its plan (Wafa: `["loyalty"]`).
+    /// Features the org has as add-ons beside its plan (Rewards by Madar: `["loyalty"]`).
     #[serde(default)]
     #[schema(example = json!(["loyalty"]))]
     pub addons: Vec<String>,

@@ -38,7 +38,7 @@ pub enum Source {
     Manual,
     /// Two memberships of one person became one; the balance moved across.
     Merge,
-    /// Stamped, or a full card completed, at the counter with no order (Wafa's
+    /// Stamped, or a full card completed, at the counter with no order (Rewards by Madar's
     /// teller page). Pairs with `earn` and `redeem` only.
     Counter,
 }
@@ -462,7 +462,7 @@ pub struct LedgerEntry {
     /// `reverse_adjust` — the last three undo the row named in `reverses_id`.
     pub kind: String,
     /// Why the row exists: `sale`, `redemption`, `void`, `refund`, `birthday`,
-    /// `winback`, `manual`, `merge` or `counter` (no order: Wafa's teller page). What a till or a dashboard should print as the
+    /// `winback`, `manual`, `merge` or `counter` (no order: the Rewards teller page). What a till or a dashboard should print as the
     /// reason, instead of guessing from the kind and the note.
     pub source: String,
     /// For a reversal, the row it undoes.

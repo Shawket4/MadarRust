@@ -38,7 +38,7 @@ pub fn refuse(r: Refusal) -> AppError {
     AppError::PlanRefused(r)
 }
 
-/// What an org may use: its plan plus its active add-ons (Wafa: loyalty sold
+/// What an org may use: its plan plus its active add-ons (Rewards by Madar: loyalty sold
 /// alone on Free). Every feature question and the capability ceiling go
 /// through this; limits stay the plan's alone.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

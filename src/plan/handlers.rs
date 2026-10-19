@@ -52,7 +52,7 @@ pub struct PlanState {
     /// (madar-plan's `Entitlements`). A limit that is `null` is unlimited.
     #[schema(value_type = Object)]
     pub entitlements: madar_plan::Entitlements,
-    /// Active add-on keys (Wafa: `["loyalty"]`), already inside
+    /// Active add-on keys (Rewards by Madar: `["loyalty"]`), already inside
     /// `entitlements.features`.
     #[serde(default)]
     pub addons: Vec<String>,
@@ -202,13 +202,13 @@ pub async fn put_active_till(
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct AddonRequest {
-    /// Why, for the record (e.g. "Wafa trial").
+    /// Why, for the record (e.g. "Rewards trial").
     #[serde(default)]
     pub note: Option<String>,
 }
 
 fn addon_feature(key: &str) -> Result<&'static str, AppError> {
-    // Only loyalty is sold as an add-on (Wafa); the table's CHECK agrees.
+    // Only loyalty is sold as an add-on (Rewards by Madar); the table's CHECK agrees.
     match madar_plan::Feature::parse(key) {
         Some(madar_plan::Feature::Loyalty) => Ok("loyalty"),
         _ => Err(AppError::BadRequest(format!(
@@ -227,7 +227,7 @@ fn require_super_admin(claims: &crate::auth::jwt::Claims) -> Result<(), AppError
     }
 }
 
-/// Switch an add-on on for an org (super admin). Loyalty on a Free org is Wafa:
+/// Switch an add-on on for an org (super admin). Loyalty on a Free org is Rewards by Madar:
 /// the loyalty programme, its card and the teller page, without the paid plan.
 /// On a paid org it changes nothing (paid has every feature) and is refused,
 /// so no row claims a sale that was not made. Repeating it keeps the first

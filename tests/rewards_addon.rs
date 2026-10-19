@@ -1,4 +1,4 @@
-//! Wafa: loyalty sold on its own (Madar WAFA_DESIGN.md).
+//! Rewards by Madar: loyalty sold on its own (Madar REWARDS_DESIGN.md).
 //!
 //! - The add-on: plan Free + `loyalty` lifts the ceiling for loyalty only;
 //!   only a super admin switches it; upgrading to paid ends it; a downgrade
@@ -146,7 +146,7 @@ async fn visits(pool: &PgPool, m: Uuid) -> i32 {
 
 /// A loyalty-only shop: plan Free + the add-on, granted the way the super
 /// admin does it.
-async fn wafa_shop<S, B>(app: &S, pool: &PgPool, s: &Shop)
+async fn rewards_shop<S, B>(app: &S, pool: &PgPool, s: &Shop)
 where
     S: actix_web::dev::Service<
             actix_http::Request,
@@ -160,7 +160,7 @@ where
         app,
         test::TestRequest::put()
             .uri(&format!("/orgs/{}/addons/loyalty", s.org))
-            .set_json(json!({"note": "Wafa test"})),
+            .set_json(json!({"note": "Rewards test"})),
         Some(&super_admin()),
     )
     .await;
@@ -182,7 +182,7 @@ async fn the_loyalty_addon_lifts_the_free_ceiling_for_loyalty_and_nothing_else(p
     let before = effective(&pool, s.teller, None).await.unwrap();
     assert!(!before.can(Cap::LoyaltyUse), "Free alone has no loyalty");
 
-    wafa_shop(&app, &pool, &s).await;
+    rewards_shop(&app, &pool, &s).await;
     let after = effective(&pool, s.teller, None).await.unwrap();
     assert!(
         after.can(Cap::LoyaltyUse),
@@ -288,7 +288,7 @@ async fn only_a_super_admin_grants_an_addon_and_only_on_free(pool: PgPool) {
 async fn upgrading_ends_the_addon_and_a_downgrade_does_not_bring_it_back(pool: PgPool) {
     let s = setup(&pool).await;
     let app = app!(pool);
-    wafa_shop(&app, &pool, &s).await;
+    rewards_shop(&app, &pool, &s).await;
 
     // Upgrade through the super admin's PATCH, the route the dashboard uses.
     let (st, body) = call(
@@ -338,7 +338,7 @@ async fn a_free_shops_card_page_exists_only_with_the_addon(pool: PgPool) {
     let (st, _) = call(&app, test::TestRequest::get().uri(&uri), None).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "Free alone has no card page");
 
-    wafa_shop(&app, &pool, &s).await;
+    rewards_shop(&app, &pool, &s).await;
     let (st, card) = call(&app, test::TestRequest::get().uri(&uri), None).await;
     assert_eq!(st, StatusCode::OK, "{card}");
 }
@@ -365,7 +365,7 @@ fn redeem_req(s: &Shop, m: Uuid, key: &str) -> test::TestRequest {
 async fn a_counter_stamps_completes_and_carries_over(pool: PgPool) {
     let s = setup(&pool).await;
     let app = app!(pool);
-    wafa_shop(&app, &pool, &s).await;
+    rewards_shop(&app, &pool, &s).await;
     // A card of 5, a stamp per item.
     stamp_card(&pool, s.org, "visits", 5, true).await;
     let m = member(&pool, s.org, "01001234567").await;
@@ -442,7 +442,7 @@ async fn a_counter_stamps_completes_and_carries_over(pool: PgPool) {
 async fn a_visit_card_counts_one_stamp_per_visit_when_items_are_not_counted(pool: PgPool) {
     let s = setup(&pool).await;
     let app = app!(pool);
-    wafa_shop(&app, &pool, &s).await;
+    rewards_shop(&app, &pool, &s).await;
     stamp_card(&pool, s.org, "visits", 5, false).await;
     let m = member(&pool, s.org, "01001234567").await;
     let (st, r) = call(
@@ -469,7 +469,7 @@ async fn the_counter_refuses_what_it_must(pool: PgPool) {
     let (st, r) = call(&app, stamp_req(&s, m, 1, "key-dddd-0001"), Some(&t)).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
 
-    wafa_shop(&app, &pool, &s).await;
+    rewards_shop(&app, &pool, &s).await;
     // A points programme: the counter stamps cards only.
     let (st, r) = call(&app, stamp_req(&s, m, 1, "key-dddd-0002"), Some(&t)).await;
     assert_eq!(st, StatusCode::CONFLICT, "{r}");
@@ -514,7 +514,7 @@ async fn the_counter_refuses_what_it_must(pool: PgPool) {
 async fn a_teller_signs_in_with_a_pin_and_no_registered_device(pool: PgPool) {
     let s = setup(&pool).await;
     let app = app!(pool);
-    wafa_shop(&app, &pool, &s).await;
+    rewards_shop(&app, &pool, &s).await;
     sqlx::query("UPDATE users SET pin_hash = $2 WHERE id = $1")
         .bind(s.teller)
         .bind(bcrypt::hash("4821", 4).unwrap())

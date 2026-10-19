@@ -30636,7 +30636,7 @@
         "tags": [
           "orgs"
         ],
-        "summary": "Switch an add-on on for an org (super admin). Loyalty on a Free org is Wafa:\nthe loyalty programme, its card and the teller page, without the paid plan.\nOn a paid org it changes nothing (paid has every feature) and is refused,\nso no row claims a sale that was not made. Repeating it keeps the first\nstart date.",
+        "summary": "Switch an add-on on for an org (super admin). Loyalty on a Free org is Rewards by Madar:\nthe loyalty programme, its card and the teller page, without the paid plan.\nOn a paid org it changes nothing (paid has every feature) and is refused,\nso no row claims a sale that was not made. Repeating it keeps the first\nstart date.",
         "operationId": "put_org_addon",
         "parameters": [
           {
@@ -67952,7 +67952,7 @@
               "string",
               "null"
             ],
-            "description": "Why, for the record (e.g. \"Wafa trial\")."
+            "description": "Why, for the record (e.g. \"Rewards trial\")."
           }
         }
       },
@@ -83358,7 +83358,7 @@
           },
           "source": {
             "type": "string",
-            "description": "Why the row exists: `sale`, `redemption`, `void`, `refund`, `birthday`,\n`winback`, `manual`, `merge` or `counter` (no order: Wafa's teller page). What a till or a dashboard should print as the\nreason, instead of guessing from the kind and the note."
+            "description": "Why the row exists: `sale`, `redemption`, `void`, `refund`, `birthday`,\n`winback`, `manual`, `merge` or `counter` (no order: the Rewards teller page). What a till or a dashboard should print as the\nreason, instead of guessing from the kind and the note."
           }
         }
       },
@@ -84008,7 +84008,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Features the org has as add-ons beside its plan (Wafa: `[\"loyalty\"]` on\nFree). Additive: an old client ignores it and sees the plan alone.",
+            "description": "Features the org has as add-ons beside its plan (Rewards by Madar: `[\"loyalty\"]` on\nFree). Additive: an old client ignores it and sees the plan alone.",
             "example": [
               "loyalty"
             ]
@@ -84973,7 +84973,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Features the org has as add-ons beside its plan (Wafa: `[\"loyalty\"]`).",
+            "description": "Features the org has as add-ons beside its plan (Rewards by Madar: `[\"loyalty\"]`).",
             "example": [
               "loyalty"
             ]
@@ -91603,7 +91603,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Active add-on keys (Wafa: `[\"loyalty\"]`), already inside\n`entitlements.features`."
+            "description": "Active add-on keys (Rewards by Madar: `[\"loyalty\"]`), already inside\n`entitlements.features`."
           },
           "branch_limit": {
             "type": [

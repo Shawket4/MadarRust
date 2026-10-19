@@ -1,4 +1,4 @@
-//! The counter: a stamp card stamped, or completed, with no order (Wafa).
+//! The counter: a stamp card stamped, or completed, with no order (Rewards by Madar).
 //!
 //! A shop that sells loyalty without Madar's POS (plan Free + the `loyalty`
 //! add-on) has no orders to earn from. Its teller page names the member and

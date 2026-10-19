@@ -1,4 +1,4 @@
--- Wafa: loyalty sold on its own (Madar WAFA_DESIGN.md).
+-- Rewards by Madar: loyalty sold on its own (Madar REWARDS_DESIGN.md).
 --
 -- 1. Add-ons: a per-org set of features switched on beside the plan. What an
 --    org may use is its plan's features plus its ACTIVE add-ons
@@ -6,7 +6,7 @@
 --    'loyalty'. No billing columns: like the plan, an add-on is switched by the
 --    super admin by hand.
 -- 2. The ledger's `counter` source: a stamp card stamped, or completed, at the
---    counter with no order (the Wafa teller page). Additive: old rows and old
+--    counter with no order (the Rewards by Madar teller page). Additive: old rows and old
 --    readers are untouched (`source` reaches every client as a plain string).
 
 CREATE TABLE IF NOT EXISTS org_addons (
@@ -88,7 +88,7 @@ ALTER TABLE loyalty_transactions
     ADD CONSTRAINT loyalty_txn_source CHECK (source IN (
         'sale', 'redemption', 'void', 'refund', 'birthday', 'winback', 'manual',
         'merge',
-        'counter'      -- stamped or completed at the counter, no order (Wafa)
+        'counter'      -- stamped or completed at the counter, no order (Rewards by Madar)
     )),
     ADD CONSTRAINT loyalty_txn_kind_has_a_source CHECK (
         CASE kind
