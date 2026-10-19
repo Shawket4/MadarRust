@@ -1837,7 +1837,7 @@ pub(crate) mod tests {
             std::fs::write(&at, bytes).unwrap();
             println!("wrote {}", at.display());
         }
-        if let Some(photo) = std::env::var("MADAR_STRIP_PREVIEW").ok() {
+        if let Ok(photo) = std::env::var("MADAR_STRIP_PREVIEW") {
             let img = image::open(&photo).expect("a readable photo");
             let mut band = img.resize_to_fill(750, 288, image::imageops::FilterType::Lanczos3).to_rgba8();
             scrim(&mut band, &pass.foreground);
