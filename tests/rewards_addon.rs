@@ -548,3 +548,66 @@ async fn a_teller_signs_in_with_a_pin_and_no_registered_device(pool: PgPool) {
     .await;
     assert_eq!(st, StatusCode::UNAUTHORIZED);
 }
+
+// ── Upgrade: same ledger, and orders earn into it ───────────────────────────
+
+#[sqlx::test]
+async fn after_upgrading_the_counters_stamps_stay_and_orders_earn_on_top(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    rewards_shop(&app, &pool, &s).await;
+    stamp_card(&pool, s.org, "visits", 5, true).await;
+    let m = member(&pool, s.org, "01001234567").await;
+    let t = teller(&s);
+    call(&app, stamp_req(&s, m, 2, "key-eeee-0001"), Some(&t)).await;
+    assert_eq!(visits(&pool, m).await, 2);
+
+    // The super admin moves the shop to paid: the add-on ends, nothing moves.
+    let (st, _) = call(
+        &app,
+        test::TestRequest::patch()
+            .uri(&format!("/orgs/{}", s.org))
+            .set_json(json!({"plan": "paid"})),
+        Some(&super_admin()),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(addon_row(&pool, s.org).await, Some(("ended".into(), true)));
+    assert_eq!(visits(&pool, m).await, 2, "balance intact");
+
+    // A till's sale now earns into the same card. An order with no lines in a
+    // per-item programme earns one stamp (earn::points_for_order's floor):
+    // 2 + 1 = 3.
+    let order = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO orders (id, branch_id, teller_id, till_id, idempotency_key, customer_name, subtotal, \
+             discount_amount, tax_amount, total_amount, status, order_number, payment_method, order_ref) \
+         VALUES ($1, $2, $3, $4, gen_random_uuid(), 'Customer', 500, 0, 0, 500, 'completed', 1, 'cash', gen_random_uuid()::text)",
+    )
+    .bind(order)
+    .bind(s.branch)
+    .bind(s.teller)
+    .bind(s.teller_till)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, r) = call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/award").set_json(json!({
+            "branch_id": s.branch, "order_id": order, "customer_id": m,
+        })),
+        Some(&t),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["points_awarded"], 1);
+    assert_eq!(visits(&pool, m).await, 3);
+    let sources: Vec<String> = sqlx::query_scalar(
+        "SELECT source FROM loyalty_transactions WHERE customer_id = $1 ORDER BY created_at",
+    )
+    .bind(m)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(sources, vec!["counter", "sale"]);
+}
