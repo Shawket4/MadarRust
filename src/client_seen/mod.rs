@@ -89,6 +89,10 @@ pub const KIND_MIRROR_LIST_POS: &str = "mirror_list_pos";
 /// Phase 4). No POS build ever called them; the parked archive migration
 /// `migrations/parked/*_authz_legacy_tables_archive.sql` waits on this kind.
 pub const KIND_PERMISSIONS_ROUTE: &str = "legacy_permissions_route";
+/// `/orgs/{id}/onboarding[/complete]`: the old setup checklist, frozen as
+/// "completed" for released Flutter dashboards (`dash-v0.1.0`–`0.5.x`). Readiness
+/// replaced it; nothing else calls it.
+pub const KIND_ONBOARDING_ROUTE: &str = "legacy_onboarding_route";
 
 /// Optional header naming the branch a client works at (read for telemetry
 /// only, and only when it is a branch of the token's org).

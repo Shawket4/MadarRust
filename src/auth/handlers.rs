@@ -180,7 +180,7 @@ const PIN_USER_COLUMNS: &str = "u.id, u.org_id, u.name, u.email, u.phone, \
 
 /// Who may type a PIN at all: anyone who works a till (owners and managers
 /// too); whether they may at THIS branch is the `pos.sign_in` check.
-const PIN_HOLDER_FILTER: &str = "u.org_id = $1 \
+pub(crate) const PIN_HOLDER_FILTER: &str = "u.org_id = $1 \
      AND u.pin_hash IS NOT NULL \
      AND u.role <> 'super_admin' \
      AND NOT u.is_guest_principal \

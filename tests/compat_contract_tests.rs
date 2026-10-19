@@ -132,6 +132,7 @@ fn the_registry_is_consistent() {
         cs::KIND_UPLOADS_LEGACY_REDIRECT,
         cs::KIND_MIRROR_LIST_POS,
         cs::KIND_PERMISSIONS_ROUTE,
+        cs::KIND_ONBOARDING_ROUTE,
         cu::KIND_COMPAT_VIEW_SERVER,
         cu::KIND_MENU_LEGACY_READ,
         cu::KIND_SHIM_WRITE_GONE,

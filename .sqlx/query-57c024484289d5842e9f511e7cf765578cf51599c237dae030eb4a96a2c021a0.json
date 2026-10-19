@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT i.id, i.name FROM menu_items i\n           LEFT JOIN categories c ON c.id = i.category_id AND c.is_active AND c.deleted_at IS NULL\n          WHERE i.org_id = $1 AND i.deleted_at IS NULL AND i.is_active AND c.id IS NULL\n          ORDER BY i.name",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "57c024484289d5842e9f511e7cf765578cf51599c237dae030eb4a96a2c021a0"
+}
