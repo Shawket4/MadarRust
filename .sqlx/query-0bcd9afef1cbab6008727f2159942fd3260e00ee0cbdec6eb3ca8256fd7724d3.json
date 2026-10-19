@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE categories SET deleted_at = now() WHERE org_id = $1 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0bcd9afef1cbab6008727f2159942fd3260e00ee0cbdec6eb3ca8256fd7724d3"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO menu_items\n             (id, org_id, category_id, name, name_translations, description,\n              description_translations, base_price, is_active)\n         SELECT id, $1, cat, name,\n                CASE WHEN ar IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('ar', ar) END,\n                descr,\n                CASE WHEN dar IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('ar', dar) END,\n                price, active\n           FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::text[], $6::text[], $7::text[],\n                       $8::int4[], $9::bool[])\n                AS t(id, cat, name, ar, descr, dar, price, active)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "UuidArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "Int4Array",
+        "BoolArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6226b7792c6bb1d115ffc43e43a9b31587fb69d23dead000db882a00c0bf52ae"
+}

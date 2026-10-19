@@ -218,6 +218,7 @@ paths(
         // ── menu studio: modifiers + pricing (Wave 2, new tables) ───
         crate::menu::modifiers::list_groups,
         crate::menu::lint::get_menu_lint,
+        crate::menu::bulk::bulk_menu,
         crate::menu::preview::preview_menu_item,
         crate::menu::modifiers::create_group,
         crate::menu::modifiers::patch_group,
@@ -658,6 +659,7 @@ paths(
         crate::purchasing::handlers::create_order,
         crate::purchasing::handlers::list_orders,
         crate::purchasing::handlers::list_org_orders,
+        crate::purchasing::handlers::list_last_prices,
         crate::purchasing::handlers::reorder_suggestions,
         crate::purchasing::handlers::create_return,
         crate::purchasing::handlers::list_po_receipts,
@@ -789,6 +791,7 @@ paths(
         crate::plan::signup::SignupVerifyRequest,
         crate::plan::signup::SignupVerifyResponse,
         crate::plan::signup::SignupRequest,
+        crate::plan::signup::SignupAttribution,
         crate::plan::signup::SignupResponse,
         crate::reports::handlers::ServiceModeSales,
         crate::loyalty::settings::LoyaltySettings,

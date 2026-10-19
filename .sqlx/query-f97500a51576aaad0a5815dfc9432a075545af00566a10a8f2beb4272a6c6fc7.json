@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO modifier_groups\n             (id, org_id, name, name_translations, selection_type, min_selections,\n              max_selections, is_required, legacy_addon_type, sort)\n         SELECT id, $1, name,\n                CASE WHEN ar IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('ar', ar) END,\n                CASE WHEN mx = 1 THEN 'single' ELSE 'multi' END,\n                mn, mx, mn > 0, fam, (ord - 1)::int\n           FROM UNNEST($2::uuid[], $3::text[], $4::text[], $5::int4[], $6::int4[], $7::text[])\n                WITH ORDINALITY AS t(id, name, ar, mn, mx, fam, ord)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "TextArray",
+        "TextArray",
+        "Int4Array",
+        "Int4Array",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f97500a51576aaad0a5815dfc9432a075545af00566a10a8f2beb4272a6c6fc7"
+}

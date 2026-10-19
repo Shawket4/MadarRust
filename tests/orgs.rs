@@ -762,6 +762,70 @@ async fn test_onboarding_checklist_and_complete(pool: PgPool) {
     }
 }
 
+/// A menu put away (archived categories, a group switched off, as the Foodics
+/// import's replace leaves them) is not counted as set up.
+#[sqlx::test]
+async fn test_onboarding_counts_skip_the_put_away_menu(pool: PgPool) {
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(get_secret()))
+            .configure(routes::configure),
+    )
+    .await;
+    let org_id = seed_org_row(&pool).await;
+    grant_org_permission(&pool, "read").await;
+    let token = generate_org_admin_token(org_id);
+
+    sqlx::query(
+        "INSERT INTO categories (org_id, name, deleted_at) VALUES ($1, 'Live', NULL), ($1, 'Old', now())",
+    )
+    .bind(org_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (name, active, options) in [("Milk", true, 2), ("Old milk", false, 3)] {
+        let group: Uuid = sqlx::query_scalar(
+            "INSERT INTO modifier_groups (org_id, name, legacy_addon_type, is_active) \
+             VALUES ($1, $2, 'milk_type', $3) RETURNING id",
+        )
+        .bind(org_id)
+        .bind(name)
+        .bind(active)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for i in 0..options {
+            sqlx::query(
+                "INSERT INTO modifier_options (org_id, group_id, name) VALUES ($1, $2, $3)",
+            )
+            .bind(org_id)
+            .bind(group)
+            .bind(format!("Option {i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/orgs/{org_id}/onboarding"))
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let body: serde_json::Value = test::read_body_json(test::call_service(&app, req).await).await;
+    let count = |key: &str| {
+        body["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["key"] == key)
+            .unwrap_or_else(|| panic!("no {key} step"))["count"]
+            .clone()
+    };
+    assert_eq!(count("categories"), 1);
+    assert_eq!(count("addons"), 2);
+}
+
 /// The optional `org_profile` step flips to done once the org has a logo
 /// (currency/tax carry NOT-NULL defaults, so a logo is the only honest
 /// "they personalized it" signal). It is never required, so it must not

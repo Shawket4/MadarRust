@@ -48,11 +48,20 @@ jobs:
       # Dawam it outgrew the runner's RAM ("ResourceExhausted: cannot allocate
       # memory", v1.5.0). Swap on the runner's scratch disk gives the link room
       # without changing how the binary is optimised.
+      # Since the repo went private (2026-10-18) its runner is smaller: a fixed 16G
+      # swapfile filled the disk and killed the runner (v1.19.0). Drop SDKs this
+      # build never uses, then size the swap to the free space.
       - name: Add swap for the fat-LTO link
         run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / /mnt
           free -h
           sudo swapoff -a || true
-          sudo fallocate -l 16G /mnt/swapfile
+          free_gb=$(df --output=avail -BG /mnt | tail -1 | tr -dc 0-9)
+          swap_gb=$(( free_gb - 20 ))   # keep 20G for the image build when /mnt shares /
+          [ "$swap_gb" -gt 16 ] && swap_gb=16
+          [ "$swap_gb" -ge 4 ] || { echo "::error::only ${free_gb}G free for swap"; exit 1; }
+          sudo fallocate -l "${swap_gb}G" /mnt/swapfile
           sudo chmod 600 /mnt/swapfile
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
@@ -77,6 +86,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # BuildKit secret for the private madar-shared dependency (Dockerfile
+          # mounts it per RUN; empty secret = anonymous fetch, as before).
+          secrets: |
+            madar_shared_token=${{ secrets.MADAR_SHARED_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

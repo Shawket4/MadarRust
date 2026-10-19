@@ -42,6 +42,25 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@v4
+      # madar-shared is private: with MADAR_SHARED_TOKEN set, cargo fetches it
+      # through the git CLI with the token; with the secret empty this is a no-op
+      # (anonymous fetch, as before). GIT_CONFIG_* also reaches Docker actions.
+      - name: Authenticate to private madar-shared
+        shell: bash
+        env:
+          MADAR_SHARED_TOKEN: ${{ secrets.MADAR_SHARED_TOKEN }}
+        run: |
+          if [ -n "$MADAR_SHARED_TOKEN" ]; then
+            base=https://github.com/Shawket4/madar-shared
+            git config --global url."https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared".insteadOf "$base"
+            {
+              echo CARGO_NET_GIT_FETCH_WITH_CLI=true
+              echo GIT_CONFIG_COUNT=1
+              echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared.insteadOf"
+              echo "GIT_CONFIG_VALUE_0=$base"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -115,6 +134,25 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/madar_ci
     steps:
       - uses: actions/checkout@v4
+      # madar-shared is private: with MADAR_SHARED_TOKEN set, cargo fetches it
+      # through the git CLI with the token; with the secret empty this is a no-op
+      # (anonymous fetch, as before). GIT_CONFIG_* also reaches Docker actions.
+      - name: Authenticate to private madar-shared
+        shell: bash
+        env:
+          MADAR_SHARED_TOKEN: ${{ secrets.MADAR_SHARED_TOKEN }}
+        run: |
+          if [ -n "$MADAR_SHARED_TOKEN" ]; then
+            base=https://github.com/Shawket4/madar-shared
+            git config --global url."https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared".insteadOf "$base"
+            {
+              echo CARGO_NET_GIT_FETCH_WITH_CLI=true
+              echo GIT_CONFIG_COUNT=1
+              echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared.insteadOf"
+              echo "GIT_CONFIG_VALUE_0=$base"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -158,6 +196,25 @@ jobs:
       PG: postgres://postgres:postgres@localhost:5432
     steps:
       - uses: actions/checkout@v4
+      # madar-shared is private: with MADAR_SHARED_TOKEN set, cargo fetches it
+      # through the git CLI with the token; with the secret empty this is a no-op
+      # (anonymous fetch, as before). GIT_CONFIG_* also reaches Docker actions.
+      - name: Authenticate to private madar-shared
+        shell: bash
+        env:
+          MADAR_SHARED_TOKEN: ${{ secrets.MADAR_SHARED_TOKEN }}
+        run: |
+          if [ -n "$MADAR_SHARED_TOKEN" ]; then
+            base=https://github.com/Shawket4/madar-shared
+            git config --global url."https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared".insteadOf "$base"
+            {
+              echo CARGO_NET_GIT_FETCH_WITH_CLI=true
+              echo GIT_CONFIG_COUNT=1
+              echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared.insteadOf"
+              echo "GIT_CONFIG_VALUE_0=$base"
+            } >> "$GITHUB_ENV"
+          fi
+
       - uses: taiki-e/install-action@v2
         with:
           tool: sqlx-cli@0.8.6
@@ -222,6 +279,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # need history to diff against the base branch
+      # madar-shared is private: with MADAR_SHARED_TOKEN set, cargo fetches it
+      # through the git CLI with the token; with the secret empty this is a no-op
+      # (anonymous fetch, as before). GIT_CONFIG_* also reaches Docker actions.
+      - name: Authenticate to private madar-shared
+        shell: bash
+        env:
+          MADAR_SHARED_TOKEN: ${{ secrets.MADAR_SHARED_TOKEN }}
+        run: |
+          if [ -n "$MADAR_SHARED_TOKEN" ]; then
+            base=https://github.com/Shawket4/madar-shared
+            git config --global url."https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared".insteadOf "$base"
+            {
+              echo CARGO_NET_GIT_FETCH_WITH_CLI=true
+              echo GIT_CONFIG_COUNT=1
+              echo "GIT_CONFIG_KEY_0=url.https://x-access-token:${MADAR_SHARED_TOKEN}@github.com/Shawket4/madar-shared.insteadOf"
+              echo "GIT_CONFIG_VALUE_0=$base"
+            } >> "$GITHUB_ENV"
+          fi
+
       - name: System deps
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - uses: dtolnay/rust-toolchain@stable

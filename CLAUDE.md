@@ -216,6 +216,7 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   `tills_migration_tests::every_projection_source_table_has_emitter` fails
   otherwise. A projection change for a type is enough when the table already
   re-emits that type.
+- **madar-shared is private.** CI authenticates with the `MADAR_SHARED_TOKEN` secret; local builds need git credentials for github.com (`gh auth setup-git`).
 - **The till's money is madar-shared's fold.** `compute_system_cash`,
   `report_figures` and the close-method figures are `madar_till::report` over
   the rows `tills::rows` loads (the POS core runs the same fold offline), and

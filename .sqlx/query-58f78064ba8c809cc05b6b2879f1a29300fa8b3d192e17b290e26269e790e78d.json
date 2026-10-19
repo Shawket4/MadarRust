@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE modifier_groups SET is_active = false, updated_at = now() WHERE org_id = $1 AND is_active",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "58f78064ba8c809cc05b6b2879f1a29300fa8b3d192e17b290e26269e790e78d"
+}

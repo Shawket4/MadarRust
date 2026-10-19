@@ -49,7 +49,6 @@ pub struct OnboardingStatus {
     pub steps: Vec<OnboardingStep>,
 }
 
-#[derive(sqlx::FromRow)]
 struct CountsRow {
     onboarding_completed_at: Option<DateTime<Utc>>,
     /// The owner has personalized the café (uploaded a logo). Currency/tax
@@ -150,43 +149,47 @@ pub async fn complete_onboarding(
 }
 
 async fn load_status(pool: &PgPool, org_id: Uuid) -> Result<OnboardingStatus, AppError> {
-    let row: Option<CountsRow> = sqlx::query_as::<_, CountsRow>(
+    // Counts what the org has NOW: an archived category (deleted_at) and the
+    // options of a group switched off are put-away menu, not setup (a menu
+    // replaced by the Foodics import leaves both behind).
+    let row = sqlx::query_as!(
+        CountsRow,
         r#"
         SELECT
             o.onboarding_completed_at,
-            (o.logo_url IS NOT NULL)                                   AS logo_set,
+            (o.logo_url IS NOT NULL)                                   AS "logo_set!",
             (SELECT COUNT(*) FROM branches b
-              WHERE b.org_id = o.id)::bigint                          AS branches,
+              WHERE b.org_id = o.id)::bigint                          AS "branches!",
             (SELECT COUNT(*) FROM users u
               WHERE u.org_id = o.id
-                AND u.role <> 'org_admin'::user_role)::bigint         AS extra_users,
+                AND u.role <> 'org_admin'::user_role)::bigint         AS "extra_users!",
             (SELECT COUNT(*) FROM org_payment_methods pm
-              WHERE pm.org_id = o.id AND pm.is_active)::bigint        AS payment_methods,
+              WHERE pm.org_id = o.id AND pm.is_active)::bigint        AS "payment_methods!",
             (SELECT COUNT(*) FROM categories c
-              WHERE c.org_id = o.id)::bigint                          AS categories,
+              WHERE c.org_id = o.id AND c.deleted_at IS NULL)::bigint AS "categories!",
             (SELECT COUNT(*) FROM menu_items mi
               WHERE mi.org_id = o.id AND mi.deleted_at IS NULL
-                AND mi.is_active)::bigint                             AS menu_items,
+                AND mi.is_active)::bigint                             AS "menu_items!",
             (SELECT COUNT(*) FROM org_ingredients oi
-              WHERE oi.org_id = o.id)::bigint                         AS ingredients,
+              WHERE oi.org_id = o.id)::bigint                         AS "ingredients!",
             (SELECT COUNT(DISTINCT ms.menu_item_id)
                FROM recipe_lines r
                JOIN menu_item_sizes ms ON ms.id = r.owner_id AND r.owner_type = 'item_size'
                JOIN menu_items mi ON mi.id = ms.menu_item_id
               WHERE mi.org_id = o.id AND mi.deleted_at IS NULL
-                AND mi.is_active)::bigint                             AS items_with_recipes,
+                AND mi.is_active)::bigint                             AS "items_with_recipes!",
             (SELECT COUNT(*) FROM modifier_options a
                JOIN modifier_groups g ON g.id = a.group_id
-              WHERE g.org_id = o.id AND a.legacy_source = 'addon'
-                AND a.is_active)::bigint                              AS addon_items,
+              WHERE g.org_id = o.id AND g.is_active AND a.legacy_source = 'addon'
+                AND a.is_active)::bigint                              AS "addon_items!",
             (SELECT COUNT(*) FROM orders ord
                JOIN branches b ON b.id = ord.branch_id
-              WHERE b.org_id = o.id)::bigint                          AS orders_placed
+              WHERE b.org_id = o.id)::bigint                          AS "orders_placed!"
         FROM organizations o
         WHERE o.id = $1
         "#,
+        org_id
     )
-    .bind(org_id)
     .fetch_optional(pool)
     .await?;
 

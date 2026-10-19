@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO modifier_options\n             (org_id, group_id, name, name_translations, price, sort, is_active, legacy_source)\n         SELECT $1, g, name,\n                CASE WHEN ar IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('ar', ar) END,\n                price, sort, active, src\n           FROM UNNEST($2::uuid[], $3::text[], $4::text[], $5::int4[], $6::int4[], $7::bool[], $8::text[])\n                AS t(g, name, ar, price, sort, active, src)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray",
+        "TextArray",
+        "TextArray",
+        "Int4Array",
+        "Int4Array",
+        "BoolArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bf51365654b3224fc74dd923eb7938eaafec64f074ca566616219517e7fe3685"
+}

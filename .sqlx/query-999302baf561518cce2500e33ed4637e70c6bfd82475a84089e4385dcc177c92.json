@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO menu_item_modifier_groups\n             (menu_item_id, group_id, sort, min_override, max_override, is_required_override)\n         SELECT item, grp, sort, mn, mx, req\n           FROM UNNEST($1::uuid[], $2::uuid[], $3::int4[], $4::int4[], $5::int4[], $6::bool[])\n                AS t(item, grp, sort, mn, mx, req)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "UuidArray",
+        "Int4Array",
+        "Int4Array",
+        "Int4Array",
+        "BoolArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "999302baf561518cce2500e33ed4637e70c6bfd82475a84089e4385dcc177c92"
+}

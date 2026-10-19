@@ -187,6 +187,55 @@ pub struct SignupRequest {
     /// The version of the terms the owner accepted (stored with the org).
     #[schema(example = "2026-10")]
     pub terms_version: String,
+    /// The campaign tags the signup page was opened with, if any. Stored with the
+    /// org for analysis only; a missing or odd value never refuses a signup.
+    #[serde(default)]
+    pub attribution: Option<SignupAttribution>,
+}
+
+/// Campaign tags from the signup page's URL (the landing copies them there).
+#[derive(Debug, Default, Deserialize, Serialize, ToSchema)]
+pub struct SignupAttribution {
+    #[schema(example = "instagram")]
+    pub utm_source: Option<String>,
+    #[schema(example = "bio")]
+    pub utm_medium: Option<String>,
+    #[schema(example = "free-plan")]
+    pub utm_campaign: Option<String>,
+    pub utm_term: Option<String>,
+    pub utm_content: Option<String>,
+    /// Meta's click id, for a later Conversions API event.
+    pub fbclid: Option<String>,
+    /// Google's click id.
+    pub gclid: Option<String>,
+}
+
+impl SignupAttribution {
+    /// Trimmed, each capped at 200 characters, empty ones dropped; `None` when
+    /// nothing is left. Untrusted input: it is stored, never interpreted.
+    pub fn cleaned(self) -> Option<serde_json::Value> {
+        let clean = |v: Option<String>| {
+            v.map(|s| s.trim().chars().take(200).collect::<String>())
+                .filter(|s| !s.is_empty())
+        };
+        let a = SignupAttribution {
+            utm_source: clean(self.utm_source),
+            utm_medium: clean(self.utm_medium),
+            utm_campaign: clean(self.utm_campaign),
+            utm_term: clean(self.utm_term),
+            utm_content: clean(self.utm_content),
+            fbclid: clean(self.fbclid),
+            gclid: clean(self.gclid),
+        };
+        let v = serde_json::to_value(a).ok()?;
+        let m: serde_json::Map<_, _> = v
+            .as_object()?
+            .iter()
+            .filter(|(_, x)| !x.is_null())
+            .map(|(k, x)| (k.clone(), x.clone()))
+            .collect();
+        (!m.is_empty()).then_some(serde_json::Value::Object(m))
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -459,6 +508,7 @@ pub async fn signup(
         &b.password,
         &terms,
         &phone,
+        b.attribution.and_then(SignupAttribution::cleaned),
     )
     .await;
     let done = match made {
@@ -528,6 +578,7 @@ async fn make_shop(
     password: &str,
     terms: &str,
     phone: &str,
+    attribution: Option<serde_json::Value>,
 ) -> Result<crate::orgs::provision::ProvisionedOrg, AppError> {
     let mut last = None;
     // The slug carries four random characters: a clash is a retry.
@@ -557,6 +608,7 @@ async fn make_shop(
             signup_source: "self",
             terms_version: Some(terms.to_string()),
             owner_phone: Some(phone.to_string()),
+            attribution: attribution.clone(),
         };
         match provision(pool, req, opts).await {
             Err(AppError::Conflict(m)) if m.contains("Slug") => last = Some(AppError::Conflict(m)),

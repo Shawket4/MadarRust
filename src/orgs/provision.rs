@@ -218,6 +218,8 @@ pub struct ProvisionOpts {
     pub terms_version: Option<String>,
     /// The owner's verified phone, canonical (self-signup only).
     pub owner_phone: Option<String>,
+    /// Campaign tags from the signup page (self-signup only).
+    pub attribution: Option<serde_json::Value>,
 }
 
 impl ProvisionOpts {
@@ -228,6 +230,7 @@ impl ProvisionOpts {
             signup_source: "admin",
             terms_version: None,
             owner_phone: None,
+            attribution: None,
         }
     }
 }
@@ -241,7 +244,6 @@ pub async fn provision(
     b: ProvisionOrgRequest,
     opts: ProvisionOpts,
 ) -> Result<ProvisionedOrg, AppError> {
-
     let name = b.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::BadRequest("name is required".into()));
@@ -326,9 +328,10 @@ pub async fn provision(
     let org = sqlx::query_as::<_, Org>(
         r#"
         INSERT INTO organizations (name, slug, currency_code, tax_rate, timezone, modules,
-                                   plan, signup_source, signup_terms_version, signup_terms_accepted_at)
+                                   plan, signup_source, signup_terms_version, signup_terms_accepted_at,
+                                   signup_attribution)
         VALUES ($1, $2, $3, $4, $5::timezone_name, COALESCE($6, '{pos}'),
-                $7, $8, $9, CASE WHEN $9::text IS NULL THEN NULL ELSE now() END)
+                $7, $8, $9, CASE WHEN $9::text IS NULL THEN NULL ELSE now() END, $10)
         RETURNING id, name, slug, logo_url, currency_code, tax_rate, tax_inclusive, service_charge_rate, service_charge_taxable, require_table_for_orders, receipt_footer, brand_background, brand_foreground, brand_accent, brand_logo_is_mark, brand_card_image, custom_branding, social_links, is_active, modules, timezone::text AS timezone, max_warehouses, plan, signup_source
         "#,
     )
@@ -341,6 +344,7 @@ pub async fn provision(
     .bind(opts.plan.as_str())
     .bind(opts.signup_source)
     .bind(&opts.terms_version)
+    .bind(&opts.attribution)
     .fetch_one(&mut *tx)
     .await?;
 

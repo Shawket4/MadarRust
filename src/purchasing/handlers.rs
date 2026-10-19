@@ -1040,6 +1040,353 @@ pub async fn reorder_suggestions(
     Ok(HttpResponse::Ok().json(groups))
 }
 
+// ── GET /purchasing/orgs/:org_id/last-prices ──────────────────
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct LastPricesQuery {
+    /// The supplier the order is for. Its own last price wins; when it never
+    /// sold the ingredient (or none is given) the last price from any supplier
+    /// is returned, with `source = "any"`.
+    pub supplier_id: Option<Uuid>,
+    /// Comma-separated ingredient ids. Omitted: every ingredient the org has
+    /// ever put on a purchase order.
+    pub ingredient_ids: Option<String>,
+}
+
+/// Where a remembered price came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum LastPriceSource {
+    /// The supplier asked about.
+    Supplier,
+    /// Another supplier (or a PO with none): the fallback.
+    Any,
+}
+
+/// The remembered price expressed per one purchase unit.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LastUnitPrice {
+    pub unit: String,
+    /// Piastres per one `unit`, exact (6 dp).
+    #[schema(value_type = f64)]
+    pub unit_price: Decimal,
+}
+
+/// The last price paid for one ingredient, the default for a new PO line.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LastPrice {
+    pub org_ingredient_id: Uuid,
+    pub source: LastPriceSource,
+    pub supplier_id: Option<Uuid>,
+    pub supplier_name: Option<String>,
+    /// The purchase order the price comes from.
+    pub po_id: Uuid,
+    pub po_status: String,
+    /// True when the price is what a delivery was actually invoiced at (a
+    /// goods receipt), false when it is only what was ordered.
+    pub received: bool,
+    /// When the purchase order was raised.
+    pub ordered_at: chrono::DateTime<chrono::Utc>,
+    /// When the delivery the price comes from was received (`received` only).
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The remembered line's purchase unit.
+    pub unit: String,
+    /// Piastres per one `unit`, exact (6 dp).
+    #[schema(value_type = f64)]
+    pub unit_price: Decimal,
+    /// The same price in every unit a new line for this ingredient can be
+    /// ordered in (its measure's units and its named pack), converted through
+    /// the ingredient's units. A unit that does not convert is left out: the
+    /// client then offers no default for it.
+    pub prices: Vec<LastUnitPrice>,
+}
+
+/// The last price paid per ingredient, to prefill a new purchase order line.
+///
+/// For each ingredient: the most recent PO line from `supplier_id`, preferring
+/// a received line (at the price its delivery was invoiced at) over one only
+/// ordered, and either over a cancelled order's; failing that, the same pick
+/// over every supplier (`source = "any"`). Ingredients never purchased are
+/// absent. Read-only, derived from purchase orders and goods receipts.
+#[utoipa::path(
+    get,
+    path = "/purchasing/orgs/{org_id}/last-prices",
+    tag = "purchasing",
+    operation_id = "list_purchase_last_prices",
+    params(("org_id" = Uuid, Path, description = "Organization ID"), LastPricesQuery),
+    responses((status = 200, description = "Last price per ingredient", body = [LastPrice]), AppErrorResponse),
+    security(("bearer_jwt" = []))
+)]
+pub async fn list_last_prices(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    org_id: web::Path<Uuid>,
+    query: web::Query<LastPricesQuery>,
+) -> Result<HttpResponse, AppError> {
+    let claims = extract_claims(&req)?;
+    check_permission(pool.get_ref(), &claims, "purchase_orders", "read").await?;
+    require_org(&claims, *org_id)?;
+
+    let ingredient_ids: Option<Vec<Uuid>> = match query.ingredient_ids.as_deref() {
+        None => None,
+        Some(raw) => Some(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    Uuid::parse_str(s)
+                        .map_err(|_| AppError::BadRequest(format!("Invalid ingredient id '{s}'")))
+                })
+                .collect::<Result<_, _>>()?,
+        ),
+    };
+    if ingredient_ids.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(HttpResponse::Ok().json(Vec::<LastPrice>::new()));
+    }
+
+    // One pick per ingredient: the asked supplier's lines first, then by tier
+    // (received > ordered/draft > cancelled), then the newest.
+    let rows = sqlx::query!(
+        r#"
+        WITH cand AS (
+            SELECT l.org_ingredient_id,
+                   po.supplier_id,
+                   s.name AS supplier_name,
+                   po.id AS po_id,
+                   po.status::text AS po_status,
+                   po.created_at AS ordered_at,
+                   r.received_at,
+                   l.purchase_unit,
+                   l.units_per_purchase_unit,
+                   -- a receipt's cost is per base stock unit; × the line's
+                   -- factor is per purchase unit, like the ordered price.
+                   COALESCE(r.unit_cost_exact * l.units_per_purchase_unit, l.unit_cost_exact) AS unit_price,
+                   CASE WHEN r.received_at IS NOT NULL THEN 0
+                        WHEN po.status = 'cancelled' THEN 2
+                        ELSE 1 END AS tier,
+                   ($2::uuid IS NOT NULL AND po.supplier_id IS NOT DISTINCT FROM $2) AS from_supplier,
+                   oi.unit::text AS base_unit,
+                   oi.pack_unit,
+                   oi.pack_size,
+                   oi.density_g_per_ml
+            FROM purchase_order_lines l
+            JOIN purchase_orders po  ON po.id = l.purchase_order_id AND po.org_id = $1
+            JOIN org_ingredients oi  ON oi.id = l.org_ingredient_id AND oi.deleted_at IS NULL
+            LEFT JOIN suppliers s    ON s.id = po.supplier_id
+            LEFT JOIN LATERAL (
+                SELECT gr.received_at, grl.unit_cost_exact
+                FROM goods_receipt_lines grl
+                JOIN goods_receipts gr ON gr.id = grl.goods_receipt_id
+                WHERE grl.purchase_order_line_id = l.id
+                  AND NOT gr.is_return
+                  AND grl.quantity > 0
+                  AND grl.unit_cost_exact IS NOT NULL
+                ORDER BY gr.received_at DESC
+                LIMIT 1
+            ) r ON true
+            WHERE l.org_id = $1
+              AND ($3::uuid[] IS NULL OR l.org_ingredient_id = ANY($3))
+        )
+        SELECT DISTINCT ON (org_ingredient_id)
+               org_ingredient_id AS "org_ingredient_id!",
+               supplier_id,
+               supplier_name AS "supplier_name?",
+               po_id AS "po_id!",
+               po_status AS "po_status!",
+               ordered_at AS "ordered_at!",
+               received_at AS "received_at?",
+               purchase_unit AS "purchase_unit!",
+               units_per_purchase_unit AS "units_per_purchase_unit!: Decimal",
+               unit_price AS "unit_price!: Decimal",
+               from_supplier AS "from_supplier!",
+               base_unit AS "base_unit!",
+               pack_unit AS "pack_unit?",
+               pack_size AS "pack_size?: Decimal",
+               density_g_per_ml AS "density_g_per_ml?: Decimal"
+        FROM cand
+        ORDER BY org_ingredient_id, from_supplier DESC, tier,
+                 COALESCE(received_at, ordered_at) DESC, po_id
+        "#,
+        *org_id,
+        query.supplier_id,
+        ingredient_ids.as_deref(),
+    )
+    .fetch_all(pool.get_ref())
+    .await?;
+
+    let out: Vec<LastPrice> = rows
+        .into_iter()
+        .map(|r| {
+            let ingredient = IngredientUnits {
+                base_unit: &r.base_unit,
+                pack_unit: r.pack_unit.as_deref(),
+                pack_size: r.pack_size,
+                density_g_per_ml: r.density_g_per_ml,
+            };
+            let prices = last_price_in_units(
+                &ingredient,
+                &r.purchase_unit,
+                r.units_per_purchase_unit,
+                r.unit_price,
+            );
+            LastPrice {
+                org_ingredient_id: r.org_ingredient_id,
+                source: if r.from_supplier {
+                    LastPriceSource::Supplier
+                } else {
+                    LastPriceSource::Any
+                },
+                supplier_id: r.supplier_id,
+                supplier_name: r.supplier_name,
+                po_id: r.po_id,
+                po_status: r.po_status,
+                received: r.received_at.is_some(),
+                ordered_at: r.ordered_at,
+                received_at: r.received_at,
+                unit: r.purchase_unit,
+                unit_price: r.unit_price.round_dp(LAST_PRICE_DP),
+                prices,
+            }
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(out))
+}
+
+/// Decimal places a remembered unit price is given to (piastres).
+const LAST_PRICE_DP: u32 = 6;
+
+/// What a remembered price is converted through: the ingredient as it is now.
+pub struct IngredientUnits<'a> {
+    pub base_unit: &'a str,
+    pub pack_unit: Option<&'a str>,
+    pub pack_size: Option<Decimal>,
+    pub density_g_per_ml: Option<Decimal>,
+}
+
+impl IngredientUnits<'_> {
+    fn named_pack(&self) -> Option<(&str, Decimal)> {
+        match (self.pack_unit.map(str::trim), self.pack_size) {
+            (Some(pu), Some(ps)) if !pu.is_empty() && ps > Decimal::ZERO => Some((pu, ps)),
+            _ => None,
+        }
+    }
+
+    /// Base stock units in one `unit`: the named pack's size, else the unit
+    /// conversion (mass↔volume through the density). `None` when it does not
+    /// convert.
+    fn base_per(&self, unit: &str) -> Option<Decimal> {
+        use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+        if let Some((pu, ps)) = self.named_pack()
+            && unit.trim().eq_ignore_ascii_case(pu)
+        {
+            return Some(ps);
+        }
+        // Scaled up so the conversion's 3 dp rounding costs nothing (1 ml of a
+        // 0.92 g/ml oil is 0.00092 kg).
+        const SCALE: f64 = 1_000_000.0;
+        let density = self.density_g_per_ml.and_then(|d| d.to_f64());
+        let scaled =
+            crate::units::convert_with_density(SCALE, unit, self.base_unit, density).ok()?;
+        let per = Decimal::from_f64(scaled)? / Decimal::from_f64(SCALE)?;
+        (per > Decimal::ZERO).then_some(per)
+    }
+}
+
+/// A remembered line price (`unit_price` piastres per `unit`, a line whose
+/// stored factor was `stored_factor` base units per `unit`) in every unit a
+/// new line for the ingredient may use: its measure's units and its named
+/// pack. The remembered unit itself keeps its price exactly; another unit
+/// goes through the price per base stock unit, and is left out when either
+/// side does not convert.
+pub fn last_price_in_units(
+    ingredient: &IngredientUnits<'_>,
+    unit: &str,
+    stored_factor: Decimal,
+    unit_price: Decimal,
+) -> Vec<LastUnitPrice> {
+    // The line's own unit through today's conversion (an ingredient
+    // re-denominated g → kg since keeps its prices right); a pack that is no
+    // longer configured falls back to the factor stored on the line.
+    let old_base_per = ingredient
+        .base_per(unit)
+        .or_else(|| (stored_factor > Decimal::ZERO).then_some(stored_factor));
+
+    let mut targets: Vec<String> = madar_units::units_of(ingredient.base_unit);
+    if let Some((pu, _)) = ingredient.named_pack()
+        && !targets.iter().any(|t| t.eq_ignore_ascii_case(pu))
+    {
+        targets.push(pu.to_string());
+    }
+
+    targets
+        .into_iter()
+        .filter_map(|target| {
+            let price = if target.trim().eq_ignore_ascii_case(unit.trim()) {
+                unit_price
+            } else {
+                let per_base = unit_price / old_base_per?;
+                per_base * ingredient.base_per(&target)?
+            };
+            Some(LastUnitPrice {
+                unit: target,
+                unit_price: price.round_dp(LAST_PRICE_DP),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod last_price_tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn grams() -> IngredientUnits<'static> {
+        IngredientUnits {
+            base_unit: "g",
+            pack_unit: Some("sack"),
+            pack_size: Some(dec!(25000)),
+            density_g_per_ml: None,
+        }
+    }
+
+    fn price(v: &[LastUnitPrice], unit: &str) -> Option<Decimal> {
+        v.iter().find(|p| p.unit == unit).map(|p| p.unit_price)
+    }
+
+    #[test]
+    fn converts_between_the_measure_and_the_pack() {
+        // 4500 piastres per kg, ordered in kg (factor 1000 g).
+        let v = last_price_in_units(&grams(), "kg", dec!(1000), dec!(4500));
+        assert_eq!(price(&v, "kg"), Some(dec!(4500)));
+        assert_eq!(price(&v, "g"), Some(dec!(4.5)));
+        assert_eq!(price(&v, "sack"), Some(dec!(112500)));
+        assert_eq!(price(&v, "ml"), None);
+    }
+
+    #[test]
+    fn a_pack_no_longer_configured_uses_the_stored_factor() {
+        let ing = IngredientUnits { pack_unit: None, pack_size: None, ..grams() };
+        let v = last_price_in_units(&ing, "case", dec!(12000), dec!(60000));
+        assert_eq!(price(&v, "g"), Some(dec!(5)));
+        assert_eq!(price(&v, "kg"), Some(dec!(5000)));
+    }
+
+    #[test]
+    fn a_count_ingredient_offers_no_weight_price() {
+        let ing = IngredientUnits {
+            base_unit: "pcs",
+            pack_unit: None,
+            pack_size: None,
+            density_g_per_ml: None,
+        };
+        let v = last_price_in_units(&ing, "pcs", dec!(1), dec!(250));
+        assert_eq!(v.len(), 1);
+        assert_eq!(price(&v, "pcs"), Some(dec!(250)));
+    }
+}
+
 // ── Goods receipts + supplier returns ─────────────────────────
 
 #[derive(serde::Serialize, sqlx::FromRow, ToSchema)]
