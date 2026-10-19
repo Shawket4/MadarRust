@@ -790,6 +790,7 @@ paths(
         crate::plan::signup::SignupVerifyRequest,
         crate::plan::signup::SignupVerifyResponse,
         crate::plan::signup::SignupRequest,
+        crate::plan::signup::SignupAttribution,
         crate::plan::signup::SignupResponse,
         crate::reports::handlers::ServiceModeSales,
         crate::loyalty::settings::LoyaltySettings,

@@ -98553,6 +98553,59 @@
           }
         }
       },
+      "SignupAttribution": {
+        "type": "object",
+        "description": "Campaign tags from the signup page's URL (the landing copies them there).",
+        "properties": {
+          "fbclid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Meta's click id, for a later Conversions API event."
+          },
+          "gclid": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Google's click id."
+          },
+          "utm_campaign": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "free-plan"
+          },
+          "utm_content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "utm_medium": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "bio"
+          },
+          "utm_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "instagram"
+          },
+          "utm_term": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "SignupOtpRequest": {
         "type": "object",
         "required": [
@@ -98600,6 +98653,17 @@
           "terms_version"
         ],
         "properties": {
+          "attribution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SignupAttribution",
+                "description": "The campaign tags the signup page was opened with, if any. Stored with the\norg for analysis only; a missing or odd value never refuses a signup."
+              }
+            ]
+          },
           "code": {
             "type": [
               "string",
