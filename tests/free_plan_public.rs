@@ -765,6 +765,63 @@ async fn a_shop_signs_itself_up_on_the_free_plan_and_is_signed_straight_in(pool:
 }
 
 #[sqlx::test]
+async fn a_signup_keeps_its_campaign_tags_cleaned_and_one_without_keeps_none(pool: PgPool) {
+    let app = app!(pool);
+    let mut orgs = vec![];
+    for (phone, email, attribution) in [
+        (
+            "01003334455",
+            "tagged@coffee.test",
+            json!({"utm_source": " instagram ", "utm_campaign": "x".repeat(300), "utm_medium": "", "fbclid": "IwAR1", "nonsense": "dropped"}),
+        ),
+        (
+            "01003334466",
+            "untagged@coffee.test",
+            json!({"utm_source": "  "}),
+        ),
+    ] {
+        let (st, b) = call(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/signup/otp")
+                .set_json(json!({"phone": phone})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        let mut body = signup_body(phone, &latest_code(&pool, phone).await, email);
+        body["attribution"] = attribution;
+        let (st, b) = call(
+            &app,
+            test::TestRequest::post()
+                .uri("/public/signup")
+                .set_json(body),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{b}");
+        orgs.push(b["org_id"].as_str().unwrap().parse::<Uuid>().unwrap());
+    }
+    let stored = |org: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<Value>>(
+                "SELECT signup_attribution FROM organizations WHERE id = $1",
+            )
+            .bind(org)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(
+        stored(orgs[0]).await,
+        Some(
+            json!({"utm_source": "instagram", "utm_campaign": "x".repeat(200), "fbclid": "IwAR1"})
+        )
+    );
+    assert_eq!(stored(orgs[1]).await, None);
+}
+
+#[sqlx::test]
 async fn a_wrong_code_a_spent_attempt_budget_and_a_borrowed_code_make_no_shop(pool: PgPool) {
     let app = app!(pool);
     let phone = "01002223344";
