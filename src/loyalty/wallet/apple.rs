@@ -26,7 +26,9 @@ pub use super::{PassLocation, locations_for_org};
 
 use super::google::progress_line;
 
-/// The images every pass carries, compiled into the binary.
+/// Madar's own icon and logo, compiled into the binary: what a CUSTOM-branded
+/// shop with no logo of its own wears (the fallback card wears the gift,
+/// `wallet::look`).
 ///
 /// **`icon.png` is not optional.** A pass without one is rejected by iOS
 /// outright, and the only thing the customer sees is Safari saying it "cannot
@@ -78,8 +80,11 @@ pub struct PassBrand {
     pub foreground: String,
     pub label: String,
     /// The org's logo, already sized for the pass. Madar's is used when the
-    /// shop has none.
+    /// shop has none; the Rewards by Madar gift when custom branding is off.
     pub images: Vec<(String, Vec<u8>)>,
+    /// The shop wears its own brand (custom branding on). Off, the card is the
+    /// Rewards by Madar fallback look (`wallet::look`).
+    pub custom: bool,
 }
 
 /// How near a branch the card starts surfacing on the lock screen, in metres.
@@ -235,8 +240,38 @@ fn scrim(img: &mut image::RgbaImage, foreground: &str) {
     }
 }
 
-/// `(org, picture URL, colour)` → the strip's files, `(name, PNG bytes)`.
-type StripCache = moka::future::Cache<(Uuid, String, String), Arc<Vec<(String, Vec<u8>)>>>;
+/// What a strip's bytes depend on: the org, its picture, the pass's colours,
+/// fallback or custom, the CURRENT card's progress and size (the bar is baked
+/// in), and the look's version.
+#[derive(Clone, Hash, PartialEq, Eq, Debug)]
+pub struct StripKey {
+    pub org: Uuid,
+    pub picture: String,
+    pub foreground: String,
+    pub background: String,
+    pub custom: bool,
+    pub progress: i32,
+    pub size: i32,
+    pub look: u32,
+}
+
+impl StripKey {
+    pub fn new(org: Uuid, brand: &crate::orgs::branding::OrgBrand, pass: &PassBrand, progress: i32, size: i32) -> Self {
+        Self {
+            org,
+            picture: brand.card_image_url.clone().unwrap_or_default(),
+            foreground: pass.foreground.clone(),
+            background: pass.background.clone(),
+            custom: pass.custom,
+            progress,
+            size,
+            look: super::look::LOOK_VERSION,
+        }
+    }
+}
+
+/// [`StripKey`] → the strip's files, `(name, PNG bytes)`.
+type StripCache = moka::future::Cache<StripKey, Arc<Vec<(String, Vec<u8>)>>>;
 
 /// The shop's photograph, sized for the pass's strip — cached per org.
 ///
@@ -252,9 +287,10 @@ type StripCache = moka::future::Cache<(Uuid, String, String), Arc<Vec<(String, V
 /// backstop for a picture replaced at the same URL.
 static STRIP_CACHE: LazyLock<StripCache> = LazyLock::new(|| {
     moka::future::Cache::builder()
-        // Each entry is three PNGs — a few hundred KB. A few dozen orgs is the
-        // whole tenancy, so this is small and bounded either way.
-        .max_capacity(64)
+        // Each entry is three PNGs. The bar makes a strip per (org, progress,
+        // card size): a card of N stamps has N of them, so a few dozen orgs
+        // is a few hundred entries.
+        .max_capacity(1024)
         .time_to_live(Duration::from_secs(3600))
         .build()
 });
@@ -270,23 +306,21 @@ static STRIP_CACHE: LazyLock<StripCache> = LazyLock::new(|| {
 pub async fn strip_images_cached(
     org_id: Uuid,
     brand: &crate::orgs::branding::OrgBrand,
-    foreground: &str,
+    pass: &PassBrand,
+    progress: i32,
+    size: i32,
 ) -> Arc<Vec<(String, Vec<u8>)>> {
     // Caching is bypassed under test for the reason in `crate::cache`: one
     // process runs many isolated databases and a shared cache leaks across them.
     if cfg!(test) {
-        return Arc::new(strip_images(brand, foreground));
+        return Arc::new(strip_images(brand, pass, progress, size));
     }
-    let key = (
-        org_id,
-        brand.card_image_url.clone().unwrap_or_default(),
-        foreground.to_string(),
-    );
+    let key = StripKey::new(org_id, brand, pass, progress, size);
     let brand = brand.clone();
-    let fg = foreground.to_string();
+    let pass = pass.clone();
     STRIP_CACHE
         .get_with(key, async move {
-            tokio::task::spawn_blocking(move || Arc::new(strip_images(&brand, &fg)))
+            tokio::task::spawn_blocking(move || Arc::new(strip_images(&brand, &pass, progress, size)))
                 .await
                 // The only way this fails is a panic inside the resize; an
                 // empty strip set is a valid pass, so the card still installs.
@@ -465,52 +499,66 @@ fn palette_png(img: &image::RgbaImage) -> Option<Vec<u8>> {
     )
 }
 
-/// The shop's photograph, sized for the pass's strip.
-///
-/// Empty when there is no picture, which is the ordinary case and a finished
-/// card — every pass looked like that until now.
+/// The strip, at Apple's three scales: the shop's photograph (custom cards,
+/// scrimmed so the balance reads on it) or the card's own ground, with the
+/// progress bar and the "rewards by madar" footer baked in (`wallet::look`).
 ///
 /// **All three scales are kept.** Apple's own guidance is to "provide the
 /// original, @2x, and @3x versions of your art", and nothing in it promises
-/// that a missing @3x is scaled up from @2x — it documents scaling to FILL the
-/// slot, not scaling between the variants a bundle happens to ship. Dropping
-/// `strip@3x.png` would have removed 55% of the pass in one move, and it was
-/// considered and rejected on exactly that: the strip is the largest thing on
-/// the card, every current iPhone Pro is a 3x display, and betting the most
-/// visible image on the card on undocumented fallback behaviour is not the
-/// trade to take when palettising gets the whole pass under target with the
-/// @3x still in it.
+/// that a missing @3x is scaled up from @2x.
 pub fn strip_images(
     brand: &crate::orgs::branding::OrgBrand,
-    foreground: &str,
+    pass: &PassBrand,
+    progress: i32,
+    size: i32,
 ) -> Vec<(String, Vec<u8>)> {
-    strip_images_squeezed(brand, foreground, Squeeze::Small)
+    strip_images_squeezed(brand, pass, progress, size, Squeeze::Small)
 }
 
 pub fn strip_images_squeezed(
     brand: &crate::orgs::branding::OrgBrand,
-    foreground: &str,
+    pass: &PassBrand,
+    progress: i32,
+    size: i32,
     squeeze: Squeeze,
 ) -> Vec<(String, Vec<u8>)> {
-    let Some(img) = brand
-        .card_image_url
-        .as_deref()
-        .and_then(crate::orgs::branding::read_upload)
-    else {
-        return Vec::new();
+    // A photograph only on a custom card; the fallback card is its own ground.
+    let photo = if pass.custom {
+        brand
+            .card_image_url
+            .as_deref()
+            .and_then(crate::orgs::branding::read_upload)
+    } else {
+        None
     };
     STRIP_SIZES
         .iter()
-        .filter_map(|(name, w, h)| {
-            // CatmullRom, not Lanczos3: at strip sizes the two are visually
-            // indistinguishable and Lanczos3 costs several times more CPU —
-            // which is paid on the customer's tap.
-            let mut scaled = img
-                .resize_to_fill(*w, *h, image::imageops::FilterType::CatmullRom)
-                .to_rgba8();
-            // Apple writes the balance across this. Make it safe to write on.
-            scrim(&mut scaled, foreground);
-            encode_png(&scaled, squeeze).map(|b| ((*name).to_string(), b))
+        .enumerate()
+        .filter_map(|(i, (name, w, h))| {
+            let mut band = match &photo {
+                Some(img) => {
+                    // CatmullRom, not Lanczos3: at strip sizes the two are
+                    // visually indistinguishable and Lanczos3 costs several
+                    // times more CPU.
+                    let mut scaled = img
+                        .resize_to_fill(*w, *h, image::imageops::FilterType::CatmullRom)
+                        .to_rgba8();
+                    // Apple writes the balance across this. Make it safe to write on.
+                    scrim(&mut scaled, &pass.foreground);
+                    scaled
+                }
+                None => super::look::ground(*w, *h, &pass.background),
+            };
+            super::look::finish(
+                &mut band,
+                i as u32 + 1,
+                progress,
+                size,
+                &pass.foreground,
+                &pass.background,
+                photo.is_some(),
+            );
+            encode_png(&band, squeeze).map(|b| ((*name).to_string(), b))
         })
         .collect()
 }
@@ -520,13 +568,11 @@ impl Default for PassBrand {
         let p = crate::orgs::branding::Palette::default();
         Self {
             org_name: String::new(),
+            images: super::look::fallback_images(&p.background),
             background: p.background,
             foreground: p.foreground,
             label: p.accent,
-            images: PASS_IMAGES
-                .iter()
-                .map(|(n, b)| ((*n).to_string(), b.to_vec()))
-                .collect(),
+            custom: false,
         }
     }
 }
@@ -650,7 +696,18 @@ pub async fn pass_brand_cached(
 }
 
 pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
-    let d = PassBrand::default();
+    // Custom branding off: the Rewards by Madar card, in the colours every
+    // fallback card already had (the palette is Madar's when the flag is off).
+    if !brand.custom_branding {
+        return PassBrand {
+            org_name: brand.name.clone(),
+            images: super::look::fallback_images(&brand.palette.background),
+            background: brand.palette.background.clone(),
+            foreground: brand.palette.foreground.clone(),
+            label: brand.palette.accent.clone(),
+            custom: false,
+        };
+    }
     let images = brand
         .logo_url
         .as_deref()
@@ -663,7 +720,13 @@ pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
                 .then_some(brand.palette.foreground.as_str());
             images_from_logo(&img, &brand.palette.background, tint)
         })
-        .unwrap_or(d.images);
+        // A custom shop with no logo keeps Madar's mark, as it always had.
+        .unwrap_or_else(|| {
+            PASS_IMAGES
+                .iter()
+                .map(|(n, b)| ((*n).to_string(), b.to_vec()))
+                .collect()
+        });
 
     PassBrand {
         org_name: brand.name.clone(),
@@ -671,6 +734,7 @@ pub fn pass_brand(brand: &crate::orgs::branding::OrgBrand) -> PassBrand {
         foreground: brand.palette.foreground.clone(),
         label: brand.palette.accent.clone(),
         images,
+        custom: true,
     }
 }
 
@@ -717,18 +781,17 @@ pub fn missing_env() -> Vec<String> {
 
 /// The pass as Apple models it.
 ///
-/// Field layout, as decided: the **balance** is the primary field (it is what
-/// staff and customer reconcile against), the **progress** line is secondary,
-/// the member's **name** is auxiliary, and the how-it-works, reward list and
-/// terms go on the back. The barcode is the member token, with the member's name
-/// as `altText` so a teller can eyeball that they scanned the right card.
+/// Field layout: the **balance** is a header field (top right) on the
+/// Rewards by Madar fallback card and the primary field on a custom card; the
+/// **progress** line is secondary; how-it-works and terms go on the back. No
+/// reward text anywhere (owner, 2026-10-19). The barcode is the member token,
+/// with the member's name as `altText` so a teller can eyeball that they
+/// scanned the right card.
 pub fn pass_json(
     member: &MemberRow,
     settings: &LoyaltySettings,
     locations: &[PassLocation],
     copy: &super::CardCopy,
-    // What they are working towards, in the shop's own words.
-    headline: &str,
     brand: &PassBrand,
 ) -> Result<serde_json::Value, AppError> {
     let (Some(pass_type), Some(team)) = (pass_type_id(), team_id()) else {
@@ -756,25 +819,13 @@ pub fn pass_json(
         })
         .unwrap_or_default();
 
-    // Where they are, and — only when there is something to say — what it is
-    // for.
-    //
-    // The reward slot used to print the COST when a shop had curated nothing:
-    // "Reward / 5 orders", which reads as though the reward IS five orders. It
-    // is the price of one, and the stepper beside it already says that. An
-    // empty headline now means no row rather than a false one.
-    let mut secondary = vec![json!({
+    // Where they are. No reward text on the card (owner, 2026-10-19): the
+    // card says how far, never what for.
+    let secondary = vec![json!({
         "key": "progress",
         "label": program,
         "value": progress_line(balance, threshold)
     })];
-    if !headline.trim().is_empty() {
-        secondary.push(json!({
-            "key": "reward",
-            "label": "Reward",
-            "value": headline
-        }));
-    }
 
     let mut back: Vec<serde_json::Value> = super::back_of_card(member, settings, copy)
         .into_iter()
@@ -838,27 +889,7 @@ pub fn pass_json(
             // with a photograph had to give up its balance — but the strip is
             // scrimmed until the worst pixel under the text clears AA, so
             // there is nothing left to give up.
-            "primaryFields": [{
-                "key": "balance",
-                "label": super::google::balance_label(mode),
-                "value": balance
-            }],
-            // Progress and reward SHARE a row. Apple lays several fields in
-            // one row side by side, and having them as separate secondary and
-            // auxiliary rows cost the card a whole band of height for two
-            // short strings — which is most of why it read as tall and empty.
-            "secondaryFields": [
-                {
-                    "key": "progress",
-                    "label": program,
-                    "value": progress_line(balance, threshold)
-                },
-                {
-                    "key": "reward",
-                    "label": "Reward",
-                    "value": headline
-                }
-            ],
+            "secondaryFields": secondary.clone(),
             // A message riding on the card — see `wallet::notices`.
             //
             // Apple has no way to push text. iOS notifies when a FIELD's value
@@ -879,6 +910,21 @@ pub fn pass_json(
             "altText": member.name
         }]
     });
+
+    // The balance. On a custom card it is the primary field, written over the
+    // shop's photograph (scrimmed for it). On the fallback card it sits top
+    // right as a header field (the board's layout), so the strip carries only
+    // the baked progress bar and footer.
+    let balance_field = json!([{
+        "key": "balance",
+        "label": super::google::balance_label(mode),
+        "value": balance
+    }]);
+    if brand.custom {
+        pass["storeCard"]["primaryFields"] = balance_field;
+    } else {
+        pass["storeCard"]["headerFields"] = balance_field;
+    }
 
     // Apple appends `/v1/...` itself, so this is the scope's parent. Without it
     // the device never registers and the pass can never update — which is
@@ -1126,15 +1172,17 @@ async fn build_pass_inner(
         brand: org,
         locations,
         copy,
-        headline,
     } = super::pass_source(pool, member).await?;
     let brand = pass_brand_cached(member.org_id, &org).await;
+    // The bar shows the CURRENT card, as the progress field does.
+    let threshold = settings.default_reward_cost;
+    let progress = madar_loyalty::card::card(member.balance_in(settings.mode()), threshold).progress_to_next;
     // `strip_images_CACHED`, not `strip_images`. The cache landed with its own
     // accessor and the builder went on calling the uncooked one, so every tap
     // still resized and encoded three images up to 1125x432 — the cache existed
     // and was never consulted. This line is the whole of that fix.
-    let strip = strip_images_cached(member.org_id, &org, &brand.foreground).await;
-    let mut pass = pass_json(member, &settings, &locations, &copy, &headline, &brand)?;
+    let strip = strip_images_cached(member.org_id, &org, &brand, progress, threshold).await;
+    let mut pass = pass_json(member, &settings, &locations, &copy, &brand)?;
     if voided {
         mark_voided(&mut pass, chrono::Utc::now());
     }
@@ -1347,7 +1395,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn balance_is_primary_and_progress_is_secondary() {
+    fn the_fallback_card_puts_the_balance_top_right_and_no_reward_text() {
         let _guard = env_guard();
         configured();
         let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
@@ -1356,37 +1404,46 @@ pub(crate) mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();
-        assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
-        // A hundred is past the point where dots are worth counting, so the
-        // field carries the bare ratio — the only case where figures appear.
+        // The board: the balance is a header field (top right), and the strip
+        // below carries only the baked bar and footer.
+        assert_eq!(p["storeCard"]["headerFields"][0]["value"], 30);
+        assert!(p["storeCard"].get("primaryFields").is_none(), "{p}");
+        // A hundred is past the point where dots are worth counting.
         assert_eq!(p["storeCard"]["secondaryFields"][0]["value"], "30 / 100");
-        // No header fields: they sat beside the logo showing the same balance
-        // in small type directly above the same number in large type.
-        assert!(
-            p["storeCard"]["headerFields"]
-                .as_array()
-                .is_none_or(|a| a.is_empty()),
-            "the balance belongs on the card once"
-        );
-        // Progress and reward share ONE row: two short strings did not need a
-        // band of card height each, which is most of why it read as tall.
-        assert_eq!(p["storeCard"]["secondaryFields"][1]["label"], "Reward");
-        assert_eq!(
-            p["storeCard"]["secondaryFields"][1]["value"],
-            "Free espresso"
-        );
+        assert_eq!(p["storeCard"]["secondaryFields"].as_array().unwrap().len(), 1);
+        assert!(!p.to_string().contains("\"reward\""), "no reward row: {p}");
         assert!(
             p["storeCard"]["auxiliaryFields"]
                 .as_array()
                 .is_none_or(|a| a.is_empty()),
             "nothing left below it: {p}"
         );
-        // And the name is still on the card, once, where a teller reads it.
         assert_eq!(p["barcodes"][0]["altText"], "Ali Hassan");
+    }
+
+    #[test]
+    fn a_custom_card_keeps_the_balance_as_its_primary_field() {
+        let _guard = env_guard();
+        configured();
+        let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        let brand = PassBrand {
+            custom: true,
+            ..PassBrand::default()
+        };
+        let p = pass_json(
+            &member(),
+            &s,
+            &[],
+            &crate::loyalty::wallet::CardCopy::default(),
+            &brand,
+        )
+        .unwrap();
+        assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 30);
+        assert!(p["storeCard"].get("headerFields").is_none(), "{p}");
+        assert!(!p.to_string().contains("\"reward\""), "{p}");
     }
 
     #[test]
@@ -1401,13 +1458,12 @@ pub(crate) mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();
         // The stamps balance leads, not the points one.
-        assert_eq!(p["storeCard"]["primaryFields"][0]["value"], 3);
-        assert_eq!(p["storeCard"]["primaryFields"][0]["label"], "Orders");
+        assert_eq!(p["storeCard"]["headerFields"][0]["value"], 3);
+        assert_eq!(p["storeCard"]["headerFields"][0]["label"], "Orders");
         // A stamp card reads as a STEPPER, not as arithmetic: five orders is
         // few enough to count at a glance, and joining the steps shows the
         // direction of travel the way loose dots do not.
@@ -1437,7 +1493,6 @@ pub(crate) mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &brand,
         )
         .unwrap();
@@ -1465,7 +1520,6 @@ pub(crate) mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();
@@ -1642,6 +1696,126 @@ pub(crate) mod tests {
         }
     }
 
+    fn org_brand(custom: bool) -> crate::orgs::branding::OrgBrand {
+        crate::orgs::branding::OrgBrand {
+            name: "Kahwa".into(),
+            logo_url: None,
+            card_image_url: None,
+            palette: crate::orgs::branding::Palette::default(),
+            custom_branding: custom,
+            logo_is_mark: false,
+            social_links: vec![],
+        }
+    }
+
+    #[test]
+    fn the_fallback_card_wears_the_gift_in_the_colours_it_always_had() {
+        let b = pass_brand(&org_brand(false));
+        assert!(!b.custom);
+        // The palette is unchanged: Madar's, exactly as every fallback card had.
+        let p = crate::orgs::branding::Palette::default();
+        assert_eq!((b.background.as_str(), b.foreground.as_str(), b.label.as_str()),
+                   (p.background.as_str(), p.foreground.as_str(), p.accent.as_str()));
+        // Teal is dark (luminance < 0.4), so the PAPER present.
+        assert!(super::super::look::paper_on(&b.background));
+        let logo = &b.images.iter().find(|(n, _)| n == "logo@3x.png").unwrap().1;
+        assert_eq!(logo.as_slice(), include_bytes!("../../../static/wallet/rewards/logo-paper@3x.png"));
+        let icon = &b.images.iter().find(|(n, _)| n == "icon.png").unwrap().1;
+        assert_eq!(icon.as_slice(), include_bytes!("../../../static/wallet/rewards/icon.png"));
+        // A light card gets the ink one.
+        assert!(!super::super::look::paper_on("#F4EFE6"));
+    }
+
+    #[test]
+    fn a_custom_shop_without_a_logo_keeps_madars_mark() {
+        let b = pass_brand(&org_brand(true));
+        assert!(b.custom);
+        let logo = &b.images.iter().find(|(n, _)| n == "logo@3x.png").unwrap().1;
+        assert_eq!(logo.as_slice(), include_bytes!("../../../static/wallet/logo@3x.png"));
+    }
+
+    #[test]
+    fn the_strip_cache_key_moves_with_the_bar_the_look_and_the_branch() {
+        let org = org_brand(false);
+        let pass = pass_brand(&org);
+        let k = |p: i32, n: i32| StripKey::new(uuid::Uuid::nil(), &org, &pass, p, n);
+        assert_eq!(k(3, 6), k(3, 6));
+        assert_ne!(k(3, 6), k(4, 6), "each step is its own strip");
+        assert_ne!(k(3, 6), k(3, 8), "and each card size");
+        assert_eq!(k(3, 6).look, super::super::look::LOOK_VERSION);
+        let custom = PassBrand { custom: true, ..pass.clone() };
+        assert_ne!(k(3, 6), StripKey::new(uuid::Uuid::nil(), &org, &custom, 3, 6));
+    }
+
+    #[test]
+    fn the_strip_bakes_the_bar_and_the_footer_and_nothing_else() {
+        let org = org_brand(false);
+        let pass = pass_brand(&org);
+        let set = strip_images_squeezed(&org, &pass, 2, 6, Squeeze::Exact);
+        let names: Vec<&str> = set.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["strip.png", "strip@2x.png", "strip@3x.png"]);
+        let img = image::load_from_memory(&set[0].1).unwrap().to_rgba8();
+        assert_eq!((img.width(), img.height()), (375, 144));
+        let (fr, fg, fb) = crate::orgs::branding::parse_hex(&pass.foreground).unwrap();
+        let (br, bg, bb) = crate::orgs::branding::parse_hex(&pass.background).unwrap();
+        // Top left is the card's own ground: nothing is drawn where text goes.
+        assert_eq!(img.get_pixel(5, 5).0, [br, bg, bb, 255]);
+        // The bar: 6 segments across 343 px from x=16, gaps of 4. The first is
+        // filled (2 of 6) in the foreground; the last is the track, which is
+        // neither the ground nor the foreground.
+        let bar_y = (0..144).find(|y| img.get_pixel(20, *y).0 == [fr, fg, fb, 255]).expect("a filled step");
+        let last = img.get_pixel(350, bar_y).0;
+        assert_ne!(last, [fr, fg, fb, 255]);
+        assert_ne!(last, [br, bg, bb, 255]);
+        // The footer is below the bar, at the left margin: some pixels there
+        // are no longer the ground.
+        let footer_drawn = (bar_y + 8..144).any(|y| (16..180).any(|x| img.get_pixel(x, y).0 != [br, bg, bb, 255]));
+        assert!(footer_drawn, "the footer is baked in");
+    }
+
+    /// Renders the real strips to LOOK at: the fallback card at a few steps,
+    /// and a custom card over a photograph when one is given.
+    ///
+    ///     MADAR_STRIP_PREVIEW_DIR=/some/dir [MADAR_STRIP_PREVIEW=photo.jpg] \
+    ///       cargo test --lib apple::tests::preview_card_strips -- --nocapture
+    #[test]
+    fn preview_card_strips() {
+        let Some(dir) = std::env::var("MADAR_STRIP_PREVIEW_DIR").ok() else {
+            return;
+        };
+        let org = org_brand(false);
+        let pass = pass_brand(&org);
+        for (p, n) in [(0, 6), (3, 6), (6, 6), (40, 100)] {
+            for (name, bytes) in strip_images_squeezed(&org, &pass, p, n, Squeeze::Exact) {
+                let at = std::path::Path::new(&dir).join(format!("fallback-{p}of{n}-{name}"));
+                std::fs::write(&at, bytes).unwrap();
+                println!("wrote {}", at.display());
+            }
+        }
+        // A light custom card (ink text, ink footer) on its own ground.
+        let light = PassBrand {
+            custom: true,
+            background: "#F4EFE6".into(),
+            foreground: "#14181E".into(),
+            label: "#76828B".into(),
+            ..pass.clone()
+        };
+        for (name, bytes) in strip_images_squeezed(&org_brand(true), &light, 4, 8, Squeeze::Exact) {
+            let at = std::path::Path::new(&dir).join(format!("custom-light-4of8-{name}"));
+            std::fs::write(&at, bytes).unwrap();
+            println!("wrote {}", at.display());
+        }
+        if let Some(photo) = std::env::var("MADAR_STRIP_PREVIEW").ok() {
+            let img = image::open(&photo).expect("a readable photo");
+            let mut band = img.resize_to_fill(750, 288, image::imageops::FilterType::Lanczos3).to_rgba8();
+            scrim(&mut band, &pass.foreground);
+            super::super::look::finish(&mut band, 2, 3, 6, &pass.foreground, &pass.background, true);
+            let at = std::path::Path::new(&dir).join("custom-photo-3of6-strip@2x.png");
+            band.save(&at).unwrap();
+            println!("wrote {}", at.display());
+        }
+    }
+
     #[test]
     fn a_photograph_that_already_reads_is_left_alone() {
         // Dimming a picture that needed no dimming is a worse photograph for
@@ -1717,7 +1891,7 @@ pub(crate) mod tests {
         // Six orders against a reward every five: one waiting, one step made.
         let mut m = member();
         m.visits_balance = 6;
-        let p = pass_json(&m, &s, &[], &copy, "", &PassBrand::default()).unwrap();
+        let p = pass_json(&m, &s, &[], &copy, &PassBrand::default()).unwrap();
         assert_eq!(
             p["storeCard"]["secondaryFields"][0]["label"],
             "Reward ready"
@@ -1731,21 +1905,9 @@ pub(crate) mod tests {
             "and the one they have started, below it"
         );
 
-        // No curated reward means NO reward row. It used to print the cost
-        // under a heading reading "Reward", which says the reward is five
-        // orders; it is the price of one.
+        // The earned row names no item, and there is no reward row at all.
         let rows = p["storeCard"]["auxiliaryFields"].as_array().unwrap();
-        assert!(
-            !rows.iter().any(|f| f["key"] == "reward"),
-            "an empty headline is not a reward"
-        );
-
-        // And with one named, it is there and says what it is.
-        let told = pass_json(&m, &s, &[], &copy, "Free espresso", &PassBrand::default()).unwrap();
-        assert_eq!(
-            told["storeCard"]["auxiliaryFields"][1]["value"],
-            "Free espresso"
-        );
+        assert!(!rows.iter().any(|f| f["key"] == "reward"), "{p}");
     }
 
     #[test]
@@ -1766,7 +1928,6 @@ pub(crate) mod tests {
             &s,
             &[],
             &copy,
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();
@@ -1779,7 +1940,7 @@ pub(crate) mod tests {
 
         let mut m = member();
         m.pass_notice = Some("Happy birthday, Ali 🎂".into());
-        let told = pass_json(&m, &s, &[], &copy, "Free espresso", &PassBrand::default()).unwrap();
+        let told = pass_json(&m, &s, &[], &copy, &PassBrand::default()).unwrap();
         let field = &told["storeCard"]["auxiliaryFields"][0];
         assert_eq!(field["value"], "Happy birthday, Ali 🎂");
         assert_eq!(
@@ -1801,7 +1962,6 @@ pub(crate) mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();
@@ -1860,7 +2020,6 @@ pub(crate) mod tests {
             &s,
             &locs,
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();
@@ -1891,7 +2050,6 @@ pub(crate) mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();
@@ -1952,7 +2110,6 @@ pub(crate) mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
             &PassBrand::default(),
         )
         .unwrap();

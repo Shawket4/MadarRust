@@ -359,7 +359,6 @@ pub async fn google_refresh(
     let brand = crate::orgs::branding::load(pool.get_ref(), member.org_id).await?;
     let locations = wallet::locations_for_member(pool.get_ref(), &member).await?;
     let copy = wallet::card_copy(pool.get_ref(), member.org_id, &settings).await;
-    let headline = wallet::reward_headline(pool.get_ref(), member.org_id, &settings).await;
 
     let mut steps = Vec::new();
     let outcome = wallet::google::save_url_recorded(
@@ -369,7 +368,6 @@ pub async fn google_refresh(
         &brand,
         &locations,
         &copy,
-        &headline,
         &mut steps,
     )
     .await;

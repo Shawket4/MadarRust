@@ -217,6 +217,12 @@ struct SaveClaims {
 /// Google REQUIRES a class to carry a logo.
 pub const MADAR_LOGO_PATH: &str = "/public/loyalty/brand/logo.png";
 
+/// The Rewards by Madar gift (Google's circle-safe 660 px exports) and hero,
+/// for a card whose custom branding is off. Static bytes in the binary.
+pub const REWARDS_LOGO_INK_PATH: &str = "/public/loyalty/brand/rewards/logo-ink.png";
+pub const REWARDS_LOGO_PAPER_PATH: &str = "/public/loyalty/brand/rewards/logo-paper.png";
+pub const REWARDS_HERO_PATH: &str = "/public/loyalty/brand/rewards/hero.png";
+
 /// The brand comes from the ORGANISATION, like Apple's. It used to be read from
 /// `loyalty_settings`, whose UI was removed when branding moved to the org — so
 /// the class carried no logo and no colour, and every Android card came back in
@@ -307,17 +313,27 @@ pub fn loyalty_class(
     // transparent mark gets whatever backing Google chooses — which is how a
     // shop's logo came to read as a pale sticker on its own card. Madar's own
     // mark stands in for a shop that has none, so a class is always valid.
-    let logo = brand
-        .logo_url
-        .as_deref()
-        .map(|u| {
-            format!(
-                "/public/loyalty/brand/{}/logo/{}.png",
-                org_id,
-                crate::orgs::branding::asset_key(u)
-            )
-        })
-        .unwrap_or_else(|| MADAR_LOGO_PATH.to_string());
+    // Custom branding off: the Rewards by Madar gift, ink or paper by the
+    // card's colour (`wallet::look`). On: the shop's logo, else Madar's mark.
+    let logo = if !brand.custom_branding {
+        if super::look::paper_on(&brand.palette.background) {
+            REWARDS_LOGO_PAPER_PATH.to_string()
+        } else {
+            REWARDS_LOGO_INK_PATH.to_string()
+        }
+    } else {
+        brand
+            .logo_url
+            .as_deref()
+            .map(|u| {
+                format!(
+                    "/public/loyalty/brand/{}/logo/{}.png",
+                    org_id,
+                    crate::orgs::branding::asset_key(u)
+                )
+            })
+            .unwrap_or_else(|| MADAR_LOGO_PATH.to_string())
+    };
     if let Some(uri) = super::absolute_api_url(&logo) {
         class["programLogo"] = json!({ "sourceUri": { "uri": uri } });
     }
@@ -336,7 +352,6 @@ pub fn loyalty_object(
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
     copy: &super::CardCopy,
-    headline: &str,
 ) -> serde_json::Value {
     let mode = settings.mode();
     let balance = member.balance_in(mode);
@@ -391,19 +406,11 @@ pub fn loyalty_object(
                 balance_label(mode),
             ),
         },
-        // What they are working towards, not how far along they are — the
-        // figures are already in the slot above. "Get a free drink" is the
-        // thing a customer opens the card to be reminded of.
         // The second slot: the live stepper when the first is showing earned
-        // rewards, otherwise the reward's own name — and NOTHING when a shop
-        // has curated none. It used to print the cost there under a heading
-        // reading "Reward", which says the reward is five orders. It is the
-        // price of one.
-        "secondaryLoyaltyPoints": match (
-            earned_line(balance, settings.default_reward_cost),
-            headline.trim().is_empty(),
-        ) {
-            (Some(_), _) => with_localized(
+        // rewards, otherwise nothing. No reward text on the card (owner,
+        // 2026-10-19): the card says how far, never what for.
+        "secondaryLoyaltyPoints": match earned_line(balance, settings.default_reward_cost) {
+            Some(_) => with_localized(
                 json!({
                     "label": balance_label(mode),
                     "balance": { "string": progress_line(balance, settings.default_reward_cost) }
@@ -411,15 +418,7 @@ pub fn loyalty_object(
                 "localizedLabel",
                 balance_label(mode),
             ),
-            (None, false) => with_localized(
-                json!({
-                    "label": "Reward",
-                    "balance": { "string": headline }
-                }),
-                "localizedLabel",
-                "Reward",
-            ),
-            (None, true) => serde_json::Value::Null,
+            None => serde_json::Value::Null,
         },
         "barcode": {
             "type": "QR_CODE",
@@ -492,6 +491,12 @@ pub fn loyalty_object(
 /// dislikes would fail the whole insert — which is a decoration taking down the
 /// card it decorates. That already happened once.
 pub fn hero_image(org_id: uuid::Uuid, brand: &OrgBrand) -> Option<serde_json::Value> {
+    // The fallback card's hero is the design system's Paper panel (the gift
+    // and the footer line), which reads on any shop colour.
+    if !brand.custom_branding {
+        let uri = super::absolute_api_url(REWARDS_HERO_PATH)?;
+        return Some(json!({ "sourceUri": { "uri": uri } }));
+    }
     let url = brand.card_image_url.as_deref()?;
     let uri = super::absolute_api_url(&format!(
         "/public/loyalty/brand/{}/banner/{}.png",
@@ -631,7 +636,6 @@ pub async fn save_url(
     brand: &OrgBrand,
     locations: &[super::PassLocation],
     copy: &super::CardCopy,
-    headline: &str,
 ) -> Result<Option<String>, AppError> {
     save_url_recorded(
         pool,
@@ -640,7 +644,6 @@ pub async fn save_url(
         brand,
         locations,
         copy,
-        headline,
         &mut Vec::new(),
     )
     .await
@@ -659,7 +662,6 @@ pub async fn save_url_recorded(
     brand: &OrgBrand,
     locations: &[super::PassLocation],
     copy: &super::CardCopy,
-    headline: &str,
     steps: &mut Vec<WalletStep>,
 ) -> Result<Option<String>, AppError> {
     let (Some(issuer), Some(email), Some(key)) = (issuer_id(), sa_email(), sa_key()) else {
@@ -699,7 +701,7 @@ pub async fn save_url_recorded(
     )
     .await?;
     let object_id = ensure_object(
-        &token, &issuer, member, settings, locations, copy, headline, brand, steps,
+        &token, &issuer, member, settings, locations, copy, brand, steps,
     )
     .await?;
     if member.google_object_id.as_deref() != Some(object_id.as_str()) {
@@ -969,12 +971,11 @@ async fn ensure_object(
     settings: &LoyaltySettings,
     locations: &[super::PassLocation],
     copy: &super::CardCopy,
-    headline: &str,
     brand: &OrgBrand,
     steps: &mut Vec<WalletStep>,
 ) -> Result<String, AppError> {
     let id = object_id(issuer, member);
-    let body = loyalty_object(issuer, member, settings, locations, copy, headline);
+    let body = loyalty_object(issuer, member, settings, locations, copy);
     // Google already holds this exact card, and `decorate` has already run for
     // it. Nothing to write, and nothing to wait for.
     if already_pushed(&id, &body).await {
@@ -1450,13 +1451,12 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
     let locations = super::locations_for_member(pool, member)
         .await
         .unwrap_or_default();
-    let headline = super::reward_headline(pool, member.org_id, &settings).await;
     let copy = super::card_copy(pool, member.org_id, &settings).await;
     // The whole card, through the same builder the save path uses, and PUT
     // rather than PATCH — for both of the reasons `ensure_object` gives. One
     // writer and one shape: a card that changed on a sale and a card that
     // changed on a save cannot end up different objects.
-    let body = loyalty_object(&issuer, member, &settings, &locations, &copy, &headline);
+    let body = loyalty_object(&issuer, member, &settings, &locations, &copy);
     let http = http();
     let resp = http
         .put(format!("{WALLET_API}/loyaltyObject/{object_id}"))
@@ -1640,7 +1640,7 @@ mod tests {
         // reason for the REST provisioning is checkable rather than folklore.
         let embedded = json!({
             "loyaltyClasses": [loyalty_class("3388000000022345678", uuid::Uuid::nil(), &brand, &s, &[])],
-            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &crate::loyalty::wallet::CardCopy::default(), "Free espresso")],
+            "loyaltyObjects": [loyalty_object("3388000000022345678", &m, &s, &locs, &crate::loyalty::wallet::CardCopy::default())],
         });
         assert!(
             as_jwt(&embedded) > MAX_SAVE_JWT,
@@ -1815,6 +1815,28 @@ mod tests {
     }
 
     #[test]
+    fn a_fallback_card_wears_the_gift_and_the_paper_hero() {
+        let _guard = super::super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe { std::env::set_var("PUBLIC_LOYALTY_BASE_URL", "https://loyalty.madar-pos.cloud") };
+        let s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        let fallback = OrgBrand { name: "Kahwa".into(), custom_branding: false, ..OrgBrand::default() };
+        let class = loyalty_class("338", uuid::Uuid::nil(), &fallback, &s, &[]);
+        // Madar's teal is dark: the paper present.
+        assert_eq!(
+            class["programLogo"]["sourceUri"]["uri"],
+            format!("https://loyalty.madar-pos.cloud/api{REWARDS_LOGO_PAPER_PATH}")
+        );
+        assert_eq!(
+            hero_image(uuid::Uuid::nil(), &fallback).unwrap()["sourceUri"]["uri"],
+            format!("https://loyalty.madar-pos.cloud/api{REWARDS_HERO_PATH}")
+        );
+        // A custom shop with no photograph still has no hero, as before.
+        let custom = OrgBrand { custom_branding: true, ..fallback };
+        assert!(hero_image(uuid::Uuid::nil(), &custom).is_none());
+    }
+
+    #[test]
     fn the_progress_is_on_the_card_not_in_the_list_under_it() {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
@@ -1825,18 +1847,15 @@ mod tests {
             &s,
             &[],
             &crate::loyalty::wallet::CardCopy::default(),
-            "Free espresso",
         );
 
-        // `loyaltyPoints` and `secondaryLoyaltyPoints` render on the card face:
-        // how far along in the larger slot, and what it is FOR in the other.
+        // `loyaltyPoints` renders on the card face: how far along. No reward
+        // text anywhere on the card (owner, 2026-10-19), so the second slot is
+        // empty until a card is full.
         assert_eq!(obj["loyaltyPoints"]["label"], "Orders");
         assert_eq!(obj["loyaltyPoints"]["balance"]["string"], "●─●─●─○─○");
-        assert_eq!(obj["secondaryLoyaltyPoints"]["label"], "Reward");
-        assert_eq!(
-            obj["secondaryLoyaltyPoints"]["balance"]["string"],
-            "Free espresso"
-        );
+        assert!(obj.get("secondaryLoyaltyPoints").is_none_or(|v| v.is_null()), "{obj}");
+        assert!(!obj.to_string().contains("\"Reward\""), "no reward row: {obj}");
 
         // `textModulesData` does NOT render on the face — it is the list below
         // the card, which is Google's version of Apple's BACK. The same content
