@@ -158,7 +158,8 @@ pub async fn item(pool: &PgPool, org: Uuid, cat: Uuid, name: &str, price: i32) -
 /// 10 g of `ing` per unit of `item` at `size` (the legacy recipe rows the
 /// cost path and the stock deduction read).
 pub async fn recipe(pool: &PgPool, item: Uuid, ing: Uuid, size: Option<&str>, grams: i32) {
-    super::legacy_catalog::item_recipe(pool, item, size.unwrap_or("one_size"), ing, grams, "g").await;
+    super::legacy_catalog::item_recipe(pool, item, size.unwrap_or("one_size"), ing, grams, "g")
+        .await;
 }
 
 pub async fn grant_legacy(pool: &PgPool) {

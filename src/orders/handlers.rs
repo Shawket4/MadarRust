@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// How old a sale replayed from a till's queue may be and still fire to the
+/// kitchen (owner, 2026-10-18). Older is an offline backlog: history.
+pub const REPLAYED_SALE_FIRES_MINUTES: i64 = 30;
+
 use crate::{
     auth::jwt::Claims,
     errors::{AppError, AppErrorResponse},
@@ -3269,8 +3273,22 @@ async fn create_order_once(
     let mut warnings: Vec<String> = Vec::new();
 
     // Build the slim kitchen display lines BEFORE the insert loop consumes
-    // `resolved_items` (live orders fire to the KDS after the items commit).
-    let kitchen_lines: Vec<crate::kitchen::KitchenLine> = if actor.replay {
+    // `resolved_items` (the order fires to the KDS after the items commit).
+    //
+    // A replayed sale fires too while it is fresh: a till sends every sale
+    // through its queue, online or not, so "live only" kept every counter sale
+    // off the kitchen screen (spec PS-2). An older one is an offline backlog,
+    // history, and must not appear on the board late (owner, 2026-10-18).
+    let fire_kitchen = !actor.replay
+        || body.created_at.is_some_and(|t| {
+            Utc::now() - t <= chrono::Duration::minutes(REPLAYED_SALE_FIRES_MINUTES)
+        });
+    // Derived from the sale's own key, as a round's are from its key, so the
+    // till's LAN projection of this sale and the server's row are one ticket.
+    let kitchen_ticket_id = body
+        .idempotency_key
+        .map(crate::kitchen::derive_kitchen_ticket_id);
+    let kitchen_lines: Vec<crate::kitchen::KitchenLine> = if !fire_kitchen {
         Vec::new()
     } else {
         resolved_items
@@ -3287,11 +3305,17 @@ async fn create_order_once(
                     size_label: ri.size_label.clone(),
                     modifiers: ri.kitchen_modifiers(),
                     notes: ri.notes.clone(),
-                    // Teller orders fire to the KDS LIVE (online) only → server ids.
+                    // Numbered below, once combo headers are out.
                     kitchen_item_id: None,
                     // A counter order has no bill lines to void one of.
                     open_ticket_item_id: None,
                 }
+            })
+            .enumerate()
+            .map(|(i, mut kl)| {
+                kl.kitchen_item_id =
+                    kitchen_ticket_id.map(|kt| crate::kitchen::derive_kitchen_item_id(kt, i));
+                kl
             })
             .collect()
     };
@@ -3571,11 +3595,27 @@ async fn create_order_once(
         }
     }
 
-    // Fire the order to the kitchen — LIVE orders only (a replayed offline order is
-    // historical and must not re-appear on the KDS). Same source-agnostic substrate
-    // the waiter tickets use; the routing mode decides where it renders client-side.
+    // Fire the order to the kitchen (`fire_kitchen` above: live, or a fresh
+    // replay). Same source-agnostic substrate the waiter tickets use; the
+    // routing mode decides where it renders client-side.
+    let derived_kitchen_ticket_id = kitchen_ticket_id;
     let mut kitchen_ticket_id: Option<Uuid> = None;
-    if !actor.replay && !kitchen_lines.is_empty() {
+    // A cart the till sent to the kitchen before charging it: the sale takes
+    // that ticket over (even a late replay, so it never stays the cart's).
+    let taken_over = match body.idempotency_key {
+        Some(key) => {
+            crate::kitchen::take_over_cart_ticket(
+                &mut tx,
+                actor.org_id,
+                key,
+                order.id,
+                order.order_ref.as_deref(),
+            )
+            .await?
+        }
+        None => None,
+    };
+    if !kitchen_lines.is_empty() {
         kitchen_ticket_id = crate::kitchen::emit_kitchen_ticket(
             &mut tx,
             &crate::kitchen::EmitKitchen {
@@ -3585,11 +3625,16 @@ async fn create_order_once(
                 round_number: 1,
                 table_label: None,
                 kitchen_ref: order.order_ref.as_deref(),
-                kitchen_ticket_id: None, // live-only fire → server-generated id
+                kitchen_ticket_id: derived_kitchen_ticket_id,
             },
             &kitchen_lines,
         )
         .await?;
+        // What was sold is what the kitchen makes; lines it finished stay finished.
+        if let Some(kt) = taken_over {
+            crate::kitchen::refresh_kitchen_lines(&mut tx, kt, &kitchen_lines).await?;
+            kitchen_ticket_id = Some(kt);
+        }
     }
 
     // Record what the rewards spent, inside the order's own transaction: a free
@@ -3689,15 +3734,15 @@ async fn create_order_once(
         crate::loyalty::wallet::push_update(pool.get_ref(), member.id);
     }
 
-    if let (Some(hub), Some(kt_id)) = (hub, kitchen_ticket_id) {
-        crate::kitchen::publish_kitchen(
-            pool.get_ref(),
-            hub,
-            body.branch_id,
-            "kitchen.fired",
-            kt_id,
-        )
-        .await;
+    if let (Some(hub), Some(kt_id)) = (hub, kitchen_ticket_id.or(taken_over)) {
+        // A ticket already on the board (its cart was sent) changed; it did
+        // not fire again, so no screen is rung twice for one order.
+        let event = if taken_over.is_some() {
+            "kitchen.changed"
+        } else {
+            "kitchen.fired"
+        };
+        crate::kitchen::publish_kitchen(pool.get_ref(), hub, body.branch_id, event, kt_id).await;
     }
     Ok(HttpResponse::Created().json(OrderFull {
         order,

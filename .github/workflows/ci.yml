@@ -41,6 +41,17 @@ jobs:
       # needs `cargo sqlx prepare` committed with it.
       SQLX_OFFLINE: "true"
     steps:
+      # Since the repo went private (2026-10-18) its runner is smaller, and the
+      # suite's per-test databases filled the disk (PR #32: "No space left on
+      # device" in dawam_roster). Drop the SDKs this job never uses. No image
+      # prune: the Postgres service container runs from one.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
+            /usr/local/share/powershell /usr/local/share/chromium /usr/local/share/boost \
+            /opt/microsoft /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy \
+            /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/go /usr/local/lib/android
+          df -h /
       - uses: actions/checkout@v4
       # madar-shared is private: with MADAR_SHARED_TOKEN set, cargo fetches it
       # through the git CLI with the token; with the secret empty this is a no-op

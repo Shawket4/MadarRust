@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kitchen_tickets SET status = 'firing', ready_at = NULL, closed_at = NULL, close_reason = NULL, closed_by = NULL WHERE id = $1 AND close_reason = 'bumped' AND EXISTS ( SELECT 1 FROM kitchen_ticket_items WHERE kitchen_ticket_id = $1 AND voided_at IS NULL AND bumped_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c30f80ffa286fa93e6b8eb280c63252b696fa48cab7345a085072420aa5bfb36"
+}
