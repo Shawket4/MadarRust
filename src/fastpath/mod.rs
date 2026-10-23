@@ -95,6 +95,7 @@ pub struct Stats {
     pub epoch_hits: u64,
     pub account_hits: u64,
     pub branch_hits: u64,
+    pub session_hits: u64,
 }
 
 #[derive(Default)]
@@ -117,6 +118,8 @@ struct State {
     /// user → (org, that org's authz epoch).
     user_epoch: HashMap<Uuid, Entry<(Option<Uuid>, i64)>>,
     accounts: HashMap<Uuid, Entry<(Option<Uuid>, Account)>>,
+    /// session key (`auth::sessions::key`) → (org, still live?).
+    auth_sessions: HashMap<Uuid, Entry<(Option<Uuid>, bool)>>,
     catalog_rev: HashMap<Uuid, Entry<i64>>,
     stats: Stats,
 }
@@ -254,13 +257,15 @@ pub fn on_branch_changed(branch: Uuid) {
     s.idle.remove(&branch);
 }
 
-/// `authz_epoch` or `authz_user`: grants, an account or a session cutoff
-/// changed somewhere. Rare, so every user-keyed entry goes.
+/// `authz_epoch` or `authz_user`: grants, an account, a session cutoff or a
+/// session's revocation changed somewhere. Rare, so every user-keyed entry
+/// goes.
 pub(crate) fn on_authz() {
     let mut s = state();
     s.authz += 1;
     s.accounts.clear();
     s.user_epoch.clear();
+    s.auth_sessions.clear();
 }
 
 /// `catalog_revision` for `org`.
@@ -378,6 +383,44 @@ pub fn put_account(cap: Capture, user: Uuid, org: Option<Uuid>, acc: Account) {
             seal,
             filled: Instant::now(),
             until: None,
+        },
+    );
+}
+
+/// Whether a session (`auth::sessions`) is live: not revoked, not expired.
+pub fn session_live(key: Uuid) -> Option<bool> {
+    let mut s = state();
+    let e = s.auth_sessions.get(&key)?;
+    let (org, live) = e.value;
+    if !s.valid(e, org, None, None) {
+        return None;
+    }
+    s.stats.session_hits += 1;
+    Some(live)
+}
+
+/// Store a session's answer. A live one is kept no later than `until` (its
+/// expiry), so a cached "live" never outlasts the session itself.
+pub fn put_session_live(
+    cap: Capture,
+    key: Uuid,
+    org: Option<Uuid>,
+    live: bool,
+    until: Option<Instant>,
+) {
+    let mut s = state();
+    if !s.unchanged(&cap, None, None) {
+        return;
+    }
+    let seal = s.seal(org, None, None);
+    insert_bounded(
+        &mut s.auth_sessions,
+        key,
+        Entry {
+            value: (org, live),
+            seal,
+            filled: Instant::now(),
+            until,
         },
     );
 }

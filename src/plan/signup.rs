@@ -27,7 +27,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::handlers::LoginResponse;
-use crate::auth::jwt::{JwtSecret, create_token};
+use crate::auth::jwt::JwtSecret;
 use crate::delivery::{normalize_phone, whatsapp};
 use crate::errors::{AppError, AppErrorResponse};
 use crate::models::{User, UserPublic, UserRole};
@@ -390,6 +390,7 @@ pub async fn verify(
         (status = 429, description = "RATE_LIMITED"),
         AppErrorResponse))]
 pub async fn signup(
+    req: actix_web::HttpRequest,
     pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
     body: web::Json<SignupRequest>,
@@ -542,8 +543,21 @@ pub async fn signup(
     .bind(done.owner_id)
     .fetch_one(pool.get_ref())
     .await?;
-    let token = create_token(&secret, user.id, user.org_id, UserRole::OrgAdmin, None, 24)
-        .map_err(|_| AppError::Internal)?;
+    let meta = crate::auth::sessions::RequestMeta::of(&req);
+    let token = crate::auth::sessions::issue(
+        &mut *pool.acquire().await?,
+        &secret,
+        crate::auth::sessions::NewSession {
+            user_id: user.id,
+            org_id: user.org_id,
+            role: UserRole::OrgAdmin,
+            branch_id: None,
+            kind: crate::auth::sessions::Kind::Signup,
+            hours: crate::auth::sessions::DASHBOARD_HOURS,
+            meta: &meta,
+        },
+    )
+    .await?;
     sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
         .bind(user.id)
         .execute(pool.get_ref())

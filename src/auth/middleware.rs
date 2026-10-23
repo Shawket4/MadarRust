@@ -113,6 +113,21 @@ where
             // test apps that don't register it simply skip the check (no behaviour
             // change, no DB hit). The pool is read the same way so a stray test
             // without one degrades gracefully rather than panicking.
+            // The session behind the token (`auth::sessions`): revoked or
+            // expired → 401 SESSION_REVOKED. Like the org check below, skipped
+            // only where no pool is registered (bare test apps).
+            if let Some(pool) = req.app_data::<web::Data<PgPool>>().cloned() {
+                let meta = || {
+                    crate::auth::sessions::RequestMeta::from_parts(req.peer_addr(), req.headers())
+                };
+                if let Err(e) =
+                    crate::auth::sessions::check(pool.get_ref(), &claims, &token, meta).await
+                {
+                    let resp = e.error_response().map_into_boxed_body();
+                    return Ok(req.into_response(resp).map_into_right_body());
+                }
+            }
+
             if let (Some(org_id), Some(cache), Some(pool)) = (
                 claims.org_id(),
                 req.app_data::<web::Data<OrgStatusCache>>().cloned(),

@@ -241,6 +241,7 @@ async fn the_ceiling_cuts_an_owner_on_free_and_a_plan_change_moves_it_at_once(po
         branch_id: None,
         exp: usize::MAX,
         iat: 0,
+        sid: None,
     };
     assert!(
         madar_rust::permissions::checker::check_permission(&pool, &claims, "inventory", "read")

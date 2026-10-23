@@ -26,6 +26,7 @@ pub fn configure_api(cfg: &mut web::ServiceConfig, read_pool: web::Data<PgPool>)
     // A shop page's HTML, asked for by nginx on the shop's own host.
     .configure(crate::tenant_shell::configure)
     .configure(auth::routes::configure)
+    .configure(auth::admin_sessions::configure)
     .configure(orgs::routes::configure)
     // A shop signing itself up on the Free plan (public, WhatsApp-verified).
     .configure(crate::plan::signup::configure)

@@ -758,6 +758,7 @@ async fn kitchen_role_can_bump_but_not_touch_the_pos(pool: PgPool) {
         branch_id: None,
         exp: 9_999_999_999,
         iat: 0,
+        sid: None,
     };
 
     // GRANTED — the kitchen workflow.
@@ -854,6 +855,7 @@ async fn teller_can_open_a_ticket_on_a_table(pool: PgPool) {
         branch_id: None,
         exp: 9_999_999_999,
         iat: 0,
+        sid: None,
     };
 
     for (res, act) in [
@@ -902,6 +904,7 @@ async fn a_branch_manager_holds_the_till_grants(pool: PgPool) {
         branch_id: None,
         exp: 9_999_999_999,
         iat: 0,
+        sid: None,
     };
 
     for (res, act) in [
@@ -948,6 +951,7 @@ async fn voiding_and_refunding_are_separate_from_ringing_up(pool: PgPool) {
         branch_id: None,
         exp: 9_999_999_999,
         iat: 0,
+        sid: None,
     };
     let t = claims(teller, UserRole::Teller);
 

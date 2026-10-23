@@ -98,6 +98,7 @@ async fn by_extractor(pool: &PgPool, shops: &[&Shop]) -> Vec<(usize, Seen)> {
                     branch_id: None,
                     exp: usize::MAX,
                     iat: 0,
+                    sid: None,
                 });
                 actix_web::dev::Service::call(srv, req)
             })

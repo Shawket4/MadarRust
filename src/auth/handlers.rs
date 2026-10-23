@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    auth::jwt::{Claims, JwtSecret, create_token},
+    auth::jwt::{Claims, JwtSecret},
     errors::{AppError, AppErrorResponse},
     models::{User, UserPublic, UserRole},
 };
@@ -729,17 +729,31 @@ pub async fn login(
     // A PIN sign-in is a till session whatever the role: branch-bound, short.
     let token_branch_id = if till_session { body.branch_id } else { None };
 
-    let hours = if token_branch_id.is_some() { 12 } else { 24 };
+    let hours = if token_branch_id.is_some() {
+        crate::auth::sessions::TILL_HOURS
+    } else {
+        crate::auth::sessions::DASHBOARD_HOURS
+    };
 
-    let token = create_token(
+    let meta = crate::auth::sessions::RequestMeta::of(&http_req);
+    let token = crate::auth::sessions::issue(
+        &mut *pool.acquire().await?,
         &secret,
-        user.id,
-        user.org_id,
-        user.role.clone(),
-        token_branch_id,
-        hours,
+        crate::auth::sessions::NewSession {
+            user_id: user.id,
+            org_id: user.org_id,
+            role: user.role.clone(),
+            branch_id: token_branch_id,
+            kind: if body.pin.is_some() {
+                crate::auth::sessions::Kind::Pin
+            } else {
+                crate::auth::sessions::Kind::Password
+            },
+            hours,
+            meta: &meta,
+        },
     )
-    .map_err(|_| AppError::Internal)?;
+    .await?;
 
     sqlx::query("UPDATE users SET last_login_at = NOW() WHERE id = $1")
         .bind(user.id)
@@ -909,15 +923,21 @@ pub async fn device_session(
     .await?;
     tx.commit().await?;
 
-    let token = create_token(
+    let meta = crate::auth::sessions::RequestMeta::of(&req);
+    let token = crate::auth::sessions::issue(
+        &mut *pool.acquire().await?,
         &secret,
-        user.id,
-        Some(org_id),
-        UserRole::Kitchen,
-        Some(branch_id),
-        12,
+        crate::auth::sessions::NewSession {
+            user_id: user.id,
+            org_id: Some(org_id),
+            role: UserRole::Kitchen,
+            branch_id: Some(branch_id),
+            kind: crate::auth::sessions::Kind::Device,
+            hours: crate::auth::sessions::TILL_HOURS,
+            meta: &meta,
+        },
     )
-    .map_err(|_| AppError::Internal)?;
+    .await?;
     let (tax_policy, currency_code, require_table_for_orders) =
         resolve_tax_context(pool.get_ref(), Some(org_id), Some(branch_id)).await?;
     let plan = crate::plan::plan_name(pool.get_ref(), Some(org_id)).await?;

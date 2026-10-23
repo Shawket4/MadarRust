@@ -15,6 +15,11 @@ pub struct Claims {
     pub branch_id: Option<String>,
     pub exp: usize,
     pub iat: usize,
+    /// The server-side session this token belongs to (`auth_sessions.id`,
+    /// see `auth::sessions`). Absent on tokens issued before sessions existed,
+    /// which are adopted as a session on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 impl Claims {
@@ -31,6 +36,9 @@ impl Claims {
     }
     /// The branch this token was issued for. Tellers always carry one (the
     /// branch they signed into); other roles are not branch-bound (`None`).
+    pub fn session_id(&self) -> Option<Uuid> {
+        self.sid.as_deref().and_then(|s| Uuid::parse_str(s).ok())
+    }
     pub fn branch_id(&self) -> Option<Uuid> {
         self.branch_id
             .as_deref()
@@ -59,6 +67,20 @@ pub fn create_token(
     branch_id: Option<Uuid>,
     hours: i64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
+    create_session_token(secret, user_id, org_id, role, branch_id, hours, None)
+}
+
+/// [`create_token`] naming its session. Every sign-in goes through
+/// `auth::sessions::issue`, which inserts the row and calls this.
+pub fn create_session_token(
+    secret: &JwtSecret,
+    user_id: Uuid,
+    org_id: Option<Uuid>,
+    role: UserRole,
+    branch_id: Option<Uuid>,
+    hours: i64,
+    sid: Option<Uuid>,
+) -> Result<String, jsonwebtoken::errors::Error> {
     let now = Utc::now();
     let claims = Claims {
         sub: user_id.to_string(),
@@ -67,6 +89,7 @@ pub fn create_token(
         branch_id: branch_id.map(|b| b.to_string()),
         iat: now.timestamp() as usize,
         exp: (now + Duration::hours(hours)).timestamp() as usize,
+        sid: sid.map(|s| s.to_string()),
     };
     encode(
         &Header::default(),

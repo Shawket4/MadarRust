@@ -350,6 +350,10 @@ async fn authenticate(req: &ServiceRequest) -> Result<Option<String>, AppError> 
 
     // A Madar user's session (dashboard, POS).
     if let Ok(claims) = verify_token(&secret, &token) {
+        crate::auth::sessions::check(pool.get_ref(), &claims, &token, || {
+            crate::auth::sessions::RequestMeta::from_parts(req.peer_addr(), req.headers())
+        })
+        .await?;
         let till_punch = req.path().ends_with("/attendance/till-punch");
         check_user_org(pool.get_ref(), &claims, till_punch).await?;
         req.extensions_mut().insert(claims);
@@ -390,6 +394,9 @@ async fn authenticate(req: &ServiceRequest) -> Result<Option<String>, AppError> 
             branch_id: None,
             exp: staff.exp,
             iat: staff.iat,
+            // A staff token is its device's session (`staff_devices`), not a
+            // user session; `auth::sessions` never sees it.
+            sid: None,
         });
     }
     let anchor = crate::staff::dawam::clock::sign_anchor(&secret, principal.device_id, Utc::now());

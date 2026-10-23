@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::jwt::{JwtSecret, create_token};
+use crate::auth::jwt::JwtSecret;
 use crate::errors::AppError;
 use crate::models::UserRole;
 
@@ -51,6 +51,7 @@ struct SessionResponse {
 }
 
 pub async fn create_session(
+    req: actix_web::HttpRequest,
     pool: web::Data<PgPool>,
     secret: web::Data<JwtSecret>,
     cfg: web::Data<DemoConfig>,
@@ -111,15 +112,21 @@ pub async fn create_session(
     }
     // (seed_full borrows the tx connection; it returns before commit below)
 
-    let token = create_token(
+    let meta = crate::auth::sessions::RequestMeta::of(&req);
+    let token = crate::auth::sessions::issue(
+        &mut tx,
         secret.get_ref(),
-        user_id,
-        Some(org_id),
-        UserRole::OrgAdmin,
-        None,
-        cfg.ttl_hours,
+        crate::auth::sessions::NewSession {
+            user_id,
+            org_id: Some(org_id),
+            role: UserRole::OrgAdmin,
+            branch_id: None,
+            kind: crate::auth::sessions::Kind::Demo,
+            hours: cfg.ttl_hours,
+            meta: &meta,
+        },
     )
-    .map_err(|_| AppError::Internal)?;
+    .await?;
 
     tx.commit().await?;
 

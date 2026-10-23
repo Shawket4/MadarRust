@@ -1,7 +1,7 @@
 use actix_governor::Governor;
 use actix_web::{middleware::Condition, web};
 
-use crate::auth::{handlers, middleware::JwtMiddleware};
+use crate::auth::{handlers, middleware::JwtMiddleware, session_cookie};
 use crate::rate_limit::{PeerIpOrLocalhost, rate_limiting_enabled};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -62,6 +62,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::resource("/staff/refresh")
                     .wrap(Condition::new(limited, Governor::new(&login_gov)))
                     .route(web::post().to(crate::staff::dawam::signin::refresh)),
+            )
+            // The browser session the first-party web apps share (dashboard,
+            // Rewards by Madar): see `auth::session_cookie`. One resource for
+            // all three methods; POST verifies its bearer token itself.
+            .service(
+                web::resource("/session")
+                    .wrap(Condition::new(limited, Governor::new(&login_gov)))
+                    .route(web::post().to(session_cookie::share))
+                    .route(web::get().to(session_cookie::adopt))
+                    .route(web::delete().to(session_cookie::end)),
             )
             .service(
                 web::resource("/resolve-branch")

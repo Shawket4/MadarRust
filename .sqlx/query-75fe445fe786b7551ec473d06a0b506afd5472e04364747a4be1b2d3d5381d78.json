@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE auth_sessions\n            SET revoked_at = now(), revoked_by = $3, revoke_reason = $4\n          WHERE org_id = $1 AND revoked_at IS NULL\n            AND ($2::text[] IS NULL OR kind = ANY($2))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "75fe445fe786b7551ec473d06a0b506afd5472e04364747a4be1b2d3d5381d78"
+}

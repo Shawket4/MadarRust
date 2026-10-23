@@ -86,10 +86,17 @@ pub fn default_gateway(route_table: &str) -> Option<IpAddr> {
 /// value a client sends never gets through it; behind Cloudflare `$remote_addr`
 /// is already the visitor (`cloudflare-real-ip.conf`), and `api.` is DNS-only.
 pub fn client_ip(req: &ServiceRequest) -> Option<IpAddr> {
-    let peer = req.peer_addr()?.ip();
+    client_ip_of(req.peer_addr(), req.headers())
+}
+
+/// [`client_ip`] over the parts an `HttpRequest` has too.
+pub fn client_ip_of(
+    peer: Option<std::net::SocketAddr>,
+    headers: &actix_web::http::header::HeaderMap,
+) -> Option<IpAddr> {
+    let peer = peer?.ip();
     if TRUSTED_PROXIES.contains(&peer)
-        && let Some(forwarded) = req
-            .headers()
+        && let Some(forwarded) = headers
             .get("x-real-ip")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<IpAddr>().ok())

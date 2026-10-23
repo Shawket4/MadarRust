@@ -42,9 +42,10 @@ fn not_found() -> AppError {
     AppError::NotFound("Not found".into())
 }
 
-/// Bearer claims when a valid token is present; `None` otherwise (the asset
-/// route also accepts signed URLs, so a missing token is not an error).
-fn optional_claims(req: &HttpRequest) -> Option<Claims> {
+/// Bearer claims when a valid token of a live session is present; `None`
+/// otherwise (the asset route also accepts signed URLs, so a missing token is
+/// not an error, and a revoked one is simply no token).
+async fn optional_claims(req: &HttpRequest) -> Option<Claims> {
     if let Some(c) = req.extensions().get::<Claims>() {
         return Some(c.clone());
     }
@@ -55,7 +56,15 @@ fn optional_claims(req: &HttpRequest) -> Option<Claims> {
         .ok()?
         .strip_prefix("Bearer ")?;
     let secret = req.app_data::<web::Data<JwtSecret>>()?;
-    verify_token(secret, token).ok()
+    let claims = verify_token(secret, token).ok()?;
+    if let Some(pool) = req.app_data::<web::Data<sqlx::PgPool>>() {
+        crate::auth::sessions::check(pool.get_ref(), &claims, token, || {
+            crate::auth::sessions::RequestMeta::of(req)
+        })
+        .await
+        .ok()?;
+    }
+    Some(claims)
 }
 
 fn claims(req: &HttpRequest) -> Result<Claims, AppError> {
@@ -106,7 +115,7 @@ pub async fn serve_asset(
         _ => false,
     };
     let jwt_ok = !signed
-        && optional_claims(&req).is_some_and(|c| match org_id {
+        && optional_claims(&req).await.is_some_and(|c| match org_id {
             None => true,
             Some(o) => {
                 c.org_id() == Some(o) || (c.role == UserRole::SuperAdmin && c.org_id.is_none())
