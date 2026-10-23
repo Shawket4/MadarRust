@@ -415,8 +415,15 @@ pub async fn project(
                                 'service_charge_taxable', COALESCE(b.service_charge_taxable, o.service_charge_taxable)), \
                         'org_require_table_for_orders', o.require_table_for_orders, \
                         'plan', o.plan, \
-                        'loyalty', (SELECT json_build_object('enabled', l.enabled, 'mode', l.mode, \
-                                'program_name', l.program_name, 'program_name_ar', l.program_name_ar) \
+                        'loyalty', (SELECT CASE WHEN l.mode = 'visits' AND EXISTS (SELECT 1 FROM loyalty_stamp_tracks st \
+                                        WHERE st.org_id = l.org_id AND st.position > 1) \
+                                THEN json_build_object('enabled', l.enabled, 'mode', l.mode, \
+                                'program_name', l.program_name, 'program_name_ar', l.program_name_ar, \
+                                'tracks', (SELECT json_agg(json_build_object('position', st.position, 'name_en', st.name_en, \
+                                        'name_ar', st.name_ar, 'size', st.size, 'shape', st.shape, 'colour', st.colour) \
+                                        ORDER BY st.position) FROM loyalty_stamp_tracks st WHERE st.org_id = l.org_id)) \
+                                ELSE json_build_object('enabled', l.enabled, 'mode', l.mode, \
+                                'program_name', l.program_name, 'program_name_ar', l.program_name_ar) END \
                               FROM loyalty_settings l WHERE l.org_id = b.org_id AND (l.branch_id = b.id OR l.branch_id IS NULL) \
                              ORDER BY l.branch_id NULLS LAST LIMIT 1), \
                         'staff_pool', (SELECT json_build_object('enabled', sp.enabled, \

@@ -1055,3 +1055,22 @@ mod tests {
     // Deliberately ONE test, not two: these read process-global environment,
     // and two tests mutating it race in the same process.
 }
+
+/// Every installed card of an org is out of date (its look or its tracks
+/// changed): the refresh sweep rebuilds and pushes them, 200 per tick, as after
+/// `20261025110000_rewards_pass_look_refresh`. Inside the caller's transaction.
+pub async fn mark_org_stale(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE loyalty_memberships c SET pass_updated_at = NULL \
+          WHERE c.org_id = $1 AND c.pass_updated_at IS NOT NULL AND c.deleted_at IS NULL \
+            AND (c.google_object_id IS NOT NULL \
+                 OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = c.id))",
+    )
+    .bind(org_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}

@@ -482,6 +482,10 @@ pub struct OrderItem {
     #[sqlx(default)]
     #[serde(default)]
     pub reward_units: i32,
+    /// The stamp track (2–4) whose reward covered it; absent for track 1.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_track: Option<i16>,
     /// Minor units the reward took off this line (0 for a paid line).
     #[sqlx(default)]
     #[serde(default)]
@@ -855,6 +859,10 @@ pub struct LoyaltyRedemptionInput {
     /// How many of that line's units the reward covers. Defaults to one.
     #[serde(default)]
     pub units: Option<i32>,
+    /// The stamp track (2–4) that pays for it; absent = track 1 (the
+    /// programme's own card, as every released till sends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<u8>,
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
@@ -3853,7 +3861,8 @@ async fn insert_order_lines(
                      is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id,
                      line_kind, combo_line_id, combo_slot_id, combo_slot_name,
                      combo_slot_name_translations,
-                     combo_unit_price, combo_share, combo_surcharge, deal_minor"#,
+                     combo_unit_price, combo_share, combo_surcharge, deal_minor,
+                     NULL::int2 AS "reward_track""#,
         order_id,
         org_id,
         &id,
@@ -4964,7 +4973,7 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
                 is_reward, reward_units, reward_covered, staff_comp_minor, staff_drink_id, \
                 line_kind, combo_line_id, combo_slot_id, combo_slot_name, \
                 combo_slot_name_translations, \
-                combo_unit_price, combo_share, combo_surcharge, deal_minor \
+                combo_unit_price, combo_share, combo_surcharge, deal_minor, reward_track \
          FROM order_items WHERE order_id = ANY($1) \
          ORDER BY COALESCE(combo_line_id, id), combo_line_id IS NOT NULL, id",
     )

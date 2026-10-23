@@ -59,6 +59,10 @@ pub struct CounterStampRequest {
     /// One per attempt, made by the page (a UUID). A retry with the same key
     /// stamps nothing new.
     pub idempotency_key: String,
+    /// The stamp track (1–4); absent = track 1. A track 2–4 stamps `items`
+    /// stamps (or one with its "per sale" setting).
+    #[serde(default)]
+    pub track: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -67,6 +71,9 @@ pub struct CounterRedeemRequest {
     pub customer_id: Uuid,
     /// One per attempt, made by the page (a UUID).
     pub idempotency_key: String,
+    /// The stamp track (1–4) to complete; absent = track 1.
+    #[serde(default)]
+    pub track: Option<u8>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -107,9 +114,10 @@ async fn prior(
     key: &str,
     customer_id: Uuid,
     kind: &str,
+    track: u8,
 ) -> Result<Option<i32>, AppError> {
-    let row: Option<(Uuid, String, i32)> = sqlx::query_as(
-        "SELECT customer_id, kind::text, points FROM loyalty_transactions
+    let row: Option<(Uuid, String, i32, Option<i16>)> = sqlx::query_as(
+        "SELECT customer_id, kind::text, points, track FROM loyalty_transactions
           WHERE org_id = $1 AND idempotency_key = $2",
     )
     .bind(org_id)
@@ -118,7 +126,11 @@ async fn prior(
     .await?;
     match row {
         None => Ok(None),
-        Some((c, k, p)) if c == customer_id && k == kind => Ok(Some(p)),
+        Some((c, k, p, t))
+            if c == customer_id && k == kind && t.unwrap_or(1) == i16::from(track) =>
+        {
+            Ok(Some(p))
+        }
         Some(_) => Err(refused(
             CODE_KEY_REUSED,
             "That request key was already used for something else",
@@ -133,6 +145,7 @@ struct Ctx {
     /// The shop's balance ceiling, if any (trims a stamp, never fails it).
     cap: Option<i32>,
     settings: super::settings::LoyaltySettings,
+    tracks: Vec<super::tracks::TrackDef>,
 }
 
 /// Who is asking, and may they: `loyalty.use` (the teller's "scan cards,
@@ -176,6 +189,7 @@ async fn context(
     let (catalogue, _) = load_effective_rewards(pool, org_id, branch_id).await?;
     let target = model::reward_target(&settings, &catalogue);
     let cap = super::settings::effective_balance_cap(&settings, &catalogue);
+    let tracks = super::tracks::load(pool, org_id, settings.mode()).await?;
     Ok((
         Ctx {
             org_id,
@@ -183,6 +197,7 @@ async fn context(
             target,
             cap,
             settings,
+            tracks,
         },
         claims.user_id_safe().ok(),
     ))
@@ -197,8 +212,14 @@ async fn result(
     let fresh = model::find_by_id(pool, ctx.member.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
+    let mut view = fresh.clone().view(Mode::Visits, ctx.target);
+    if ctx.tracks.len() > 1 {
+        let b = super::tracks::balances(pool, fresh.id).await?;
+        view.tracks =
+            super::tracks::member_tracks(&ctx.tracks, fresh.visits_balance, ctx.target, &b);
+    }
     Ok(HttpResponse::Ok().json(CounterResult {
-        member: fresh.view(Mode::Visits, ctx.target),
+        member: view,
         stamps,
         already,
     }))
@@ -226,8 +247,12 @@ pub async fn stamp(
         )));
     }
     let (ctx, actor) = context(&claims, pool, body.branch_id, body.customer_id).await?;
-    if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "earn").await? {
+    let track = body.track.unwrap_or(1);
+    if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "earn", track).await? {
         return result(pool, &ctx, p, true).await;
+    }
+    if track != 1 {
+        return stamp_track(pool, &ctx, body.branch_id, key, track, body.items, actor).await;
     }
 
     // The visit as the stamp rule sees a sale: one line of `items` units, no
@@ -265,7 +290,7 @@ pub async fn stamp(
     if stamps == 0 {
         // Nothing written: a racing retry with this key won, or the card is at
         // the shop's ceiling.
-        if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "earn").await? {
+        if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "earn", 1).await? {
             return result(pool, &ctx, p, true).await;
         }
         return Err(refused(
@@ -294,8 +319,12 @@ pub async fn redeem(
     let claims = authorize(&req, pool).await?;
     let key = valid_key(&body.idempotency_key)?;
     let (ctx, actor) = context(&claims, pool, body.branch_id, body.customer_id).await?;
-    if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "redeem").await? {
+    let track = body.track.unwrap_or(1);
+    if let Some(p) = prior(pool, ctx.org_id, key, ctx.member.id, "redeem", track).await? {
         return result(pool, &ctx, p, true).await;
+    }
+    if track != 1 {
+        return redeem_track(pool, &ctx, body.branch_id, key, track, actor).await;
     }
     let size = ctx.target;
     let mut tx = pool.begin().await?;
@@ -331,11 +360,135 @@ pub async fn redeem(
     .rows_affected();
     tx.commit().await?;
     if inserted == 0 {
-        return match prior(pool, ctx.org_id, key, ctx.member.id, "redeem").await? {
+        return match prior(pool, ctx.org_id, key, ctx.member.id, "redeem", 1).await? {
             Some(p) => result(pool, &ctx, p, true).await,
             None => Err(AppError::Internal),
         };
     }
     wallet::push_update(pool, ctx.member.id);
     result(pool, &ctx, -size, false).await
+}
+
+/// Stamp a track 2–4 at the counter: `items` stamps (one with its "per sale"
+/// setting), trimmed by the track's ceiling, never refused for it unless the
+/// card is already at it.
+#[allow(clippy::too_many_arguments)]
+async fn stamp_track(
+    pool: &PgPool,
+    ctx: &Ctx,
+    branch_id: Uuid,
+    key: &str,
+    track: u8,
+    items: i32,
+    actor: Option<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let def = super::tracks::find(&ctx.tracks, track)?.clone();
+    let want = if def.per_item { items } else { 1 };
+    let mut tx = pool.begin().await?;
+    // Locked (created if new), so two stamps racing under a ceiling serialise.
+    sqlx::query(
+        "INSERT INTO loyalty_track_balances (org_id, customer_id, position) VALUES ($1,$2,$3) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(ctx.org_id)
+    .bind(ctx.member.id)
+    .bind(i16::from(track))
+    .execute(&mut *tx)
+    .await?;
+    let balance: i32 = sqlx::query_scalar(
+        "SELECT balance FROM loyalty_track_balances WHERE customer_id = $1 AND position = $2 FOR UPDATE",
+    )
+    .bind(ctx.member.id)
+    .bind(i16::from(track))
+    .fetch_one(&mut *tx)
+    .await?;
+    let stamps = madar_card::tracks::stamps_within_cap(balance, want, def.cap);
+    if stamps <= 0 {
+        return Err(refused(
+            CODE_CARD_AT_CAP,
+            "This card is at the shop's limit; complete it before stamping more",
+        ));
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO loyalty_transactions
+            (org_id, customer_id, branch_id, kind, currency, points, created_by, source,
+             idempotency_key, track)
+         VALUES ($1, $2, $3, 'earn', 'visits', $4, $5, $6, $7, $8)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(ctx.org_id)
+    .bind(ctx.member.id)
+    .bind(branch_id)
+    .bind(stamps)
+    .bind(actor)
+    .bind(model::Source::Counter.as_str())
+    .bind(key)
+    .bind(i16::from(track))
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    if inserted == 0 {
+        return match prior(pool, ctx.org_id, key, ctx.member.id, "earn", track).await? {
+            Some(p) => result(pool, ctx, p, true).await,
+            None => Err(AppError::Internal),
+        };
+    }
+    wallet::push_update(pool, ctx.member.id);
+    result(pool, ctx, stamps, false).await
+}
+
+/// Complete a full track 2–4: deduct exactly its size; extra stamps stay.
+async fn redeem_track(
+    pool: &PgPool,
+    ctx: &Ctx,
+    branch_id: Uuid,
+    key: &str,
+    track: u8,
+    actor: Option<Uuid>,
+) -> Result<HttpResponse, AppError> {
+    let def = super::tracks::find(&ctx.tracks, track)?;
+    let size = def.size.unwrap_or(0);
+    let mut tx = pool.begin().await?;
+    let balance: i32 = sqlx::query_scalar(
+        "SELECT balance FROM loyalty_track_balances WHERE customer_id = $1 AND position = $2 FOR UPDATE",
+    )
+    .bind(ctx.member.id)
+    .bind(i16::from(track))
+    .fetch_optional(&mut *tx)
+    .await?
+    .unwrap_or(0);
+    if !madar_card::tracks::can_complete(balance, size) {
+        return Err(refused(
+            CODE_CARD_NOT_FULL,
+            &format!("This card has {balance} of {size} stamps; it is not full yet"),
+        ));
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO loyalty_transactions
+            (org_id, customer_id, branch_id, kind, currency, points, created_by, source,
+             idempotency_key, track)
+         VALUES ($1, $2, $3, 'redeem', 'visits', $4, $5, $6, $7, $8)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(ctx.org_id)
+    .bind(ctx.member.id)
+    .bind(branch_id)
+    .bind(-size)
+    .bind(actor)
+    .bind(model::Source::Counter.as_str())
+    .bind(key)
+    .bind(i16::from(track))
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    if inserted == 0 {
+        return match prior(pool, ctx.org_id, key, ctx.member.id, "redeem", track).await? {
+            Some(p) => result(pool, ctx, p, true).await,
+            None => Err(AppError::Internal),
+        };
+    }
+    wallet::push_update(pool, ctx.member.id);
+    result(pool, ctx, -size, false).await
 }

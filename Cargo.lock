@@ -2663,7 +2663,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "madar-authz"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "argon2",
  "chrono",
@@ -2672,9 +2672,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "madar-card"
+version = "0.6.0"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
+dependencies = [
+ "madar-loyalty",
+ "serde",
+ "utoipa",
+]
+
+[[package]]
 name = "madar-catalog"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "madar-money",
  "madar-units",
@@ -2685,7 +2695,7 @@ dependencies = [
 [[package]]
 name = "madar-dawam"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2698,7 +2708,7 @@ dependencies = [
 [[package]]
 name = "madar-ids"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "serde",
 ]
@@ -2706,7 +2716,7 @@ dependencies = [
 [[package]]
 name = "madar-inventory"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "chrono",
  "madar-authz",
@@ -2721,7 +2731,7 @@ dependencies = [
 [[package]]
 name = "madar-loyalty"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "serde",
 ]
@@ -2729,7 +2739,7 @@ dependencies = [
 [[package]]
 name = "madar-menu"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "serde",
  "utoipa",
@@ -2738,7 +2748,7 @@ dependencies = [
 [[package]]
 name = "madar-money"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2751,7 +2761,7 @@ dependencies = [
 [[package]]
 name = "madar-plan"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "madar-authz",
  "serde",
@@ -2786,6 +2796,7 @@ dependencies = [
  "infer",
  "jsonwebtoken",
  "madar-authz",
+ "madar-card",
  "madar-catalog",
  "madar-dawam",
  "madar-ids",
@@ -2840,7 +2851,7 @@ dependencies = [
 [[package]]
 name = "madar-sync"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "serde",
  "serde_json",
@@ -2851,7 +2862,7 @@ dependencies = [
 [[package]]
 name = "madar-till"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "chrono",
  "madar-money",
@@ -2861,7 +2872,7 @@ dependencies = [
 [[package]]
 name = "madar-time"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -2871,7 +2882,7 @@ dependencies = [
 [[package]]
 name = "madar-units"
 version = "0.6.0"
-source = "git+https://github.com/Shawket4/madar-shared?tag=v0.11.0#6724636d22c0519e79ea2ec4669b0ba860fd1ab3"
+source = "git+https://github.com/Shawket4/madar-shared?tag=v0.12.0#1233a9c583c6f5bd79b23c3dd0f2b18838516db7"
 dependencies = [
  "serde",
 ]

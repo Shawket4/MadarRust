@@ -46,6 +46,11 @@ pub struct ScanResult {
     /// enforces it before Charge so the server's refusal is never the first
     /// the teller hears of it.
     pub max_rewards_per_order: Option<i32>,
+    /// Tracks 2–4's rewards (each of a track's items at its size), when the
+    /// card has more than one track. `rewards` stays track 1's only: a
+    /// released till offers what is in it against the track-1 balance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_rewards: Option<Vec<super::tracks::TrackRewards>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -85,7 +90,12 @@ pub async fn lookup(
     let recent = model::ledger(pool.get_ref(), member.id, 10).await?;
     let mode = settings.mode();
     let target = model::reward_target(&settings, &all_rewards);
-    let view = member.clone().view(mode, target);
+    let mut view = member.clone().view(mode, target);
+    let defs = super::tracks::load(pool.get_ref(), org_id, mode).await?;
+    let track_balances = super::tracks::balances(pool.get_ref(), member.id).await?;
+    view.tracks =
+        super::tracks::member_tracks(&defs, member.balance_in(mode), target, &track_balances);
+    let track_rewards = super::tracks::track_rewards(pool.get_ref(), &defs, member.id).await?;
     // Only what this balance can actually buy, priced in the live currency. A
     // screen that lists a reward the customer cannot afford is a screen that
     // tempts a teller into handing it over anyway.
@@ -105,6 +115,7 @@ pub async fn lookup(
         any_item: settings.reward_any_item,
         any_item_cost: settings.default_reward_cost,
         max_rewards_per_order: settings.max_rewards_per_order,
+        track_rewards,
     }))
 }
 
@@ -462,6 +473,9 @@ pub struct AdjustRequest {
     /// Signed. Negative takes points away.
     pub points: i32,
     pub note: Option<String>,
+    /// The stamp track (2–4) to adjust; absent = track 1 (the balance above).
+    #[serde(default)]
+    pub track: Option<u8>,
 }
 
 #[utoipa::path(post, path = "/loyalty/adjust", tag = "loyalty", operation_id = "loyalty_adjust",
@@ -508,6 +522,49 @@ pub async fn adjust(
     let mode = settings.mode();
     let target = model::reward_target(&settings, &rewards);
 
+    if let Some(t) = body.track.filter(|t| *t > 1) {
+        // A stamp track 2–4: the same reasons and the same floor, on its own balance.
+        let defs = super::tracks::load(pool.get_ref(), org_id, mode).await?;
+        super::tracks::find(&defs, t)?;
+        if body.points == 0 {
+            return Err(AppError::BadRequest(
+                "An adjustment of zero points changes nothing".into(),
+            ));
+        }
+        let have = super::tracks::balances(pool.get_ref(), member.id)
+            .await?
+            .get(&t)
+            .copied()
+            .unwrap_or(0);
+        if body.points < 0 && have + body.points < 0 {
+            return Err(AppError::BadRequest(format!(
+                "{} has {have} on that track; that adjustment would go negative",
+                member.name
+            )));
+        }
+        sqlx::query(
+            "INSERT INTO loyalty_transactions \
+                (org_id, customer_id, branch_id, kind, currency, points, note, created_by, source, track) \
+             VALUES ($1,$2,$3,'adjust','visits',$4,$5,$6,'manual',$7)",
+        )
+        .bind(org_id)
+        .bind(member.id)
+        .bind(body.branch_id)
+        .bind(body.points)
+        .bind(&note)
+        .bind(claims.user_id_safe().ok())
+        .bind(i16::from(t))
+        .execute(pool.get_ref())
+        .await?;
+        wallet::push_update(pool.get_ref(), member.id);
+        let fresh = model::find_by_id(pool.get_ref(), member.id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
+        let mut view = fresh.clone().view(mode, target);
+        view.tracks = super::tracks::for_member(pool.get_ref(), &fresh, mode, target).await?;
+        return Ok(HttpResponse::Ok().json(view));
+    }
+
     let view = model::adjust(
         pool.get_ref(),
         &member,
@@ -522,12 +579,25 @@ pub async fn adjust(
     wallet::push_update(pool.get_ref(), member.id);
     // The card page's and the passes' figures (madar-shared), not balance ≥ target.
     let card = madar_loyalty::card::card(view.balance, target);
+    let tracks = super::tracks::for_member(pool.get_ref(), &member, mode, target)
+        .await?
+        .map(|mut ts| {
+            if let Some(t1) = ts.iter_mut().find(|t| t.position == 1) {
+                t1.balance = view.balance;
+                t1.rewards_ready = card.rewards_ready;
+                t1.progress_to_next = card.progress_to_next;
+                t1.points_to_next_reward = card.points_to_next_reward;
+                t1.can_redeem = card.can_redeem;
+            }
+            ts
+        });
     Ok(HttpResponse::Ok().json(MemberView {
         next_reward_cost: target,
         rewards_ready: card.rewards_ready,
         progress_to_next: card.progress_to_next,
         points_to_next_reward: card.points_to_next_reward,
         can_redeem: card.can_redeem,
+        tracks,
         ..view
     }))
 }
@@ -738,8 +808,11 @@ pub async fn get_member(
     let mode = scope.mode();
     let target = model::reward_target(&scope, &rewards);
     let ledger = model::ledger(pool.get_ref(), member.id, 200).await?;
+    let tracks = super::tracks::for_member(pool.get_ref(), &member, mode, target).await?;
+    let mut view = member.view(mode, target);
+    view.tracks = tracks;
     Ok(HttpResponse::Ok().json(MemberDetail {
-        member: member.view(mode, target),
+        member: view,
         ledger,
     }))
 }

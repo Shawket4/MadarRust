@@ -100,6 +100,11 @@ pub struct MemberView {
     pub can_redeem: bool,
     pub locale: String,
     pub enrolled_at: chrono::DateTime<chrono::Utc>,
+    /// Every stamp track of the card (track 1 first, its figures equal to the
+    /// fields above), present only when the shop runs more than one. The
+    /// fields above stay track 1's for ever (released tills read them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<Vec<super::tracks::MemberTrack>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -178,6 +183,7 @@ impl MemberRow {
             lifetime_visits: self.lifetime_visits,
             locale: self.locale,
             enrolled_at: self.enrolled_at,
+            tracks: None,
         }
     }
 }
@@ -485,6 +491,10 @@ pub struct LedgerEntry {
     pub created_by: Option<Uuid>,
     #[sqlx(default)]
     pub created_by_name: Option<String>,
+    /// The stamp track this row moved (2–4); absent for track 1.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track: Option<i16>,
 }
 
 pub async fn ledger(
@@ -496,7 +506,7 @@ pub async fn ledger(
         "SELECT t.id, t.kind::text AS kind, t.source, t.reverses_id, t.currency, t.points, \
                 t.branch_id, b.name AS branch_name, \
                 t.order_id, t.basis_piastres, m.name AS reward_name, t.note, t.created_at, \
-                t.created_by, u.name AS created_by_name \
+                t.created_by, u.name AS created_by_name, t.track \
            FROM loyalty_transactions t \
            LEFT JOIN branches b ON b.id = t.branch_id \
            LEFT JOIN users u ON u.id = t.created_by \

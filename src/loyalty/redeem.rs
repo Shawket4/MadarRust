@@ -36,6 +36,8 @@ pub struct PlannedRedemption {
     pub currency: String,
     /// Total spent for this line: the reward's cost × units.
     pub cost: i32,
+    /// The stamp track that pays: 1 (the programme's card) or 2–4.
+    pub track: u8,
 }
 
 /// The whole plan for one sale. Empty when nothing was redeemed, which is the
@@ -158,6 +160,7 @@ fn planned(p: madar_loyalty::Planned, currency: &str) -> PlannedRedemption {
         units: i32::try_from(p.units).unwrap_or(i32::MAX),
         currency: currency.into(),
         cost: i32::try_from(p.cost).unwrap_or(i32::MAX),
+        track: 1,
     }
 }
 
@@ -170,7 +173,17 @@ fn structural_lines(
 ) -> Vec<PlannedRedemption> {
     madar_loyalty::replay_lines(&plan_lines(items), &plan_asks(redemptions))
         .into_iter()
-        .map(|p| planned(p, ""))
+        .map(|p| {
+            let track = redemptions
+                .iter()
+                .find(|r| r.item_index == Some(p.line))
+                .and_then(|r| r.track)
+                .unwrap_or(1);
+            PlannedRedemption {
+                track,
+                ..planned(p, "")
+            }
+        })
         .collect()
 }
 
@@ -213,6 +226,30 @@ fn refused(r: madar_loyalty::Refusal, member_name: &str) -> AppError {
         R::BalanceShort { balance, spent } => AppError::Conflict(format!(
             "{member_name} has {balance}; those rewards cost {spent}"
         )),
+    }
+}
+
+/// A refusal of the planner across tracks: track 1's as ever, a track 2–4's
+/// with a stable code the till words (POS_MULTITRACK_DESIGN.md §4.4 #11).
+fn refused_on_track(r: madar_loyalty::tracks::TrackRefusal, member_name: &str) -> AppError {
+    use madar_loyalty::Refusal as R;
+    use madar_loyalty::tracks::TrackRefusalKind as K;
+    match (r.track, r.refusal) {
+        (t, K::TrackUnknown) => AppError::Refused {
+            code: super::tracks::CODE_TRACK_UNKNOWN,
+            reason: format!("This card has no track {}", t.unwrap_or(0)),
+        },
+        (Some(t), K::Plan { reason: R::NotOnOffer }) if t > 1 => AppError::Refused {
+            code: super::tracks::CODE_TRACK_NOT_ON_OFFER,
+            reason: format!("That item is not one of track {t}'s rewards"),
+        },
+        (Some(t), K::Plan { reason: R::BalanceShort { balance, spent } }) if t > 1 => {
+            AppError::Refused {
+                code: super::tracks::CODE_TRACK_BALANCE_SHORT,
+                reason: format!("{member_name} has {balance} on track {t}; those rewards cost {spent}"),
+            }
+        }
+        (_, K::Plan { reason }) => refused(reason, member_name),
     }
 }
 
@@ -271,6 +308,59 @@ async fn plan_strict(
         max_per_order: settings.max_rewards_per_order.map(i64::from),
         balance: i64::from(member.balance_in(mode)),
     };
+    // A sale asking a stamp track 2–4 for a reward: madar-shared's planner
+    // across tracks (one reward per line, each track its own balance, one
+    // shared ceiling). A sale on track 1 alone never reaches it.
+    if redemptions.iter().any(|r| r.track.unwrap_or(1) != 1) {
+        let defs = super::tracks::load(pool, org_id, mode).await?;
+        let balances = super::tracks::balances(pool, member.id).await?;
+        let mut programmes = vec![madar_loyalty::tracks::TrackProgramme {
+            track: 1,
+            programme: programme.clone(),
+        }];
+        for d in defs.iter().filter(|d| d.position > 1) {
+            programmes.push(madar_loyalty::tracks::track_programme(
+                d.position,
+                &d.items.iter().map(Uuid::to_string).collect::<Vec<_>>(),
+                i64::from(d.size.unwrap_or(0)),
+                i64::from(balances.get(&d.position).copied().unwrap_or(0)),
+            ));
+        }
+        let asks: Vec<madar_loyalty::tracks::TrackAsk> = redemptions
+            .iter()
+            .map(|r| madar_loyalty::tracks::TrackAsk {
+                line: r.item_index,
+                units: r.units.map(i64::from),
+                track: r.track,
+            })
+            .collect();
+        let plan = madar_loyalty::tracks::plan_tracks(
+            &plan_lines(items),
+            &programmes,
+            &asks,
+            settings.max_rewards_per_order.map(i64::from),
+            madar_loyalty::Mode::Server,
+        )
+        .map_err(|r| refused_on_track(r, &member.name))?;
+        let lines = plan
+            .tracks
+            .into_iter()
+            .flat_map(|t| {
+                let track = t.track;
+                let currency = if track == 1 { mode.as_str() } else { "visits" };
+                t.plan.lines.into_iter().map(move |p| PlannedRedemption {
+                    track,
+                    ..planned(p, currency)
+                })
+            })
+            .collect();
+        return Ok(RedemptionPlan {
+            member: Some(member),
+            lines,
+            refused: None,
+        });
+    }
+
     let plan = madar_loyalty::plan(
         &plan_lines(items),
         &programme,
@@ -330,19 +420,13 @@ pub async fn record(
     let Some(member) = &plan.member else {
         return Ok(None);
     };
-    let currency = plan
-        .lines
+    // Track 1's lines as ever; a track 2–4's against its own balance, locked
+    // the same way (POS_MULTITRACK_DESIGN.md §2).
+    let one: Vec<&PlannedRedemption> = plan.lines.iter().filter(|l| l.track <= 1).collect();
+    let currency = one
         .first()
         .map(|l| l.currency.clone())
-        .unwrap_or_default();
-    let balance: Option<i32> = sqlx::query_scalar(
-        "SELECT CASE WHEN $2 = 'visits' THEN visits_balance ELSE points_balance END \
-           FROM loyalty_memberships WHERE id = $1 FOR UPDATE",
-    )
-    .bind(member.id)
-    .bind(&currency)
-    .fetch_optional(&mut **tx)
-    .await?;
+        .unwrap_or_else(|| "visits".into());
     // A retry of an order whose rows already landed must not be judged against
     // the balance those rows already spent.
     let already: i64 = sqlx::query_scalar(
@@ -351,24 +435,67 @@ pub async fn record(
     .bind(order_id)
     .fetch_one(&mut **tx)
     .await?;
-    let spent = plan.spent();
-    if already == 0 && balance.unwrap_or(0) < spent {
-        let why = format!(
-            "{} has {}; those rewards cost {spent}",
-            member.name,
-            balance.unwrap_or(0)
-        );
-        if lenient {
-            return Ok(Some(why));
+    if !one.is_empty() {
+        let balance: Option<i32> = sqlx::query_scalar(
+            "SELECT CASE WHEN $2 = 'visits' THEN visits_balance ELSE points_balance END \
+               FROM loyalty_memberships WHERE id = $1 FOR UPDATE",
+        )
+        .bind(member.id)
+        .bind(&currency)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let spent = one.iter().fold(0i32, |a, l| a.saturating_add(l.cost));
+        if already == 0 && balance.unwrap_or(0) < spent {
+            let why = format!(
+                "{} has {}; those rewards cost {spent}",
+                member.name,
+                balance.unwrap_or(0)
+            );
+            if lenient {
+                return Ok(Some(why));
+            }
+            return Err(AppError::Conflict(why));
         }
-        return Err(AppError::Conflict(why));
+    }
+    let mut tracks: Vec<u8> = plan.lines.iter().map(|l| l.track).filter(|t| *t > 1).collect();
+    tracks.sort_unstable();
+    tracks.dedup();
+    for t in tracks {
+        let balance: Option<i32> = sqlx::query_scalar(
+            "SELECT balance FROM loyalty_track_balances WHERE customer_id = $1 AND position = $2 FOR UPDATE",
+        )
+        .bind(member.id)
+        .bind(i16::from(t))
+        .fetch_optional(&mut **tx)
+        .await?;
+        let spent = plan
+            .lines
+            .iter()
+            .filter(|l| l.track == t)
+            .fold(0i32, |a, l| a.saturating_add(l.cost));
+        if already == 0 && balance.unwrap_or(0) < spent {
+            let why = format!(
+                "{} has {} on track {t}; those rewards cost {spent}",
+                member.name,
+                balance.unwrap_or(0)
+            );
+            if lenient {
+                return Ok(Some(why));
+            }
+            return Err(AppError::Refused {
+                code: super::tracks::CODE_TRACK_BALANCE_SHORT,
+                reason: why,
+            });
+        }
     }
     for line in &plan.lines {
+        let track = (line.track > 1).then_some(i16::from(line.track));
+        let item_id = item_ids.get(line.item_index).copied();
         sqlx::query(
             "INSERT INTO loyalty_transactions \
                 (org_id, customer_id, branch_id, kind, currency, points, order_id, \
-                 order_line_index, reward_menu_item_id, created_by, source, order_item_id) \
-             VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9,'redemption',$10) \
+                 order_line_index, reward_menu_item_id, created_by, source, order_item_id, track) \
+             VALUES ($1,$2,$3,'redeem',$4,$5,$6,$7,$8,$9,'redemption',$10,$11) \
              ON CONFLICT DO NOTHING",
         )
         .bind(org_id)
@@ -380,9 +507,18 @@ pub async fn record(
         .bind(line.item_index as i32)
         .bind(line.menu_item_id)
         .bind(created_by)
-        .bind(item_ids.get(line.item_index).copied())
+        .bind(item_id)
+        .bind(track)
         .execute(&mut **tx)
         .await?;
+        // The order line remembers which track paid (receipts, history).
+        if let (Some(t), Some(id)) = (track, item_id) {
+            sqlx::query("UPDATE order_items SET reward_track = $2 WHERE id = $1")
+                .bind(id)
+                .bind(t)
+                .execute(&mut **tx)
+                .await?;
+        }
     }
     Ok(None)
 }

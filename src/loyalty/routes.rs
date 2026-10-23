@@ -33,6 +33,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 // What FILLS a card, beside what it buys.
                 .route("/earning-items", web::get().to(settings::get_earning_items))
                 .route("/earning-items", web::put().to(settings::put_earning_items))
+                // Stamp tracks: one card, up to four rewards.
+                .route("/tracks", web::get().to(super::tracks::get_tracks))
+                .route("/tracks", web::put().to(super::tracks::put_tracks))
                 .route("/lookup", web::post().to(handlers::lookup))
                 .route("/award", web::post().to(award::award))
                 .route("/counter/stamp", web::post().to(super::counter::stamp))

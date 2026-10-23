@@ -121,6 +121,11 @@ pub struct AwardResult {
     /// for, and the response carries the balance that resulted.
     pub already_awarded: bool,
     pub order_id: Uuid,
+    /// What each stamp track 2–4 earned on this press (0 for one already
+    /// earned), when the card has more than one track. `points_awarded` and
+    /// `member` stay track 1's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<Vec<crate::loyalty::tracks::TrackAward>>,
 }
 
 /// The order an award names, with the amounts — and lines — the points come from.
@@ -361,6 +366,10 @@ pub async fn award_inner(
     let eligible =
         crate::loyalty::settings::eligible_item_ids(pool, order.org_id, order.branch_id).await?;
 
+    // The card's tracks: the same press earns every track 2–4 the sale's lines
+    // qualify for, in the same transaction (POS_MULTITRACK_DESIGN.md D1).
+    let defs = crate::loyalty::tracks::load(pool, order.org_id, settings.mode()).await?;
+
     let mut tx = pool.begin().await?;
     let points = model::award_for_order(
         &mut tx,
@@ -381,6 +390,18 @@ pub async fn award_inner(
         actor,
     )
     .await?;
+    let track_awards = crate::loyalty::tracks::award_for_order(
+        &mut tx,
+        &defs,
+        order.org_id,
+        order.branch_id,
+        member.id,
+        order.id,
+        &order.lines,
+        actor,
+    )
+    .await?;
+    let tracks_moved = track_awards.iter().any(|t| t.points_awarded > 0);
     // Record who the sale earned for even when it rounded down to zero points,
     // so "was this sale claimed?" has an answer either way.
     sqlx::query(
@@ -403,6 +424,7 @@ pub async fn award_inner(
     // A zero here means the ledger already had this order — the award happened
     // on an earlier attempt, and the honest answer is the balance as it stands.
     let already_awarded = points == 0
+        && !tracks_moved
         && sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM loyalty_transactions \
               WHERE order_id = $1 AND kind = 'earn')",
@@ -411,7 +433,7 @@ pub async fn award_inner(
         .fetch_one(pool)
         .await?;
 
-    if points > 0 {
+    if points > 0 || tracks_moved {
         // After the commit, never inside it — the same rule realtime follows.
         wallet::push_update(pool, member.id);
     }
@@ -421,11 +443,17 @@ pub async fn award_inner(
     let fresh = model::find_by_id(pool, member.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
+    let mut view = fresh.clone().view(mode, target);
+    if defs.len() > 1 {
+        let b = crate::loyalty::tracks::balances(pool, fresh.id).await?;
+        view.tracks = crate::loyalty::tracks::member_tracks(&defs, fresh.balance_in(mode), target, &b);
+    }
     Ok(HttpResponse::Ok().json(AwardResult {
-        member: fresh.view(mode, target),
+        member: view,
         points_awarded: points,
         already_awarded,
         order_id: order.id,
+        tracks: (defs.len() > 1).then_some(track_awards),
     }))
 }
 
