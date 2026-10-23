@@ -11,7 +11,7 @@
 -- * `loyalty_track_balances (org_id, position, balance)`: balance and
 --   reward-ready segments of tracks 2–4.
 -- The indexes on the busy tables (memberships, ledger) are built CONCURRENTLY,
--- one per file (20261026131000..133000).
+-- one per file (20261027131000..134000).
 
 SET LOCAL lock_timeout = '15s';
 
