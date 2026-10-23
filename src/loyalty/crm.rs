@@ -450,6 +450,8 @@ pub struct RewardsStats {
     pub to: chrono::NaiveDate,
     /// `points` or `visits`.
     pub mode: String,
+    /// What track 1 counts: `points`, `order`, `item` or `stamp` (tracks 2–4 count stamps).
+    pub stamp_unit: String,
     pub members_total: i64,
     pub new_members: i64,
     pub active_members: i64,
@@ -509,6 +511,12 @@ pub async fn stats(
     // An aggregate over the org's ledger: computed at most once a minute per
     // range (rewards_cache), from the (org_id, created_at) index.
     let key = format!("stats|{org_id}|{from}|{to}");
+    let settings = super::settings::load_scope(pool, org_id, None)
+        .await?
+        .unwrap_or_else(|| super::settings::LoyaltySettings::defaults(org_id, None));
+    let stamp_unit = super::wallet::design::unit_of(pool, org_id, &settings)
+        .await
+        .to_string();
     let tz2 = tz.clone();
     let value = super::rewards_cache::stats(key, || async move {
         let tz = tz2;
@@ -588,6 +596,7 @@ pub async fn stats(
             from,
             to,
             mode: mode.as_str().into(),
+            stamp_unit,
             members_total,
             new_members: daily.iter().map(|d| d.new_members).sum(),
             active_members,
