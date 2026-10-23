@@ -353,6 +353,9 @@ pub fn loyalty_object(
     locations: &[super::PassLocation],
     copy: &super::CardCopy,
 ) -> serde_json::Value {
+    // Counted towards the card size (`model::card_size`), like the till.
+    let sized = copy.sized(settings);
+    let settings = &sized;
     let mode = settings.mode();
     let balance = member.balance_in(mode);
 

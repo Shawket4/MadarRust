@@ -72380,6 +72380,15 @@
           "can_redeem": {
             "type": "boolean"
           },
+          "card_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The card size: how many stamps (or points) fill one card, the cheapest\nreward on offer (`model::card_size`), the same figure the till and the\npasses count towards. Equal to `next_reward_cost`, under its own name.",
+            "example": 6
+          },
           "marketing_opt_out": {
             "type": "boolean",
             "description": "They have asked this shop to stop sending them things."
@@ -82546,6 +82555,15 @@
             "$ref": "#/components/schemas/CardBrand",
             "description": "Whose programme this is, and how the page should look."
           },
+          "card_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The card size: how many stamps (or points) fill one card, the cheapest\nreward on offer (`model::card_size`), the same figure the till and the\npasses count towards. Equal to `next_reward_cost`, under its own name.",
+            "example": 6
+          },
           "earn_piastres_per_point": {
             "type": "integer",
             "format": "int32",
@@ -82694,6 +82712,15 @@
           "card_link_sent": {
             "type": "boolean",
             "description": "While `verify_required`: the card link was also sent to the number on\nfile, by WhatsApp — the one channel that proves possession without a\ncode. False when no gateway is configured or there is no public base to\nbuild a link on; the page then offers only the OTP."
+          },
+          "card_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The card size: how many stamps (or points) fill one card, the cheapest\nreward on offer (`model::card_size`), the same figure the till and the\npasses count towards. Equal to `next_reward_cost`, under its own name.",
+            "example": 6
           },
           "member_token": {
             "type": [

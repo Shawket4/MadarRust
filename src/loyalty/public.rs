@@ -162,6 +162,12 @@ pub struct JoinInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "order")]
     pub stamp_unit: Option<String>,
+    /// The card size: how many stamps (or points) fill one card, the cheapest
+    /// reward on offer (`model::card_size`), the same figure the till and the
+    /// passes count towards. Equal to `next_reward_cost`, under its own name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6)]
+    pub card_size: Option<i32>,
 }
 
 /// How a tenant's card should look.
@@ -475,7 +481,8 @@ pub async fn join_info(
         birthday_enabled: settings.birthday_enabled,
         birthday_reward_amount: settings.birthday_reward_amount,
         mode: settings.mode.clone(),
-        next_reward_cost: model::reward_target(&settings, &rewards),
+        next_reward_cost: model::card_size(&settings, &rewards),
+        card_size: Some(model::card_size(&settings, &rewards)),
         earn_piastres_per_point: settings.earn_piastres_per_point,
         rewards: rewards
             .into_iter()
@@ -568,6 +575,12 @@ pub struct JoinResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "item")]
     pub stamp_unit: Option<String>,
+    /// The card size: how many stamps (or points) fill one card, the cheapest
+    /// reward on offer (`model::card_size`), the same figure the till and the
+    /// passes count towards. Equal to `next_reward_cost`, under its own name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6)]
+    pub card_size: Option<i32>,
 }
 
 /// Join a shop's rewards programme.
@@ -733,6 +746,7 @@ pub async fn join(
         verify_required: false,
         card_link_sent: false,
         stamp_unit,
+        card_size: Some(next_reward_cost),
     }))
 }
 
@@ -800,6 +814,7 @@ fn welcome_back(
         verify_required: true,
         card_link_sent,
         stamp_unit: None,
+        card_size: Some(next_reward_cost),
     }
 }
 
@@ -837,6 +852,12 @@ pub struct CardView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = "item")]
     pub stamp_unit: Option<String>,
+    /// The card size: how many stamps (or points) fill one card, the cheapest
+    /// reward on offer (`model::card_size`), the same figure the till and the
+    /// passes count towards. Equal to `next_reward_cost`, under its own name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6)]
+    pub card_size: Option<i32>,
 }
 
 /// One past visit, as the customer's own page shows it.
@@ -1025,6 +1046,7 @@ pub async fn card(
         brand,
         marketing_opt_out,
         stamp_unit,
+        card_size: Some(target),
         order_now_url,
         member_token: token.into_inner(),
         rewards: catalogue

@@ -818,6 +818,9 @@ pub fn pass_json(
     copy: &super::CardCopy,
     brand: &PassBrand,
 ) -> Result<serde_json::Value, AppError> {
+    // Counted towards the card size (`model::card_size`), like the till.
+    let sized = copy.sized(settings);
+    let settings = &sized;
     let (Some(pass_type), Some(team)) = (pass_type_id(), team_id()) else {
         return Err(AppError::ServiceUnavailable(
             "Apple Wallet is not configured".into(),
@@ -1198,7 +1201,9 @@ async fn build_pass_inner(
         copy,
     } = super::pass_source(pool, member).await?;
     let brand = pass_brand_cached(member.org_id, &org).await;
-    // The bar shows the CURRENT card, as the progress field does.
+    // The bar shows the CURRENT card, as the progress field does, counted
+    // towards the card size (`model::card_size`).
+    let settings = copy.sized(&settings);
     let threshold = settings.default_reward_cost;
     let progress = madar_loyalty::card::card(member.balance_in(settings.mode()), threshold).progress_to_next;
     // `strip_images_CACHED`, not `strip_images`. The cache landed with its own

@@ -950,3 +950,63 @@ async fn the_card_page_and_the_join_answer_say_what_a_stamp_is_for(pool: PgPool)
     let (_, body) = call(&app, join("01001234573"), None).await;
     assert_eq!(body["stamp_unit"], "stamp", "join: {body}");
 }
+
+#[sqlx::test]
+async fn the_card_size_is_the_cheapest_reward_on_every_public_view(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    // Default 6; the catalogue has an espresso at 3 and a cake at 10.
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    sqlx::query("UPDATE loyalty_settings SET require_otp = false, reward_any_item = false WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (name, cost) in [("Espresso", 3), ("Cake", 10)] {
+        let item: Uuid = sqlx::query_scalar(
+            "INSERT INTO menu_items (org_id, name, base_price) VALUES ($1, $2, 5000) RETURNING id",
+        )
+        .bind(s.org)
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO loyalty_reward_items (org_id, menu_item_id, cost_currency, cost_amount) VALUES ($1, $2, 'visits', $3)",
+        )
+        .bind(s.org)
+        .bind(item)
+        .bind(cost)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let m = member(&pool, s.org, "01001234567").await;
+    let tok: String = sqlx::query_scalar("SELECT member_token FROM loyalty_memberships WHERE id = $1")
+        .bind(m)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let info = join_info(&app, &s).await;
+    assert_eq!((info["card_size"].as_i64(), info["next_reward_cost"].as_i64()), (Some(3), Some(3)), "{info}");
+    let (_, card) = call(&app, test::TestRequest::get().uri(&format!("/public/loyalty/card/{tok}")), None).await;
+    assert_eq!(card["card_size"], 3, "{card}");
+    let (_, joined) = call(
+        &app,
+        test::TestRequest::post().uri("/public/loyalty/join").set_json(json!({
+            "org_id": s.org, "name": "Hoda", "phone": "01001234580",
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(joined["card_size"], 3, "{joined}");
+    // The till's lookup counts towards the same figure.
+    let (_, scan) = call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/lookup").set_json(json!({"branch_id": s.branch, "customer_id": m})),
+        Some(&teller(&s)),
+    )
+    .await;
+    assert_eq!(scan["member"]["next_reward_cost"], 3, "{scan}");
+}
