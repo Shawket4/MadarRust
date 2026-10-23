@@ -254,9 +254,14 @@ mod tests {
         for mode in [Mode::Points, Mode::Visits] {
             for per_item in [false, true] {
                 for standalone in [false, true] {
-                    let ours = StampUnit::of(mode, per_item, standalone).map_or("points", StampUnit::as_str);
-                    let card = madar_card::text::stamp_unit(mode == Mode::Points, per_item, standalone);
-                    assert_eq!(ours, card, "{mode:?} per_item={per_item} standalone={standalone}");
+                    let ours = StampUnit::of(mode, per_item, standalone)
+                        .map_or("points", StampUnit::as_str);
+                    let card =
+                        madar_card::text::stamp_unit(mode == Mode::Points, per_item, standalone);
+                    assert_eq!(
+                        ours, card,
+                        "{mode:?} per_item={per_item} standalone={standalone}"
+                    );
                 }
             }
         }

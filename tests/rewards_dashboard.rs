@@ -1144,7 +1144,8 @@ async fn segments_filter_the_members_and_the_figures_add_up(pool: PgPool) {
     // The dashboard sends instants (its date scope): a one-day range in Cairo.
     let (st, one) = call(
         &app,
-        test::TestRequest::get().uri("/loyalty/stats?from=2026-10-22T21:00:00Z&to=2026-10-23T20:59:59.999Z"),
+        test::TestRequest::get()
+            .uri("/loyalty/stats?from=2026-10-22T21:00:00Z&to=2026-10-23T20:59:59.999Z"),
         &s.admin_token(),
     )
     .await;
@@ -1365,7 +1366,11 @@ async fn a_write_is_visible_on_the_next_read_through_the_caches(pool: PgPool) {
     // …save three, and the very next lookup has them.
     put_tracks(&app, &s, three_tracks(&s)).await;
     let (_, after) = call(&app, lookup(), &s.teller_token()).await;
-    assert_eq!(after["member"]["tracks"].as_array().unwrap().len(), 3, "{after}");
+    assert_eq!(
+        after["member"]["tracks"].as_array().unwrap().len(),
+        3,
+        "{after}"
+    );
     // Rename track 2: visible at once.
     let mut t = three_tracks(&s);
     t["tracks"][1]["name_en"] = json!("Bakery");
@@ -1375,17 +1380,45 @@ async fn a_write_is_visible_on_the_next_read_through_the_caches(pool: PgPool) {
 
     // The published design: the hero answers at the new revision at once, and
     // stops answering at once when unpublished.
-    let hero = |rev: i32| test::TestRequest::get().uri(&format!("/public/loyalty/brand/{}/card/{rev}/0-0-0-en.png", s.org));
+    let hero = |rev: i32| {
+        test::TestRequest::get().uri(&format!(
+            "/public/loyalty/brand/{}/card/{rev}/0-0-0-en.png",
+            s.org
+        ))
+    };
     let (st, _) = raw(&app, hero(0)).await;
-    assert_eq!(st, StatusCode::OK, "the automatic multi-track design (revision 0)");
-    let good = design(json!([{"kind": {"type": "bar", "track": 1}, "cell": {"col": 0, "row": 4, "w": 12, "h": 1}}]));
-    call(&app, test::TestRequest::put().uri("/loyalty/card-design").set_json(json!({"design": good})), &s.admin_token()).await;
-    call(&app, test::TestRequest::post().uri("/loyalty/card-design/publish"), &s.admin_token()).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "the automatic multi-track design (revision 0)"
+    );
+    let good = design(
+        json!([{"kind": {"type": "bar", "track": 1}, "cell": {"col": 0, "row": 4, "w": 12, "h": 1}}]),
+    );
+    call(
+        &app,
+        test::TestRequest::put()
+            .uri("/loyalty/card-design")
+            .set_json(json!({"design": good})),
+        &s.admin_token(),
+    )
+    .await;
+    call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/card-design/publish"),
+        &s.admin_token(),
+    )
+    .await;
     let (st, _) = raw(&app, hero(1)).await;
     assert_eq!(st, StatusCode::OK, "revision 1, right after publishing");
     let (st, _) = raw(&app, hero(0)).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "the automatic one is gone");
-    call(&app, test::TestRequest::delete().uri("/loyalty/card-design/published"), &s.admin_token()).await;
+    call(
+        &app,
+        test::TestRequest::delete().uri("/loyalty/card-design/published"),
+        &s.admin_token(),
+    )
+    .await;
     let (st, _) = raw(&app, hero(1)).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "unpublished: gone at once");
 }
@@ -1399,12 +1432,15 @@ async fn the_public_pages_and_the_teller_get_the_shops_design(pool: PgPool) {
     let app = app!(pool);
     stamps(&pool, s.org, 8).await;
     let m = member(&pool, s.org, "201000000116", "Ghada").await;
-    let token: String = sqlx::query_scalar("SELECT member_token FROM loyalty_memberships WHERE id = $1")
-        .bind(m)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let join = || test::TestRequest::get().uri(&format!("/public/loyalty/join-info?branch_id={}", s.branch));
+    let token: String =
+        sqlx::query_scalar("SELECT member_token FROM loyalty_memberships WHERE id = $1")
+            .bind(m)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let join = || {
+        test::TestRequest::get().uri(&format!("/public/loyalty/join-info?branch_id={}", s.branch))
+    };
     let card = || test::TestRequest::get().uri(&format!("/public/loyalty/card/{token}"));
     let (_, j) = call(&app, join(), "").await;
     assert!(j.get("card").is_none(), "classic: nothing extra, {j}");
@@ -1413,19 +1449,38 @@ async fn the_public_pages_and_the_teller_get_the_shops_design(pool: PgPool) {
 
     // A published design reaches all three at once (the design cache is
     // invalidated by the publish).
-    let good = design(json!([{"kind": {"type": "stamps", "track": 1}, "cell": {"col": 0, "row": 0, "w": 12, "h": 3}}]));
-    call(&app, test::TestRequest::put().uri("/loyalty/card-design").set_json(json!({"design": good})), &s.admin_token()).await;
-    call(&app, test::TestRequest::post().uri("/loyalty/card-design/publish"), &s.admin_token()).await;
+    let good = design(
+        json!([{"kind": {"type": "stamps", "track": 1}, "cell": {"col": 0, "row": 0, "w": 12, "h": 3}}]),
+    );
+    call(
+        &app,
+        test::TestRequest::put()
+            .uri("/loyalty/card-design")
+            .set_json(json!({"design": good})),
+        &s.admin_token(),
+    )
+    .await;
+    call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/card-design/publish"),
+        &s.admin_token(),
+    )
+    .await;
     let (_, j) = call(&app, join(), "").await;
     assert_eq!(j["card"]["revision"], 1, "{j}");
     assert_eq!(j["card"]["design"]["elements"][0]["kind"]["type"], "stamps");
     assert_eq!(j["card"]["track_one_size"], 8);
-    assert_eq!(j["card"]["stamp_unit"], "item", "a POS shop stamping per item");
+    assert_eq!(
+        j["card"]["stamp_unit"], "item",
+        "a POS shop stamping per item"
+    );
     let (_, c) = call(&app, card(), "").await;
     assert_eq!(c["card"]["revision"], 1);
     let (_, scan) = call(
         &app,
-        test::TestRequest::post().uri("/loyalty/lookup").set_json(json!({"branch_id": s.branch, "customer_id": m})),
+        test::TestRequest::post()
+            .uri("/loyalty/lookup")
+            .set_json(json!({"branch_id": s.branch, "customer_id": m})),
         &s.teller_token(),
     )
     .await;

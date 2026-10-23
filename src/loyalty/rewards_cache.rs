@@ -42,8 +42,10 @@ where
 pub type TrackRows = Arc<Vec<super::tracks::TrackDef>>;
 
 static TRACKS: LazyLock<Cache<Uuid, TrackRows>> = LazyLock::new(|| cache(20_000, 300));
-static DESIGNS: LazyLock<Cache<Uuid, Arc<Option<(i32, madar_card::CardDesign)>>>> =
-    LazyLock::new(|| cache(20_000, 300));
+/// An org's published design and its revision, if any.
+pub type Published = Arc<Option<(i32, madar_card::CardDesign)>>;
+
+static DESIGNS: LazyLock<Cache<Uuid, Published>> = LazyLock::new(|| cache(20_000, 300));
 static STATS: LazyLock<Cache<String, Arc<serde_json::Value>>> = LazyLock::new(|| cache(5_000, 60));
 static COUNTS: LazyLock<Cache<String, i64>> = LazyLock::new(|| cache(20_000, 60));
 

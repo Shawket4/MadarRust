@@ -213,7 +213,9 @@ pub async fn audience_count(
 }
 
 async fn one(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<Broadcast, AppError> {
-    sqlx::query_as(&format!("{BROADCAST_SELECT} WHERE b.id = $1 AND b.org_id = $2"))
+    sqlx::query_as(&format!(
+        "{BROADCAST_SELECT} WHERE b.id = $1 AND b.org_id = $2"
+    ))
     .bind(id)
     .bind(org_id)
     .fetch_optional(pool)
