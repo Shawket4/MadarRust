@@ -100579,6 +100579,7 @@
           "from",
           "to",
           "mode",
+          "stamp_unit",
           "members_total",
           "new_members",
           "active_members",
@@ -100643,6 +100644,10 @@
           "redemptions": {
             "type": "integer",
             "format": "int64"
+          },
+          "stamp_unit": {
+            "type": "string",
+            "description": "What track 1 counts: `points`, `order`, `item` or `stamp` (tracks 2–4 count stamps)."
           },
           "to": {
             "type": "string",
