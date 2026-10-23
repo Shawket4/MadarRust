@@ -448,6 +448,8 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
         }
         // The flip and the audience in ONE transaction: a second runner waits
         // on the row, then finds it sending with its recipients in place.
+        // Read before the transaction: never a second pooled connection while one is held.
+        let (mode, sizes, _, _) = super::crm::programme(pool, b.org_id).await?;
         let mut tx = pool.begin().await?;
         let started = sqlx::query(
             "UPDATE loyalty_broadcasts SET status = 'sending', started_at = now() WHERE id = $1 AND status = 'scheduled'",
@@ -457,7 +459,6 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
         .await?
         .rows_affected();
         if started == 1 {
-            let (mode, sizes, _, _) = super::crm::programme(pool, b.org_id).await?;
             let mut qb = QueryBuilder::<Postgres>::new(
                 "INSERT INTO loyalty_broadcast_recipients (broadcast_id, org_id, customer_id, outcome, processed_at) SELECT ",
             );
