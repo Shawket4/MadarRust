@@ -244,7 +244,10 @@ pub async fn latest_pass(
             .get("If-Modified-Since")
             .and_then(|v| v.to_str().ok()),
     ) && let Ok(since) = chrono::DateTime::parse_from_rfc2822(header)
-        && updated <= since.with_timezone(&chrono::Utc)
+        // In whole seconds: Last-Modified (RFC 2822) carries no fraction, so
+        // the stored microseconds were always "newer" than the header the
+        // device echoed back, and no device ever got a 304.
+        && updated.timestamp() <= since.timestamp()
     {
         return Ok(HttpResponse::NotModified().finish());
     }

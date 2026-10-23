@@ -733,6 +733,22 @@ async fn the_pass_always_carries_last_modified_and_a_stale_card_is_never_a_304(p
     let earlier = (at - chrono::Duration::hours(1)).to_rfc2822();
     let resp = test::call_service(&app, get(Some(&earlier)).to_request()).await;
     assert_eq!(resp.status(), StatusCode::OK);
+
+    // A stamp with microseconds (what now() stores): the header the device
+    // echoes back is whole seconds, and it still gets its 304.
+    sqlx::query("UPDATE loyalty_memberships SET pass_updated_at = '2026-10-21 14:13:05.987654+00' WHERE id = $1")
+        .bind(m)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let resp = test::call_service(&app, get(None).to_request()).await;
+    let lm = resp.headers().get("Last-Modified").unwrap().to_str().unwrap().to_string();
+    let resp = test::call_service(&app, get(Some(&lm)).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::NOT_MODIFIED, "the echoed Last-Modified is a 304");
+    // And a second earlier is still a fresh pass.
+    let before = (chrono::DateTime::parse_from_rfc2822(&lm).unwrap() - chrono::Duration::seconds(1)).to_rfc2822();
+    let resp = test::call_service(&app, get(Some(&before)).to_request()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[sqlx::test]
