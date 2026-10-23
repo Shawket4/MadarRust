@@ -51,6 +51,9 @@ pub struct ScanResult {
     /// released till offers what is in it against the track-1 balance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub track_rewards: Option<Vec<super::tracks::TrackRewards>>,
+    /// The shop's card design for the teller's member card (absent = classic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<super::wallet::design::PublicCard>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -96,6 +99,10 @@ pub async fn lookup(
     view.tracks =
         super::tracks::member_tracks(&defs, member.balance_in(mode), target, &track_balances);
     let track_rewards = super::tracks::track_rewards(pool.get_ref(), &defs, member.id).await?;
+    let card = match crate::orgs::branding::load(pool.get_ref(), org_id).await {
+        Ok(brand) => wallet::design::public_card(pool.get_ref(), org_id, &settings, &brand).await,
+        Err(_) => None,
+    };
     // Only what this balance can actually buy, priced in the live currency. A
     // screen that lists a reward the customer cannot afford is a screen that
     // tempts a teller into handing it over anyway.
@@ -116,6 +123,7 @@ pub async fn lookup(
         any_item_cost: settings.default_reward_cost,
         max_rewards_per_order: settings.max_rewards_per_order,
         track_rewards,
+        card,
     }))
 }
 

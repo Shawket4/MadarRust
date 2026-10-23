@@ -149,6 +149,11 @@ pub struct JoinInfo {
     pub birthday_reward_amount: Option<i32>,
     pub terms: Option<String>,
     pub terms_ar: Option<String>,
+    /// The shop's card design, when it published one (or runs several stamp
+    /// tracks): the page draws it with the `card` wasm package. Absent = the
+    /// classic card, and the page loads nothing extra.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card: Option<super::wallet::design::PublicCard>,
 }
 
 /// How a tenant's card should look.
@@ -449,14 +454,15 @@ pub async fn join_info(
     let pool = pdb.scoped(scope.org_id).await;
     let org_id = scope.org_id;
     let (settings, rewards) = load_for_scope(pool.get_ref(), &scope).await?;
+    let org_brand = crate::orgs::branding::load(pool.get_ref(), org_id).await?;
+    let card =
+        super::wallet::design::public_card(pool.get_ref(), org_id, &settings, &org_brand).await;
 
     Ok(HttpResponse::Ok().json(JoinInfo {
         branch_id: scope.branch_id,
         branch_name: scope.branch_name,
-        brand: card_brand(
-            &crate::orgs::branding::load(pool.get_ref(), org_id).await?,
-            &settings,
-        ),
+        card,
+        brand: card_brand(&org_brand, &settings),
         enabled: settings.enabled,
         require_otp: settings.require_otp,
         birthday_enabled: settings.birthday_enabled,
@@ -803,6 +809,12 @@ pub struct CardView {
     pub brand: CardBrand,
     /// They have asked this shop to stop sending them things.
     pub marketing_opt_out: bool,
+    /// The shop's card design (see [`JoinInfo::card`]); absent = classic.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card: Option<super::wallet::design::PublicCard>,
+    /// Every stamp track of this member's card, when there is more than one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<Vec<super::tracks::MemberTrack>>,
 }
 
 /// One past visit, as the customer's own page shows it.
@@ -975,8 +987,12 @@ pub async fn card(
     wallet::apple::prebuild(pool.get_ref(), &member);
     let order_now_url = wallet::order_now_for(pool.get_ref(), &member).await;
     let marketing_opt_out = member.marketing_opt_out;
+    let card = wallet::design::public_card(pool.get_ref(), member.org_id, &settings, &org).await;
+    let tracks = super::tracks::for_member(pool.get_ref(), &member, mode, target).await?;
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
+        card,
+        tracks,
         name: view.name,
         balance: view.balance,
         mode: view.mode,

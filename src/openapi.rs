@@ -834,6 +834,7 @@ paths(
         crate::loyalty::tracks::TracksView,
         crate::loyalty::tracks::PutTracks,
         crate::loyalty::design::CardDesignView,
+        crate::loyalty::wallet::design::PublicCard,
         crate::loyalty::design::PutCardDesign,
         crate::loyalty::design::CardPreviewRequest,
         crate::loyalty::design::PreviewBalance,

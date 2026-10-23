@@ -1369,3 +1369,50 @@ async fn a_write_is_visible_on_the_next_read_through_the_caches(pool: PgPool) {
     let (st, _) = raw(&app, hero(1)).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "unpublished: gone at once");
 }
+
+/// Every place a card is drawn gets the same design: the join page, the
+/// member's card page and the teller's lookup carry it (and nothing for the
+/// classic look), with the unit the card counts.
+#[sqlx::test]
+async fn the_public_pages_and_the_teller_get_the_shops_design(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamps(&pool, s.org, 8).await;
+    let m = member(&pool, s.org, "201000000116", "Ghada").await;
+    let token: String = sqlx::query_scalar("SELECT member_token FROM loyalty_memberships WHERE id = $1")
+        .bind(m)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let join = || test::TestRequest::get().uri(&format!("/public/loyalty/join-info?branch_id={}", s.branch));
+    let card = || test::TestRequest::get().uri(&format!("/public/loyalty/card/{token}"));
+    let (_, j) = call(&app, join(), "").await;
+    assert!(j.get("card").is_none(), "classic: nothing extra, {j}");
+    let (_, c) = call(&app, card(), "").await;
+    assert!(c.get("card").is_none() && c.get("tracks").is_none(), "{c}");
+
+    // A published design reaches all three at once (the design cache is
+    // invalidated by the publish).
+    let good = design(json!([{"kind": {"type": "stamps", "track": 1}, "cell": {"col": 0, "row": 0, "w": 12, "h": 3}}]));
+    call(&app, test::TestRequest::put().uri("/loyalty/card-design").set_json(json!({"design": good})), &s.admin_token()).await;
+    call(&app, test::TestRequest::post().uri("/loyalty/card-design/publish"), &s.admin_token()).await;
+    let (_, j) = call(&app, join(), "").await;
+    assert_eq!(j["card"]["revision"], 1, "{j}");
+    assert_eq!(j["card"]["design"]["elements"][0]["kind"]["type"], "stamps");
+    assert_eq!(j["card"]["track_one_size"], 8);
+    assert_eq!(j["card"]["stamp_unit"], "item", "a POS shop stamping per item");
+    let (_, c) = call(&app, card(), "").await;
+    assert_eq!(c["card"]["revision"], 1);
+    let (_, scan) = call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/lookup").set_json(json!({"branch_id": s.branch, "customer_id": m})),
+        &s.teller_token(),
+    )
+    .await;
+    assert_eq!(scan["card"]["revision"], 1);
+    // Tracks: the member's card page lists them; the tracks carry no items.
+    put_tracks(&app, &s, three_tracks(&s)).await;
+    let (_, c) = call(&app, card(), "").await;
+    assert_eq!(c["tracks"].as_array().unwrap().len(), 3, "{c}");
+    assert_eq!(c["card"]["tracks"][1]["items"], json!([]));
+}

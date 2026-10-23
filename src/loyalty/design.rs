@@ -335,6 +335,7 @@ pub async fn preview(
         logo_is_mark: s.brand.logo_is_mark,
         balances,
         member_name: String::new(),
+        unit: wd::unit_of(pool, org_id, &s.settings).await,
     };
     let (store, arabic) = (body.store, body.arabic);
     let png = tokio::task::spawn_blocking(move || {

@@ -55,6 +55,41 @@ pub struct DesignedCard {
     /// This member: balance per track (track 1 included).
     pub balances: HashMap<u8, i32>,
     pub member_name: String,
+    /// What a unit counts (madar-card `text::stamp_unit`): `points`, `order`,
+    /// `item` or `stamp` — the balance label every card prints.
+    pub unit: &'static str,
+}
+
+/// Plan Free + the loyalty add-on: a stand-alone Rewards shop (no Madar POS).
+pub async fn standalone(pool: &PgPool, org_id: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT plan = 'free' AND 'loyalty' = ANY(org_active_addons(id)) FROM organizations WHERE id = $1",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
+/// The unit a shop's card counts (see [`DesignedCard::unit`]).
+pub async fn unit_of(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> &'static str {
+    madar_card::text::stamp_unit(
+        settings.mode() == Mode::Points,
+        settings.stamp_per_line_item.unwrap_or(true),
+        standalone(pool, org_id).await,
+    )
+}
+
+/// The balance label of a unit.
+pub fn unit_label(unit: &str) -> (&'static str, &'static str) {
+    match unit {
+        "points" => ("Points", "نقاط"),
+        "item" => ("Items", "أصناف"),
+        "stamp" => ("Stamps", "الأختام"),
+        _ => ("Orders", "طلبات"),
+    }
 }
 
 /// The org's design as stored: `(revision, published)`.
@@ -182,6 +217,7 @@ pub async fn for_member(
         logo_is_mark: brand.logo_is_mark,
         balances,
         member_name: member.name.clone(),
+        unit: unit_of(pool, member.org_id, settings).await,
     }))
 }
 
@@ -243,7 +279,7 @@ impl DesignedCard {
         if let Some(t) = src.track() {
             self.def(t)?;
         }
-        let balance_word = super::google::balance_label(self.mode);
+        let balance_word = unit_label(self.unit).0;
         match src {
             FieldSource::Balance { track } => Some((
                 format!("balance_t{track}"),
@@ -371,16 +407,10 @@ impl DesignedCard {
     pub fn restyle_google(&self, object: &mut Value) {
         let ar: HashMap<String, String> =
             self.strings().into_iter().map(|p| (p.en, p.ar)).collect();
-        let classic: HashMap<String, String> = [(
-            super::google::balance_label(self.mode),
-            match self.mode {
-                Mode::Points => "نقاط",
-                Mode::Visits => "طلبات",
-            },
-        )]
-        .into_iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect();
+        let classic: HashMap<String, String> = [unit_label(self.unit)]
+            .into_iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect();
         let slot = |src: FieldSource| -> Value {
             match self.field(src) {
                 None => Value::Null,
@@ -733,6 +763,7 @@ pub async fn hero_for_state(
         logo_is_mark: brand.logo_is_mark,
         balances,
         member_name: String::new(),
+        unit: unit_of(pool, org_id, &settings).await,
     });
     let key = card.cache_key(if arabic { "google-ar" } else { "google-en" });
     let c = Arc::clone(&card);
@@ -857,6 +888,7 @@ mod tests {
             logo_is_mark: false,
             balances: balances.iter().copied().collect(),
             member_name: "Mona Adel".into(),
+            unit: "order",
         }
     }
 
@@ -1041,4 +1073,66 @@ mod tests {
             }
         }
     }
+}
+
+/// A shop's card design as the public pages and the teller draw it: present
+/// when the shop has a published design (or several stamp tracks, which get
+/// the automatic one), absent for the classic look. No member data.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct PublicCard {
+    /// The published revision (0: the automatic multi-track design).
+    pub revision: i32,
+    pub design: CardDesign,
+    /// The tracks, without their menu items.
+    pub tracks: Vec<madar_card::Track>,
+    /// Track 1's size: the programme's card size.
+    pub track_one_size: i32,
+    /// `points`, `order`, `item` or `stamp` (madar-card `text::stamp_unit`).
+    pub stamp_unit: String,
+}
+
+/// [`PublicCard`] for an org, from the cached design and tracks.
+pub async fn public_card(
+    pool: &PgPool,
+    org_id: Uuid,
+    settings: &LoyaltySettings,
+    brand: &OrgBrand,
+) -> Option<PublicCard> {
+    let mode = settings.mode();
+    let defs = crate::loyalty::tracks::load(pool, org_id, mode)
+        .await
+        .ok()?;
+    let rewards = if settings.reward_any_item {
+        Vec::new()
+    } else {
+        crate::loyalty::settings::rewards_org_in(pool, org_id, settings)
+            .await
+            .unwrap_or_default()
+    };
+    let track_one_size = crate::loyalty::model::reward_target(settings, &rewards);
+    let tracks: Vec<madar_card::Track> = defs
+        .iter()
+        .map(|d| madar_card::Track {
+            items: Vec::new(),
+            ..d.to_card()
+        })
+        .collect();
+    let (revision, design) = match published(pool, org_id).await {
+        Some(p) => p,
+        None if defs.len() > 1 => {
+            let ctx = ctx_of(&defs, mode, track_one_size, brand);
+            (
+                0,
+                madar_card::templates::default_design(&colours_of(brand), &ctx, &tracks),
+            )
+        }
+        None => return None,
+    };
+    Some(PublicCard {
+        revision,
+        design: enforce_branding(design, brand),
+        tracks,
+        track_one_size,
+        stamp_unit: unit_of(pool, org_id, settings).await.to_string(),
+    })
 }
