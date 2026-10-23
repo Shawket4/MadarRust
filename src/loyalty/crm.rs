@@ -355,6 +355,10 @@ pub struct MemberWallet {
     /// Dashboard messages this member was sent.
     pub messages_received: i64,
     pub marketing_opt_out: bool,
+    /// Their birthday gift while open, or claimed and still in its window;
+    /// absent otherwise (`gifts::current`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthday_gift: Option<super::gifts::BirthdayGiftView>,
 }
 
 #[utoipa::path(get, path = "/loyalty/members/{id}/wallet", tag = "loyalty",
@@ -398,7 +402,9 @@ pub async fn member_wallet(
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound("Member not found".into()))?;
+    let birthday_gift = super::gifts::current(pool, *id).await?;
     Ok(HttpResponse::Ok().json(MemberWallet {
+        birthday_gift,
         apple_devices: r.apple_devices,
         apple_registered_at: r.apple_registered_at,
         google_card: r.google_card,

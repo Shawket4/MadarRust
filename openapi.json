@@ -88027,6 +88027,17 @@
             ],
             "format": "date-time"
           },
+          "birthday_gift": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BirthdayGiftView",
+                "description": "Their birthday gift while open, or claimed and still in its window;\nabsent otherwise (`gifts::current`)."
+              }
+            ]
+          },
           "google_card": {
             "type": "boolean"
           },

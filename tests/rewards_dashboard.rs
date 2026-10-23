@@ -1162,6 +1162,26 @@ async fn segments_filter_the_members_and_the_figures_add_up(pool: PgPool) {
     assert_eq!(st, StatusCode::OK, "{w}");
     assert_eq!(w["apple_devices"], 0);
     assert_eq!(w["google_card"], false);
+    assert!(w.get("birthday_gift").is_none(), "no gift, no field: {w}");
+
+    // An open birthday gift shows on the member page until its date.
+    sqlx::query(
+        "INSERT INTO loyalty_gifts (org_id, customer_id, year, valid_from, valid_until) \
+         VALUES ($1, $2, 2026, now() - interval '1 day', now() + interval '20 days')",
+    )
+    .bind(s.org)
+    .bind(a)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_, w) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/loyalty/members/{a}/wallet")),
+        &s.admin_token(),
+    )
+    .await;
+    assert_eq!(w["birthday_gift"]["status"], "open", "{w}");
+    assert!(w["birthday_gift"]["valid_until"].is_string());
 }
 
 #[sqlx::test]
