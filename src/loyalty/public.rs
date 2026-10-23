@@ -563,6 +563,11 @@ pub struct JoinResult {
     /// code. False when no gateway is configured or there is no public base to
     /// build a link on; the page then offers only the OTP.
     pub card_link_sent: bool,
+    /// What one stamp stands for: `order`, `item` or `stamp` (a counter
+    /// shop); absent for points. The join info's rule (`earn::StampUnit`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "item")]
+    pub stamp_unit: Option<String>,
 }
 
 /// Join a shop's rewards programme.
@@ -681,6 +686,9 @@ pub async fn join(
         None
     };
 
+    let stamp_unit = wallet::stamp_unit_for(pool.get_ref(), org_id, &settings)
+        .await
+        .map(|u| u.as_str().to_string());
     let (member, already_member) = match inserted {
         Some(fresh) => (fresh, false),
         None => {
@@ -692,7 +700,7 @@ pub async fn join(
                 // the page will make lands on a clean insert.
                 .ok_or_else(|| AppError::Conflict("Please try again".into()))?;
             if !verified {
-                return Ok(HttpResponse::Ok().json(welcome_back(
+                let mut answer = welcome_back(
                     pool.get_ref(),
                     &existing,
                     name,
@@ -700,7 +708,9 @@ pub async fn join(
                     &org,
                     brand,
                     next_reward_cost,
-                )));
+                );
+                answer.stamp_unit = stamp_unit;
+                return Ok(HttpResponse::Ok().json(answer));
             }
             (existing, true)
         }
@@ -722,6 +732,7 @@ pub async fn join(
         already_member,
         verify_required: false,
         card_link_sent: false,
+        stamp_unit,
     }))
 }
 
@@ -788,6 +799,7 @@ fn welcome_back(
         already_member: true,
         verify_required: true,
         card_link_sent,
+        stamp_unit: None,
     }
 }
 
@@ -820,6 +832,11 @@ pub struct CardView {
     pub brand: CardBrand,
     /// They have asked this shop to stop sending them things.
     pub marketing_opt_out: bool,
+    /// What one stamp stands for: `order`, `item` or `stamp` (a counter
+    /// shop); absent for points. The join info's rule (`earn::StampUnit`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "item")]
+    pub stamp_unit: Option<String>,
 }
 
 /// One past visit, as the customer's own page shows it.
@@ -992,6 +1009,9 @@ pub async fn card(
     wallet::apple::prebuild(pool.get_ref(), &member);
     let order_now_url = wallet::order_now_for(pool.get_ref(), &member).await;
     let marketing_opt_out = member.marketing_opt_out;
+    let stamp_unit = wallet::stamp_unit_for(pool.get_ref(), member.org_id, &settings)
+        .await
+        .map(|u| u.as_str().to_string());
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
         name: view.name,
@@ -1004,6 +1024,7 @@ pub async fn card(
         can_redeem: view.can_redeem,
         brand,
         marketing_opt_out,
+        stamp_unit,
         order_now_url,
         member_token: token.into_inner(),
         rewards: catalogue

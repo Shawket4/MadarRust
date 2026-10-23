@@ -72426,6 +72426,14 @@
             "type": "integer",
             "format": "int32",
             "description": "Rewards the balance has already earned — a card does not stop at full."
+          },
+          "stamp_unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What one stamp stands for: `order`, `item` or `stamp` (a counter\nshop); absent for points. The join info's rule (`earn::StampUnit`).",
+            "example": "item"
           }
         }
       },
@@ -82715,6 +82723,14 @@
                 "description": "Absent when `verify_required`."
               }
             ]
+          },
+          "stamp_unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What one stamp stands for: `order`, `item` or `stamp` (a counter\nshop); absent for points. The join info's rule (`earn::StampUnit`).",
+            "example": "item"
           },
           "verify_required": {
             "type": "boolean",

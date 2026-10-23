@@ -887,3 +887,66 @@ async fn the_join_page_says_what_a_stamp_is_for(pool: PgPool) {
     rewards_shop(&app, &pool, &s).await;
     assert_eq!(join_info(&app, &s).await["stamp_unit"], "stamp");
 }
+
+#[sqlx::test]
+async fn the_card_page_and_the_join_answer_say_what_a_stamp_is_for(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamp_card(&pool, s.org, "points", 100, false).await;
+    sqlx::query("UPDATE loyalty_settings SET require_otp = false WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let m = member(&pool, s.org, "01001234567").await;
+    let tok: String = sqlx::query_scalar("SELECT member_token FROM loyalty_memberships WHERE id = $1")
+        .bind(m)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let card = |app_tok: String| test::TestRequest::get().uri(&format!("/public/loyalty/card/{app_tok}"));
+    let join = |phone: &str| {
+        test::TestRequest::post().uri("/public/loyalty/join").set_json(json!({
+            "org_id": s.org, "name": "Hoda", "phone": phone,
+        }))
+    };
+    let set = |mode: &'static str, per_item: bool| {
+        let pool = pool.clone();
+        let org = s.org;
+        async move {
+            sqlx::query("UPDATE loyalty_settings SET mode = $2, stamp_per_line_item = $3 WHERE org_id = $1")
+                .bind(org)
+                .bind(mode)
+                .bind(per_item)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+
+    // Points: absent on both.
+    let (st, body) = call(&app, card(tok.clone()), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.get("stamp_unit").is_none(), "{body}");
+    let (st, body) = call(&app, join("01001234570"), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.get("stamp_unit").is_none(), "{body}");
+
+    for (mode, per_item, phone, want) in [
+        ("visits", false, "01001234571", "order"),
+        ("visits", true, "01001234572", "item"),
+    ] {
+        set(mode, per_item).await;
+        let (_, body) = call(&app, card(tok.clone()), None).await;
+        assert_eq!(body["stamp_unit"], want, "card: {body}");
+        let (_, body) = call(&app, join(phone), None).await;
+        assert_eq!(body["stamp_unit"], want, "join: {body}");
+    }
+
+    // A counter shop (Free + the add-on).
+    rewards_shop(&app, &pool, &s).await;
+    let (_, body) = call(&app, card(tok), None).await;
+    assert_eq!(body["stamp_unit"], "stamp", "card: {body}");
+    let (_, body) = call(&app, join("01001234573"), None).await;
+    assert_eq!(body["stamp_unit"], "stamp", "join: {body}");
+}
