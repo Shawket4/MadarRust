@@ -59,16 +59,24 @@ pub struct DesignedCard {
 
 /// The org's design as stored: `(revision, published)`.
 pub async fn published(pool: &PgPool, org_id: Uuid) -> Option<(i32, CardDesign)> {
-    let row: Option<(i32, Option<Value>)> =
-        sqlx::query_as("SELECT revision, published FROM loyalty_card_designs WHERE org_id = $1")
-            .bind(org_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-    let (rev, json) = row?;
-    let d: CardDesign = serde_json::from_value(json?).ok()?;
-    Some((rev, d))
+    // Cached per org (rewards_cache): read by every designed pass build;
+    // publish and unpublish invalidate it.
+    let got = crate::loyalty::rewards_cache::design(org_id, || async move {
+        let row: Option<(i32, Option<Value>)> = sqlx::query_as(
+            "SELECT revision, published FROM loyalty_card_designs WHERE org_id = $1",
+        )
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?;
+        Ok(Arc::new(row.and_then(|(rev, json)| {
+            serde_json::from_value::<CardDesign>(json?)
+                .ok()
+                .map(|d| (rev, d))
+        })))
+    })
+    .await
+    .ok()?;
+    (*got).clone()
 }
 
 /// The pass colours a shop's card has today (the classic look's).
@@ -487,13 +495,12 @@ impl DesignedCard {
 /// Named PNGs.
 type Images = Arc<Vec<(String, Vec<u8>)>>;
 
-static IMAGES: LazyLock<moka::future::Cache<u64, Images>> =
-    LazyLock::new(|| {
-        moka::future::Cache::builder()
-            .max_capacity(2048)
-            .time_to_live(Duration::from_secs(3600))
-            .build()
-    });
+static IMAGES: LazyLock<moka::future::Cache<u64, Images>> = LazyLock::new(|| {
+    moka::future::Cache::builder()
+        .max_capacity(2048)
+        .time_to_live(Duration::from_secs(3600))
+        .build()
+});
 
 fn rgb(hex: &str) -> String {
     match crate::orgs::branding::parse_hex(hex) {

@@ -249,6 +249,7 @@ pub async fn publish(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRespon
     .await?;
     super::wallet::mark_org_stale(&mut tx, org_id).await?;
     tx.commit().await?;
+    super::rewards_cache::invalidate_design(org_id).await;
     super::wallet::store::purge_org(pool, org_id).await;
     Ok(HttpResponse::Ok().json(view(pool, org_id).await?))
 }
@@ -274,6 +275,7 @@ pub async fn unpublish(req: HttpRequest, pool: crate::db::Db) -> Result<HttpResp
     }
     tx.commit().await?;
     if changed > 0 {
+        super::rewards_cache::invalidate_design(org_id).await;
         super::wallet::store::purge_org(pool, org_id).await;
     }
     Ok(HttpResponse::Ok().json(view(pool, org_id).await?))

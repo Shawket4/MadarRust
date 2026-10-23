@@ -43,7 +43,7 @@ pub struct AudienceRequest {
 }
 
 /// Who an audience reaches, and how.
-#[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
+#[derive(Debug, Serialize, Deserialize, ToSchema, sqlx::FromRow)]
 pub struct AudienceCount {
     /// Members matching the rules (opted-out ones included in this figure).
     pub members: i64,
@@ -118,19 +118,27 @@ pub struct BroadcastsQuery {
     pub offset: Option<i64>,
 }
 
-const BROADCAST_COLS: &str = "b.id, b.line_en, b.line_ar, b.audience, b.whatsapp_fallback, b.status, \
+/// A broadcast with its counters, the counters read per broadcast from the
+/// recipients' primary key (broadcast_id, …) — never across every recipient.
+const BROADCAST_SELECT: &str = "SELECT b.id, b.line_en, b.line_ar, b.audience, b.whatsapp_fallback, b.status, \
     b.scheduled_for, b.created_at, b.started_at, b.finished_at, u.name AS created_by_name, \
-    count(r.customer_id) AS recipients, \
-    count(*) FILTER (WHERE r.outcome = 'pending') AS pending, \
-    count(*) FILTER (WHERE r.outcome = 'sent') AS sent, \
-    count(*) FILTER (WHERE r.channel LIKE '%apple%') AS apple, \
-    count(*) FILTER (WHERE r.channel LIKE '%google%') AS google, \
-    count(*) FILTER (WHERE r.channel = 'whatsapp') AS whatsapp, \
-    count(r.seen_at) AS seen, \
-    count(*) FILTER (WHERE r.outcome = 'skipped_recent') AS skipped_recent, \
-    count(*) FILTER (WHERE r.outcome = 'skipped_opted_out') AS skipped_opted_out, \
-    count(*) FILTER (WHERE r.outcome = 'sent' AND r.channel = 'none') AS unreachable, \
-    count(*) FILTER (WHERE r.outcome = 'failed') AS failed";
+    k.recipients, k.pending, k.sent, k.apple, k.google, k.whatsapp, k.seen, k.skipped_recent, \
+    k.skipped_opted_out, k.unreachable, k.failed \
+  FROM loyalty_broadcasts b \
+  LEFT JOIN users u ON u.id = b.created_by \
+  CROSS JOIN LATERAL ( \
+    SELECT count(r.customer_id) AS recipients, \
+           count(*) FILTER (WHERE r.outcome = 'pending') AS pending, \
+           count(*) FILTER (WHERE r.outcome = 'sent') AS sent, \
+           count(*) FILTER (WHERE r.channel LIKE '%apple%') AS apple, \
+           count(*) FILTER (WHERE r.channel LIKE '%google%') AS google, \
+           count(*) FILTER (WHERE r.channel = 'whatsapp') AS whatsapp, \
+           count(r.seen_at) AS seen, \
+           count(*) FILTER (WHERE r.outcome = 'skipped_recent') AS skipped_recent, \
+           count(*) FILTER (WHERE r.outcome = 'skipped_opted_out') AS skipped_opted_out, \
+           count(*) FILTER (WHERE r.outcome = 'sent' AND r.channel = 'none') AS unreachable, \
+           count(*) FILTER (WHERE r.outcome = 'failed') AS failed \
+      FROM loyalty_broadcast_recipients r WHERE r.broadcast_id = b.id) k";
 
 async fn may_read(req: &HttpRequest, pool: &PgPool) -> Result<Uuid, AppError> {
     let (org_id, claims) = super::settings::scope_org(pool, req, None).await?;
@@ -154,9 +162,9 @@ fn audience_from(
     mode: super::earn::Mode,
     sizes: &super::crm::Sizes,
 ) {
-    qb.push(" FROM loyalty_members_v m WHERE m.org_id = ")
+    qb.push(" FROM loyalty_memberships m JOIN customers c ON c.id = m.id WHERE m.org_id = ")
         .push_bind(org_id)
-        .push(" AND m.deleted_at IS NULL AND m.erased_at IS NULL");
+        .push(" AND m.deleted_at IS NULL AND c.erased_at IS NULL");
     super::crm::push_audience(qb, audience, mode, sizes);
 }
 
@@ -168,14 +176,24 @@ async fn count(
     let (mode, sizes, _, _) = super::crm::programme(pool, org_id).await?;
     super::crm::check_audience(audience, &sizes)?;
     let apple = "EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)";
+    let key = format!(
+        "audience|{org_id}|{}",
+        serde_json::to_string(audience).unwrap_or_default()
+    );
+    let cached = super::rewards_cache::stats(key, || async {
     let mut qb = QueryBuilder::<Postgres>::new(format!(
-        "SELECT count(*) AS members, count(*) FILTER (WHERE m.marketing_opt_out) AS opted_out, \
-                count(*) FILTER (WHERE NOT m.marketing_opt_out AND {apple}) AS apple, \
-                count(*) FILTER (WHERE NOT m.marketing_opt_out AND m.google_object_id IS NOT NULL) AS google, \
-                count(*) FILTER (WHERE NOT m.marketing_opt_out AND NOT {apple} AND m.google_object_id IS NULL) AS no_card"
+        "SELECT count(*) AS members, count(*) FILTER (WHERE c.marketing_opt_out) AS opted_out, \
+                count(*) FILTER (WHERE NOT c.marketing_opt_out AND {apple}) AS apple, \
+                count(*) FILTER (WHERE NOT c.marketing_opt_out AND m.google_object_id IS NOT NULL) AS google, \
+                count(*) FILTER (WHERE NOT c.marketing_opt_out AND NOT {apple} AND m.google_object_id IS NULL) AS no_card"
     ));
     audience_from(&mut qb, org_id, audience, mode, &sizes);
-    Ok(qb.build_query_as().fetch_one(pool).await?)
+    let n: AudienceCount = qb.build_query_as().fetch_one(pool).await?;
+    Ok(std::sync::Arc::new(serde_json::to_value(n).map_err(|_| AppError::Internal)?))
+    })
+    .await?;
+    // A minute-old count, like the CRM total (rewards_cache).
+    serde_json::from_value((*cached).clone()).map_err(|_| AppError::Internal)
 }
 
 /// How many members an audience reaches, before sending.
@@ -195,12 +213,7 @@ pub async fn audience_count(
 }
 
 async fn one(pool: &PgPool, org_id: Uuid, id: Uuid) -> Result<Broadcast, AppError> {
-    sqlx::query_as(&format!(
-        "SELECT {BROADCAST_COLS} FROM loyalty_broadcasts b \
-           LEFT JOIN loyalty_broadcast_recipients r ON r.broadcast_id = b.id \
-           LEFT JOIN users u ON u.id = b.created_by \
-          WHERE b.id = $1 AND b.org_id = $2 GROUP BY b.id, u.name"
-    ))
+    sqlx::query_as(&format!("{BROADCAST_SELECT} WHERE b.id = $1 AND b.org_id = $2"))
     .bind(id)
     .bind(org_id)
     .fetch_optional(pool)
@@ -316,10 +329,7 @@ pub async fn list(
     let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let offset = query.offset.unwrap_or(0).max(0);
     let items: Vec<Broadcast> = sqlx::query_as(&format!(
-        "SELECT {BROADCAST_COLS} FROM loyalty_broadcasts b \
-           LEFT JOIN loyalty_broadcast_recipients r ON r.broadcast_id = b.id \
-           LEFT JOIN users u ON u.id = b.created_by \
-          WHERE b.org_id = $1 GROUP BY b.id, u.name ORDER BY b.created_at DESC LIMIT $2 OFFSET $3"
+        "{BROADCAST_SELECT} WHERE b.org_id = $1 ORDER BY b.created_at DESC LIMIT $2 OFFSET $3"
     ))
     .bind(org_id)
     .bind(limit)
@@ -452,8 +462,8 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
                 "INSERT INTO loyalty_broadcast_recipients (broadcast_id, org_id, customer_id, outcome, processed_at) SELECT ",
             );
             qb.push_bind(id).push(
-                ", m.org_id, m.id, CASE WHEN m.marketing_opt_out THEN 'skipped_opted_out' ELSE 'pending' END, \
-                 CASE WHEN m.marketing_opt_out THEN now() END",
+                ", m.org_id, m.id, CASE WHEN c.marketing_opt_out THEN 'skipped_opted_out' ELSE 'pending' END, \
+                 CASE WHEN c.marketing_opt_out THEN now() END",
             );
             audience_from(&mut qb, b.org_id, &b.audience, mode, &sizes);
             qb.push(" ON CONFLICT DO NOTHING");

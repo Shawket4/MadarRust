@@ -1141,6 +1141,16 @@ async fn segments_filter_the_members_and_the_figures_add_up(pool: PgPool) {
     assert_eq!(stats["active_members"], 2);
     assert_eq!(stats["earned"], 0);
     assert_eq!(stats["daily"].as_array().unwrap().len(), 30);
+    // The dashboard sends instants (its date scope): a one-day range in Cairo.
+    let (st, one) = call(
+        &app,
+        test::TestRequest::get().uri("/loyalty/stats?from=2026-10-22T21:00:00Z&to=2026-10-23T20:59:59.999Z"),
+        &s.admin_token(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{one}");
+    assert_eq!(one["from"], "2026-10-23");
+    assert_eq!(one["to"], "2026-10-23");
 
     // A member's wallet.
     let (st, w) = call(
@@ -1314,4 +1324,48 @@ async fn a_refund_claws_back_each_tracks_earn_in_proportion(pool: PgPool) {
     assert!(st.is_success(), "{st} {body}");
     assert_eq!(visits(&pool, m).await, 3, "5 - 2");
     assert_eq!(track_balance(&pool, m, 2).await, 2, "3 - 1");
+}
+
+/// The read caches (rewards_cache) never serve a write's old value: the next
+/// read after a tracks save, a publish or an unpublish is the new one.
+#[sqlx::test]
+async fn a_write_is_visible_on_the_next_read_through_the_caches(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamps(&pool, s.org, 8).await;
+    let m = member(&pool, s.org, "201000000115", "Farah").await;
+    let lookup = || {
+        test::TestRequest::post()
+            .uri("/loyalty/lookup")
+            .set_json(json!({"branch_id": s.branch, "customer_id": m}))
+    };
+    // Warm the tracks cache with one track…
+    let (_, before) = call(&app, lookup(), &s.teller_token()).await;
+    assert!(before["member"].get("tracks").is_none());
+    // …save three, and the very next lookup has them.
+    put_tracks(&app, &s, three_tracks(&s)).await;
+    let (_, after) = call(&app, lookup(), &s.teller_token()).await;
+    assert_eq!(after["member"]["tracks"].as_array().unwrap().len(), 3, "{after}");
+    // Rename track 2: visible at once.
+    let mut t = three_tracks(&s);
+    t["tracks"][1]["name_en"] = json!("Bakery");
+    put_tracks(&app, &s, t).await;
+    let (_, again) = call(&app, lookup(), &s.teller_token()).await;
+    assert_eq!(again["member"]["tracks"][1]["name_en"], "Bakery");
+
+    // The published design: the hero answers at the new revision at once, and
+    // stops answering at once when unpublished.
+    let hero = |rev: i32| test::TestRequest::get().uri(&format!("/public/loyalty/brand/{}/card/{rev}/0-0-0-en.png", s.org));
+    let (st, _) = raw(&app, hero(0)).await;
+    assert_eq!(st, StatusCode::OK, "the automatic multi-track design (revision 0)");
+    let good = design(json!([{"kind": {"type": "bar", "track": 1}, "cell": {"col": 0, "row": 4, "w": 12, "h": 1}}]));
+    call(&app, test::TestRequest::put().uri("/loyalty/card-design").set_json(json!({"design": good})), &s.admin_token()).await;
+    call(&app, test::TestRequest::post().uri("/loyalty/card-design/publish"), &s.admin_token()).await;
+    let (st, _) = raw(&app, hero(1)).await;
+    assert_eq!(st, StatusCode::OK, "revision 1, right after publishing");
+    let (st, _) = raw(&app, hero(0)).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "the automatic one is gone");
+    call(&app, test::TestRequest::delete().uri("/loyalty/card-design/published"), &s.admin_token()).await;
+    let (st, _) = raw(&app, hero(1)).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "unpublished: gone at once");
 }

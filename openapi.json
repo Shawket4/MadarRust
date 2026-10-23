@@ -24481,21 +24481,21 @@
           {
             "name": "from",
             "in": "query",
-            "description": "`YYYY-MM-DD`, in the shop's time zone; default 30 days ago.",
+            "description": "Start of the range (an instant, like the other loyalty analytics); its\nday in the shop's time zone is the first day. Default: 29 days before `to`.",
             "required": false,
             "schema": {
               "type": "string",
-              "format": "date"
+              "format": "date-time"
             }
           },
           {
             "name": "to",
             "in": "query",
-            "description": "`YYYY-MM-DD`, inclusive; default today.",
+            "description": "End of the range (inclusive); its day in the shop's zone is the last.\nDefault: today.",
             "required": false,
             "schema": {
               "type": "string",
-              "format": "date"
+              "format": "date-time"
             }
           }
         ],

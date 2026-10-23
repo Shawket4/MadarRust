@@ -75,7 +75,37 @@ impl TrackDef {
 /// stamps programme.
 pub async fn load<'e, E>(exec: E, org_id: Uuid, mode: Mode) -> Result<Vec<TrackDef>, AppError>
 where
-    E: sqlx::PgExecutor<'e> + Copy,
+    E: sqlx::PgExecutor<'e> + Copy + 'e,
+{
+    // Cached per org (rewards_cache): every lookup, award, redemption and pass
+    // build reads this; only `PUT /loyalty/tracks` changes it.
+    let rows = super::rewards_cache::tracks(org_id, || async move {
+        Ok(std::sync::Arc::new(stored(exec, org_id).await?))
+    })
+    .await?;
+    let mut out: Vec<TrackDef> = Vec::new();
+    let one = rows.iter().find(|r| r.position == 1);
+    out.push(TrackDef {
+        position: 1,
+        name_en: one.map(|r| r.name_en.clone()).unwrap_or_default(),
+        name_ar: one.map(|r| r.name_ar.clone()).unwrap_or_default(),
+        size: None,
+        shape: one.and_then(|r| r.shape.clone()),
+        colour: one.and_then(|r| r.colour.clone()),
+        per_item: true,
+        cap: None,
+        items: Vec::new(),
+    });
+    if mode == Mode::Visits {
+        out.extend(rows.iter().filter(|r| r.position > 1).cloned());
+    }
+    Ok(out)
+}
+
+/// The org's track rows as stored (every position), one round trip.
+async fn stored<'e, E>(exec: E, org_id: Uuid) -> Result<Vec<TrackDef>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
 {
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -101,35 +131,20 @@ where
     .bind(org_id)
     .fetch_all(exec)
     .await?;
-    let mut out: Vec<TrackDef> = Vec::new();
-    let one = rows.iter().find(|r| r.position == 1);
-    out.push(TrackDef {
-        position: 1,
-        name_en: one.map(|r| r.name_en.clone()).unwrap_or_default(),
-        name_ar: one.map(|r| r.name_ar.clone()).unwrap_or_default(),
-        size: None,
-        shape: one.and_then(|r| r.shape.clone()),
-        colour: one.and_then(|r| r.colour.clone()),
-        per_item: true,
-        cap: None,
-        items: Vec::new(),
-    });
-    if mode == Mode::Visits {
-        for r in rows.into_iter().filter(|r| r.position > 1) {
-            out.push(TrackDef {
-                position: u8::try_from(r.position).unwrap_or(0),
-                name_en: r.name_en,
-                name_ar: r.name_ar,
-                size: r.size,
-                shape: r.shape,
-                colour: r.colour,
-                per_item: r.per_item,
-                cap: r.cap,
-                items: r.items,
-            });
-        }
-    }
-    Ok(out)
+    Ok(rows
+        .into_iter()
+        .map(|r| TrackDef {
+            position: u8::try_from(r.position).unwrap_or(0),
+            name_en: r.name_en,
+            name_ar: r.name_ar,
+            size: r.size,
+            shape: r.shape,
+            colour: r.colour,
+            per_item: r.per_item,
+            cap: r.cap,
+            items: r.items,
+        })
+        .collect())
 }
 
 /// A member's balances on tracks 2–4.
@@ -541,6 +556,7 @@ pub async fn put_tracks(
     // The cards change look: rebuilt by the sweep, as after a settings save.
     super::wallet::mark_org_stale(&mut tx, org_id).await?;
     tx.commit().await?;
+    super::rewards_cache::invalidate_tracks(org_id).await;
     super::wallet::store::purge_org(pool, org_id).await;
     Ok(HttpResponse::Ok().json(view(pool, org_id).await?))
 }

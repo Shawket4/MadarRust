@@ -38,10 +38,25 @@ fn balance_sql(track: u8, mode: Mode) -> String {
     }
 }
 
-/// When a member was last seen: their latest ledger row, else when they joined.
-pub const LAST_SEEN: &str = "COALESCE((SELECT max(t.created_at) FROM loyalty_transactions t WHERE t.customer_id = m.id), m.enrolled_at)";
+/// Track `track` (2–4) holds at least `value` (a value of 0 or less is everyone).
+fn at_least(qb: &mut QueryBuilder<'_, Postgres>, track: u8, value: i32) {
+    if value <= 0 {
+        return;
+    }
+    qb.push(format!(
+        " AND EXISTS (SELECT 1 FROM loyalty_track_balances b \
+           WHERE b.customer_id = m.id AND b.position = {track} AND b.balance >= "
+    ))
+    .push_bind(value)
+    .push(")");
+}
 
-/// `AND …` for every rule of `audience`, over `loyalty_members_v m`. The rules
+/// When a member was last seen: their latest stamp, point or reward
+/// (`loyalty_memberships.last_seen_at`, kept by the ledger trigger and indexed),
+/// else when they joined.
+pub const LAST_SEEN: &str = "m.last_seen_at";
+
+/// `AND …` for every rule of `audience`, over `loyalty_memberships m JOIN customers c`. The rules
 /// have been validated (madar-card) before this is called; numbers are bound.
 pub fn push_audience(
     qb: &mut QueryBuilder<'_, Postgres>,
@@ -51,6 +66,23 @@ pub fn push_audience(
 ) {
     for r in &audience.rules {
         match *r {
+            // Tracks 2–4 as a semi-join on their own (org, position, balance)
+            // index; a member with no row holds 0 on that track.
+            Rule::BalanceAtLeast { track, value } if track > 1 => {
+                at_least(qb, track, value);
+            }
+            Rule::RewardReady { track } if track > 1 => {
+                let size = sizes.get(&track).copied().unwrap_or(i32::MAX).max(1);
+                at_least(qb, track, size);
+            }
+            Rule::BalanceAtMost { track, value } if track > 1 => {
+                qb.push(format!(
+                    " AND NOT EXISTS (SELECT 1 FROM loyalty_track_balances b \
+                       WHERE b.customer_id = m.id AND b.position = {track} AND b.balance > "
+                ))
+                .push_bind(value)
+                .push(")");
+            }
             Rule::BalanceAtLeast { track, value } => {
                 qb.push(format!(" AND {} >= ", balance_sql(track, mode)))
                     .push_bind(value);
@@ -82,7 +114,7 @@ pub fn push_audience(
                     .push(")");
             }
             Rule::BirthdayMonth { month } => {
-                qb.push(" AND m.birth_month = ").push_bind(i16::from(month));
+                qb.push(" AND c.birth_month = ").push_bind(i16::from(month));
             }
             Rule::HasWallet { wallet } => {
                 let apple =
@@ -249,13 +281,13 @@ pub async fn query_members(
     };
 
     let filter = |qb: &mut QueryBuilder<'_, Postgres>| {
-        qb.push(" FROM loyalty_members_v m WHERE m.org_id = ")
+        qb.push(" FROM loyalty_memberships m JOIN customers c ON c.id = m.id WHERE m.org_id = ")
             .push_bind(org_id)
-            .push(" AND m.deleted_at IS NULL AND m.erased_at IS NULL");
+            .push(" AND m.deleted_at IS NULL AND c.erased_at IS NULL");
         if let Some(n) = &n {
-            qb.push(" AND (m.name ILIKE ")
+            qb.push(" AND (c.name ILIKE ")
                 .push_bind(n.clone())
-                .push(" OR m.phone ILIKE ")
+                .push(" OR c.phone_key ILIKE ")
                 .push_bind(n.clone())
                 .push(")");
         }
@@ -263,10 +295,10 @@ pub async fn query_members(
     };
 
     let mut qb = QueryBuilder::<Postgres>::new(format!(
-        "SELECT m.id, m.name, m.phone, {bal} AS balance, {lifetime} AS lifetime, m.enrolled_at, \
+        "SELECT m.id, c.name, COALESCE(c.phone_key, c.phone, '') AS phone, {bal} AS balance, {lifetime} AS lifetime, m.enrolled_at, \
                 {LAST_SEEN} AS last_visit_at, \
                 (SELECT count(*) FROM loyalty_pass_devices d WHERE d.customer_id = m.id) AS apple_devices, \
-                (m.google_object_id IS NOT NULL) AS google_card, m.marketing_opt_out, m.birth_month, m.locale"
+                (m.google_object_id IS NOT NULL) AS google_card, c.marketing_opt_out, c.birth_month, COALESCE(c.locale, 'en') AS locale"
     ));
     filter(&mut qb);
     let dir = if body.desc { "DESC" } else { "ASC" };
@@ -274,7 +306,7 @@ pub async fn query_members(
         MemberSort::Joined => format!("m.enrolled_at {dir}"),
         MemberSort::LastVisit => format!("last_visit_at {dir}"),
         MemberSort::Balance => format!("balance {dir}"),
-        MemberSort::Name => format!("lower(m.name) {dir}"),
+        MemberSort::Name => format!("lower(c.name) {dir}"),
     };
     qb.push(format!(" ORDER BY {order}, m.id LIMIT "))
         .push_bind(limit)
@@ -282,9 +314,19 @@ pub async fn query_members(
         .push_bind(offset);
     let mut rows: Vec<CrmMember> = qb.build_query_as().fetch_all(pool).await?;
 
-    let mut count = QueryBuilder::<Postgres>::new("SELECT count(*)");
-    filter(&mut count);
-    let total: i64 = count.build_query_scalar().fetch_one(pool).await?;
+    // The total is an aggregate over the org: counted once a minute per filter
+    // (rewards_cache), not on every page turn.
+    let key = format!(
+        "members|{org_id}|{}|{}",
+        n.as_deref().unwrap_or(""),
+        serde_json::to_string(&body.audience).unwrap_or_default()
+    );
+    let total: i64 = super::rewards_cache::count(key, || async {
+        let mut count = QueryBuilder::<Postgres>::new("SELECT count(*)");
+        filter(&mut count);
+        Ok(count.build_query_scalar().fetch_one(pool).await?)
+    })
+    .await?;
 
     let multi = defs.len() > 1;
     for r in &mut rows {
@@ -348,8 +390,8 @@ pub async fn member_wallet(
                 (m.google_object_id IS NOT NULL) AS google_card, m.pass_updated_at, m.pass_notice, \
                 m.pass_notice_at, m.pass_notice_seen_at, m.pass_notice_wallets, \
                 (SELECT count(*) FROM loyalty_broadcast_recipients r WHERE r.customer_id = m.id AND r.outcome = 'sent') AS messages_received, \
-                m.marketing_opt_out \
-           FROM loyalty_members_v m WHERE m.id = $1 AND m.org_id = $2 AND m.deleted_at IS NULL",
+                c.marketing_opt_out \
+           FROM loyalty_memberships m JOIN customers c ON c.id = m.id WHERE m.id = $1 AND m.org_id = $2 AND m.deleted_at IS NULL",
     )
     .bind(*id)
     .bind(org_id)
@@ -375,10 +417,12 @@ pub async fn member_wallet(
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct StatsQuery {
-    /// `YYYY-MM-DD`, in the shop's time zone; default 30 days ago.
-    pub from: Option<chrono::NaiveDate>,
-    /// `YYYY-MM-DD`, inclusive; default today.
-    pub to: Option<chrono::NaiveDate>,
+    /// Start of the range (an instant, like the other loyalty analytics); its
+    /// day in the shop's time zone is the first day. Default: 29 days before `to`.
+    pub from: Option<chrono::DateTime<chrono::Utc>>,
+    /// End of the range (inclusive); its day in the shop's zone is the last.
+    /// Default: today.
+    pub to: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Serialize, ToSchema, sqlx::FromRow)]
@@ -440,103 +484,124 @@ pub async fn stats(
     .fetch_optional(pool)
     .await?
     .unwrap_or_else(|| "Africa/Cairo".into());
-    let today: chrono::NaiveDate = sqlx::query_scalar("SELECT (now() AT TIME ZONE $1)::date")
-        .bind(&tz)
-        .fetch_one(pool)
-        .await?;
-    let to = query.to.unwrap_or(today);
-    let from = query.from.unwrap_or(to - chrono::Duration::days(29));
+    let day_of = |t: Option<chrono::DateTime<chrono::Utc>>| {
+        let tz = tz.clone();
+        async move {
+            sqlx::query_scalar::<_, chrono::NaiveDate>(
+                "SELECT (COALESCE($1, now()) AT TIME ZONE $2)::date",
+            )
+            .bind(t)
+            .bind(tz)
+            .fetch_one(pool)
+            .await
+        }
+    };
+    let to = day_of(query.to).await?;
+    let from = match query.from {
+        Some(_) => day_of(query.from).await?,
+        None => to - chrono::Duration::days(29),
+    };
     if from > to || (to - from).num_days() > 366 {
         return Err(AppError::BadRequest(
             "from must be before to, at most a year apart".into(),
         ));
     }
-    // Days run [from 00:00, to+1 00:00) in the shop's zone.
+    // An aggregate over the org's ledger: computed at most once a minute per
+    // range (rewards_cache), from the (org_id, created_at) index.
+    let key = format!("stats|{org_id}|{from}|{to}");
+    let tz2 = tz.clone();
+    let value = super::rewards_cache::stats(key, || async move {
+        let tz = tz2;
+        // Days run [from 00:00, to+1 00:00) in the shop's zone.
 
-    let daily: Vec<StatsDay> = sqlx::query_as(&format!(
-        "WITH days AS (SELECT generate_series($2::date, $3::date, '1 day')::date AS date), \
-              led AS (SELECT (t.created_at AT TIME ZONE $4)::date AS date, t.customer_id, t.kind::text AS kind, t.points \
-                        FROM loyalty_transactions t \
-                       WHERE t.org_id = $1 AND t.created_at >= {lo} AND t.created_at < {hi}), \
-              joined AS (SELECT (m.enrolled_at AT TIME ZONE $4)::date AS date, count(*) AS n FROM loyalty_memberships m \
-                          WHERE m.org_id = $1 AND m.enrolled_at >= {lo} AND m.enrolled_at < {hi} GROUP BY 1) \
-         SELECT d.date, COALESCE(j.n, 0)::bigint AS new_members, \
-                COALESCE((SELECT sum(points) FROM led WHERE led.date = d.date AND kind = 'earn'), 0)::bigint AS earned, \
-                COALESCE((SELECT count(*) FROM led WHERE led.date = d.date AND kind = 'redeem'), 0)::bigint AS redemptions, \
-                COALESCE((SELECT count(DISTINCT customer_id) FROM led WHERE led.date = d.date), 0)::bigint AS active \
-           FROM days d LEFT JOIN joined j ON j.date = d.date ORDER BY d.date",
-        lo = "($2::date::timestamp AT TIME ZONE $4)",
-        hi = "(($3::date + 1)::timestamp AT TIME ZONE $4)"
-    ))
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
-    .bind(&tz)
-    .fetch_all(pool)
-    .await?;
+        let daily: Vec<StatsDay> = sqlx::query_as(&format!(
+            "WITH days AS (SELECT generate_series($2::date, $3::date, '1 day')::date AS date), \
+                  led AS (SELECT (t.created_at AT TIME ZONE $4)::date AS date, t.customer_id, t.kind::text AS kind, t.points \
+                            FROM loyalty_transactions t \
+                           WHERE t.org_id = $1 AND t.created_at >= {lo} AND t.created_at < {hi}), \
+                  joined AS (SELECT (m.enrolled_at AT TIME ZONE $4)::date AS date, count(*) AS n FROM loyalty_memberships m \
+                              WHERE m.org_id = $1 AND m.enrolled_at >= {lo} AND m.enrolled_at < {hi} GROUP BY 1) \
+             SELECT d.date, COALESCE(j.n, 0)::bigint AS new_members, \
+                    COALESCE((SELECT sum(points) FROM led WHERE led.date = d.date AND kind = 'earn'), 0)::bigint AS earned, \
+                    COALESCE((SELECT count(*) FROM led WHERE led.date = d.date AND kind = 'redeem'), 0)::bigint AS redemptions, \
+                    COALESCE((SELECT count(DISTINCT customer_id) FROM led WHERE led.date = d.date), 0)::bigint AS active \
+               FROM days d LEFT JOIN joined j ON j.date = d.date ORDER BY d.date",
+            lo = "($2::date::timestamp AT TIME ZONE $4)",
+            hi = "(($3::date + 1)::timestamp AT TIME ZONE $4)"
+        ))
+        .bind(org_id)
+        .bind(from)
+        .bind(to)
+        .bind(&tz)
+        .fetch_all(pool)
+        .await?;
 
-    let per_track: Vec<StatsTrack> = sqlx::query_as(
-        "SELECT COALESCE(t.track, 1)::int2 AS position, \
-                COALESCE(sum(t.points) FILTER (WHERE t.kind = 'earn'), 0)::bigint AS earned, \
-                count(*) FILTER (WHERE t.kind = 'redeem')::bigint AS redemptions \
-           FROM loyalty_transactions t \
-          WHERE t.org_id = $1 AND t.created_at >= ($2::date::timestamp AT TIME ZONE $4) \
-            AND t.created_at < (($3::date + 1)::timestamp AT TIME ZONE $4) \
-          GROUP BY 1 ORDER BY 1",
-    )
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
-    .bind(&tz)
-    .fetch_all(pool)
-    .await?;
+        let per_track: Vec<StatsTrack> = sqlx::query_as(
+            "SELECT COALESCE(t.track, 1)::int2 AS position, \
+                    COALESCE(sum(t.points) FILTER (WHERE t.kind = 'earn'), 0)::bigint AS earned, \
+                    count(*) FILTER (WHERE t.kind = 'redeem')::bigint AS redemptions \
+               FROM loyalty_transactions t \
+              WHERE t.org_id = $1 AND t.created_at >= ($2::date::timestamp AT TIME ZONE $4) \
+                AND t.created_at < (($3::date + 1)::timestamp AT TIME ZONE $4) \
+              GROUP BY 1 ORDER BY 1",
+        )
+        .bind(org_id)
+        .bind(from)
+        .bind(to)
+        .bind(&tz)
+        .fetch_all(pool)
+        .await?;
 
-    let (members_total, members_with_card): (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE m.google_object_id IS NOT NULL \
-                    OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)) \
-           FROM loyalty_memberships m WHERE m.org_id = $1 AND m.deleted_at IS NULL",
-    )
-    .bind(org_id)
-    .fetch_one(pool)
+        let (members_total, members_with_card): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE m.google_object_id IS NOT NULL \
+                        OR EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)) \
+               FROM loyalty_memberships m WHERE m.org_id = $1 AND m.deleted_at IS NULL",
+        )
+        .bind(org_id)
+        .fetch_one(pool)
+        .await?;
+        let active_members: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT customer_id) FROM loyalty_transactions \
+              WHERE org_id = $1 AND created_at >= ($2::date::timestamp AT TIME ZONE $4) \
+                AND created_at < (($3::date + 1)::timestamp AT TIME ZONE $4)",
+        )
+        .bind(org_id)
+        .bind(from)
+        .bind(to)
+        .bind(&tz)
+        .fetch_one(pool)
+        .await?;
+        let (messages_sent, messages_seen): (i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE r.outcome = 'sent'), count(r.seen_at) \
+               FROM loyalty_broadcast_recipients r JOIN loyalty_broadcasts b ON b.id = r.broadcast_id \
+              WHERE b.org_id = $1 AND r.processed_at >= ($2::date::timestamp AT TIME ZONE $4) \
+                AND r.processed_at < (($3::date + 1)::timestamp AT TIME ZONE $4)",
+        )
+        .bind(org_id)
+        .bind(from)
+        .bind(to)
+        .bind(&tz)
+        .fetch_one(pool)
+        .await?;
+
+            Ok(std::sync::Arc::new(serde_json::to_value(RewardsStats {
+            from,
+            to,
+            mode: mode.as_str().into(),
+            members_total,
+            new_members: daily.iter().map(|d| d.new_members).sum(),
+            active_members,
+            earned: daily.iter().map(|d| d.earned).sum(),
+            redemptions: daily.iter().map(|d| d.redemptions).sum(),
+            members_with_card,
+            messages_sent,
+            messages_seen,
+            per_track,
+            daily,
+            }).map_err(|_| AppError::Internal)?))
+    })
     .await?;
-    let active_members: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT customer_id) FROM loyalty_transactions \
-          WHERE org_id = $1 AND created_at >= ($2::date::timestamp AT TIME ZONE $4) \
-            AND created_at < (($3::date + 1)::timestamp AT TIME ZONE $4)",
-    )
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
-    .bind(&tz)
-    .fetch_one(pool)
-    .await?;
-    let (messages_sent, messages_seen): (i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE r.outcome = 'sent'), count(r.seen_at) \
-           FROM loyalty_broadcast_recipients r JOIN loyalty_broadcasts b ON b.id = r.broadcast_id \
-          WHERE b.org_id = $1 AND r.processed_at >= ($2::date::timestamp AT TIME ZONE $4) \
-            AND r.processed_at < (($3::date + 1)::timestamp AT TIME ZONE $4)",
-    )
-    .bind(org_id)
-    .bind(from)
-    .bind(to)
-    .bind(&tz)
-    .fetch_one(pool)
-    .await?;
-    Ok(HttpResponse::Ok().json(RewardsStats {
-        from,
-        to,
-        mode: mode.as_str().into(),
-        members_total,
-        new_members: daily.iter().map(|d| d.new_members).sum(),
-        active_members,
-        earned: daily.iter().map(|d| d.earned).sum(),
-        redemptions: daily.iter().map(|d| d.redemptions).sum(),
-        members_with_card,
-        messages_sent,
-        messages_seen,
-        per_track,
-        daily,
-    }))
+    Ok(HttpResponse::Ok().json(&*value))
 }
 
 #[cfg(test)]
