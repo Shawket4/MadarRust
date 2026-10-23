@@ -100625,7 +100625,8 @@
           },
           "messages_sent": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Messages that reached a card or WhatsApp (not \"no card, no WhatsApp\")."
           },
           "mode": {
             "type": "string",
