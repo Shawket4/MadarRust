@@ -941,7 +941,7 @@ pub fn pass_json(
     // the baked progress bar and footer.
     let balance_field = json!([{
         "key": "balance",
-        "label": super::google::balance_label(mode),
+        "label": super::google::balance_label(mode, super::i18n::unit_of(settings, copy.unit)),
         "value": balance
     }]);
     if brand.custom {
@@ -1226,7 +1226,7 @@ async fn build_pass_inner(
     // rather than the text it happens to contain.
     //
     // See `wallet::i18n` for why the English text is the key.
-    let pairs = super::i18n::strings_for(&settings, settings.program_name_ar.as_deref());
+    let pairs = super::i18n::strings_for(&settings, settings.program_name_ar.as_deref(), copy.unit);
     images.push((
         "en.lproj/pass.strings".to_string(),
         super::i18n::strings_file(&super::i18n::identity(&pairs)).into_bytes(),
@@ -1487,7 +1487,9 @@ pub(crate) mod tests {
         .unwrap();
         // The stamps balance leads, not the points one.
         assert_eq!(p["storeCard"]["headerFields"][0]["value"], 3);
-        assert_eq!(p["storeCard"]["headerFields"][0]["label"], "Orders");
+        // The default programme counts a stamp per ITEM, so the balance is
+        // items (earn::StampUnit), not orders.
+        assert_eq!(p["storeCard"]["headerFields"][0]["label"], "Items");
         // A stamp card reads as a STEPPER, not as arithmetic: five orders is
         // few enough to count at a glance, and joining the steps shows the
         // direction of travel the way loose dots do not.
@@ -1919,7 +1921,7 @@ pub(crate) mod tests {
         let pass = pass_json(m, s, &[], copy, &brand).unwrap();
         let mut images = brand.images.clone();
         images.extend(strip);
-        let pairs = crate::loyalty::wallet::i18n::strings_for(s, s.program_name_ar.as_deref());
+        let pairs = crate::loyalty::wallet::i18n::strings_for(s, s.program_name_ar.as_deref(), copy.unit);
         images.push((
             "en.lproj/pass.strings".into(),
             crate::loyalty::wallet::i18n::strings_file(&crate::loyalty::wallet::i18n::identity(&pairs)).into_bytes(),
@@ -2183,7 +2185,7 @@ pub(crate) mod tests {
     fn a_pass_carries_both_languages_or_it_carries_one() {
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.default_reward_cost = 5;
-        let pairs = crate::loyalty::wallet::i18n::strings_for(&s, None);
+        let pairs = crate::loyalty::wallet::i18n::strings_for(&s, None, None);
         assert!(!pairs.is_empty());
 
         let english = crate::loyalty::wallet::i18n::identity(&pairs);

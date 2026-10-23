@@ -207,6 +207,42 @@ pub fn points_for_order(
     }
 }
 
+/// What one stamp stands for, as the customer is told: the ONE rule behind
+/// every unit word on the join page, the passes and the messages. `None` for a
+/// points programme (it has no stamps).
+///
+/// - `Order`: one stamp per sale (visits, per item off).
+/// - `Item`: one stamp per item bought (visits, per item on).
+/// - `Stamp`: a Rewards by Madar counter shop (plan Free + the loyalty add-on):
+///   the teller stamps the card, so neither "per order" nor "per item" is a
+///   promise the shop makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampUnit {
+    Order,
+    Item,
+    Stamp,
+}
+
+impl StampUnit {
+    pub fn of(mode: Mode, per_line_item: bool, standalone: bool) -> Option<Self> {
+        match mode {
+            Mode::Points => None,
+            Mode::Visits if standalone => Some(Self::Stamp),
+            Mode::Visits if per_line_item => Some(Self::Item),
+            Mode::Visits => Some(Self::Order),
+        }
+    }
+
+    /// The wire form (`stamp_unit` on the public join info).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Order => "order",
+            Self::Item => "item",
+            Self::Stamp => "stamp",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +496,18 @@ mod tests {
         // a deliberate act rather than an accident.
         let generous = amounts(10_000, 0, 0);
         assert_eq!(points_for(generous, RULE), 10);
+    }
+
+    #[test]
+    fn the_stamp_unit_is_one_rule() {
+        assert_eq!(StampUnit::of(Mode::Points, true, true), None, "points have no stamps");
+        assert_eq!(StampUnit::of(Mode::Visits, false, false), Some(StampUnit::Order));
+        assert_eq!(StampUnit::of(Mode::Visits, true, false), Some(StampUnit::Item));
+        assert_eq!(StampUnit::of(Mode::Visits, true, true), Some(StampUnit::Stamp));
+        assert_eq!(StampUnit::of(Mode::Visits, false, true), Some(StampUnit::Stamp));
+        assert_eq!(
+            [StampUnit::Order, StampUnit::Item, StampUnit::Stamp].map(StampUnit::as_str),
+            ["order", "item", "stamp"]
+        );
     }
 }

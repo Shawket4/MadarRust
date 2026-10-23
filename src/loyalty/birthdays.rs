@@ -23,7 +23,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::errors::AppError;
-use crate::loyalty::earn::Mode;
 
 /// Default cadence. Hours rather than minutes: a birthday is a day, not a
 /// moment, and a tighter loop only means more scans finding nothing.
@@ -230,23 +229,22 @@ pub fn message_for(
 
     let program = &settings.program_name;
     let gift = settings.birthday_reward_amount;
-    let unit = match settings.mode() {
-        Mode::Points => ("points", "نقطة"),
-        Mode::Visits => ("stamps", "أختام"),
-    };
+    // `{n} من النقاط` reads right at every number; `{n} نقطة` did not (3-10
+    // take the plural). See `wallet::i18n::unit_in_a_sentence`.
+    let unit = |a: i32| crate::loyalty::wallet::i18n::unit_in_a_sentence(settings.mode(), a);
     match (arabic, gift) {
         (false, Some(a)) => format!(
-            "Happy birthday, {name}! 🎉 We've put {a} {} on your {program} card — \
+            "Happy birthday, {name}! 🎉 We've put {} on your {program} card — \
              come and enjoy something on us.",
-            unit.0
+            unit(a).en
         ),
         (false, None) => {
             format!("Happy birthday, {name}! 🎉 Everyone at {program} is thinking of you today.")
         }
         (true, Some(a)) => format!(
-            "كل سنة وأنت طيب يا {name}! 🎉 أضفنا {a} {} إلى بطاقتك في {program} — \
+            "كل سنة وأنت طيب يا {name}! 🎉 أضفنا {} إلى بطاقتك في {program} — \
              تعال واستمتع بشيء على حسابنا.",
-            unit.1
+            unit(a).ar
         ),
         (true, None) => format!("كل سنة وأنت طيب يا {name}! 🎉 نتمنى لك يوماً سعيداً من {program}."),
     }
@@ -285,6 +283,10 @@ mod tests {
         let m = message_for(&settings, "Ali", "en");
         assert!(m.contains("1 stamps"), "{m}");
         assert!(!m.contains("points"), "{m}");
+        // Arabic in the form that agrees with any number (5 أختام was wrong).
+        settings.birthday_reward_amount = Some(5);
+        let ar = message_for(&settings, "علي", "ar");
+        assert!(ar.contains("أضفنا 5 من الأختام"), "{ar}");
     }
 
     #[test]

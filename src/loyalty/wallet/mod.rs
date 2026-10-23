@@ -352,6 +352,32 @@ pub struct CardCopy {
     /// Member-specific, unlike the rest — it rides here because this is the one
     /// value both wallet builders already receive.
     pub order_now_url: Option<String>,
+    /// What one stamp stands for (`earn::StampUnit`), worked out with the org's
+    /// plan ([`stamp_unit_for`]). `None` lets the settings alone decide
+    /// (order or item), which is right for every shop but a counter shop.
+    pub unit: Option<crate::loyalty::earn::StampUnit>,
+}
+
+/// The card's unit for this org: a counter shop (plan Free + the loyalty
+/// add-on) stamps at the counter; otherwise the settings decide. `None` for
+/// points. The one place the plan joins the rule.
+pub async fn stamp_unit_for(
+    pool: &PgPool,
+    org_id: Uuid,
+    settings: &LoyaltySettings,
+) -> Option<crate::loyalty::earn::StampUnit> {
+    let standalone = match crate::plan::access_of(pool, org_id).await {
+        Ok(a) => {
+            a.plan == madar_plan::Plan::Free && a.addons.contains(madar_plan::Feature::Loyalty)
+        }
+        // A plan we cannot read is not a counter shop: the settings decide.
+        Err(_) => false,
+    };
+    crate::loyalty::earn::StampUnit::of(
+        settings.mode(),
+        settings.stamp_per_line_item.unwrap_or(false),
+        standalone,
+    )
 }
 
 /// Everything a pass build reads from the database, fetched once.
@@ -407,6 +433,7 @@ pub async fn pass_source(pool: &PgPool, member: &MemberRow) -> Result<PassSource
 
     let mut copy = card_copy_from(&settings, &rewards, branches, Some(&brand));
     copy.order_now_url = order_now_for(pool, member).await;
+    copy.unit = stamp_unit_for(pool, member.org_id, &settings).await;
     Ok(PassSource {
         copy,
         settings,
@@ -425,12 +452,14 @@ pub async fn card_copy(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) 
             .unwrap_or_default()
     };
     let brand = crate::orgs::branding::load(pool, org_id).await.ok();
-    card_copy_from(
+    let mut copy = card_copy_from(
         settings,
         &rewards,
         branch_names(pool, org_id).await,
         brand.as_ref(),
-    )
+    );
+    copy.unit = stamp_unit_for(pool, org_id, settings).await;
+    copy
 }
 
 /// The same copy, assembled from rows a caller has ALREADY fetched.
@@ -456,6 +485,7 @@ pub fn card_copy_from(
         branches,
         social: brand.map(|b| b.social_links.clone()).unwrap_or_default(),
         order_now_url: None,
+        unit: None,
     }
 }
 
@@ -578,7 +608,6 @@ pub fn back_of_card(
     settings: &LoyaltySettings,
     copy: &CardCopy,
 ) -> Vec<BackLine> {
-    let threshold = settings.default_reward_cost;
     let mut out = Vec::new();
     // FIRST, when there is one (design §4.1): Apple passes have no buttons, so
     // the top of the back is the most reachable place a link can be. The value
@@ -596,20 +625,10 @@ pub fn back_of_card(
         BackLine {
             key: "howitworks",
             label: "How it works".into(),
-            // The two programs are explained in their own terms — a stamp card
-            // that talked about EGP per point would be a card nobody could
-            // follow at the counter.
-            value: match settings.mode() {
-                crate::loyalty::earn::Mode::Points => format!(
-                    "Show this card when you pay. You earn a point for every {} EGP you spend, \
-                     and a reward costs {threshold} points.",
-                    settings.earn_piastres_per_point / 100,
-                ),
-                crate::loyalty::earn::Mode::Visits => format!(
-                    "Show this card when you pay. Every order earns a stamp, \
-                     and a reward costs {threshold} of them."
-                ),
-            },
+            // The programme in its own terms and in the card's unit (order,
+            // item or a counter stamp): the same sentence `i18n` translates,
+            // so the Arabic file always has its key.
+            value: i18n::how_it_works(settings, copy.unit).en,
         },
         BackLine {
             key: "member",
@@ -854,6 +873,7 @@ mod tests {
             rewards: vec![],
             branches: vec!["Maadi".into(), "Zamalek".into(), "Alexandria".into()],
             social: vec![],
+            unit: None,
         };
         // One located branch, three open ones.
         let lines = back_of_card(&apple::tests::member(), &s, &copy);
@@ -870,6 +890,7 @@ mod tests {
             rewards: vec![],
             branches: (1..=15).map(|i| format!("Branch {i}")).collect(),
             social: vec![],
+            unit: None,
         };
         let lines = back_of_card(&apple::tests::member(), &s, &copy);
         let branches = lines.iter().find(|l| l.key == "branches").unwrap();
@@ -905,6 +926,7 @@ mod tests {
             rewards: vec!["Espresso — 5 visits".to_string()],
             branches: vec!["Maadi".into(), "Zamalek".into()],
             social: vec![],
+            unit: None,
         };
 
         let apple = apple::pass_json(
@@ -1054,4 +1076,64 @@ mod tests {
 
     // Deliberately ONE test, not two: these read process-global environment,
     // and two tests mutating it race in the same process.
+
+    /// Every unit word on both wallets follows `earn::StampUnit`: the balance
+    /// label, "How it works", and their Arabic.
+    #[test]
+    fn both_wallets_speak_in_the_cards_unit() {
+        use crate::loyalty::earn::StampUnit;
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock makes this the only thread touching the environment.
+        unsafe {
+            std::env::set_var("LOYALTY_APPLE_PASS_TYPE_ID", "pass.example");
+            std::env::set_var("LOYALTY_APPLE_TEAM_ID", "TEAM123456");
+        }
+        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 6;
+        for (unit, label, label_ar, how, how_ar) in [
+            (StampUnit::Order, "Orders", "طلبات", "Every order earns a stamp", "كل طلب يكسبك ختمًا"),
+            (StampUnit::Item, "Items", "أصناف", "Every item you buy earns a stamp", "كل صنف تشتريه يكسبك ختمًا"),
+            (StampUnit::Stamp, "Stamps", "أختام", "at the counter to collect stamps", "عند الكاشير لتجمع الأختام"),
+        ] {
+            let copy = CardCopy { unit: Some(unit), ..Default::default() };
+            let apple = apple::pass_json(&member(), &s, &[], &copy, &apple::PassBrand::default()).unwrap();
+            let google = google::loyalty_object("338", &member(), &s, &[], &copy);
+            assert_eq!(apple["storeCard"]["headerFields"][0]["label"], label, "{unit:?}");
+            assert_eq!(google["loyaltyPoints"]["label"], label, "{unit:?}");
+            assert_eq!(
+                google["loyaltyPoints"]["localizedLabel"]["translatedValues"][0]["value"],
+                label_ar,
+                "{unit:?}"
+            );
+            let back = apple["storeCard"]["backFields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["key"] == "howitworks")
+                .unwrap()["value"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(back.contains(how), "{unit:?}: {back}");
+            let module = google["textModulesData"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == "howitworks")
+                .unwrap();
+            assert_eq!(module["body"], back.as_str(), "the same words on both wallets");
+            assert!(
+                module["localizedBody"]["translatedValues"][0]["value"].as_str().unwrap().contains(how_ar),
+                "{unit:?}"
+            );
+            // Apple's Arabic comes from pass.strings, keyed by the English.
+            let strings = i18n::strings_file(&i18n::strings_for(&s, None, copy.unit));
+            assert!(strings.contains(&format!("\"{label}\" = \"{label_ar}\";")), "{unit:?}");
+            assert!(strings.contains(&back), "{unit:?}: the back's sentence is a key");
+        }
+        // A points card has no stamp unit at all.
+        let points = LoyaltySettings::defaults(Uuid::nil(), None);
+        assert_eq!(i18n::unit_of(&points, Some(StampUnit::Stamp)), None);
+    }
 }

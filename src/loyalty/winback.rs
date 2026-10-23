@@ -310,11 +310,13 @@ pub fn message_for(
     };
 
     let reward = settings.winback_reward_amount.map(|amount| {
-        let unit = crate::loyalty::wallet::google::balance_label(settings.mode()).to_lowercase();
+        // A gift is points or stamps, in the reader's language. It used to
+        // borrow the pass's English balance label: "ضفنالك 20 orders".
+        let unit = crate::loyalty::wallet::i18n::unit_in_a_sentence(settings.mode(), amount);
         if arabic {
-            format!("\n\nوعشان ترجع: ضفنالك {amount} {unit}.")
+            format!("\n\nوعشان ترجع: ضفنالك {}.", unit.ar)
         } else {
-            format!("\n\nAnd to make it easier: we've added {amount} {unit} to your card.")
+            format!("\n\nAnd to make it easier: we've added {} to your card.", unit.en)
         }
     });
 
@@ -479,7 +481,12 @@ mod tests {
 
     #[test]
     fn a_shop_that_writes_its_own_still_cannot_send_an_unstoppable_message() {
-        // SAFETY: single-threaded test process for this variable.
+        // The wallet tests read this variable too: take their lock, or this
+        // test's remove_var can land in the middle of one of them.
+        let _guard = crate::loyalty::wallet::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: the lock above.
         unsafe { std::env::set_var("PUBLIC_LOYALTY_BASE_URL", "https://loyalty.example") }
         let mut s = settings();
         s.winback_message = Some("{name}! Two for one this week.".into());
@@ -498,5 +505,11 @@ mod tests {
         assert!(!message_for(&s, "Sara", "en", "t", None).contains("added"));
         s.winback_reward_amount = Some(20);
         assert!(message_for(&s, "Sara", "en", "t", None).contains("added 20 points"));
+        // In Arabic, in Arabic: it used to borrow the English label.
+        let ar = message_for(&s, "Sara", "ar", "t", None);
+        assert!(ar.contains("ضفنالك 20 من النقاط"), "{ar}");
+        s.mode = "visits".into();
+        let ar = message_for(&s, "Sara", "ar", "t", None);
+        assert!(ar.contains("ضفنالك 20 من الأختام") && !ar.contains("orders"), "{ar}");
     }
 }

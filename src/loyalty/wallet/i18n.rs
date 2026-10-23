@@ -26,7 +26,7 @@
 //! `localizedLabel` and friends. One table, two wallets, no chance of the two
 //! disagreeing about what "Reward earned" means.
 
-use crate::loyalty::earn::Mode;
+use crate::loyalty::earn::{Mode, StampUnit};
 use crate::loyalty::settings::LoyaltySettings;
 
 /// An English string on the card, and what it says in Arabic.
@@ -42,11 +42,25 @@ fn pair(en: impl Into<String>, ar: impl Into<String>) -> Pair {
     }
 }
 
-/// What the balance is called.
-pub fn balance_label(mode: Mode) -> Pair {
-    match mode {
-        Mode::Points => pair("Points", "نقاط"),
-        Mode::Visits => pair("Orders", "طلبات"),
+/// The unit a card speaks in: the one given (the caller knows whether the
+/// shop is a counter shop), else what the settings alone say. `None` for
+/// points.
+pub fn unit_of(settings: &LoyaltySettings, given: Option<StampUnit>) -> Option<StampUnit> {
+    match settings.mode() {
+        Mode::Points => None,
+        Mode::Visits => given.or_else(|| {
+            StampUnit::of(Mode::Visits, settings.stamp_per_line_item.unwrap_or(false), false)
+        }),
+    }
+}
+
+/// What the balance is called: what one stamp stands for (`StampUnit`).
+pub fn balance_label(mode: Mode, unit: Option<StampUnit>) -> Pair {
+    match (mode, unit) {
+        (Mode::Points, _) => pair("Points", "نقاط"),
+        (Mode::Visits, Some(StampUnit::Item)) => pair("Items", "أصناف"),
+        (Mode::Visits, Some(StampUnit::Stamp)) => pair("Stamps", "أختام"),
+        (Mode::Visits, _) => pair("Orders", "طلبات"),
     }
 }
 
@@ -103,9 +117,10 @@ pub fn labels() -> Vec<Pair> {
     ]
 }
 
-/// "How it works", with this shop's numbers already in it.
-pub fn how_it_works(settings: &LoyaltySettings) -> Pair {
+/// "How it works", with this shop's numbers already in it, in the card's unit.
+pub fn how_it_works(settings: &LoyaltySettings, unit: Option<StampUnit>) -> Pair {
     let threshold = settings.default_reward_cost;
+    let unit = unit_of(settings, unit);
     match settings.mode() {
         Mode::Points => {
             let egp = settings.earn_piastres_per_point / 100;
@@ -130,7 +145,19 @@ pub fn how_it_works(settings: &LoyaltySettings) -> Pair {
         // Which items collect is deliberately NOT listed here. The back of a
         // pass is not a menu, the list is per-branch and changes, and a stale
         // list printed on a card is worse than none.
-        Mode::Visits if settings.stamp_per_line_item.unwrap_or(false) => pair(
+        // A counter shop: the teller stamps the card, so the card promises
+        // neither "per order" nor "per item".
+        Mode::Visits if unit == Some(StampUnit::Stamp) => pair(
+            format!(
+                "Show this card at the counter to collect stamps. A full card of \
+                 {threshold} stamps gets you a reward."
+            ),
+            format!(
+                "اعرض هذه البطاقة عند الكاشير لتجمع الأختام. البطاقة المكتملة بـ{threshold} من \
+                 الأختام تمنحك مكافأة."
+            ),
+        ),
+        Mode::Visits if unit == Some(StampUnit::Item) => pair(
             format!(
                 "Show this card when you pay. Every item you buy earns a stamp, and a \
                  reward costs {threshold} of them."
@@ -168,14 +195,18 @@ pub fn description(program: &str) -> Pair {
 /// Built per pass, because half of it is per pass. Anything whose Arabic is the
 /// same as its English — a branch name, a member's own name — is left out: a
 /// strings file that maps a string to itself is noise in a signed archive.
-pub fn strings_for(settings: &LoyaltySettings, program_ar: Option<&str>) -> Vec<Pair> {
+pub fn strings_for(
+    settings: &LoyaltySettings,
+    program_ar: Option<&str>,
+    unit: Option<StampUnit>,
+) -> Vec<Pair> {
     let mut out = labels();
     if settings.reward_any_item {
         out.push(any_item(settings.mode(), settings.default_reward_cost));
         out.push(any_item_short());
     }
-    out.push(balance_label(settings.mode()));
-    out.push(how_it_works(settings));
+    out.push(balance_label(settings.mode(), unit_of(settings, unit)));
+    out.push(how_it_works(settings, unit));
     out.push(description(&settings.program_name));
     // The programme's own name, where the shop gave us one in Arabic.
     if let Some(ar) = program_ar.filter(|s| !s.trim().is_empty()) {
@@ -266,7 +297,7 @@ mod tests {
         assert_eq!(p.en, "Anything on the menu — 5 stamps");
         assert!(p.ar.contains("أي صنف"));
         // And it reaches the pass's Arabic, so a phone set to Arabic reads it.
-        assert!(strings_for(&s, None).iter().any(|q| q.en == p.en));
+        assert!(strings_for(&s, None, None).iter().any(|q| q.en == p.en));
     }
 
     #[test]
@@ -274,7 +305,7 @@ mod tests {
         let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 5;
-        let p = how_it_works(&s);
+        let p = how_it_works(&s, None);
         assert!(p.en.contains("costs 5 of them"));
         assert!(p.ar.contains("5 من الأختام"));
     }
@@ -292,7 +323,7 @@ mod tests {
         s.default_reward_cost = 5;
 
         s.stamp_per_line_item = Some(false);
-        let per_order = how_it_works(&s);
+        let per_order = how_it_works(&s, None);
         assert!(
             per_order.en.contains("Every order earns a stamp"),
             "{}",
@@ -301,7 +332,7 @@ mod tests {
         assert!(per_order.ar.contains("كل طلب"), "{}", per_order.ar);
 
         s.stamp_per_line_item = Some(true);
-        let per_item = how_it_works(&s);
+        let per_item = how_it_works(&s, None);
         assert!(
             per_item.en.contains("Every item you buy earns a stamp"),
             "{}",
@@ -315,6 +346,6 @@ mod tests {
         // Points are untouched by any of this — the switch is a stamps setting
         // and must not leak into a sentence about money.
         s.mode = "points".into();
-        assert!(how_it_works(&s).en.contains("you spend"));
+        assert!(how_it_works(&s, None).en.contains("you spend"));
     }
 }
