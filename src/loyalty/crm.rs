@@ -459,6 +459,7 @@ pub struct RewardsStats {
     pub redemptions: i64,
     /// Members holding the card in a wallet (Apple device or Google object).
     pub members_with_card: i64,
+    /// Messages that reached a card or WhatsApp (not "no card, no WhatsApp").
     pub messages_sent: i64,
     pub messages_seen: i64,
     pub per_track: Vec<StatsTrack>,
@@ -580,7 +581,7 @@ pub async fn stats(
         .fetch_one(pool)
         .await?;
         let (messages_sent, messages_seen): (i64, i64) = sqlx::query_as(
-            "SELECT count(*) FILTER (WHERE r.outcome = 'sent'), count(r.seen_at) \
+            "SELECT count(*) FILTER (WHERE r.outcome = 'sent' AND r.channel <> 'none'), count(r.seen_at) \
                FROM loyalty_broadcast_recipients r JOIN loyalty_broadcasts b ON b.id = r.broadcast_id \
               WHERE b.org_id = $1 AND r.processed_at >= ($2::date::timestamp AT TIME ZONE $4) \
                 AND r.processed_at < (($3::date + 1)::timestamp AT TIME ZONE $4)",
