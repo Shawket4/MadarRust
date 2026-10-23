@@ -642,6 +642,19 @@ pub async fn register_asset_files(
 ///
 /// Only the last two segments of the URL are used — the subdirectory and the
 /// file — and neither may climb out of the uploads directory.
+/// Tests only: read uploads from `dir`. Here, beside [`read_upload`], so a test
+/// elsewhere (the wallet's photo-card strips) points the reader at a fixture
+/// without touching the uploads setting itself.
+///
+/// # Safety
+/// Sets a process environment variable: the caller must hold whatever lock
+/// keeps other threads from reading the environment meanwhile.
+#[cfg(test)]
+pub(crate) unsafe fn read_uploads_from(dir: &std::path::Path) {
+    // SAFETY: the caller's contract above.
+    unsafe { std::env::set_var("UPLOADS_DIR", dir) };
+}
+
 pub fn read_upload(url: &str) -> Option<image::DynamicImage> {
     if let Some(path) = asset_file_for(url)
         && let Some(img) = std::fs::read(&path)

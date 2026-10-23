@@ -1942,7 +1942,7 @@ pub(crate) mod tests {
         configured();
         throwaway_signing();
         // SAFETY: the guard above.
-        unsafe { std::env::set_var("UPLOADS_DIR", &dir) };
+        unsafe { crate::orgs::branding::read_uploads_from(std::path::Path::new(&dir)) };
         let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
         s.mode = "visits".into();
         s.default_reward_cost = 6;
@@ -2004,7 +2004,7 @@ pub(crate) mod tests {
         }
         photo.save(dir.join("brand/photo.png")).unwrap();
         // SAFETY: the guard above.
-        unsafe { std::env::set_var("UPLOADS_DIR", &dir) };
+        unsafe { crate::orgs::branding::read_uploads_from(std::path::Path::new(&dir)) };
         let custom = crate::orgs::branding::OrgBrand {
             card_image_url: Some("https://x/api/uploads/brand/photo.png".into()),
             ..org_brand(true)
