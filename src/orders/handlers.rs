@@ -828,6 +828,12 @@ pub struct CreateOrderRequest {
     /// mixed basket can have one free coffee among four paid ones.
     #[serde(default)]
     pub loyalty_redemptions: Vec<LoyaltyRedemptionInput>,
+    /// The member's birthday gift on ONE line: one unit of it free, whatever
+    /// it costs, no balance spent (`loyalty::gifts`). Needs
+    /// `loyalty_customer_id`. Refused live with `LOYALTY_GIFT_NONE`,
+    /// `LOYALTY_GIFT_NOT_A_REWARD` or `LOYALTY_GIFT_LINE`. Additive.
+    #[serde(default)]
+    pub loyalty_birthday_gift: Option<crate::loyalty::gifts::LoyaltyGiftInput>,
     /// A manual customer (phase 6), attached when the actor holds
     /// `customers.attach`. A merged id resolves; an unknown one is ignored —
     /// a sale is never refused over its customer.
@@ -2107,6 +2113,26 @@ async fn create_order_once(
         actor.replay,
     )
     .await?;
+    // The birthday gift, beside the rewards and judged the same way: before
+    // pricing, live refusals before anything is handed over.
+    let gift_plan = crate::loyalty::gifts::plan(
+        pool.get_ref(),
+        actor.org_id,
+        body.branch_id,
+        body.loyalty_customer_id,
+        body.loyalty_birthday_gift.as_ref(),
+        &body.items,
+        |i| redemption_plan.units_for(i).is_some(),
+        |i| {
+            combo_ctx.as_ref().is_some_and(|c| {
+                body.items
+                    .get(i)
+                    .is_some_and(|it| c.is_combo(it.menu_item_id))
+            })
+        },
+        actor.replay,
+    )
+    .await?;
 
     let mut resolved_items: Vec<ResolvedItem> = Vec::new();
     // `bill_lines` are the CHARGED lines (what the customer paid), for
@@ -2217,7 +2243,10 @@ async fn create_order_once(
         // A reward pays for whole units of this line, modifiers included — the
         // customer chose oat milk and the reward is the drink they chose. The
         // charge is reduced, never taken below zero.
-        let reward_units = redemption_plan.units_for(line_index).unwrap_or(0);
+        let reward_units = redemption_plan
+            .units_for(line_index)
+            .or_else(|| gift_plan.as_ref().and_then(|g| g.units_for(line_index)))
+            .unwrap_or(0);
         // A STAFF DRINK: the base configuration is comped, before the reward
         // and before anything is computed on the subtotal — so tax, service
         // and an order-level discount see the CHARGED part only.
@@ -2473,7 +2502,7 @@ async fn create_order_once(
     // So when a reward is claimed the money is the server's, all of it: taking
     // the till's subtotal and reducing it would be reducing a figure whose
     // discount and tax were computed over the un-reduced one.
-    let claimed = !redemption_plan.is_empty();
+    let claimed = !redemption_plan.is_empty() || gift_plan.is_some();
     // A STAFF DRINK is the other thing the till does not get to price — live.
     // The server computed the comp and the whole bill follows from it, exactly
     // as it does for a reward: a client-sent subtotal or total is not compared,
@@ -3626,6 +3655,27 @@ async fn create_order_once(
         actor.replay,
     )
     .await?;
+    let gift_refused = match &gift_plan {
+        Some(g) => {
+            crate::loyalty::gifts::claim_on_order(
+                &mut tx,
+                g,
+                actor.org_id,
+                body.branch_id,
+                order.id,
+                item_ids.get(g.item_index).copied(),
+                Some(actor.teller_id),
+                actor.replay,
+            )
+            .await?
+        }
+        None => None,
+    };
+    let redemption_refused = match (redemption_refused, gift_refused) {
+        (Some(a), Some(b)) => Some(format!("{a}; birthday gift: {b}")),
+        (a, None) => a,
+        (None, Some(b)) => Some(format!("Birthday gift: {b}")),
+    };
     if let Some(why) = &redemption_refused {
         // Recorded, flagged, and said out loud — never a lost sale.
         sqlx::query(

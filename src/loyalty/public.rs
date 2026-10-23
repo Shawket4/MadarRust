@@ -154,6 +154,31 @@ pub struct JoinInfo {
     /// classic card, and the page loads nothing extra.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub card: Option<super::wallet::design::PublicCard>,
+    /// "N+ people already have this card": the programme's live members,
+    /// floored to a step (100, 150, 200, 250, 300, 400, 500, 750, 1000, ...;
+    /// `loyalty::social`). Absent at 100 members or fewer, and never exact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 150)]
+    pub member_count: Option<i64>,
+    /// What one stamp stands for: `order` (one per sale), `item` (one per item
+    /// bought) or `stamp` (a Rewards by Madar counter shop: the teller stamps
+    /// the card). Absent for a points programme. The same rule the passes and
+    /// messages use (`earn::StampUnit`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "order")]
+    pub stamp_unit: Option<String>,
+    /// The card size: how many stamps (or points) fill one card, the cheapest
+    /// reward on offer (`model::card_size`), the same figure the till and the
+    /// passes count towards. Equal to `next_reward_cost`, under its own name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6)]
+    pub card_size: Option<i32>,
+    /// What the birthday gives here: `item` (one free item) or `amount`
+    /// (`birthday_reward_amount` on the card). Absent when birthdays are off
+    /// or give nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "item")]
+    pub birthday_gift: Option<String>,
 }
 
 /// How a tenant's card should look.
@@ -467,8 +492,15 @@ pub async fn join_info(
         require_otp: settings.require_otp,
         birthday_enabled: settings.birthday_enabled,
         birthday_reward_amount: settings.birthday_reward_amount,
+        birthday_gift: match settings.birthday_gift_kind() {
+            _ if !settings.birthday_enabled => None,
+            "item" => Some("item".into()),
+            "amount" if settings.birthday_reward_amount.is_some() => Some("amount".into()),
+            _ => None,
+        },
         mode: settings.mode.clone(),
-        next_reward_cost: model::reward_target(&settings, &rewards),
+        next_reward_cost: model::card_size(&settings, &rewards),
+        card_size: Some(model::card_size(&settings, &rewards)),
         earn_piastres_per_point: settings.earn_piastres_per_point,
         rewards: rewards
             .into_iter()
@@ -480,6 +512,10 @@ pub async fn join_info(
             .collect(),
         terms: settings.terms.clone(),
         terms_ar: settings.terms_ar.clone(),
+        member_count: crate::loyalty::social::member_count(pool.get_ref(), org_id).await,
+        stamp_unit: crate::loyalty::wallet::stamp_unit_for(pool.get_ref(), org_id, &settings)
+            .await
+            .map(|u| u.as_str().to_string()),
     }))
 }
 
@@ -552,6 +588,17 @@ pub struct JoinResult {
     /// code. False when no gateway is configured or there is no public base to
     /// build a link on; the page then offers only the OTP.
     pub card_link_sent: bool,
+    /// What one stamp stands for: `order`, `item` or `stamp` (a counter
+    /// shop); absent for points. The join info's rule (`earn::StampUnit`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "item")]
+    pub stamp_unit: Option<String>,
+    /// The card size: how many stamps (or points) fill one card, the cheapest
+    /// reward on offer (`model::card_size`), the same figure the till and the
+    /// passes count towards. Equal to `next_reward_cost`, under its own name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6)]
+    pub card_size: Option<i32>,
 }
 
 /// Join a shop's rewards programme.
@@ -670,6 +717,9 @@ pub async fn join(
         None
     };
 
+    let stamp_unit = wallet::stamp_unit_for(pool.get_ref(), org_id, &settings)
+        .await
+        .map(|u| u.as_str().to_string());
     let (member, already_member) = match inserted {
         Some(fresh) => (fresh, false),
         None => {
@@ -681,7 +731,7 @@ pub async fn join(
                 // the page will make lands on a clean insert.
                 .ok_or_else(|| AppError::Conflict("Please try again".into()))?;
             if !verified {
-                return Ok(HttpResponse::Ok().json(welcome_back(
+                let mut answer = welcome_back(
                     pool.get_ref(),
                     &existing,
                     name,
@@ -689,7 +739,9 @@ pub async fn join(
                     &org,
                     brand,
                     next_reward_cost,
-                )));
+                );
+                answer.stamp_unit = stamp_unit;
+                return Ok(HttpResponse::Ok().json(answer));
             }
             (existing, true)
         }
@@ -711,6 +763,8 @@ pub async fn join(
         already_member,
         verify_required: false,
         card_link_sent: false,
+        stamp_unit,
+        card_size: Some(next_reward_cost),
     }))
 }
 
@@ -777,6 +831,8 @@ fn welcome_back(
         already_member: true,
         verify_required: true,
         card_link_sent,
+        stamp_unit: None,
+        card_size: Some(next_reward_cost),
     }
 }
 
@@ -815,6 +871,21 @@ pub struct CardView {
     /// Every stamp track of this member's card, when there is more than one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracks: Option<Vec<super::tracks::MemberTrack>>,
+    /// What one stamp stands for: `order`, `item` or `stamp` (a counter
+    /// shop); absent for points. The join info's rule (`earn::StampUnit`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "item")]
+    pub stamp_unit: Option<String>,
+    /// The card size: how many stamps (or points) fill one card, the cheapest
+    /// reward on offer (`model::card_size`), the same figure the till and the
+    /// passes count towards. Equal to `next_reward_cost`, under its own name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 6)]
+    pub card_size: Option<i32>,
+    /// The member's birthday gift while it is open, or claimed and still in
+    /// its window. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthday_gift: Option<super::gifts::BirthdayGiftView>,
 }
 
 /// One past visit, as the customer's own page shows it.
@@ -989,10 +1060,15 @@ pub async fn card(
     let marketing_opt_out = member.marketing_opt_out;
     let card = wallet::design::public_card(pool.get_ref(), member.org_id, &settings, &org).await;
     let tracks = super::tracks::for_member(pool.get_ref(), &member, mode, target).await?;
+    let stamp_unit = wallet::stamp_unit_for(pool.get_ref(), member.org_id, &settings)
+        .await
+        .map(|u| u.as_str().to_string());
+    let birthday_gift = super::gifts::current(pool.get_ref(), member.id).await?;
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
         card,
         tracks,
+        birthday_gift,
         name: view.name,
         balance: view.balance,
         mode: view.mode,
@@ -1003,6 +1079,8 @@ pub async fn card(
         can_redeem: view.can_redeem,
         brand,
         marketing_opt_out,
+        stamp_unit,
+        card_size: Some(target),
         order_now_url,
         member_token: token.into_inner(),
         rewards: catalogue

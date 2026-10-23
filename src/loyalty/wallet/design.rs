@@ -60,26 +60,12 @@ pub struct DesignedCard {
     pub unit: &'static str,
 }
 
-/// Plan Free + the loyalty add-on: a stand-alone Rewards shop (no Madar POS).
-pub async fn standalone(pool: &PgPool, org_id: Uuid) -> bool {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT plan = 'free' AND 'loyalty' = ANY(org_active_addons(id)) FROM organizations WHERE id = $1",
-    )
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(false)
-}
-
-/// The unit a shop's card counts (see [`DesignedCard::unit`]).
+/// The unit a shop's card counts (see [`DesignedCard::unit`]): main's one
+/// rule (`wallet::stamp_unit_for` → `earn::StampUnit`), `points` for points.
 pub async fn unit_of(pool: &PgPool, org_id: Uuid, settings: &LoyaltySettings) -> &'static str {
-    madar_card::text::stamp_unit(
-        settings.mode() == Mode::Points,
-        settings.stamp_per_line_item.unwrap_or(true),
-        standalone(pool, org_id).await,
-    )
+    super::stamp_unit_for(pool, org_id, settings)
+        .await
+        .map_or("points", |u| u.as_str())
 }
 
 /// The balance label of a unit.

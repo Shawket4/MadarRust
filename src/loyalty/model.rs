@@ -41,6 +41,8 @@ pub enum Source {
     /// Stamped, or a full card completed, at the counter with no order (Rewards by Madar's
     /// teller page). Pairs with `earn` and `redeem` only.
     Counter,
+    /// A birthday gift item handed over: a `redeem` worth 0 (`loyalty::gifts`).
+    Gift,
 }
 
 impl Source {
@@ -55,6 +57,7 @@ impl Source {
             Source::Manual => "manual",
             Source::Merge => "merge",
             Source::Counter => "counter",
+            Source::Gift => "gift",
         }
     }
 }
@@ -188,32 +191,33 @@ impl MemberRow {
     }
 }
 
-/// What the card counts towards, for this scope.
+/// The CARD SIZE (owner, 2026-10-23): what one card counts towards, the same
+/// figure on the till, the API, the web card and both wallet passes.
 ///
-/// Normally the cheapest reward on offer: a customer who can afford the espresso
-/// HAS earned a reward, whatever the cake costs. With `reward_any_item` on there
-/// is no cheapest — every item costs the same — so the scope's default is the
-/// answer, and reading the catalogue there would aim the card at a price that no
-/// longer applies to anything.
-pub fn reward_target(settings: &LoyaltySettings, rewards: &[RewardItem]) -> i32 {
-    if settings.reward_any_item {
-        return settings.default_reward_cost;
-    }
-    cheapest_cost(rewards).unwrap_or(settings.default_reward_cost)
+/// The cheapest reward the till would actually hand over, priced as the shared
+/// planner prices it (`madar_loyalty::plan`): a curated reward costs its own
+/// price (also with "any item" on: the catalogue keeps its price there), every
+/// other item costs `default_reward_cost` when "any item" is on, and a cost of
+/// zero is never offered. A customer who can afford the espresso HAS earned a
+/// reward, whatever the cake costs. With nothing on offer, `default_reward_cost`.
+///
+/// The catalogue arrives priced in the scope's own currency (`settings::in_mode`
+/// relabels it), so a reward priced before a mode switch counts in the new unit.
+pub fn card_size(settings: &LoyaltySettings, rewards: &[RewardItem]) -> i32 {
+    let curated = rewards.iter().map(|r| r.cost_amount).filter(|c| *c > 0);
+    let any_item = settings
+        .reward_any_item
+        .then_some(settings.default_reward_cost)
+        .filter(|c| *c > 0);
+    curated
+        .chain(any_item)
+        .min()
+        .unwrap_or(settings.default_reward_cost)
 }
 
-/// The cheapest reward on offer, or `None` when the catalogue is empty.
-///
-/// This is what the pass counts towards. Aiming at the cheapest is the only
-/// target that is always true: a customer who can afford the espresso HAS
-/// earned a reward, whatever the cake costs.
-///
-/// Takes no mode. A catalogue arrives priced in its scope's own currency
-/// (`settings::in_mode`), so there is nothing to filter by — and filtering by
-/// the row's stored copy is what made this return `None` for a shop with a full
-/// catalogue, quietly resetting every customer's target to the program default.
-pub fn cheapest_cost(rewards: &[RewardItem]) -> Option<i32> {
-    rewards.iter().map(|r| r.cost_amount).min()
+/// [`card_size`], under the name its callers have always used.
+pub fn reward_target(settings: &LoyaltySettings, rewards: &[RewardItem]) -> i32 {
+    card_size(settings, rewards)
 }
 
 /// Look a member up by the token their pass barcode carries.
@@ -980,26 +984,57 @@ mod overflow_tests {
         assert!(v.can_redeem);
     }
 
-    #[test]
-    fn any_item_mode_aims_the_card_at_the_flat_price() {
-        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
-        s.default_reward_cost = 8;
-        let catalogue = vec![RewardItem {
-            menu_item_id: Uuid::nil(),
+    fn reward(cost: i32) -> RewardItem {
+        RewardItem {
+            menu_item_id: Uuid::new_v4(),
             name: "Espresso".into(),
             image_url: None,
             base_price: 5000,
             cost_currency: "visits".into(),
-            cost_amount: 3,
+            cost_amount: cost,
             sort_order: 0,
-        }];
-        // Normally the cheapest thing on offer is what the card counts towards.
-        assert_eq!(reward_target(&s, &catalogue), 3);
-        // With any item claimable there is no cheapest — everything costs the
-        // same — and aiming at 3 would point the card at a price that no longer
-        // applies to anything.
+        }
+    }
+
+    /// The card size is the cheapest reward the till would hand over.
+    #[test]
+    fn the_card_size_is_the_cheapest_reward_on_offer() {
+        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
+        s.default_reward_cost = 8;
+        // No rewards curated: the programme's default.
+        assert_eq!(card_size(&s, &[]), 8);
+        // One reward: its price, whatever the default says.
+        assert_eq!(card_size(&s, &[reward(10)]), 10);
+        // Several: the cheapest.
+        assert_eq!(card_size(&s, &[reward(10), reward(3), reward(6)]), 3);
+        // A reward at zero is never offered, so it is not the card's size.
+        assert_eq!(card_size(&s, &[reward(0), reward(6)]), 6);
+        assert_eq!(card_size(&s, &[reward(0)]), 8);
+        // Any item on: every other item costs the default, and a curated one
+        // keeps its own price, so the cheaper of the two.
         s.reward_any_item = true;
-        assert_eq!(reward_target(&s, &catalogue), 8);
-        assert_eq!(reward_target(&s, &[]), 8);
+        assert_eq!(card_size(&s, &[]), 8);
+        assert_eq!(card_size(&s, &[reward(10)]), 8, "any item is cheaper than the cake");
+        assert_eq!(card_size(&s, &[reward(3)]), 3, "the espresso is cheaper than any item");
+        // Any item at zero is not offered either.
+        s.default_reward_cost = 0;
+        assert_eq!(card_size(&s, &[reward(5)]), 5);
+        // reward_target is the same rule.
+        assert_eq!(reward_target(&s, &[reward(5)]), 5);
+    }
+
+    /// A mode switch: the catalogue counts in the new unit (`settings::in_mode`
+    /// relabels it before it reaches the rule), so the size is the same number.
+    #[test]
+    fn the_card_size_counts_in_the_scopes_unit() {
+        let mut s = LoyaltySettings::defaults(Uuid::nil(), None);
+        s.default_reward_cost = 100;
+        s.mode = "points".into();
+        let mut cake = reward(40);
+        cake.cost_currency = "points".into();
+        assert_eq!(card_size(&s, &[cake]), 40);
+        s.mode = "visits".into();
+        s.default_reward_cost = 6;
+        assert_eq!(card_size(&s, &[reward(5)]), 5);
     }
 }

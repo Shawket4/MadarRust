@@ -46,6 +46,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/award", web::post().to(award::award))
                 .route("/counter/stamp", web::post().to(super::counter::stamp))
                 .route("/counter/redeem", web::post().to(super::counter::redeem))
+                .route(
+                    "/counter/birthday-gift",
+                    web::post().to(super::gifts::counter_claim),
+                )
                 .route("/adjust", web::post().to(handlers::adjust))
                 .route(
                     "/birthday-preview",

@@ -816,3 +816,395 @@ async fn a_stale_card_is_listed_to_its_device_whatever_it_last_saw(pool: PgPool)
 fn urlencode(s: &str) -> String {
     s.replace('+', "%2B").replace(':', "%3A")
 }
+
+// ── The join page: social proof and the stamp unit ──────────────────────────
+
+async fn join_info(app: &impl actix_web::dev::Service<actix_http::Request, Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>, Error = actix_web::Error>, s: &Shop) -> Value {
+    let (st, body) = call(
+        app,
+        test::TestRequest::get().uri(&format!("/public/loyalty/join-info?org_id={}", s.org)),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    body
+}
+
+#[sqlx::test]
+async fn the_join_page_shows_a_rounded_member_count_only_past_a_hundred(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    // Exactly 100 live members: nothing shown (absent, not null).
+    let mut members = Vec::new();
+    for i in 0..100 {
+        members.push(member(&pool, s.org, &format!("010{:08}", 10_000_000 + i)).await);
+    }
+    let info = join_info(&app, &s).await;
+    assert!(info.get("member_count").is_none(), "{info}");
+
+    // The 101st: still cached for this org (the count is not read per view).
+    member(&pool, s.org, "01099999999").await;
+    assert!(join_info(&app, &s).await.get("member_count").is_none(), "served from the cache");
+    madar_rust::loyalty::social::forget(s.org).await;
+    assert_eq!(join_info(&app, &s).await["member_count"], 100, "101 shows as 100+");
+
+    // A leaver (deleted_at, as leaving and erasure both set) is not counted.
+    sqlx::query("UPDATE loyalty_memberships SET deleted_at = now() WHERE id = $1")
+        .bind(members[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    madar_rust::loyalty::social::forget(s.org).await;
+    assert!(join_info(&app, &s).await.get("member_count").is_none(), "back to 100");
+}
+
+#[sqlx::test]
+async fn the_join_page_says_what_a_stamp_is_for(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    // Points: no stamp unit at all.
+    stamp_card(&pool, s.org, "points", 100, false).await;
+    assert!(join_info(&app, &s).await.get("stamp_unit").is_none());
+    let set = |mode: &'static str, per_item: bool| {
+        let pool = pool.clone();
+        let org = s.org;
+        async move {
+            sqlx::query("UPDATE loyalty_settings SET mode = $2, stamp_per_line_item = $3 WHERE org_id = $1")
+                .bind(org)
+                .bind(mode)
+                .bind(per_item)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set("visits", false).await;
+    assert_eq!(join_info(&app, &s).await["stamp_unit"], "order");
+    set("visits", true).await;
+    assert_eq!(join_info(&app, &s).await["stamp_unit"], "item");
+    // A Rewards by Madar counter shop (Free + the loyalty add-on).
+    rewards_shop(&app, &pool, &s).await;
+    assert_eq!(join_info(&app, &s).await["stamp_unit"], "stamp");
+}
+
+#[sqlx::test]
+async fn the_card_page_and_the_join_answer_say_what_a_stamp_is_for(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamp_card(&pool, s.org, "points", 100, false).await;
+    sqlx::query("UPDATE loyalty_settings SET require_otp = false WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let m = member(&pool, s.org, "01001234567").await;
+    let tok: String = sqlx::query_scalar("SELECT member_token FROM loyalty_memberships WHERE id = $1")
+        .bind(m)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let card = |app_tok: String| test::TestRequest::get().uri(&format!("/public/loyalty/card/{app_tok}"));
+    let join = |phone: &str| {
+        test::TestRequest::post().uri("/public/loyalty/join").set_json(json!({
+            "org_id": s.org, "name": "Hoda", "phone": phone,
+        }))
+    };
+    let set = |mode: &'static str, per_item: bool| {
+        let pool = pool.clone();
+        let org = s.org;
+        async move {
+            sqlx::query("UPDATE loyalty_settings SET mode = $2, stamp_per_line_item = $3 WHERE org_id = $1")
+                .bind(org)
+                .bind(mode)
+                .bind(per_item)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+
+    // Points: absent on both.
+    let (st, body) = call(&app, card(tok.clone()), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.get("stamp_unit").is_none(), "{body}");
+    let (st, body) = call(&app, join("01001234570"), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert!(body.get("stamp_unit").is_none(), "{body}");
+
+    for (mode, per_item, phone, want) in [
+        ("visits", false, "01001234571", "order"),
+        ("visits", true, "01001234572", "item"),
+    ] {
+        set(mode, per_item).await;
+        let (_, body) = call(&app, card(tok.clone()), None).await;
+        assert_eq!(body["stamp_unit"], want, "card: {body}");
+        let (_, body) = call(&app, join(phone), None).await;
+        assert_eq!(body["stamp_unit"], want, "join: {body}");
+    }
+
+    // A counter shop (Free + the add-on).
+    rewards_shop(&app, &pool, &s).await;
+    let (_, body) = call(&app, card(tok), None).await;
+    assert_eq!(body["stamp_unit"], "stamp", "card: {body}");
+    let (_, body) = call(&app, join("01001234573"), None).await;
+    assert_eq!(body["stamp_unit"], "stamp", "join: {body}");
+}
+
+#[sqlx::test]
+async fn the_card_size_is_the_cheapest_reward_on_every_public_view(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    // Default 6; the catalogue has an espresso at 3 and a cake at 10.
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    sqlx::query("UPDATE loyalty_settings SET require_otp = false, reward_any_item = false WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (name, cost) in [("Espresso", 3), ("Cake", 10)] {
+        let item: Uuid = sqlx::query_scalar(
+            "INSERT INTO menu_items (org_id, name, base_price) VALUES ($1, $2, 5000) RETURNING id",
+        )
+        .bind(s.org)
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO loyalty_reward_items (org_id, menu_item_id, cost_currency, cost_amount) VALUES ($1, $2, 'visits', $3)",
+        )
+        .bind(s.org)
+        .bind(item)
+        .bind(cost)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let m = member(&pool, s.org, "01001234567").await;
+    let tok: String = sqlx::query_scalar("SELECT member_token FROM loyalty_memberships WHERE id = $1")
+        .bind(m)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let info = join_info(&app, &s).await;
+    assert_eq!((info["card_size"].as_i64(), info["next_reward_cost"].as_i64()), (Some(3), Some(3)), "{info}");
+    let (_, card) = call(&app, test::TestRequest::get().uri(&format!("/public/loyalty/card/{tok}")), None).await;
+    assert_eq!(card["card_size"], 3, "{card}");
+    let (_, joined) = call(
+        &app,
+        test::TestRequest::post().uri("/public/loyalty/join").set_json(json!({
+            "org_id": s.org, "name": "Hoda", "phone": "01001234580",
+        })),
+        None,
+    )
+    .await;
+    assert_eq!(joined["card_size"], 3, "{joined}");
+    // The till's lookup counts towards the same figure.
+    let (_, scan) = call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/lookup").set_json(json!({"branch_id": s.branch, "customer_id": m})),
+        Some(&teller(&s)),
+    )
+    .await;
+    assert_eq!(scan["member"]["next_reward_cost"], 3, "{scan}");
+}
+
+/// Born today, in the org's own timezone (what the birthday sweep reads).
+async fn born_today(pool: &PgPool, org: Uuid, member: Uuid) {
+    sqlx::query(
+        "UPDATE customers c SET birth_month = EXTRACT(MONTH FROM (now() AT TIME ZONE o.timezone::text))::smallint, \
+                                birth_day = EXTRACT(DAY FROM (now() AT TIME ZONE o.timezone::text))::smallint \
+           FROM organizations o WHERE c.id = $1 AND o.id = $2",
+    )
+    .bind(member)
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn an_opted_out_member_gets_the_birthday_gift_but_no_greeting(pool: PgPool) {
+    let s = setup(&pool).await;
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    sqlx::query("UPDATE loyalty_settings SET birthday_enabled = true, birthday_reward_amount = 2 WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let quiet = member(&pool, s.org, "01001234567").await;
+    let chatty = member(&pool, s.org, "01001234568").await;
+    for m in [quiet, chatty] {
+        born_today(&pool, s.org, m).await;
+    }
+    sqlx::query("UPDATE customers SET marketing_opt_out = true WHERE id = $1")
+        .bind(quiet)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Neither has a card in a wallet, so a greeting goes by WhatsApp.
+    let sent = common::whatsapp::gateway().await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+
+    for m in [quiet, chatty] {
+        assert_eq!(visits(&pool, m).await, 2, "the gift is theirs either way");
+    }
+    common::whatsapp::whatsapp_to(&sent, "1234568").await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(bodies.iter().all(|b| !b.contains("1234567\"")), "no greeting for an opted-out member: {bodies:?}");
+    // A rerun gives nothing twice.
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    assert_eq!(visits(&pool, quiet).await, 2);
+}
+
+// ── The birthday gift: one free item (BIRTHDAY_GIFT_DESIGN.md) ─────────────
+
+async fn gift_rows(pool: &PgPool, m: Uuid) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT status, (EXTRACT(EPOCH FROM valid_until - valid_from) / 86400)::bigint \
+           FROM loyalty_gifts WHERE customer_id = $1",
+    )
+    .bind(m)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn gift_req(s: &Shop, m: Uuid, key: &str) -> test::TestRequest {
+    test::TestRequest::post()
+        .uri("/loyalty/counter/birthday-gift")
+        .set_json(json!({ "branch_id": s.branch, "customer_id": m, "idempotency_key": key }))
+}
+
+#[sqlx::test]
+async fn an_item_programme_grants_one_free_item_once_and_credits_nothing(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    // An amount is stored too: an item programme must not credit it.
+    sqlx::query(
+        "UPDATE loyalty_settings SET birthday_enabled = true, birthday_reward_amount = 2, \
+                birthday_gift = 'item', birthday_gift_days = 14 WHERE org_id = $1",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let quiet = member(&pool, s.org, "01001234567").await;
+    let chatty = member(&pool, s.org, "01001234568").await;
+    for m in [quiet, chatty] {
+        born_today(&pool, s.org, m).await;
+    }
+    sqlx::query("UPDATE customers SET marketing_opt_out = true WHERE id = $1")
+        .bind(quiet)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let sent = common::whatsapp::gateway().await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    for m in [quiet, chatty] {
+        assert_eq!(visits(&pool, m).await, 0, "no stamps: the gift is an item");
+        assert_eq!(
+            gift_rows(&pool, m).await,
+            vec![("open".to_string(), 14)],
+            "one gift, the shop's window, even for an opted-out member and on a rerun"
+        );
+    }
+    common::whatsapp::whatsapp_to(&sent, "1234568").await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(
+        bodies.iter().any(|b| b.contains("A free item on us") && b.contains("valid until")),
+        "{bodies:?}"
+    );
+    assert!(bodies.iter().all(|b| !b.contains("1234567\"")), "{bodies:?}");
+
+    // The join page says what the birthday is for.
+    let info = join_info(&app, &s).await;
+    assert_eq!(info["birthday_gift"], "item", "{info}");
+}
+
+#[sqlx::test]
+async fn a_counter_hands_over_the_birthday_gift_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    rewards_shop(&app, &pool, &s).await;
+    stamp_card(&pool, s.org, "visits", 5, true).await;
+    sqlx::query(
+        "UPDATE loyalty_settings SET birthday_enabled = true, birthday_gift = 'item' WHERE org_id = $1",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = member(&pool, s.org, "01001234567").await;
+    let t = teller(&s);
+
+    // No gift yet: refused, by code.
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0001"), Some(&t)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    assert_eq!(r["code"], "LOYALTY_GIFT_NONE", "{r}");
+
+    born_today(&pool, s.org, m).await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    let (st, r) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/loyalty/lookup")
+            .set_json(json!({ "branch_id": s.branch, "customer_id": m })),
+        Some(&t),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["birthday_gift"]["status"], "open", "{r}");
+
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0002"), Some(&t)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["birthday_gift"]["status"], "claimed");
+    assert_eq!(r["already"], false);
+    assert_eq!(r["member"]["balance"], 0, "no balance moves");
+    // A retry with the same key answers the first outcome.
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0002"), Some(&t)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["already"], true);
+    // A new attempt finds nothing left.
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0003"), Some(&t)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    assert_eq!(r["code"], "LOYALTY_GIFT_NONE");
+
+    let ledger: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT kind::text, source, points FROM loyalty_transactions WHERE customer_id = $1",
+    )
+    .bind(m)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger, vec![("redeem".into(), "gift".into(), 0)]);
+
+    // Another org's teller cannot claim it.
+    let other = setup(&pool).await;
+    let (st, _) = call(&app, gift_req(&other, m, "gift-key-0004"), Some(&teller(&other))).await;
+    assert!(st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN, "{st}");
+}
+
+#[sqlx::test]
+async fn leaving_forfeits_an_open_gift(pool: PgPool) {
+    let s = setup(&pool).await;
+    stamp_card(&pool, s.org, "visits", 5, false).await;
+    sqlx::query(
+        "UPDATE loyalty_settings SET birthday_enabled = true, birthday_gift = 'item' WHERE org_id = $1",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = member(&pool, s.org, "01001234567").await;
+    born_today(&pool, s.org, m).await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    madar_rust::loyalty::model::leave(&pool, m).await.unwrap();
+    assert_eq!(gift_rows(&pool, m).await[0].0, "expired");
+}

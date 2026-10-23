@@ -531,6 +531,8 @@ pub async fn create_refund_inner(
     let restored =
         crate::loyalty::redeem::restore_on_refund(&mut tx, order.id, &lines, actor.teller_id, note)
             .await?;
+    // A birthday gift's unit coming back re-opens the gift, while still valid.
+    crate::loyalty::gifts::reopen_on_refund(&mut tx, order.id, &lines).await?;
 
     // Read back inside the transaction: the status the AFTER INSERT trigger
     // may just have flipped is what the till should print.

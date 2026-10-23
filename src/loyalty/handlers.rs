@@ -54,6 +54,12 @@ pub struct ScanResult {
     /// The shop's card design for the teller's member card (absent = classic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card: Option<super::wallet::design::PublicCard>,
+    /// The member's birthday gift: `open` is one free item to hand over
+    /// (`loyalty_birthday_gift` on the order, or the counter's
+    /// `/loyalty/counter/birthday-gift`); `claimed` was used this time. Absent
+    /// when there is none or it expired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthday_gift: Option<super::gifts::BirthdayGiftView>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -124,6 +130,7 @@ pub async fn lookup(
         max_rewards_per_order: settings.max_rewards_per_order,
         track_rewards,
         card,
+        birthday_gift: super::gifts::current(pool.get_ref(), member.id).await?,
     }))
 }
 

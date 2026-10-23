@@ -24,6 +24,7 @@ pub mod counter;
 pub mod crm;
 pub mod design;
 pub mod earn;
+pub mod gifts;
 pub mod handlers;
 pub mod model;
 pub mod public;
@@ -32,6 +33,7 @@ pub mod rewards_cache;
 pub mod routes;
 pub mod settings;
 pub mod tracks;
+pub mod social;
 pub mod wallet;
 pub mod winback;
 

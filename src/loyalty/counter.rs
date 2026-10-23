@@ -94,7 +94,7 @@ fn refused(code: &'static str, reason: &str) -> AppError {
     }
 }
 
-fn valid_key(key: &str) -> Result<&str, AppError> {
+pub(super) fn valid_key(key: &str) -> Result<&str, AppError> {
     let k = key.trim();
     if (8..=64).contains(&k.len()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         Ok(k)

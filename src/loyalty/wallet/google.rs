@@ -353,6 +353,9 @@ pub fn loyalty_object(
     locations: &[super::PassLocation],
     copy: &super::CardCopy,
 ) -> serde_json::Value {
+    // Counted towards the card size (`model::card_size`), like the till.
+    let sized = copy.sized(settings);
+    let settings = &sized;
     let mode = settings.mode();
     let balance = member.balance_in(mode);
 
@@ -360,7 +363,8 @@ pub fn loyalty_object(
     // strings file is built from — one place to be wrong rather than two. A
     // string with no Arabic is emitted as itself: a shop's own reward names and
     // its branches are not ours to translate.
-    let pairs = super::i18n::strings_for(settings, settings.program_name_ar.as_deref());
+    let unit = super::i18n::unit_of(settings, copy.unit);
+    let pairs = super::i18n::strings_for(settings, settings.program_name_ar.as_deref(), copy.unit);
     let localized = |en: &str| -> serde_json::Value {
         match pairs.iter().find(|p| p.en == en) {
             Some(p) => json!({
@@ -399,11 +403,11 @@ pub fn loyalty_object(
             }),
             None => with_localized(
                 json!({
-                    "label": balance_label(mode),
+                    "label": balance_label(mode, unit),
                     "balance": { "string": progress_line(balance, settings.default_reward_cost) }
                 }),
                 "localizedLabel",
-                balance_label(mode),
+                balance_label(mode, unit),
             ),
         },
         // The second slot: the live stepper when the first is showing earned
@@ -412,11 +416,11 @@ pub fn loyalty_object(
         "secondaryLoyaltyPoints": match earned_line(balance, settings.default_reward_cost) {
             Some(_) => with_localized(
                 json!({
-                    "label": balance_label(mode),
+                    "label": balance_label(mode, unit),
                     "balance": { "string": progress_line(balance, settings.default_reward_cost) }
                 }),
                 "localizedLabel",
-                balance_label(mode),
+                balance_label(mode, unit),
             ),
             None => serde_json::Value::Null,
         },
@@ -602,13 +606,19 @@ pub fn earned_label(balance: i32, threshold: i32) -> &'static str {
     }
 }
 
-/// What this program calls what it collects, for the pass's field label.
-pub fn balance_label(mode: crate::loyalty::earn::Mode) -> &'static str {
-    match mode {
-        crate::loyalty::earn::Mode::Points => "Points",
-        // "Orders", not "Visits": the customer counts the things they bought,
-        // and that is the word the counter uses back to them.
-        crate::loyalty::earn::Mode::Visits => "Orders",
+/// What this program calls what it collects, for the pass's field label: the
+/// English of `i18n::balance_label`, in the card's unit (orders, items or
+/// stamps; never "Visits": the customer counts what they bought).
+pub fn balance_label(
+    mode: crate::loyalty::earn::Mode,
+    unit: Option<crate::loyalty::earn::StampUnit>,
+) -> &'static str {
+    use crate::loyalty::earn::{Mode, StampUnit};
+    match (mode, unit) {
+        (Mode::Points, _) => "Points",
+        (Mode::Visits, Some(StampUnit::Item)) => "Items",
+        (Mode::Visits, Some(StampUnit::Stamp)) => "Stamps",
+        (Mode::Visits, _) => "Orders",
     }
 }
 
@@ -1866,7 +1876,7 @@ mod tests {
         // `loyaltyPoints` renders on the card face: how far along. No reward
         // text anywhere on the card (owner, 2026-10-19), so the second slot is
         // empty until a card is full.
-        assert_eq!(obj["loyaltyPoints"]["label"], "Orders");
+        assert_eq!(obj["loyaltyPoints"]["label"], "Items", "the default counts per item");
         assert_eq!(obj["loyaltyPoints"]["balance"]["string"], "●─●─●─○─○");
         assert!(obj.get("secondaryLoyaltyPoints").is_none_or(|v| v.is_null()), "{obj}");
         assert!(!obj.to_string().contains("\"Reward\""), "no reward row: {obj}");
