@@ -217,4 +217,11 @@ pub fn finish(
         let x = if arabic { w.saturating_sub(margin + f.width()) } else { margin };
         image::imageops::overlay(img, &f, x as i64, foot_y as i64);
     }
+    // The strip is opaque by design. Blending the footer's anti-aliased edge
+    // leaves alpha a step under 255 on a few pixels, and one such pixel makes
+    // `encode_png` keep the whole strip RGBA instead of palettising it: about
+    // twice the bytes for a photograph, ten times for the flat fallback ground.
+    for p in img.pixels_mut() {
+        p.0[3] = u8::MAX;
+    }
 }

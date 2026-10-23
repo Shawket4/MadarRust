@@ -535,6 +535,14 @@ pub fn strip_images_squeezed(
     // has no folder for) with the Latin footer, and `ar.lproj/` with the
     // Arabic one. iOS picks the folder by the phone's language, exactly as it
     // picks `ar.lproj/pass.strings`.
+    // A flat ground (no photograph) is stored losslessly: it compresses to
+    // a few KB as RGB, where quantising the footer's edges dithers the whole
+    // ground (72 KB at 3x, measured).
+    let squeeze = if photo.is_none() && squeeze == Squeeze::Small {
+        Squeeze::Exact
+    } else {
+        squeeze
+    };
     let mut out = Vec::with_capacity(STRIP_SIZES.len() * 2);
     for (i, (name, w, h)) in STRIP_SIZES.iter().enumerate() {
         let base = match &photo {
@@ -1846,6 +1854,267 @@ pub(crate) mod tests {
             band.save(&at).unwrap();
             println!("wrote {}", at.display());
         }
+    }
+
+    /// A throwaway self-signed signer (iOS would refuse it; the PKCS#7 path is
+    /// real). Returns the certificate, which also stands in for WWDR.
+    fn throwaway_signing() -> openssl::x509::X509 {
+        let rsa = openssl::rsa::Rsa::generate(2048).unwrap();
+        let key = openssl::pkey::PKey::from_rsa(rsa).unwrap();
+        let mut name = openssl::x509::X509NameBuilder::new().unwrap();
+        name.append_entry_by_text("CN", "madar-test").unwrap();
+        let name = name.build();
+        let mut b = openssl::x509::X509::builder().unwrap();
+        b.set_version(2).unwrap();
+        b.set_subject_name(&name).unwrap();
+        b.set_issuer_name(&name).unwrap();
+        b.set_pubkey(&key).unwrap();
+        b.set_not_before(&openssl::asn1::Asn1Time::days_from_now(0).unwrap()).unwrap();
+        b.set_not_after(&openssl::asn1::Asn1Time::days_from_now(1).unwrap()).unwrap();
+        b.sign(&key, openssl::hash::MessageDigest::sha256()).unwrap();
+        let x509 = b.build();
+        let cert = String::from_utf8(x509.to_pem().unwrap()).unwrap();
+        // SAFETY: callers hold `env_guard`.
+        unsafe {
+            std::env::set_var("LOYALTY_APPLE_CERT_PEM", &cert);
+            std::env::set_var(
+                "LOYALTY_APPLE_KEY_PEM",
+                String::from_utf8(key.private_key_to_pem_pkcs8().unwrap()).unwrap(),
+            );
+            std::env::set_var("LOYALTY_APPLE_WWDR_PEM", &cert);
+        }
+        x509
+    }
+
+    /// The whole archive a pass build ships, as built in production
+    /// (`build_pass_inner` minus the database): brand images, strips, both
+    /// `.lproj` string files.
+    pub(crate) fn pass_files(
+        org: &crate::orgs::branding::OrgBrand,
+        m: &MemberRow,
+        s: &LoyaltySettings,
+        copy: &crate::loyalty::wallet::CardCopy,
+    ) -> (serde_json::Value, Vec<(String, Vec<u8>)>) {
+        let brand = pass_brand(org);
+        let progress = madar_loyalty::card::card(m.balance_in(s.mode()), s.default_reward_cost).progress_to_next;
+        let strip = strip_images(org, &brand, progress, s.default_reward_cost);
+        let pass = pass_json(m, s, &[], copy, &brand).unwrap();
+        let mut images = brand.images.clone();
+        images.extend(strip);
+        let pairs = crate::loyalty::wallet::i18n::strings_for(s, s.program_name_ar.as_deref());
+        images.push((
+            "en.lproj/pass.strings".into(),
+            crate::loyalty::wallet::i18n::strings_file(&crate::loyalty::wallet::i18n::identity(&pairs)).into_bytes(),
+        ));
+        images.push(("ar.lproj/pass.strings".into(), crate::loyalty::wallet::i18n::strings_file(&pairs).into_bytes()));
+        (pass, images)
+    }
+
+    /// Every file in a built pass, with its size, for a fallback card and for a
+    /// custom card over each photograph in `MADAR_PASS_SIZES` (a folder holding
+    /// `brand/<name>.jpg`), against the old look's strip (photo + scrim, one set).
+    ///
+    ///     MADAR_PASS_SIZES=/dir cargo test --lib apple::tests::pass_sizes -- --nocapture
+    #[test]
+    fn pass_sizes() {
+        let Ok(dir) = std::env::var("MADAR_PASS_SIZES") else {
+            return;
+        };
+        let _guard = env_guard();
+        configured();
+        throwaway_signing();
+        // SAFETY: the guard above.
+        unsafe { std::env::set_var("UPLOADS_DIR", &dir) };
+        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 6;
+        let mut m = member();
+        m.visits_balance = 3;
+        let copy = crate::loyalty::wallet::CardCopy::default();
+        let report = |label: &str, files: &[(String, Vec<u8>)], pass: &serde_json::Value| {
+            let total = build_pkpass(pass, files).unwrap().len();
+            println!("== {label}: pkpass {total} bytes");
+            for (n, b) in files {
+                // PNG colour type: 2 RGB, 3 palette, 6 RGBA.
+                let ct = if n.ends_with(".png") { b.get(25).copied().unwrap_or(0) } else { 0 };
+                println!("   {:>8}  ct{ct}  {n}", b.len());
+            }
+        };
+        let (p, f) = pass_files(&org_brand(false), &m, &s, &copy);
+        report("fallback", &f, &p);
+        let mut names: Vec<_> = std::fs::read_dir(format!("{dir}/brand")).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        names.sort();
+        for photo in names {
+            let org = crate::orgs::branding::OrgBrand {
+                card_image_url: Some(format!("https://x/api/uploads/brand/{photo}")),
+                ..org_brand(true)
+            };
+            let (p, f) = pass_files(&org, &m, &s, &copy);
+            report(&format!("custom + {photo}"), &f, &p);
+            // The old look: the photograph and its scrim only, one set.
+            let img = crate::orgs::branding::read_upload(org.card_image_url.as_deref().unwrap()).unwrap();
+            let old: usize = STRIP_SIZES
+                .iter()
+                .map(|(_, w, h)| {
+                    let mut band = img.resize_to_fill(*w, *h, image::imageops::FilterType::CatmullRom).to_rgba8();
+                    scrim(&mut band, &pass_brand(&org).foreground);
+                    encode_png(&band, Squeeze::Small).unwrap().len()
+                })
+                .sum();
+            println!("   old look strips (3): {old}");
+        }
+    }
+
+    /// A built pass, checked the way iOS checks one before it accepts it, over
+    /// every card state the look can draw: empty, part-way, full (earned row),
+    /// with a notice, with a long Arabic name; fallback and custom with a photo.
+    #[test]
+    fn every_built_pass_is_one_ios_would_accept() {
+        use openssl::pkcs7::{Pkcs7, Pkcs7Flags};
+        use sha1::{Digest, Sha1};
+        use std::io::Read;
+
+        let _guard = env_guard();
+        configured();
+        let cert = throwaway_signing();
+        // A photograph for the custom card, from disk as uploads are read.
+        let dir = std::env::temp_dir().join(format!("madar-pass-check-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("brand")).unwrap();
+        let mut photo = image::RgbImage::new(900, 500);
+        for (x, y, p) in photo.enumerate_pixels_mut() {
+            *p = image::Rgb([(x % 251) as u8, (y % 241) as u8, ((x * y) % 239) as u8]);
+        }
+        photo.save(dir.join("brand/photo.png")).unwrap();
+        // SAFETY: the guard above.
+        unsafe { std::env::set_var("UPLOADS_DIR", &dir) };
+        let custom = crate::orgs::branding::OrgBrand {
+            card_image_url: Some("https://x/api/uploads/brand/photo.png".into()),
+            ..org_brand(true)
+        };
+
+        let mut s = LoyaltySettings::defaults(uuid::Uuid::nil(), None);
+        s.mode = "visits".into();
+        s.default_reward_cost = 6;
+        s.program_name_ar = Some("مكافآت \"القهوة\"".into());
+        s.terms = Some("Line one\nLine \"two\"".into());
+        let copy = crate::loyalty::wallet::CardCopy {
+            branches: vec!["Zamalek".into()],
+            ..Default::default()
+        };
+        let png_sizes = |name: &str| -> Option<(u32, u32)> {
+            let base = name.rsplit('/').next().unwrap();
+            Some(match base {
+                "icon.png" => (29, 29),
+                "icon@2x.png" => (58, 58),
+                "icon@3x.png" => (87, 87),
+                "strip.png" => (375, 144),
+                "strip@2x.png" => (750, 288),
+                "strip@3x.png" => (1125, 432),
+                _ => return None,
+            })
+        };
+
+        let states: [(i32, Option<&str>, &str); 5] = [
+            (0, None, "Ali"),
+            (3, None, "Ali"),
+            (6, None, "Ali"),
+            (13, Some("Happy birthday! A gift is on your card."), "Ali"),
+            (7, Some("نشتاق إليك"), "محمد عبد الرحمن عبد العزيز الشربيني أبو الفتوح"),
+        ];
+        // Every state on the fallback card; the two hardest (a full card with
+        // a notice, the long Arabic name) over a photograph, whose palette
+        // quantising is the slow part in a debug build.
+        for (label, org, states) in [
+            ("fallback", org_brand(false), &states[..]),
+            ("custom", custom.clone(), &states[3..]),
+        ] {
+            for &(balance, notice, name) in states {
+                let mut m = member();
+                m.visits_balance = balance;
+                m.name = name.into();
+                m.pass_notice = notice.map(String::from);
+                let at = format!("{label} balance={balance} notice={}", notice.is_some());
+                let (pass, files) = pass_files(&org, &m, &s, &copy);
+
+                // Field keys are unique across every group (iOS rejects a
+                // pass with a duplicate key).
+                let mut keys = std::collections::HashSet::new();
+                for group in ["headerFields", "primaryFields", "secondaryFields", "auxiliaryFields", "backFields"] {
+                    for f in pass["storeCard"][group].as_array().into_iter().flatten() {
+                        let k = f["key"].as_str().expect("every field has a key").to_string();
+                        assert!(keys.insert(k.clone()), "{at}: duplicate key {k}: {pass}");
+                    }
+                }
+                for k in ["formatVersion", "passTypeIdentifier", "serialNumber", "teamIdentifier", "organizationName", "description"] {
+                    assert!(!pass[k].is_null(), "{at}: {k} missing");
+                }
+
+                // The archive: manifest lists exactly the files, by SHA-1.
+                let bytes = build_pkpass(&pass, &files).unwrap();
+                let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+                let mut content = std::collections::BTreeMap::new();
+                for i in 0..zip.len() {
+                    let mut f = zip.by_index(i).unwrap();
+                    let mut b = Vec::new();
+                    f.read_to_end(&mut b).unwrap();
+                    content.insert(f.name().to_string(), b);
+                }
+                let manifest: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_slice(&content["manifest.json"]).unwrap();
+                let hashed: Vec<&String> = content.keys().filter(|n| *n != "manifest.json" && *n != "signature").collect();
+                assert_eq!(manifest.len(), hashed.len(), "{at}: manifest and archive disagree");
+                for n in hashed {
+                    let mut h = Sha1::new();
+                    h.update(&content[n]);
+                    assert_eq!(manifest[n.as_str()], hex(&h.finalize()), "{at}: {n}");
+                }
+                // pass.json is valid JSON and is what was built.
+                let _: serde_json::Value = serde_json::from_slice(&content["pass.json"]).unwrap();
+
+                // The signature verifies over the manifest against the chain.
+                let sig = Pkcs7::from_der(&content["signature"]).unwrap();
+                let mut store = openssl::x509::store::X509StoreBuilder::new().unwrap();
+                store.add_cert(cert.clone()).unwrap();
+                let store = store.build();
+                let certs = openssl::stack::Stack::new().unwrap();
+                sig.verify(&certs, &store, Some(&content["manifest.json"]), None, Pkcs7Flags::BINARY)
+                    .unwrap_or_else(|e| panic!("{at}: signature: {e}"));
+
+                // Every PNG: 8-bit, not interlaced, a colour type iOS reads,
+                // and the right size; strips opaque (palette or RGB).
+                for (n, b) in content.iter().filter(|(n, _)| n.ends_with(".png")) {
+                    assert_eq!(&b[..8], b"\x89PNG\r\n\x1a\n", "{at}: {n}");
+                    let (w, h) = (u32::from_be_bytes(b[16..20].try_into().unwrap()), u32::from_be_bytes(b[20..24].try_into().unwrap()));
+                    let (depth, ctype, interlace) = (b[24], b[25], b[28]);
+                    assert_eq!(depth, 8, "{at}: {n}");
+                    assert!([2, 3, 6].contains(&ctype), "{at}: {n} colour type {ctype}");
+                    assert_eq!(interlace, 0, "{at}: {n}");
+                    if let Some(want) = png_sizes(n) {
+                        assert_eq!((w, h), want, "{at}: {n}");
+                    }
+                    if n.contains("strip") {
+                        assert_ne!(ctype, 6, "{at}: {n} must not be RGBA (opaque strips palettise)");
+                    }
+                    if n.starts_with("logo") {
+                        assert!(w <= 480 && h <= 150, "{at}: {n} {w}x{h}");
+                    }
+                    image::load_from_memory(b).unwrap_or_else(|e| panic!("{at}: {n}: {e}"));
+                }
+
+                // The two localisations agree: same strings keys, same strips.
+                let keys_of = |b: &[u8]| -> Vec<String> {
+                    String::from_utf8(b.to_vec()).unwrap().lines()
+                        .filter(|l| l.starts_with('"'))
+                        .map(|l| l.split("\" = \"").next().unwrap().to_string())
+                        .collect()
+                };
+                assert_eq!(keys_of(&content["en.lproj/pass.strings"]), keys_of(&content["ar.lproj/pass.strings"]), "{at}");
+                for scale in ["strip.png", "strip@2x.png", "strip@3x.png"] {
+                    assert!(content.contains_key(scale) && content.contains_key(&format!("ar.lproj/{scale}")), "{at}: {scale}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
