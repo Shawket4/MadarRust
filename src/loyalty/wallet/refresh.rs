@@ -73,6 +73,12 @@ async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
     // up, and one sweep is one thing to reason about.
     notices::sweep_undelivered(pool).await?;
 
+    // Dashboard messages that are due, or still sending (`loyalty::broadcasts`).
+    // Their own failures are logged inside; never the tick's.
+    if let Err(e) = crate::loyalty::broadcasts::run_due(pool).await {
+        tracing::warn!(error = %e, "loyalty: broadcast pass failed");
+    }
+
     // And the pre-built passes that have aged out. Same argument: one sweep,
     // one thing to reason about. A few hundred KB per member who tapped adds
     // up on a box where Postgres shares the disk with everything else, and

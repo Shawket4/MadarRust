@@ -19,7 +19,10 @@
 
 pub mod award;
 pub mod birthdays;
+pub mod broadcasts;
 pub mod counter;
+pub mod crm;
+pub mod design;
 pub mod earn;
 pub mod handlers;
 pub mod model;

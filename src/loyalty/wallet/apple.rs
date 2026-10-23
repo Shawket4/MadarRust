@@ -157,7 +157,7 @@ const STRIP_CONTRAST: f64 = 3.0;
 /// on. The strength is MEASURED rather than guessed: the scrim deepens until
 /// the WORST pixel under the text clears AA against the foreground. A picture
 /// that is already dark enough is left alone.
-fn scrim(img: &mut image::RgbaImage, foreground: &str) {
+pub(crate) fn scrim(img: &mut image::RgbaImage, foreground: &str) {
     let (fr, fg_, fb) = crate::orgs::branding::parse_hex(foreground).unwrap_or((255, 255, 255));
     let fg_lum = crate::orgs::branding::luminance(fr, fg_, fb);
     // Toward the opposite end from the text, which is the direction that buys
@@ -1015,6 +1015,10 @@ pub fn pass_json(
                 .collect::<Vec<_>>()
         );
     }
+    // A designed card: its own fields and colours (wallet::design).
+    if let Some(d) = &copy.design {
+        d.restyle_apple(&mut pass);
+    }
     Ok(pass)
 }
 
@@ -1205,7 +1209,11 @@ async fn build_pass_inner(
     // accessor and the builder went on calling the uncooked one, so every tap
     // still resized and encoded three images up to 1125x432 — the cache existed
     // and was never consulted. This line is the whole of that fix.
-    let strip = strip_images_cached(member.org_id, &org, &brand, progress, threshold).await;
+    // A designed card (wallet::design) draws its own strip; the classic look is untouched.
+    let strip = match &copy.design {
+        Some(d) => d.apple_strips().await,
+        None => strip_images_cached(member.org_id, &org, &brand, progress, threshold).await,
+    };
     let mut pass = pass_json(member, &settings, &locations, &copy, &brand)?;
     if voided {
         mark_voided(&mut pass, chrono::Utc::now());
@@ -1226,7 +1234,10 @@ async fn build_pass_inner(
     // rather than the text it happens to contain.
     //
     // See `wallet::i18n` for why the English text is the key.
-    let pairs = super::i18n::strings_for(&settings, settings.program_name_ar.as_deref());
+    let mut pairs = super::i18n::strings_for(&settings, settings.program_name_ar.as_deref());
+    if let Some(d) = &copy.design {
+        pairs.extend(d.strings());
+    }
     images.push((
         "en.lproj/pass.strings".to_string(),
         super::i18n::strings_file(&super::i18n::identity(&pairs)).into_bytes(),

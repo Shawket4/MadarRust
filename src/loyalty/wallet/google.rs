@@ -479,6 +479,10 @@ pub fn loyalty_object(
             })
             .collect::<Vec<_>>(),
     });
+    // A designed card: its own face slots (wallet::design).
+    if let Some(d) = &copy.design {
+        d.restyle_google(&mut object);
+    }
     drop_empty_arrays(&mut object);
     object
 }
@@ -685,6 +689,9 @@ pub async fn save_url_recorded(
     // old one forever. The token is cached, so the cost of being right here is
     // two requests on a page a customer opens rarely.
     let token = access_token().await?;
+    // A designed card's object and class (wallet::design).
+    let copy = &super::design::with_design(pool, member, settings, brand, copy).await;
+    let class_brand = super::design::brand_for_google(brand, copy);
     // The class describes the SHOP, so it gets the shop's branches — not this
     // member's nearest ten, which is what the object carries.
     let org_locations = super::locations_for_org(pool, member.org_id)
@@ -694,7 +701,7 @@ pub async fn save_url_recorded(
         &token,
         &issuer,
         member.org_id,
-        brand,
+        &class_brand,
         settings,
         &org_locations,
         steps,
@@ -999,7 +1006,7 @@ async fn ensure_object(
             created.as_u16(),
             resp.text().await.unwrap_or_default(),
         ));
-        decorate(token, &id, member.org_id, brand, steps).await;
+        decorate(token, &id, member.org_id, brand, copy.design.as_ref().and_then(|d| d.google_hero(member.locale == "ar")), steps).await;
         record_pushed(&id, &body).await;
         return Ok(id);
     }
@@ -1069,7 +1076,7 @@ async fn ensure_object(
             tracing::warn!(error = %e, "loyalty: could not refresh the card");
         }
     }
-    decorate(token, &id, member.org_id, brand, steps).await;
+    decorate(token, &id, member.org_id, brand, copy.design.as_ref().and_then(|d| d.google_hero(member.locale == "ar")), steps).await;
     Ok(id)
 }
 
@@ -1083,9 +1090,10 @@ async fn decorate(
     id: &str,
     org_id: uuid::Uuid,
     brand: &OrgBrand,
+    designed: Option<serde_json::Value>,
     steps: &mut Vec<WalletStep>,
 ) {
-    let Some(hero) = hero_image(org_id, brand) else {
+    let Some(hero) = designed.or_else(|| hero_image(org_id, brand)) else {
         steps.push(WalletStep::new(
             "add the card image",
             0,
@@ -1452,6 +1460,11 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
         .await
         .unwrap_or_default();
     let copy = super::card_copy(pool, member.org_id, &settings).await;
+    let brand = crate::orgs::branding::load(pool, member.org_id).await.ok();
+    let copy = match &brand {
+        Some(b) => super::design::with_design(pool, member, &settings, b, &copy).await,
+        None => copy,
+    };
     // The whole card, through the same builder the save path uses, and PUT
     // rather than PATCH — for both of the reasons `ensure_object` gives. One
     // writer and one shape: a card that changed on a sale and a card that
@@ -1469,8 +1482,9 @@ pub async fn push_balance(pool: &PgPool, member: &MemberRow) -> Result<(), AppEr
         return Err(google_error("updating the loyalty object", resp).await);
     }
     // A put replaces the resource, so the photograph goes back on after it.
-    if let Ok(brand) = crate::orgs::branding::load(pool, member.org_id).await {
-        decorate(&token, &object_id, member.org_id, &brand, &mut Vec::new()).await;
+    if let Some(brand) = &brand {
+        let hero = copy.design.as_ref().and_then(|d| d.google_hero(member.locale == "ar"));
+        decorate(&token, &object_id, member.org_id, brand, hero, &mut Vec::new()).await;
     }
     Ok(())
 }

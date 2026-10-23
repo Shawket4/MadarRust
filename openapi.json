@@ -21605,6 +21605,494 @@
         ]
       }
     },
+    "/loyalty/broadcasts": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "list_loyalty_broadcasts",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BroadcastsPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Send now, or schedule.",
+        "operationId": "create_loyalty_broadcast",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Broadcast"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/broadcasts/audience": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "How many members an audience reaches, before sending.",
+        "operationId": "count_loyalty_broadcast_audience",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AudienceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceCount"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/broadcasts/{id}": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "get_loyalty_broadcast",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Broadcast"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/broadcasts/{id}/cancel": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Cancel a scheduled message (one already sending finishes).",
+        "operationId": "cancel_loyalty_broadcast",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Broadcast"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/campaign-effectiveness": {
       "get": {
         "tags": [
@@ -21659,6 +22147,446 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CampaignEffectiveness"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/card-design": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "get_loyalty_card_design",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CardDesignView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "put_loyalty_card_design",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutCardDesign"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CardDesignView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/card-design/preview": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "The strip (Apple @2x) or the hero (Google) exactly as the wallet will get\nit, for the designer's \"as the wallet renders it\" view. Not saved.",
+        "operationId": "preview_loyalty_card_design",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CardPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "PNG",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/card-design/publish": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "publish_loyalty_card_design",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CardDesignView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/card-design/published": {
+      "delete": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "unpublish_loyalty_card_design",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CardDesignView"
                 }
               }
             }
@@ -22460,6 +23388,102 @@
         ]
       }
     },
+    "/loyalty/members/query": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Search, filter by a segment, sort and page the members.",
+        "operationId": "query_loyalty_members",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MembersQueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrmMembersPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/members/{id}": {
       "get": {
         "tags": [
@@ -22810,6 +23834,103 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GoogleRefreshReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/members/{id}/wallet": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "get_loyalty_member_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Member ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberWallet"
                 }
               }
             }
@@ -23281,6 +24402,291 @@
         "responses": {
           "204": {
             "description": ""
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/stats": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "get_loyalty_stats",
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "description": "`YYYY-MM-DD`, in the shop's time zone; default 30 days ago.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "`YYYY-MM-DD`, inclusive; default today.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RewardsStats"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
+    "/loyalty/tracks": {
+      "get": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "get_loyalty_tracks",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TracksView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "loyalty"
+        ],
+        "operationId": "put_loyalty_tracks",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutTracks"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TracksView"
+                }
+              }
+            }
           },
           "400": {
             "description": "Bad request — validation failed or malformed input",
@@ -36472,6 +37878,55 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/public/loyalty/brand/{org_id}/card/{revision}/{state}": {
+      "get": {
+        "tags": [
+          "loyalty-public"
+        ],
+        "summary": "The designed Google hero at one progress state (public: Google fetches it).\nNo member data: the org, the revision and each track's progress, every\nnumber checked against the shop's tracks.",
+        "operationId": "public_loyalty_card_hero",
+        "parameters": [
+          {
+            "name": "org_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "state",
+            "in": "path",
+            "description": "e.g. `3-0-en.png`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "PNG",
+            "content": {
+              "image/png": {}
+            }
+          },
+          "404": {
+            "description": ""
           }
         }
       }
@@ -68068,6 +69523,15 @@
             "type": "integer",
             "format": "int32",
             "description": "Signed. Negative takes points away."
+          },
+          "track": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The stamp track (2–4) to adjust; absent = track 1 (the balance above).",
+            "minimum": 0
           }
         }
       },
@@ -68601,6 +70065,42 @@
           "total_tax": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "AppleFields": {
+        "type": "object",
+        "description": "Apple's store-card field groups. The back of the card is not designed: it\ncarries how it works, branches, terms and links, as today.",
+        "properties": {
+          "auxiliary": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldSource"
+            }
+          },
+          "header": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldSource"
+            },
+            "description": "Top right beside the logo, and the only thing a stacked wallet shows."
+          },
+          "primary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FieldSource",
+                "description": "Written over the strip's leading top two thirds."
+              }
+            ]
+          },
+          "secondary": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldSource"
+            }
           }
         }
       },
@@ -69511,6 +71011,62 @@
           }
         }
       },
+      "Audience": {
+        "type": "object",
+        "description": "Every member (no rules), or those matching all of `rules`.",
+        "properties": {
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Rule"
+            }
+          }
+        }
+      },
+      "AudienceCount": {
+        "type": "object",
+        "description": "Who an audience reaches, and how.",
+        "required": [
+          "members",
+          "opted_out",
+          "apple",
+          "google",
+          "no_card"
+        ],
+        "properties": {
+          "apple": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Reachable: holding an Apple card / a Google card / neither (WhatsApp\nonly, and only if asked for)."
+          },
+          "google": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "members": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Members matching the rules (opted-out ones included in this figure)."
+          },
+          "no_card": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "opted_out": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, opted out of marketing: never sent to."
+          }
+        }
+      },
+      "AudienceRequest": {
+        "type": "object",
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/Audience"
+          }
+        }
+      },
       "AuditBreakdownEntry": {
         "type": "object",
         "required": [
@@ -69838,6 +71394,16 @@
             "type": "integer",
             "format": "int32",
             "description": "Points this sale earned. 0 when it was too small to reach one point."
+          },
+          "tracks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrackAward"
+            },
+            "description": "What each stamp track 2–4 earned on this press (0 for one already\nearned), when the card has more than one track. `points_awarded` and\n`member` stay track 1's."
           }
         }
       },
@@ -71515,6 +73081,184 @@
           }
         }
       },
+      "Broadcast": {
+        "type": "object",
+        "description": "What the log can honestly say about a broadcast.",
+        "required": [
+          "id",
+          "line_en",
+          "line_ar",
+          "audience",
+          "whatsapp_fallback",
+          "status",
+          "scheduled_for",
+          "created_at",
+          "recipients",
+          "pending",
+          "sent",
+          "apple",
+          "google",
+          "whatsapp",
+          "seen",
+          "skipped_recent",
+          "skipped_opted_out",
+          "unreachable",
+          "failed"
+        ],
+        "properties": {
+          "apple": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Reached an Apple card (pushed)."
+          },
+          "audience": {
+            "$ref": "#/components/schemas/Audience"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "google": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Accepted by Google (Google gives no delivery signal)."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "line_ar": {
+            "type": "string"
+          },
+          "line_en": {
+            "type": "string"
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "recipients": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scheduled_for": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "seen": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Apple devices that fetched the card after the push: delivered."
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "skipped_opted_out": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "skipped_recent": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "description": "`scheduled`, `sending`, `sent` or `cancelled`."
+          },
+          "unreachable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "No card and no WhatsApp asked for."
+          },
+          "whatsapp": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "whatsapp_fallback": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BroadcastInput": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/Audience"
+          },
+          "message": {
+            "$ref": "#/components/schemas/Message"
+          },
+          "scheduled_for": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Absent = now. Otherwise 5 minutes to 30 days ahead."
+          },
+          "whatsapp_fallback": {
+            "type": "boolean",
+            "description": "Also WhatsApp members with no card in a wallet (costs the shop)."
+          }
+        }
+      },
+      "BroadcastsPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "sent_last_24h",
+          "limits"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Broadcast"
+            }
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits"
+          },
+          "sent_last_24h": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Broadcasts in the last 24 hours (cancelled ones excluded), against `limits.daily_limit`."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "BulkArchived": {
         "type": "object",
         "description": "What a `replace` archived.",
@@ -72329,6 +74073,144 @@
           }
         }
       },
+      "CardDesign": {
+        "type": "object",
+        "description": "The whole design.",
+        "required": [
+          "version",
+          "colours",
+          "ground",
+          "stamp",
+          "apple",
+          "google"
+        ],
+        "properties": {
+          "apple": {
+            "$ref": "#/components/schemas/AppleFields"
+          },
+          "colours": {
+            "$ref": "#/components/schemas/Colours"
+          },
+          "elements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Element"
+            },
+            "description": "What the strip (Apple) and the hero (Google) show, on the grid."
+          },
+          "google": {
+            "$ref": "#/components/schemas/GoogleFields"
+          },
+          "ground": {
+            "$ref": "#/components/schemas/Ground"
+          },
+          "stamp": {
+            "$ref": "#/components/schemas/StampStyle"
+          },
+          "template": {
+            "type": "string",
+            "description": "The template it started from (informational: `classic`, `stamps`, …)."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "CardDesignView": {
+        "type": "object",
+        "description": "Everything the designer needs to open.",
+        "required": [
+          "revision",
+          "default_design",
+          "ctx",
+          "tracks",
+          "colours",
+          "custom_branding",
+          "programme_name"
+        ],
+        "properties": {
+          "colours": {
+            "$ref": "#/components/schemas/Colours",
+            "description": "The pass colours the shop has today."
+          },
+          "ctx": {
+            "$ref": "#/components/schemas/Ctx",
+            "description": "What designs are checked against: mode, tracks, photo."
+          },
+          "custom_branding": {
+            "type": "boolean",
+            "description": "False: the shop wears Madar's palette (custom branding is a super\nadmin's switch) — the designer locks the colours and the photograph."
+          },
+          "default_design": {
+            "$ref": "#/components/schemas/CardDesign",
+            "description": "The design a shop starts from (madar-card's default for it)."
+          },
+          "draft": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CardDesign",
+                "description": "The design being edited, if one was saved."
+              }
+            ]
+          },
+          "logo_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "photo_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The shop's card photograph and logo (upload URLs) for the live preview."
+          },
+          "programme_name": {
+            "type": "string"
+          },
+          "programme_name_ar": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "published": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CardDesign",
+                "description": "The design the passes wear; `None` = the classic look (or, with\nseveral tracks, the automatic one)."
+              }
+            ]
+          },
+          "published_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Track"
+            },
+            "description": "The tracks, for labels and colours in the preview."
+          }
+        }
+      },
       "CardPreferences": {
         "type": "object",
         "description": "What a customer can change about their own card, without an account.\n\nThe token in the URL is the credential — the same one their pass carries and\nthe till scans. That is deliberate: a person who has just been messaged must\nbe able to stop the messages by tapping the link in the message, not by\nremembering a password they never made.",
@@ -72346,6 +74228,32 @@
               "null"
             ],
             "description": "Stop sending marketing. Covers the birthday greeting as well as the\nwin-back: someone asking us to stop is asking the SHOP to stop, not to\nbe excluded from one campaign."
+          }
+        }
+      },
+      "CardPreviewRequest": {
+        "type": "object",
+        "description": "Render a design as the wallet will get it.",
+        "required": [
+          "design",
+          "store"
+        ],
+        "properties": {
+          "arabic": {
+            "type": "boolean"
+          },
+          "balances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewBalance"
+            },
+            "description": "Sample balances per track (`{position, balance}`); absent = half full."
+          },
+          "design": {
+            "$ref": "#/components/schemas/CardDesign"
+          },
+          "store": {
+            "$ref": "#/components/schemas/Store"
           }
         }
       },
@@ -72893,6 +74801,38 @@
           "revenue": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "Cell": {
+        "type": "object",
+        "description": "A rectangle of whole cells: `col`/`row` from the leading top corner,\n`w`×`h` cells.",
+        "required": [
+          "col",
+          "row",
+          "w",
+          "h"
+        ],
+        "properties": {
+          "col": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "h": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "row": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "w": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -73654,6 +75594,26 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "Colours": {
+        "type": "object",
+        "description": "The pass's colours, `#RRGGBB`. Apple writes field values in `foreground`\nand labels in `label` on `background`; Google takes `background` only.",
+        "required": [
+          "background",
+          "foreground",
+          "label"
+        ],
+        "properties": {
+          "background": {
+            "type": "string"
+          },
+          "foreground": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
           }
         }
       },
@@ -74970,6 +76930,15 @@
           "idempotency_key": {
             "type": "string",
             "description": "One per attempt, made by the page (a UUID)."
+          },
+          "track": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The stamp track (1–4) to complete; absent = track 1.",
+            "minimum": 0
           }
         }
       },
@@ -75025,6 +76994,15 @@
             "example": 1,
             "maximum": 50,
             "minimum": 1
+          },
+          "track": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The stamp track (1–4); absent = track 1. A track 2–4 stamps `items`\nstamps (or one with its \"per sale\" setting).",
+            "minimum": 0
           }
         }
       },
@@ -77522,6 +79500,135 @@
           }
         ],
         "description": "Returned ONLY by create and rotate. The secret is bcrypt-hashed on the way\nin and is not recoverable afterwards, so the dashboard must show it once and\ntell the operator to copy it."
+      },
+      "CrmMember": {
+        "type": "object",
+        "description": "One row of the CRM table.",
+        "required": [
+          "id",
+          "name",
+          "phone",
+          "balance",
+          "lifetime",
+          "enrolled_at",
+          "last_visit_at",
+          "apple_devices",
+          "google_card",
+          "marketing_opt_out",
+          "locale",
+          "rewards_ready"
+        ],
+        "properties": {
+          "apple_devices": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Apple devices holding the card."
+          },
+          "balance": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Track 1's balance in the programme's currency."
+          },
+          "birth_month": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "enrolled_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "google_card": {
+            "type": "boolean",
+            "description": "A Google Wallet object was created for them."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_visit_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Their latest stamp, point or reward (or when they joined)."
+          },
+          "lifetime": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "locale": {
+            "type": "string"
+          },
+          "marketing_opt_out": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "rewards_ready": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Rewards earned on track 1, not yet taken."
+          },
+          "tracks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/MemberTrack"
+            },
+            "description": "Every track, when the card has more than one."
+          }
+        }
+      },
+      "CrmMembersPage": {
+        "type": "object",
+        "required": [
+          "rows",
+          "total"
+        ],
+        "properties": {
+          "rows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CrmMember"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Ctx": {
+        "type": "object",
+        "description": "What the design is checked against: the shop's programme as it stands.",
+        "required": [
+          "mode",
+          "tracks",
+          "has_photo"
+        ],
+        "properties": {
+          "has_photo": {
+            "type": "boolean",
+            "description": "The shop has a card photograph uploaded."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/Mode"
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrackRef"
+            },
+            "description": "Every track with its card size (track 1's is the programme's)."
+          }
+        }
       },
       "CurrentPayroll": {
         "type": "object",
@@ -80308,6 +82415,134 @@
           }
         }
       },
+      "Element": {
+        "type": "object",
+        "description": "One thing on the strip, and where.",
+        "required": [
+          "kind",
+          "cell"
+        ],
+        "properties": {
+          "cell": {
+            "$ref": "#/components/schemas/Cell"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ElementKind"
+          }
+        }
+      },
+      "ElementKind": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A track's stamps, filled up to its progress on the current card.",
+            "required": [
+              "track",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "stamps"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A track's progress as a bar (segmented up to 12 steps).",
+            "required": [
+              "track",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "bar"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A track's progress as figures, \"3/8\", baked with the bundled font.",
+            "required": [
+              "track",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "count"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Static words, EN and AR, baked with the bundled font. The Arabic is\ndrawn on the Arabic strip, the English on every other; one of them may\nbe empty (the other is used).",
+            "required": [
+              "size",
+              "align",
+              "type"
+            ],
+            "properties": {
+              "align": {
+                "$ref": "#/components/schemas/TextAlign"
+              },
+              "ar": {
+                "type": "string"
+              },
+              "en": {
+                "type": "string"
+              },
+              "size": {
+                "$ref": "#/components/schemas/TextSize"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The shop's logo (Settings › Brand), else the Rewards present.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "logo"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The kinds of thing a strip can hold. Each is drawn by [`crate::render`]."
+      },
       "ElsewhereShift": {
         "type": "object",
         "description": "A person's shift at ANOTHER branch that date (BUG-4): the board shows it\n(\"at <branch>\") so the cell never reads \"Off\", but it is not this\nboard's: never one of `shifts`, never sent back by a PUT from here.",
@@ -80592,6 +82827,14 @@
             "description": "The linked Madar user, when this employee is one (a cashier, a manager,\nthe owner). Null for someone who is only on payroll."
           }
         }
+      },
+      "EmptyStyle": {
+        "type": "string",
+        "description": "How a stamp not yet earned looks.",
+        "enum": [
+          "outline",
+          "faint"
+        ]
       },
       "ErrorBody": {
         "type": "object",
@@ -81032,6 +83275,89 @@
           }
         }
       },
+      "FieldSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The track's balance, as a number (track 1: points or stamps).",
+            "required": [
+              "track",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "balance"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Where the track is on its current card: the stamp row, or \"3 / 8\".",
+            "required": [
+              "track",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "progress"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The rewards the track has earned (no row while there are none).",
+            "required": [
+              "track",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "rewards"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The member's name.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "member"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What an OS-drawn field shows."
+      },
       "FilterInfo": {
         "type": "object",
         "required": [
@@ -81437,6 +83763,30 @@
           }
         }
       },
+      "GoogleFields": {
+        "type": "object",
+        "description": "Google's two slots on the face of the card.",
+        "required": [
+          "points"
+        ],
+        "properties": {
+          "points": {
+            "$ref": "#/components/schemas/FieldSource",
+            "description": "`loyaltyPoints`, the largest text on the card."
+          },
+          "secondary": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FieldSource",
+                "description": "`secondaryLoyaltyPoints`."
+              }
+            ]
+          }
+        }
+      },
       "GoogleObjectDump": {
         "type": "object",
         "description": "The card Google holds, plus the two counts that make it readable at a glance.",
@@ -81555,6 +83905,37 @@
             "description": "\"template\" or \"custom\" (an owner edited it)."
           }
         }
+      },
+      "Ground": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/GroundKind"
+          },
+          "pattern": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Pattern",
+                "description": "Which pattern, when `kind` is `pattern`."
+              }
+            ]
+          }
+        }
+      },
+      "GroundKind": {
+        "type": "string",
+        "description": "What lies under the elements.",
+        "enum": [
+          "colour",
+          "photo",
+          "pattern"
+        ]
       },
       "GroupAttachInput": {
         "type": "object",
@@ -83359,6 +85740,14 @@
           "source": {
             "type": "string",
             "description": "Why the row exists: `sale`, `redemption`, `void`, `refund`, `birthday`,\n`winback`, `manual`, `merge` or `counter` (no order: the Rewards teller page). What a till or a dashboard should print as the\nreason, instead of guessing from the kind and the note."
+          },
+          "track": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The stamp track this row moved (2–4); absent for track 1."
           }
         }
       },
@@ -83521,6 +85910,44 @@
           "week": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "Limits": {
+        "type": "object",
+        "description": "The limits, for the composer to show.",
+        "required": [
+          "line_max",
+          "daily_limit",
+          "member_gap_hours",
+          "schedule_min_minutes",
+          "schedule_max_days"
+        ],
+        "properties": {
+          "daily_limit": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "line_max": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "member_gap_hours": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "schedule_max_days": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "schedule_min_minutes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -84333,6 +86760,15 @@
             "format": "uuid",
             "description": "`open_ticket_items.id` — how a ticket settle names the line to cover.\nResolved to `item_index` by `settle_open_ticket` before pricing."
           },
+          "track": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The stamp track (2–4) that pays for it; absent = track 1 (the\nprogramme's own card, as every released till sends).",
+            "minimum": 0
+          },
           "units": {
             "type": [
               "integer",
@@ -85063,6 +87499,82 @@
           }
         }
       },
+      "MemberSort": {
+        "type": "string",
+        "enum": [
+          "joined",
+          "last_visit",
+          "balance",
+          "name"
+        ]
+      },
+      "MemberTrack": {
+        "type": "object",
+        "description": "One track on a member's card, with the card's figures (madar-card's\n`track_card`). Track 1's figures equal the member's top-level ones.",
+        "required": [
+          "position",
+          "name_en",
+          "name_ar",
+          "size",
+          "balance",
+          "rewards_ready",
+          "progress_to_next",
+          "points_to_next_reward",
+          "can_redeem"
+        ],
+        "properties": {
+          "balance": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "can_redeem": {
+            "type": "boolean"
+          },
+          "colour": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "earns_from_sales": {
+            "type": "boolean",
+            "description": "The track is bound to menu items (a POS sale earns it); `false` = a\ncounter-only track."
+          },
+          "name_ar": {
+            "type": "string"
+          },
+          "name_en": {
+            "type": "string"
+          },
+          "points_to_next_reward": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "progress_to_next": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "rewards_ready": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "shape": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "MemberView": {
         "type": "object",
         "description": "A member as the teller, the admin and the pass all see them.\n\nBoth balances travel, because an org may switch mode (or run points at one\nbranch and stamps at another) and what a customer earned under the old rules\nis still theirs. `mode` says which one is LIVE where the question was asked,\nand `balance` is that one — so a caller never has to pick.",
@@ -85152,9 +87664,88 @@
             "format": "int32",
             "description": "How many rewards the balance has ALREADY earned.\n\nA card does not stop at full. Six stamps against a five-stamp reward is\none reward earned and one stamp towards the next, not \"five and a bit\nwasted\" — and a customer who has been in eleven times is owed two\nrewards, whether or not they claimed the first."
           },
+          "tracks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/MemberTrack"
+            },
+            "description": "Every stamp track of the card (track 1 first, its figures equal to the\nfields above), present only when the shop runs more than one. The\nfields above stay track 1's for ever (released tills read them)."
+          },
           "visits_balance": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "MemberWallet": {
+        "type": "object",
+        "description": "How the member's card is held, and the last message it carried.",
+        "required": [
+          "apple_devices",
+          "google_card",
+          "messages_received",
+          "marketing_opt_out"
+        ],
+        "properties": {
+          "apple_devices": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "apple_registered_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "google_card": {
+            "type": "boolean"
+          },
+          "marketing_opt_out": {
+            "type": "boolean"
+          },
+          "messages_received": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Dashboard messages this member was sent."
+          },
+          "notice": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notice_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "notice_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Apple's device fetched the pass after the push."
+          },
+          "notice_wallets": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pass_updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the pass was last rebuilt for them."
           }
         }
       },
@@ -85174,6 +87765,43 @@
           "total": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "MembersQueryRequest": {
+        "type": "object",
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/Audience",
+            "description": "A segment (madar-card's audience rules); empty = every member."
+          },
+          "desc": {
+            "type": "boolean",
+            "description": "Newest / most / latest first when true (the default)."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "q": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name or phone fragment."
+          },
+          "sort": {
+            "$ref": "#/components/schemas/MemberSort"
           }
         }
       },
@@ -85942,6 +88570,18 @@
           }
         }
       },
+      "Message": {
+        "type": "object",
+        "description": "The message, in either or both languages.",
+        "properties": {
+          "ar": {
+            "type": "string"
+          },
+          "en": {
+            "type": "string"
+          }
+        }
+      },
       "MethodTotal": {
         "type": "object",
         "description": "What the system says one method took on a till.",
@@ -86160,6 +88800,14 @@
             "description": "`null` for parts whose slot was deleted since."
           }
         }
+      },
+      "Mode": {
+        "type": "string",
+        "description": "What a programme collects. One track only for points.",
+        "enum": [
+          "points",
+          "visits"
+        ]
       },
       "ModifierGroupOut": {
         "type": "object",
@@ -88451,6 +91099,14 @@
             "format": "int32",
             "description": "Minor units the reward took off this line (0 for a paid line)."
           },
+          "reward_track": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The stamp track (2–4) whose reward covered it; absent for track 1."
+          },
           "reward_units": {
             "type": "integer",
             "format": "int32",
@@ -90299,6 +92955,14 @@
             "description": "`\"\"` clears the Arabic name."
           }
         }
+      },
+      "Pattern": {
+        "type": "string",
+        "enum": [
+          "dots",
+          "lines",
+          "grid"
+        ]
       },
       "PauseInput": {
         "type": "object",
@@ -92272,6 +94936,24 @@
           "quantity": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "PreviewBalance": {
+        "type": "object",
+        "required": [
+          "position",
+          "balance"
+        ],
+        "properties": {
+          "balance": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -94450,6 +97132,17 @@
           }
         }
       },
+      "PutCardDesign": {
+        "type": "object",
+        "required": [
+          "design"
+        ],
+        "properties": {
+          "design": {
+            "$ref": "#/components/schemas/CardDesign"
+          }
+        }
+      },
       "PutCoverage": {
         "type": "object",
         "required": [
@@ -94892,6 +97585,21 @@
           "work_shift_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "PutTracks": {
+        "type": "object",
+        "required": [
+          "tracks"
+        ],
+        "properties": {
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Track"
+            },
+            "description": "The complete list, in position order, track 1 first. A track left out\nis removed (its members' balances are kept, and come back with it)."
           }
         }
       },
@@ -97791,6 +100499,83 @@
           }
         }
       },
+      "RewardsStats": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "mode",
+          "members_total",
+          "new_members",
+          "active_members",
+          "earned",
+          "redemptions",
+          "members_with_card",
+          "messages_sent",
+          "messages_seen",
+          "per_track",
+          "daily"
+        ],
+        "properties": {
+          "active_members": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "daily": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsDay"
+            }
+          },
+          "earned": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "from": {
+            "type": "string",
+            "format": "date"
+          },
+          "members_total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "members_with_card": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Members holding the card in a wallet (Apple device or Google object)."
+          },
+          "messages_seen": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "messages_sent": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mode": {
+            "type": "string",
+            "description": "`points` or `visits`."
+          },
+          "new_members": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "per_track": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsTrack"
+            }
+          },
+          "redemptions": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "to": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      },
       "RolePermission": {
         "type": "object",
         "required": [
@@ -98106,6 +100891,187 @@
           }
         }
       },
+      "Rule": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The track's balance is at least `value`.",
+            "required": [
+              "track",
+              "value",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "balance_at_least"
+                ]
+              },
+              "value": {
+                "type": "integer",
+                "format": "int32"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The track's balance is at most `value`.",
+            "required": [
+              "track",
+              "value",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "balance_at_most"
+                ]
+              },
+              "value": {
+                "type": "integer",
+                "format": "int32"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The track has a reward earned and not yet taken.",
+            "required": [
+              "track",
+              "type"
+            ],
+            "properties": {
+              "track": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reward_ready"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Seen (any stamp, point or reward) within the last `days`.",
+            "required": [
+              "days",
+              "type"
+            ],
+            "properties": {
+              "days": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "visited_within"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Not seen for at least `days` (never seen counts from joining).",
+            "required": [
+              "days",
+              "type"
+            ],
+            "properties": {
+              "days": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "not_visited_for"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Joined within the last `days`.",
+            "required": [
+              "days",
+              "type"
+            ],
+            "properties": {
+              "days": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "joined_within"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Born in `month` (1–12).",
+            "required": [
+              "month",
+              "type"
+            ],
+            "properties": {
+              "month": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "birthday_month"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Holds the card in this wallet.",
+            "required": [
+              "wallet",
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "has_wallet"
+                ]
+              },
+              "wallet": {
+                "$ref": "#/components/schemas/Wallet"
+              }
+            }
+          }
+        ],
+        "description": "One rule."
+      },
       "SalaryAdvance": {
         "type": "object",
         "required": [
@@ -98400,6 +101366,16 @@
               "$ref": "#/components/schemas/RewardItem"
             },
             "description": "What this member could claim at this branch right now. Empty until the\nbalance reaches the threshold, so the screen cannot tempt a teller into\nhanding over a reward that has not been earned."
+          },
+          "track_rewards": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TrackRewards"
+            },
+            "description": "Tracks 2–4's rewards (each of a track's items at its size), when the\ncard has more than one track. `rewards` stays track 1's only: a\nreleased till offers what is in it against the track-1 balance."
           }
         }
       },
@@ -100906,6 +103882,34 @@
           }
         }
       },
+      "StampShape": {
+        "type": "string",
+        "description": "The stamp's shape.",
+        "enum": [
+          "circle",
+          "square",
+          "star",
+          "heart",
+          "cup",
+          "gift",
+          "check"
+        ]
+      },
+      "StampStyle": {
+        "type": "object",
+        "required": [
+          "shape",
+          "empty"
+        ],
+        "properties": {
+          "empty": {
+            "$ref": "#/components/schemas/EmptyStyle"
+          },
+          "shape": {
+            "$ref": "#/components/schemas/StampShape"
+          }
+        }
+      },
       "StationRoutes": {
         "type": "object",
         "required": [
@@ -100924,6 +103928,63 @@
             "items": {
               "$ref": "#/components/schemas/ItemRoute"
             }
+          }
+        }
+      },
+      "StatsDay": {
+        "type": "object",
+        "required": [
+          "date",
+          "new_members",
+          "earned",
+          "redemptions",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Members with any ledger row that day."
+          },
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "earned": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Stamps (or points) earned, every track."
+          },
+          "new_members": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "redemptions": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rewards taken (redemption rows), every track."
+          }
+        }
+      },
+      "StatsTrack": {
+        "type": "object",
+        "required": [
+          "position",
+          "earned",
+          "redemptions"
+        ],
+        "properties": {
+          "earned": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "redemptions": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -101619,6 +104680,14 @@
             "description": "Why it stops (AD-9). Required: blank or missing is a 400."
           }
         }
+      },
+      "Store": {
+        "type": "string",
+        "description": "A wallet.",
+        "enum": [
+          "apple",
+          "google"
+        ]
       },
       "StoredTurn": {
         "type": "object",
@@ -102822,6 +105891,23 @@
           }
         }
       },
+      "TextAlign": {
+        "type": "string",
+        "description": "Alignment in reading order (`start` is the right edge on an Arabic pass).",
+        "enum": [
+          "start",
+          "centre",
+          "end"
+        ]
+      },
+      "TextSize": {
+        "type": "string",
+        "enum": [
+          "small",
+          "medium",
+          "large"
+        ]
+      },
       "TicketBill": {
         "type": "object",
         "description": "What the party owes, priced where the books are priced.\n\nThe till used to show the ticket's running `subtotal` and collect that,\nwhile the settle booked subtotal − discount + service charge + tax. Every\nsuch drawer was short by the tax on every table sale, and the drift check\nat settle now refuses that figure outright — so the till must be shown the\nright one, and only the server knows the branch's policy. Priced under the\nsame engine and the same resolved policy as `create_order_inner`, with the\nservice charge on (a ticket is dine-in by definition, ruling 2). For a\nsettled ticket the figures are the ORDER's, as booked, not a repricing\nunder today's policy.",
@@ -103944,6 +107030,160 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "Track": {
+        "type": "object",
+        "description": "A track as the owner defines it.",
+        "required": [
+          "position"
+        ],
+        "properties": {
+          "cap": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Tracks 2–4: the balance ceiling (a stamp past it is trimmed); at least\nthe track's size. `None` = no ceiling."
+          },
+          "colour": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "This track's colour (`#RRGGBB`), else the pass's foreground."
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tracks 2–4: the menu items (ids) a sale earns on and a completed card\ncovers. Empty = a counter-only track. Always empty on track 1, whose\nitems are the programme's earning list and reward catalogue."
+          },
+          "name_ar": {
+            "type": "string"
+          },
+          "name_en": {
+            "type": "string",
+            "description": "Shown on the pass and the teller page; required from track 2 on."
+          },
+          "per_item": {
+            "type": "boolean",
+            "description": "Tracks 2–4: a stamp per unit of its items (default), or one per sale\nholding any. Track 1 follows the programme's own setting."
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1 to 4, in order. Track 1 is the programme's own counter.",
+            "minimum": 0
+          },
+          "shape": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/StampShape",
+                "description": "This track's stamp, else the design's."
+              }
+            ]
+          },
+          "size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Stamps that fill this track's card. `None` on track 1, whose size is\nthe programme's card size (one number, one place)."
+          }
+        }
+      },
+      "TrackAward": {
+        "type": "object",
+        "description": "What one track earned on an award.",
+        "required": [
+          "position",
+          "points_awarded"
+        ],
+        "properties": {
+          "points_awarded": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "TrackRef": {
+        "type": "object",
+        "description": "What rendering and validation need of a track: where it is and how big a\ncard it fills.",
+        "required": [
+          "position",
+          "size"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "TrackRewards": {
+        "type": "object",
+        "description": "What a track 2–4 offers at the till: each of its items at the track's size.",
+        "required": [
+          "position",
+          "rewards"
+        ],
+        "properties": {
+          "position": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "rewards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RewardItem"
+            },
+            "description": "Only what the member's balance on this track can buy now (as\n`ScanResult.rewards` is for track 1)."
+          }
+        }
+      },
+      "TracksView": {
+        "type": "object",
+        "description": "The shop's tracks, for the dashboard (and anyone setting up a till).",
+        "required": [
+          "mode",
+          "track_one_size",
+          "tracks"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string",
+            "description": "`points` or `visits` (the org default's)."
+          },
+          "track_one_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Track 1's size: the programme's card size."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Track"
+            },
+            "description": "Every track in position order; track 1 always first. In a points\nprogramme only track 1 (tracks 2–4 are kept but inactive)."
           }
         }
       },
@@ -106437,6 +109677,15 @@
             "type": "string"
           }
         }
+      },
+      "Wallet": {
+        "type": "string",
+        "description": "A wallet a member may hold the card in.",
+        "enum": [
+          "apple",
+          "google",
+          "none"
+        ]
       },
       "WalletProvider": {
         "type": "object",

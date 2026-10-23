@@ -51,7 +51,7 @@ pub fn qr_matrix(data: &str, ec: EcLevel) -> Result<Matrix, QrCardError> {
 
 /// Process-wide font database holding only our three bundled faces — never the
 /// system fonts. Built once; cloned (cheaply, it's an `Arc`) per render.
-fn fontdb() -> Arc<usvg::fontdb::Database> {
+pub(crate) fn fontdb() -> Arc<usvg::fontdb::Database> {
     static DB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
     DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();

@@ -14,6 +14,7 @@
 
 pub mod apns;
 pub mod apple;
+pub mod design;
 pub mod google;
 pub mod i18n;
 pub mod look;
@@ -352,6 +353,10 @@ pub struct CardCopy {
     /// Member-specific, unlike the rest — it rides here because this is the one
     /// value both wallet builders already receive.
     pub order_now_url: Option<String>,
+    /// The shop's published card design (or the automatic one for a card with
+    /// several stamp tracks), for THIS member — `None` is the classic look,
+    /// built exactly as before (`wallet::design`).
+    pub design: Option<std::sync::Arc<design::DesignedCard>>,
 }
 
 /// Everything a pass build reads from the database, fetched once.
@@ -407,6 +412,7 @@ pub async fn pass_source(pool: &PgPool, member: &MemberRow) -> Result<PassSource
 
     let mut copy = card_copy_from(&settings, &rewards, branches, Some(&brand));
     copy.order_now_url = order_now_for(pool, member).await;
+    copy.design = design::for_member(pool, member, &settings, &brand).await;
     Ok(PassSource {
         copy,
         settings,
@@ -456,6 +462,7 @@ pub fn card_copy_from(
         branches,
         social: brand.map(|b| b.social_links.clone()).unwrap_or_default(),
         order_now_url: None,
+        design: None,
     }
 }
 
@@ -851,6 +858,7 @@ mod tests {
         let s = LoyaltySettings::defaults(Uuid::nil(), None);
         let copy = CardCopy {
             order_now_url: None,
+            design: None,
             rewards: vec![],
             branches: vec!["Maadi".into(), "Zamalek".into(), "Alexandria".into()],
             social: vec![],
@@ -867,6 +875,7 @@ mod tests {
         let s = LoyaltySettings::defaults(Uuid::nil(), None);
         let copy = CardCopy {
             order_now_url: None,
+            design: None,
             rewards: vec![],
             branches: (1..=15).map(|i| format!("Branch {i}")).collect(),
             social: vec![],
@@ -902,6 +911,7 @@ mod tests {
         }];
         let copy = CardCopy {
             order_now_url: None,
+            design: None,
             rewards: vec!["Espresso — 5 visits".to_string()],
             branches: vec!["Maadi".into(), "Zamalek".into()],
             social: vec![],

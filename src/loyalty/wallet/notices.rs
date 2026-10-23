@@ -86,16 +86,33 @@ pub async fn announce(
     line: &str,
     message: &str,
 ) -> Result<(), AppError> {
+    announce_with(pool, member, line, Some(message), None).await.map(|_| ())
+}
+
+/// [`announce`], for a dashboard message (`loyalty::broadcasts`): `message`
+/// is the WhatsApp owed when no card is reached — `None` sends none (a
+/// broadcast asks for WhatsApp explicitly; it costs the shop per message) —
+/// and `broadcast` is remembered on the card so the fetch that delivers it
+/// marks that recipient seen. Returns the channels reached: `apple`,
+/// `google`, `apple,google`, `whatsapp`, or `none`.
+pub async fn announce_with(
+    pool: &PgPool,
+    member: &MemberRow,
+    line: &str,
+    message: Option<&str>,
+    broadcast: Option<Uuid>,
+) -> Result<String, AppError> {
     let (apple, google) = wallets_for(pool, member).await;
 
     if !apple && !google {
         // No card anywhere. This is the whole reason WhatsApp is still here.
-        crate::delivery::whatsapp::send_message(
-            pool.clone(),
-            member.phone.clone(),
-            message.to_string(),
-        );
-        return Ok(());
+        return Ok(match message {
+            Some(m) => {
+                crate::delivery::whatsapp::send_message(pool.clone(), member.phone.clone(), m.to_string());
+                "whatsapp".into()
+            }
+            None => "none".into(),
+        });
     }
 
     let mut reached: Vec<&str> = Vec::new();
@@ -107,12 +124,13 @@ pub async fn announce(
         sqlx::query(
             "UPDATE loyalty_memberships \
                 SET pass_notice = $2, pass_notice_at = now(), pass_notice_seen_at = NULL, \
-                    pass_notice_fallback = $3, pass_updated_at = now() \
+                    pass_notice_fallback = $3, pass_updated_at = now(), pass_notice_broadcast_id = $4 \
               WHERE id = $1",
         )
         .bind(member.id)
         .bind(line)
         .bind(message)
+        .bind(broadcast)
         .execute(pool)
         .await?;
         super::apple::notify_devices(pool, member).await?;
@@ -131,12 +149,13 @@ pub async fn announce(
 
     // Nothing landed after all — Google refused and there was no Apple card.
     if reached.is_empty() {
-        crate::delivery::whatsapp::send_message(
-            pool.clone(),
-            member.phone.clone(),
-            message.to_string(),
-        );
-        return Ok(());
+        return Ok(match message {
+            Some(m) => {
+                crate::delivery::whatsapp::send_message(pool.clone(), member.phone.clone(), m.to_string());
+                "whatsapp".into()
+            }
+            None => "none".into(),
+        });
     }
 
     sqlx::query("UPDATE loyalty_memberships SET pass_notice_wallets = $2 WHERE id = $1")
@@ -145,7 +164,7 @@ pub async fn announce(
         .execute(pool)
         .await?;
     tracing::info!(customer_id = %member.id, wallets = %reached.join(","), "loyalty: notice on the card");
-    Ok(())
+    Ok(reached.join(","))
 }
 
 /// Send the WhatsApp we owe anyone whose card never came back for the message.
@@ -202,6 +221,16 @@ pub async fn mark_seen(pool: &PgPool, member: &MemberRow) {
     let _ = sqlx::query(
         "UPDATE loyalty_memberships SET pass_notice_seen_at = now() \
           WHERE id = $1 AND pass_notice_seen_at IS NULL",
+    )
+    .bind(member.id)
+    .execute(pool)
+    .await;
+    // A dashboard message: its recipient row is seen too.
+    let _ = sqlx::query(
+        "UPDATE loyalty_broadcast_recipients r SET seen_at = now() \
+           FROM loyalty_memberships m \
+          WHERE m.id = $1 AND r.customer_id = m.id AND r.broadcast_id = m.pass_notice_broadcast_id \
+            AND r.seen_at IS NULL",
     )
     .bind(member.id)
     .execute(pool)

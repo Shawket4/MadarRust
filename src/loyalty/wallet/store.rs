@@ -34,8 +34,14 @@ const TTL: chrono::Duration = chrono::Duration::hours(1);
 /// link, present only while the shop takes online orders. Hashing it is what
 /// makes a stored pass stop matching the moment ordering is switched on or
 /// off, so the next fetch rebuilds it with (or without) the link.
-fn fingerprint(member: &MemberRow, order_now: Option<&str>) -> String {
+fn fingerprint(member: &MemberRow, order_now: Option<&str>, design: &str) -> String {
     let mut h = Sha256::new();
+    // A designed card: its revision, its tracks and their balances
+    // (`wallet::design::fingerprint_extra`). Empty-ish and constant for a
+    // classic card, so its stored passes keep matching.
+    if !design.is_empty() {
+        h.update(design.as_bytes());
+    }
     // The look: a pass stored under an older look is not served again.
     h.update(super::look::LOOK_VERSION.to_le_bytes());
     h.update(order_now.unwrap_or("").as_bytes());
@@ -79,7 +85,8 @@ pub async fn load(pool: &PgPool, member: &MemberRow) -> Option<Vec<u8>> {
 
     let (bytes, stored, built_at) = row?;
     let order_now = super::order_now_for(pool, member).await;
-    if stored != fingerprint(member, order_now.as_deref()) {
+    let design = super::design::fingerprint_extra(pool, member).await;
+    if stored != fingerprint(member, order_now.as_deref(), &design) {
         return None;
     }
     if chrono::Utc::now() - built_at > TTL {
@@ -104,7 +111,11 @@ pub async fn save(pool: &PgPool, member: &MemberRow, bytes: &[u8]) {
     .bind(member.id)
     .bind(member.org_id)
     .bind(bytes)
-    .bind(fingerprint(member, order_now.as_deref()))
+    .bind(fingerprint(
+        member,
+        order_now.as_deref(),
+        &super::design::fingerprint_extra(pool, member).await,
+    ))
     .execute(pool)
     .await;
     if let Err(e) = res {

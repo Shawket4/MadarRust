@@ -36,6 +36,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 // Stamp tracks: one card, up to four rewards.
                 .route("/tracks", web::get().to(super::tracks::get_tracks))
                 .route("/tracks", web::put().to(super::tracks::put_tracks))
+                // The card designer.
+                .route("/card-design", web::get().to(super::design::get_design))
+                .route("/card-design", web::put().to(super::design::put_design))
+                .route("/card-design/publish", web::post().to(super::design::publish))
+                .route("/card-design/published", web::delete().to(super::design::unpublish))
+                .route("/card-design/preview", web::post().to(super::design::preview))
                 .route("/lookup", web::post().to(handlers::lookup))
                 .route("/award", web::post().to(award::award))
                 .route("/counter/stamp", web::post().to(super::counter::stamp))
@@ -54,6 +60,16 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/liability-trend", web::get().to(handlers::liability_trend))
                 // Makes live calls to Google, so it is asked for, never polled.
                 .route("/wallet-status", web::get().to(handlers::wallet_status))
+                // The Rewards CRM and figures.
+                .route("/members/query", web::post().to(super::crm::query_members))
+                .route("/members/{id}/wallet", web::get().to(super::crm::member_wallet))
+                .route("/stats", web::get().to(super::crm::stats))
+                // Messages to members' cards.
+                .route("/broadcasts", web::get().to(super::broadcasts::list))
+                .route("/broadcasts", web::post().to(super::broadcasts::create))
+                .route("/broadcasts/audience", web::post().to(super::broadcasts::audience_count))
+                .route("/broadcasts/{id}", web::get().to(super::broadcasts::get))
+                .route("/broadcasts/{id}/cancel", web::post().to(super::broadcasts::cancel))
                 .route("/members", web::get().to(handlers::list_members))
                 .route("/members/{id}", web::get().to(handlers::get_member))
                 // Forgets the person, keeps the books. Admin only.
@@ -110,6 +126,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .service(
             web::resource("/public/loyalty/brand/{org_id}/logo/{v}.png")
                 .route(web::get().to(public::org_logo_badge)),
+        )
+        // A designed card's Google hero, per progress (wallet::design). No
+        // member data in it; every number is checked against the shop's tracks.
+        .service(
+            web::resource("/public/loyalty/brand/{org_id}/card/{revision}/{state}")
+                .wrap(Condition::new(limited, Governor::new(&browse_gov)))
+                .route(web::get().to(super::design::public_hero)),
         )
         .service(
             web::resource("/public/loyalty/brand/{org_id}/banner/{v}.png")

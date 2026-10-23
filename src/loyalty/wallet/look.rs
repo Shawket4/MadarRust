@@ -77,6 +77,12 @@ pub fn paper_on(background: &str) -> bool {
     luminance(r, g, b) < 0.4
 }
 
+/// The Rewards present at 3x (480x150), ink or paper by the ground: a designed
+/// card's logo element when the shop has no logo of its own.
+pub fn present_logo(background: &str) -> &'static [u8] {
+    if paper_on(background) { LOGO_PAPER[2].1 } else { LOGO_INK[2].1 }
+}
+
 /// The fallback card's icon and logo set: the gift, ink or paper by the ground.
 pub fn fallback_images(background: &str) -> Vec<(String, Vec<u8>)> {
     let logo = if paper_on(background) {
@@ -94,7 +100,7 @@ pub fn fallback_images(background: &str) -> Vec<(String, Vec<u8>)> {
 /// The footer for a strip at `scale` (1, 2 or 3), in the colour that reads on
 /// the pass: paper under light text, ink under dark. Latin 3x is the 2x file
 /// scaled by 1.5 (there is no 36 px export); Arabic has all three.
-fn footer(scale: u32, foreground_is_light: bool, arabic: bool) -> Option<image::RgbaImage> {
+pub(crate) fn footer(scale: u32, foreground_is_light: bool, arabic: bool) -> Option<image::RgbaImage> {
     if arabic {
         let set = if foreground_is_light { FOOTER_AR_PAPER } else { FOOTER_AR_INK };
         let i = (scale.clamp(1, 3) - 1) as usize;
