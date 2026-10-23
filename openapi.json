@@ -74128,7 +74128,8 @@
           "tracks",
           "colours",
           "custom_branding",
-          "programme_name"
+          "programme_name",
+          "stamp_unit"
         ],
         "properties": {
           "colours": {
@@ -74201,6 +74202,10 @@
           "revision": {
             "type": "integer",
             "format": "int32"
+          },
+          "stamp_unit": {
+            "type": "string",
+            "description": "What a unit of the card counts: `points`, `order`, `item` or `stamp`."
           },
           "tracks": {
             "type": "array",

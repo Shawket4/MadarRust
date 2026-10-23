@@ -42,6 +42,8 @@ pub struct CardDesignView {
     pub custom_branding: bool,
     pub programme_name: String,
     pub programme_name_ar: Option<String>,
+    /// What a unit of the card counts: `points`, `order`, `item` or `stamp`.
+    pub stamp_unit: String,
     /// The shop's card photograph and logo (upload URLs) for the live preview.
     pub photo_url: Option<String>,
     pub logo_url: Option<String>,
@@ -155,6 +157,7 @@ async fn view(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<CardDesignView,
         custom_branding: s.brand.custom_branding,
         programme_name: s.settings.program_name.clone(),
         programme_name_ar: s.settings.program_name_ar.clone(),
+        stamp_unit: wd::unit_of(pool, org_id, &s.settings).await.to_string(),
         photo_url: s
             .brand
             .custom_branding
