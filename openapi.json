@@ -107256,12 +107256,17 @@
         "required": [
           "mode",
           "track_one_size",
+          "stamp_unit",
           "tracks"
         ],
         "properties": {
           "mode": {
             "type": "string",
             "description": "`points` or `visits` (the org default's)."
+          },
+          "stamp_unit": {
+            "type": "string",
+            "description": "What track 1 counts: `points`, `order`, `item` or `stamp` (tracks 2–4\ncount stamps). madar-card `text::stamp_unit`."
           },
           "track_one_size": {
             "type": "integer",
