@@ -790,6 +790,27 @@ async fn a_stale_card_is_listed_to_its_device_whatever_it_last_saw(pool: PgPool)
         .unwrap();
     let (st, _) = call(&app, list(&since), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
+
+    // The tag a device is handed goes back, unencoded, in the query string,
+    // and must still mean "since then": a changed card is listed with a NEWER
+    // tag, and asking again with that tag is a 204.
+    sqlx::query("UPDATE loyalty_memberships SET pass_updated_at = now() WHERE id = $1")
+        .bind(m)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body) = call(&app, list(&since), None).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let tag = body["lastUpdated"].as_str().unwrap().to_string();
+    assert!(!tag.contains('+'), "a tag that survives a query string: {tag}");
+    let (st, body) = call(&app, list(&tag), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "the same tag back means nothing changed: {body}");
+    // A tag issued before this fix ("+00:00", unencoded: the + arrives as a
+    // space) is still read as a time, not as no time at all.
+    let old_tag = chrono::DateTime::parse_from_rfc3339(&tag).unwrap().to_rfc3339();
+    assert!(old_tag.contains("+00:00"));
+    let (st, body) = call(&app, list(&old_tag), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "an old-style tag is understood: {body}");
 }
 
 fn urlencode(s: &str) -> String {

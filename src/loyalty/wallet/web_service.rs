@@ -171,7 +171,7 @@ pub async fn serials(
     let since = query
         .passes_updated_since
         .as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(parse_tag)
         .map(|d| d.with_timezone(&chrono::Utc));
 
     let rows: Vec<(Uuid, Uuid, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
@@ -220,9 +220,26 @@ pub async fn serials(
         .max()
         .unwrap_or_else(chrono::Utc::now);
     Ok(HttpResponse::Ok().json(SerialsResponse {
-        last_updated: last.to_rfc3339(),
+        last_updated: tag(last),
         serial_numbers: rows.into_iter().map(|(id, _)| id.to_string()).collect(),
     }))
+}
+
+/// The `lastUpdated` tag, in a form that survives a query string: `Z`, never
+/// `+00:00`. The device sends the tag back as `?passesUpdatedSince=` without
+/// encoding it, so a `+` arrived as a space, the tag failed to parse, and the
+/// device was handed every pass with the same tag again (Apple's log: "the
+/// lastUpdated tag remained the same", and "the pass was unchanged").
+fn tag(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
+/// A tag back from a device. Also reads the tags already on phones, whose
+/// `+00:00` arrives as ` 00:00`.
+fn parse_tag(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(&s.replace(' ', "+")))
+        .ok()
 }
 
 /// The device fetching the pass itself, after a push or a registration.
