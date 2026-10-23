@@ -4,8 +4,10 @@
 -- own `exp` says. Only a super admin lists or revokes them (/admin/sessions,
 -- driven from madar-admin).
 --
--- A platform table, not a tenant one: nothing tenant-scoped reads it, so it has
--- no RLS and is read through the owner pool, like `users` by the JWT check.
+-- Read and written through the owner pool (the JWT check, sign-in, the
+-- super-admin routes), which bypasses row security by ownership. Like every
+-- public table it still enforces the flat tenant policy for `madar_app`, so a
+-- tenant connection could only ever see its own org's sessions.
 --
 -- Tokens issued before this migration carry no `sid`. They are adopted on first
 -- use as a row keyed by `legacy_token_hash` (SHA-256 of the token, hex), so they
@@ -47,6 +49,10 @@ CREATE INDEX auth_sessions_expires ON auth_sessions (expires_at);
 CREATE UNIQUE INDEX auth_sessions_legacy_token ON auth_sessions (legacy_token_hash)
     WHERE legacy_token_hash IS NOT NULL;
 
+ALTER TABLE auth_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON auth_sessions FOR ALL
+    USING ((org_id = (SELECT current_setting('app.org_id', true)::uuid)) IS TRUE)
+    WITH CHECK ((org_id = (SELECT current_setting('app.org_id', true)::uuid)) IS TRUE);
 GRANT SELECT, INSERT, UPDATE, DELETE ON auth_sessions TO madar_app;
 
 CREATE FUNCTION auth_sessions_notify_revoked() RETURNS trigger
