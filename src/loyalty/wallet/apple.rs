@@ -531,10 +531,17 @@ pub fn strip_images_squeezed(
     } else {
         None
     };
-    // Two strips per scale: the root one (English, and any language the pass
-    // has no folder for) with the Latin footer, and `ar.lproj/` with the
-    // Arabic one. iOS picks the folder by the phone's language, exactly as it
-    // picks `ar.lproj/pass.strings`.
+    // Two strips per scale on a flat card: the root one (English, and any
+    // language the pass has no folder for) with the Latin footer, and
+    // `ar.lproj/` with the Arabic one. iOS picks the folder by the phone's
+    // language, exactly as it picks `ar.lproj/pass.strings`.
+    //
+    // A PHOTO card ships the root set only (owner, 2026-10-23): a second set of
+    // photographs doubled the pass (~400 KB -> ~800 KB). An Arabic phone falls
+    // back to the root strips, Latin footer and a left-to-right bar: the strip
+    // then reads as one Latin element rather than a Latin footer under a
+    // mirrored bar. `ar.lproj/pass.strings` still carries the Arabic labels.
+    let variants: &[bool] = if photo.is_some() { &[false] } else { &[false, true] };
     // A flat ground (no photograph) is stored losslessly: it compresses to
     // a few KB as RGB, where quantising the footer's edges dithers the whole
     // ground (72 KB at 3x, measured).
@@ -559,7 +566,8 @@ pub fn strip_images_squeezed(
             }
             None => super::look::ground(*w, *h, &pass.background),
         };
-        for (arabic, path) in [(false, (*name).to_string()), (true, format!("ar.lproj/{name}"))] {
+        for &arabic in variants {
+            let path = if arabic { format!("ar.lproj/{name}") } else { (*name).to_string() };
             let mut band = base.clone();
             super::look::finish(
                 &mut band,
@@ -1761,6 +1769,16 @@ pub(crate) mod tests {
         assert_eq!(k(3, 6).look, super::super::look::LOOK_VERSION);
         let custom = PassBrand { custom: true, ..pass.clone() };
         assert_ne!(k(3, 6), StripKey::new(uuid::Uuid::nil(), &org, &custom, 3, 6));
+        // Photo or no photo is in the key (the picture), so a photo card (one
+        // strip set) and a flat card (two) can never share a cache entry.
+        let with_photo = crate::orgs::branding::OrgBrand {
+            card_image_url: Some("https://x/api/uploads/brand/p.jpg".into()),
+            ..org_brand(true)
+        };
+        assert_ne!(
+            StripKey::new(uuid::Uuid::nil(), &org_brand(true), &custom, 3, 6),
+            StripKey::new(uuid::Uuid::nil(), &with_photo, &custom, 3, 6)
+        );
     }
 
     #[test]
@@ -2109,8 +2127,23 @@ pub(crate) mod tests {
                         .collect()
                 };
                 assert_eq!(keys_of(&content["en.lproj/pass.strings"]), keys_of(&content["ar.lproj/pass.strings"]), "{at}");
+                // Every card has the root strips and an Arabic `pass.strings`.
+                // A flat card has the Arabic strips too; a PHOTO card has none
+                // (owner, 2026-10-23): its ar.lproj is the strings file alone,
+                // and an Arabic phone falls back to the root strips.
+                let photo_card = label == "custom";
+                assert!(content.contains_key("ar.lproj/pass.strings"), "{at}");
                 for scale in ["strip.png", "strip@2x.png", "strip@3x.png"] {
-                    assert!(content.contains_key(scale) && content.contains_key(&format!("ar.lproj/{scale}")), "{at}: {scale}");
+                    assert!(content.contains_key(scale), "{at}: {scale}");
+                    assert_eq!(
+                        content.contains_key(&format!("ar.lproj/{scale}")),
+                        !photo_card,
+                        "{at}: ar.lproj/{scale}"
+                    );
+                }
+                if photo_card {
+                    let ar: Vec<&String> = content.keys().filter(|n| n.starts_with("ar.lproj/")).collect();
+                    assert_eq!(ar, ["ar.lproj/pass.strings"], "{at}");
                 }
             }
         }
