@@ -186,6 +186,21 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
         }
     }
 
+    // A member who asked the shop to stop messaging them still gets the gift
+    // (it is theirs, not marketing: owner, 2026-10-23) but no greeting, on the
+    // card or by WhatsApp. Win-back skips such members entirely; a birthday
+    // gift is a benefit, not a nudge, so only the message is dropped.
+    let opted_out: bool =
+        sqlx::query_scalar("SELECT marketing_opt_out FROM loyalty_members_v WHERE id = $1")
+            .bind(m.id)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(false);
+    if opted_out {
+        tracing::info!(customer_id = %m.id, "loyalty: birthday gift given, greeting withheld (opted out)");
+        return Ok(());
+    }
+
     let text = message_for(&settings, &m.name, &m.locale);
     // The card first. A greeting on the lock screen from the shop's own pass is
     // better than a WhatsApp among a hundred others, and it costs nothing —

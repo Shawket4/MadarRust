@@ -1010,3 +1010,52 @@ async fn the_card_size_is_the_cheapest_reward_on_every_public_view(pool: PgPool)
     .await;
     assert_eq!(scan["member"]["next_reward_cost"], 3, "{scan}");
 }
+
+/// Born today, in the org's own timezone (what the birthday sweep reads).
+async fn born_today(pool: &PgPool, org: Uuid, member: Uuid) {
+    sqlx::query(
+        "UPDATE customers c SET birth_month = EXTRACT(MONTH FROM (now() AT TIME ZONE o.timezone::text))::smallint, \
+                                birth_day = EXTRACT(DAY FROM (now() AT TIME ZONE o.timezone::text))::smallint \
+           FROM organizations o WHERE c.id = $1 AND o.id = $2",
+    )
+    .bind(member)
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test]
+async fn an_opted_out_member_gets_the_birthday_gift_but_no_greeting(pool: PgPool) {
+    let s = setup(&pool).await;
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    sqlx::query("UPDATE loyalty_settings SET birthday_enabled = true, birthday_reward_amount = 2 WHERE org_id = $1")
+        .bind(s.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let quiet = member(&pool, s.org, "01001234567").await;
+    let chatty = member(&pool, s.org, "01001234568").await;
+    for m in [quiet, chatty] {
+        born_today(&pool, s.org, m).await;
+    }
+    sqlx::query("UPDATE customers SET marketing_opt_out = true WHERE id = $1")
+        .bind(quiet)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Neither has a card in a wallet, so a greeting goes by WhatsApp.
+    let sent = common::whatsapp::gateway().await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+
+    for m in [quiet, chatty] {
+        assert_eq!(visits(&pool, m).await, 2, "the gift is theirs either way");
+    }
+    common::whatsapp::whatsapp_to(&sent, "1234568").await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(bodies.iter().all(|b| !b.contains("1234567\"")), "no greeting for an opted-out member: {bodies:?}");
+    // A rerun gives nothing twice.
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    assert_eq!(visits(&pool, quiet).await, 2);
+}
