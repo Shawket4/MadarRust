@@ -816,3 +816,74 @@ async fn a_stale_card_is_listed_to_its_device_whatever_it_last_saw(pool: PgPool)
 fn urlencode(s: &str) -> String {
     s.replace('+', "%2B").replace(':', "%3A")
 }
+
+// ── The join page: social proof and the stamp unit ──────────────────────────
+
+async fn join_info(app: &impl actix_web::dev::Service<actix_http::Request, Response = actix_web::dev::ServiceResponse<impl actix_web::body::MessageBody>, Error = actix_web::Error>, s: &Shop) -> Value {
+    let (st, body) = call(
+        app,
+        test::TestRequest::get().uri(&format!("/public/loyalty/join-info?org_id={}", s.org)),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    body
+}
+
+#[sqlx::test]
+async fn the_join_page_shows_a_rounded_member_count_only_past_a_hundred(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    // Exactly 100 live members: nothing shown (absent, not null).
+    let mut members = Vec::new();
+    for i in 0..100 {
+        members.push(member(&pool, s.org, &format!("010{:08}", 10_000_000 + i)).await);
+    }
+    let info = join_info(&app, &s).await;
+    assert!(info.get("member_count").is_none(), "{info}");
+
+    // The 101st: still cached for this org (the count is not read per view).
+    member(&pool, s.org, "01099999999").await;
+    assert!(join_info(&app, &s).await.get("member_count").is_none(), "served from the cache");
+    madar_rust::loyalty::social::forget(s.org).await;
+    assert_eq!(join_info(&app, &s).await["member_count"], 100, "101 shows as 100+");
+
+    // A leaver (deleted_at, as leaving and erasure both set) is not counted.
+    sqlx::query("UPDATE loyalty_memberships SET deleted_at = now() WHERE id = $1")
+        .bind(members[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    madar_rust::loyalty::social::forget(s.org).await;
+    assert!(join_info(&app, &s).await.get("member_count").is_none(), "back to 100");
+}
+
+#[sqlx::test]
+async fn the_join_page_says_what_a_stamp_is_for(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    // Points: no stamp unit at all.
+    stamp_card(&pool, s.org, "points", 100, false).await;
+    assert!(join_info(&app, &s).await.get("stamp_unit").is_none());
+    let set = |mode: &'static str, per_item: bool| {
+        let pool = pool.clone();
+        let org = s.org;
+        async move {
+            sqlx::query("UPDATE loyalty_settings SET mode = $2, stamp_per_line_item = $3 WHERE org_id = $1")
+                .bind(org)
+                .bind(mode)
+                .bind(per_item)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    set("visits", false).await;
+    assert_eq!(join_info(&app, &s).await["stamp_unit"], "order");
+    set("visits", true).await;
+    assert_eq!(join_info(&app, &s).await["stamp_unit"], "item");
+    // A Rewards by Madar counter shop (Free + the loyalty add-on).
+    rewards_shop(&app, &pool, &s).await;
+    assert_eq!(join_info(&app, &s).await["stamp_unit"], "stamp");
+}

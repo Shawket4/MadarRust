@@ -27,6 +27,7 @@ pub mod public;
 pub mod redeem;
 pub mod routes;
 pub mod settings;
+pub mod social;
 pub mod wallet;
 pub mod winback;
 

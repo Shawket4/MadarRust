@@ -149,6 +149,19 @@ pub struct JoinInfo {
     pub birthday_reward_amount: Option<i32>,
     pub terms: Option<String>,
     pub terms_ar: Option<String>,
+    /// "N+ people already have this card": the programme's live members,
+    /// floored to a step (100, 150, 200, 250, 300, 400, 500, 750, 1000, ...;
+    /// `loyalty::social`). Absent at 100 members or fewer, and never exact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = 150)]
+    pub member_count: Option<i64>,
+    /// What one stamp stands for: `order` (one per sale), `item` (one per item
+    /// bought) or `stamp` (a Rewards by Madar counter shop: the teller stamps
+    /// the card). Absent for a points programme. The same rule the passes and
+    /// messages use (`earn::StampUnit`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "order")]
+    pub stamp_unit: Option<String>,
 }
 
 /// How a tenant's card should look.
@@ -474,6 +487,10 @@ pub async fn join_info(
             .collect(),
         terms: settings.terms.clone(),
         terms_ar: settings.terms_ar.clone(),
+        member_count: crate::loyalty::social::member_count(pool.get_ref(), org_id).await,
+        stamp_unit: crate::loyalty::wallet::stamp_unit_for(pool.get_ref(), org_id, &settings)
+            .await
+            .map(|u| u.as_str().to_string()),
     }))
 }
 

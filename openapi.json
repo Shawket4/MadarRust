@@ -82547,6 +82547,15 @@
             "type": "boolean",
             "description": "False when the program is off here — the page says so instead of taking\na signup that would go nowhere."
           },
+          "member_count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "\"N+ people already have this card\": the programme's live members,\nfloored to a step (100, 150, 200, 250, 300, 400, 500, 750, 1000, ...;\n`loyalty::social`). Absent at 100 members or fewer, and never exact.",
+            "example": 150
+          },
           "mode": {
             "type": "string",
             "description": "`\"points\"` (earned on spend) or `\"visits\"` (a stamp per order) — which\nsentence the page writes."
@@ -82566,6 +82575,14 @@
               "$ref": "#/components/schemas/PublicReward"
             },
             "description": "The rewards on offer, each with what it costs."
+          },
+          "stamp_unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What one stamp stands for: `order` (one per sale), `item` (one per item\nbought) or `stamp` (a Rewards by Madar counter shop: the teller stamps\nthe card). Absent for a points programme. The same rule the passes and\nmessages use (`earn::StampUnit`).",
+            "example": "order"
           },
           "terms": {
             "type": [
