@@ -74288,6 +74288,17 @@
           "can_redeem": {
             "type": "boolean"
           },
+          "card": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicCard",
+                "description": "The shop's card design (see [`JoinInfo::card`]); absent = classic."
+              }
+            ]
+          },
           "marketing_opt_out": {
             "type": "boolean",
             "description": "They have asked this shop to stop sending them things."
@@ -74334,6 +74345,16 @@
             "type": "integer",
             "format": "int32",
             "description": "Rewards the balance has already earned — a card does not stop at full."
+          },
+          "tracks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/MemberTrack"
+            },
+            "description": "Every stamp track of this member's card, when there is more than one."
           }
         }
       },
@@ -84918,6 +84939,17 @@
           "brand": {
             "$ref": "#/components/schemas/CardBrand",
             "description": "Whose programme this is, and how the page should look."
+          },
+          "card": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicCard",
+                "description": "The shop's card design, when it published one (or runs several stamp\ntracks): the page draws it with the `card` wasm package. Absent = the\nclassic card, and the page loads nothing extra."
+              }
+            ]
           },
           "earn_piastres_per_point": {
             "type": "integer",
@@ -95895,6 +95927,43 @@
           }
         }
       },
+      "PublicCard": {
+        "type": "object",
+        "description": "A shop's card design as the public pages and the teller draw it: present\nwhen the shop has a published design (or several stamp tracks, which get\nthe automatic one), absent for the classic look. No member data.",
+        "required": [
+          "revision",
+          "design",
+          "tracks",
+          "track_one_size",
+          "stamp_unit"
+        ],
+        "properties": {
+          "design": {
+            "$ref": "#/components/schemas/CardDesign"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The published revision (0: the automatic multi-track design)."
+          },
+          "stamp_unit": {
+            "type": "string",
+            "description": "`points`, `order`, `item` or `stamp` (madar-card `text::stamp_unit`)."
+          },
+          "track_one_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Track 1's size: the programme's card size."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Track"
+            },
+            "description": "The tracks, without their menu items."
+          }
+        }
+      },
       "PublicCartQuoteRequest": {
         "type": "object",
         "description": "`POST /public/branches/{id}/cart-quote` (online) and\n`POST /public/tables/{id}/cart-quote` (QR): the cart priced by the server\nexactly as the order will be, with the best deals applied automatically.",
@@ -101341,6 +101410,17 @@
             "type": "integer",
             "format": "int32",
             "description": "What one line costs when `any_item` is on, in the branch's currency."
+          },
+          "card": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PublicCard",
+                "description": "The shop's card design for the teller's member card (absent = classic)."
+              }
+            ]
           },
           "max_rewards_per_order": {
             "type": [
