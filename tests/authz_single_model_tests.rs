@@ -68,6 +68,7 @@ fn claims(user: Uuid, org: Uuid, role: UserRole) -> Claims {
         branch_id: None,
         exp: usize::MAX / 2,
         iat: chrono::Utc::now().timestamp() as usize,
+        sid: None,
     }
 }
 

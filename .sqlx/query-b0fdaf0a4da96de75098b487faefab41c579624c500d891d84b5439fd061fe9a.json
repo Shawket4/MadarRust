@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO auth_sessions\n             (user_id, org_id, branch_id, role, kind, device_id, client, ip, user_agent,\n              legacy_token_hash, created_at, expires_at)\n         VALUES ($1, (SELECT id FROM organizations WHERE id = $2),\n                 (SELECT id FROM branches WHERE id = $3), $4, 'legacy', $5, $6,\n                 $7::text::inet, $8, $9, to_timestamp($10), to_timestamp($11))\n         ON CONFLICT (legacy_token_hash) WHERE legacy_token_hash IS NOT NULL DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        {
+          "Custom": {
+            "name": "user_role",
+            "kind": {
+              "Enum": [
+                "super_admin",
+                "org_admin",
+                "branch_manager",
+                "teller",
+                "waiter",
+                "kitchen"
+              ]
+            }
+          }
+        },
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Float8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b0fdaf0a4da96de75098b487faefab41c579624c500d891d84b5439fd061fe9a"
+}

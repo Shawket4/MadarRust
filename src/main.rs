@@ -153,6 +153,7 @@ async fn run() -> std::io::Result<()> {
     madar_rust::sync::pull::sweeper::spawn(pool.get_ref().clone());
     // DB architecture Phase 1: shim usage counters and the sales rollups.
     madar_rust::compat_usage::spawn(pool.get_ref().clone());
+    madar_rust::auth::sessions::spawn_pruner(pool.get_ref().clone());
     madar_rust::rollups::spawn(pool.get_ref().clone());
     madar_rust::sync::pull::listener::spawn(pool.get_ref().clone(), realtime_bus.get_ref().clone());
     loyalty::birthdays::spawn(pool.get_ref().clone());
@@ -252,6 +253,10 @@ async fn run() -> std::io::Result<()> {
                 // set (authorization, content-type, x-org-id, x-branch-id, and
                 // TRACE_HEADERS) in one call.
                 .allow_any_header()
+                // Credentialed requests are needed by `/auth/session` only (its
+                // cookie is host-only and path-scoped, so no other route ever
+                // receives one); every other call stays bearer-token.
+                .supports_credentials()
                 .max_age(3600);
             match std::env::var("CORS_ALLOWED_ORIGINS") {
                 Ok(list) if !list.trim().is_empty() => list

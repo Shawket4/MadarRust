@@ -230,8 +230,35 @@ pub async fn stream(
         futures::future::ready(out)
     });
 
-    let keepalive = IntervalStream::new(tokio::time::interval(Duration::from_secs(20)))
-        .map(|_| Ok::<Bytes, actix_web::Error>(Bytes::from_static(b": ping\n\n")));
+    // Each keepalive also re-asks whether the session is still live
+    // (`auth::sessions`, from memory while the fast path is up): a revoked
+    // session's stream ends within one tick instead of living until the
+    // client hangs up.
+    let watch = std::sync::Arc::new((
+        claims.clone(),
+        req.headers()
+            .get(actix_web::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_string(),
+        req.app_data::<web::Data<sqlx::PgPool>>().cloned(),
+    ));
+    let keepalive =
+        IntervalStream::new(tokio::time::interval(Duration::from_secs(20))).then(move |_| {
+            let watch = watch.clone();
+            async move {
+                let (claims, token, pool) = &*watch;
+                if let Some(pool) = pool
+                    && crate::auth::sessions::check(pool.get_ref(), claims, token, Default::default)
+                        .await
+                        .is_err()
+                {
+                    return Err(actix_web::error::ErrorUnauthorized("session ended"));
+                }
+                Ok::<Bytes, actix_web::Error>(Bytes::from_static(b": ping\n\n"))
+            }
+        });
 
     // Replay buffered events first, then the live stream; keepalive interleaves.
     let body = futures::stream::select(

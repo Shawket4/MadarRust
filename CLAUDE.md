@@ -339,6 +339,15 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   `scripts/schema_catalog.sql` (the drift catalog). Deploys dump prod to
   `/opt/madar-rust/db-backups` (last 10) before the new container migrates.
 
+### Sessions (`src/auth/sessions.rs`, `docs/sessions.md`)
+- **Every sign-in goes through `sessions::issue`**, never a bare `create_token`: it
+  inserts the `auth_sessions` row the token names (`sid`). A token without a row
+  cannot be revoked by the super admin (madar-admin → Sessions).
+- **Anything that verifies a bearer token itself calls `sessions::check`** (as
+  `JwtMiddleware`, `StaffAuth`, `assets::optional_claims` and `/auth/session` do).
+- A dead session is **401 `SESSION_REVOKED` with the JSON body**, never a bare 401
+  (the POS reads that as offline) or a 403 (it dead-letters a queued sale).
+
 ### Realtime
 `src/realtime` publishes per-branch events consumers subscribe to, e.g.
 `floor.layout_changed` (re-pull the authored layout) and `table.status_changed`.

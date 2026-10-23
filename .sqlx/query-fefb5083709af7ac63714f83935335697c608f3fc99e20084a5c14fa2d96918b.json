@@ -1,0 +1,151 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id, s.user_id, u.name AS user_name, u.email AS \"user_email?\",\n                  s.role::text AS \"role!\", s.org_id, o.name AS \"org_name?\",\n                  s.branch_id, b.name AS \"branch_name?\", s.kind, s.device_id, s.client,\n                  host(s.ip) AS ip, s.user_agent, s.created_at, s.last_seen_at,\n                  s.expires_at, s.revoked_at, rb.name AS \"revoked_by_name?\",\n                  s.revoke_reason,\n                  CASE WHEN s.revoked_at IS NOT NULL THEN 'revoked'\n                       WHEN s.expires_at <= now() THEN 'expired'\n                       ELSE 'active' END AS \"state!\"\n             FROM auth_sessions s\n             JOIN users u ON u.id = s.user_id\n             LEFT JOIN organizations o ON o.id = s.org_id\n             LEFT JOIN branches b ON b.id = s.branch_id\n             LEFT JOIN users rb ON rb.id = s.revoked_by\n            WHERE ($1::uuid IS NULL OR s.id = $1)\n              AND ($2::uuid IS NULL OR s.org_id = $2)\n              AND ($3::uuid IS NULL OR s.user_id = $3)\n              AND ($4::uuid IS NULL OR s.branch_id = $4)\n              AND ($5::text IS NULL OR s.kind = $5)\n              AND ($6::text IS NULL OR u.name ILIKE $6 OR u.email ILIKE $6\n                   OR s.device_id ILIKE $6 OR host(s.ip) ILIKE $6)\n              AND CASE $7::text\n                    WHEN 'active' THEN s.revoked_at IS NULL AND s.expires_at > now()\n                    WHEN 'revoked' THEN s.revoked_at IS NOT NULL\n                    WHEN 'expired' THEN s.revoked_at IS NULL AND s.expires_at <= now()\n                    ELSE true END\n              AND ($8::timestamptz IS NULL OR (s.created_at, s.id) < ($8, $9::uuid))\n            ORDER BY s.created_at DESC, s.id DESC\n            LIMIT $10",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "user_email?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "role!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "org_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "org_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "branch_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "branch_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "device_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "client",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "ip",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "user_agent",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 16,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 17,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 18,
+        "name": "revoked_by_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 19,
+        "name": "revoke_reason",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 20,
+        "name": "state!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      null,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "fefb5083709af7ac63714f83935335697c608f3fc99e20084a5c14fa2d96918b"
+}
