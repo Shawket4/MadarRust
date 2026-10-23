@@ -168,6 +168,12 @@ pub struct JoinInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 6)]
     pub card_size: Option<i32>,
+    /// What the birthday gives here: `item` (one free item) or `amount`
+    /// (`birthday_reward_amount` on the card). Absent when birthdays are off
+    /// or give nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "item")]
+    pub birthday_gift: Option<String>,
 }
 
 /// How a tenant's card should look.
@@ -480,6 +486,12 @@ pub async fn join_info(
         require_otp: settings.require_otp,
         birthday_enabled: settings.birthday_enabled,
         birthday_reward_amount: settings.birthday_reward_amount,
+        birthday_gift: match settings.birthday_gift_kind() {
+            _ if !settings.birthday_enabled => None,
+            "item" => Some("item".into()),
+            "amount" if settings.birthday_reward_amount.is_some() => Some("amount".into()),
+            _ => None,
+        },
         mode: settings.mode.clone(),
         next_reward_cost: model::card_size(&settings, &rewards),
         card_size: Some(model::card_size(&settings, &rewards)),
@@ -858,6 +870,10 @@ pub struct CardView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 6)]
     pub card_size: Option<i32>,
+    /// The member's birthday gift while it is open, or claimed and still in
+    /// its window. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthday_gift: Option<super::gifts::BirthdayGiftView>,
 }
 
 /// One past visit, as the customer's own page shows it.
@@ -1033,8 +1049,10 @@ pub async fn card(
     let stamp_unit = wallet::stamp_unit_for(pool.get_ref(), member.org_id, &settings)
         .await
         .map(|u| u.as_str().to_string());
+    let birthday_gift = super::gifts::current(pool.get_ref(), member.id).await?;
     let view = member.view(mode, target);
     Ok(HttpResponse::Ok().json(CardView {
+        birthday_gift,
         name: view.name,
         balance: view.balance,
         mode: view.mode,

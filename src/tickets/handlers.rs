@@ -268,6 +268,9 @@ pub struct SettleOpenTicketRequest {
     /// exactly like a counter one — the cashier scans at settle either way.
     #[serde(default)]
     pub loyalty_redemptions: Vec<crate::orders::handlers::LoyaltyRedemptionInput>,
+    /// The member's birthday gift on one line, named by `ticket_line_id`.
+    #[serde(default)]
+    pub loyalty_birthday_gift: Option<crate::loyalty::gifts::LoyaltyGiftInput>,
     /// Remove the service charge from this bill. Only someone whose effective
     /// permissions include `orders:waive_service` may send `true`; anyone else
     /// is refused, live or replayed. The order records who and when. Absent
@@ -1790,6 +1793,24 @@ pub async fn settle_open_ticket_inner(
         }
     }
 
+    // The birthday gift's line, translated the same way. A line that has gone
+    // drops the gift on a replay; live, the order path refuses the missing line.
+    let birthday_gift = match &body.loyalty_birthday_gift {
+        Some(g) => match g.ticket_line_id.and_then(|id| line_positions.get(&id).copied()) {
+            Some(index) => Some(crate::loyalty::gifts::LoyaltyGiftInput {
+                item_index: Some(index),
+                ticket_line_id: g.ticket_line_id,
+            }),
+            None if actor.replay => None,
+            None => {
+                return Err(AppError::BadRequest(
+                    "The birthday gift must name a line on this ticket".into(),
+                ));
+            }
+        },
+        None => None,
+    };
+
     // The discount, explicitly — one rule, shared with the permission gate so
     // the discount CHARGED and the discount JUDGED are the same act.
     let cashier_spoke = settle_cashier_spoke(&body);
@@ -1807,6 +1828,7 @@ pub async fn settle_open_ticket_inner(
         branch_id,
         loyalty_customer_id: body.loyalty_customer_id,
         loyalty_redemptions: redemptions,
+        loyalty_birthday_gift: birthday_gift,
         // The cashier's pick, through the order's own `customers.attach` gate.
         // Without one, `create_order_inner` carries the BILL's customer over
         // in the transaction that links the two.

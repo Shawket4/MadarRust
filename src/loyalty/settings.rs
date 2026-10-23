@@ -67,6 +67,19 @@ pub struct LoyaltySettings {
     pub birthday_message: Option<String>,
     #[serde(default)]
     pub birthday_message_ar: Option<String>,
+    /// What the birthday gives: `"none"` (a greeting only), `"amount"`
+    /// (`birthday_reward_amount` on the balance) or `"item"` (one free item
+    /// from the rewards, whatever it costs, valid `birthday_gift_days` days).
+    /// `None` on the way IN keeps the stored value, so a dashboard that has
+    /// never heard of it cannot switch it; always `Some` on the way out.
+    #[serde(default)]
+    #[schema(example = "item")]
+    pub birthday_gift: Option<String>,
+    /// How many days an `"item"` gift stays valid from the birthday, 7 to 60
+    /// (30 by default). `None` on the way IN keeps the stored value.
+    #[serde(default)]
+    #[schema(example = 30)]
+    pub birthday_gift_days: Option<i32>,
 
     /// Nudge a member who has not been in for a while. Off by default, like
     /// everything here that speaks to a customer unprompted.
@@ -225,6 +238,8 @@ impl LoyaltySettings {
             birthday_reward_amount: None,
             birthday_message: None,
             birthday_message_ar: None,
+            birthday_gift: Some("amount".into()),
+            birthday_gift_days: Some(30),
             winback_enabled: false,
             winback_message: None,
             winback_reward_amount: None,
@@ -241,6 +256,11 @@ impl LoyaltySettings {
             terms: None,
             terms_ar: None,
         }
+    }
+
+    /// What the birthday gives: `none`, `amount` or `item` (`amount` when unset).
+    pub fn birthday_gift_kind(&self) -> &str {
+        self.birthday_gift.as_deref().unwrap_or("amount")
     }
 
     /// What this scope collects.
@@ -296,6 +316,23 @@ impl LoyaltySettings {
                 "a win-back reward must be worth more than nothing".into(),
             ));
         }
+        if self
+            .birthday_gift
+            .as_deref()
+            .is_some_and(|g| !matches!(g, "none" | "amount" | "item"))
+        {
+            return Err(AppError::BadRequest(
+                "birthday_gift must be 'none', 'amount' or 'item'".into(),
+            ));
+        }
+        if self
+            .birthday_gift_days
+            .is_some_and(|d| !(7..=60).contains(&d))
+        {
+            return Err(AppError::BadRequest(
+                "birthday_gift_days must be 7 to 60".into(),
+            ));
+        }
         if self.birthday_reward_amount.is_some_and(|a| a <= 0) {
             return Err(AppError::BadRequest(
                 "a birthday reward must be worth more than nothing".into(),
@@ -322,6 +359,8 @@ struct Row {
     birthday_reward_amount: Option<i32>,
     birthday_message: Option<String>,
     birthday_message_ar: Option<String>,
+    birthday_gift: String,
+    birthday_gift_days: i32,
     winback_enabled: bool,
     winback_message: Option<String>,
     winback_reward_amount: Option<i32>,
@@ -341,7 +380,8 @@ const COLS: &str = "org_id, branch_id, enabled, program_name, program_name_ar, m
     birthday_message, birthday_message_ar, winback_enabled, winback_message, \
     winback_reward_amount, reward_any_item, stamp_per_line_item, \
     balance_cap_enabled, balance_cap, \
-    max_rewards_per_order, allow_negative_balance, terms, terms_ar";
+    max_rewards_per_order, allow_negative_balance, terms, terms_ar, \
+    birthday_gift, birthday_gift_days";
 
 impl From<Row> for LoyaltySettings {
     fn from(r: Row) -> Self {
@@ -361,6 +401,8 @@ impl From<Row> for LoyaltySettings {
             birthday_reward_amount: r.birthday_reward_amount,
             birthday_message: r.birthday_message,
             birthday_message_ar: r.birthday_message_ar,
+            birthday_gift: Some(r.birthday_gift),
+            birthday_gift_days: Some(r.birthday_gift_days),
             winback_enabled: r.winback_enabled,
             winback_message: r.winback_message,
             winback_reward_amount: r.winback_reward_amount,
@@ -547,9 +589,11 @@ pub async fn put_settings(
             require_otp, birthday_enabled, birthday_reward_amount, birthday_message, \
             birthday_message_ar, winback_enabled, winback_message, winback_reward_amount, \
             reward_any_item, stamp_per_line_item, balance_cap_enabled, balance_cap, \
-            max_rewards_per_order, allow_negative_balance, terms, terms_ar) \
+            max_rewards_per_order, allow_negative_balance, terms, terms_ar, \
+            birthday_gift, birthday_gift_days) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, \
-                 COALESCE($20, true),$21,$22,$23,$24,$25,$26) \
+                 COALESCE($20, true),$21,$22,$23,$24,$25,$26, \
+                 COALESCE($27, 'amount'), COALESCE($28, 30)) \
          ON CONFLICT (org_id, COALESCE(branch_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
          DO UPDATE SET enabled = EXCLUDED.enabled, program_name = EXCLUDED.program_name, \
             program_name_ar = EXCLUDED.program_name_ar, mode = EXCLUDED.mode, \
@@ -573,7 +617,10 @@ pub async fn put_settings(
             max_rewards_per_order = EXCLUDED.max_rewards_per_order, \
             allow_negative_balance = EXCLUDED.allow_negative_balance, \
             terms = EXCLUDED.terms, \
-            terms_ar = EXCLUDED.terms_ar, updated_at = now() \
+            terms_ar = EXCLUDED.terms_ar, \
+            birthday_gift = COALESCE($27, loyalty_settings.birthday_gift), \
+            birthday_gift_days = COALESCE($28, loyalty_settings.birthday_gift_days), \
+            updated_at = now() \
          RETURNING {COLS}"
     ))
     .bind(org_id)
@@ -607,6 +654,9 @@ pub async fn put_settings(
     .bind(incoming.allow_negative_balance)
     .bind(&incoming.terms)
     .bind(&incoming.terms_ar)
+    // Like `stamp_per_line_item`: absent keeps what is stored.
+    .bind(incoming.birthday_gift.as_deref())
+    .bind(incoming.birthday_gift_days)
     .fetch_one(pool.get_ref())
     .await?;
 

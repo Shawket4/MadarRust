@@ -1059,3 +1059,152 @@ async fn an_opted_out_member_gets_the_birthday_gift_but_no_greeting(pool: PgPool
     madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
     assert_eq!(visits(&pool, quiet).await, 2);
 }
+
+// ── The birthday gift: one free item (BIRTHDAY_GIFT_DESIGN.md) ─────────────
+
+async fn gift_rows(pool: &PgPool, m: Uuid) -> Vec<(String, i64)> {
+    sqlx::query_as(
+        "SELECT status, (EXTRACT(EPOCH FROM valid_until - valid_from) / 86400)::bigint \
+           FROM loyalty_gifts WHERE customer_id = $1",
+    )
+    .bind(m)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn gift_req(s: &Shop, m: Uuid, key: &str) -> test::TestRequest {
+    test::TestRequest::post()
+        .uri("/loyalty/counter/birthday-gift")
+        .set_json(json!({ "branch_id": s.branch, "customer_id": m, "idempotency_key": key }))
+}
+
+#[sqlx::test]
+async fn an_item_programme_grants_one_free_item_once_and_credits_nothing(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamp_card(&pool, s.org, "visits", 6, false).await;
+    // An amount is stored too: an item programme must not credit it.
+    sqlx::query(
+        "UPDATE loyalty_settings SET birthday_enabled = true, birthday_reward_amount = 2, \
+                birthday_gift = 'item', birthday_gift_days = 14 WHERE org_id = $1",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let quiet = member(&pool, s.org, "01001234567").await;
+    let chatty = member(&pool, s.org, "01001234568").await;
+    for m in [quiet, chatty] {
+        born_today(&pool, s.org, m).await;
+    }
+    sqlx::query("UPDATE customers SET marketing_opt_out = true WHERE id = $1")
+        .bind(quiet)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let sent = common::whatsapp::gateway().await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    for m in [quiet, chatty] {
+        assert_eq!(visits(&pool, m).await, 0, "no stamps: the gift is an item");
+        assert_eq!(
+            gift_rows(&pool, m).await,
+            vec![("open".to_string(), 14)],
+            "one gift, the shop's window, even for an opted-out member and on a rerun"
+        );
+    }
+    common::whatsapp::whatsapp_to(&sent, "1234568").await;
+    let bodies = sent.lock().unwrap().clone();
+    assert!(
+        bodies.iter().any(|b| b.contains("A free item on us") && b.contains("valid until")),
+        "{bodies:?}"
+    );
+    assert!(bodies.iter().all(|b| !b.contains("1234567\"")), "{bodies:?}");
+
+    // The join page says what the birthday is for.
+    let info = join_info(&app, &s).await;
+    assert_eq!(info["birthday_gift"], "item", "{info}");
+}
+
+#[sqlx::test]
+async fn a_counter_hands_over_the_birthday_gift_once(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    rewards_shop(&app, &pool, &s).await;
+    stamp_card(&pool, s.org, "visits", 5, true).await;
+    sqlx::query(
+        "UPDATE loyalty_settings SET birthday_enabled = true, birthday_gift = 'item' WHERE org_id = $1",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = member(&pool, s.org, "01001234567").await;
+    let t = teller(&s);
+
+    // No gift yet: refused, by code.
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0001"), Some(&t)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    assert_eq!(r["code"], "LOYALTY_GIFT_NONE", "{r}");
+
+    born_today(&pool, s.org, m).await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    let (st, r) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/loyalty/lookup")
+            .set_json(json!({ "branch_id": s.branch, "customer_id": m })),
+        Some(&t),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["birthday_gift"]["status"], "open", "{r}");
+
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0002"), Some(&t)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["birthday_gift"]["status"], "claimed");
+    assert_eq!(r["already"], false);
+    assert_eq!(r["member"]["balance"], 0, "no balance moves");
+    // A retry with the same key answers the first outcome.
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0002"), Some(&t)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["already"], true);
+    // A new attempt finds nothing left.
+    let (st, r) = call(&app, gift_req(&s, m, "gift-key-0003"), Some(&t)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    assert_eq!(r["code"], "LOYALTY_GIFT_NONE");
+
+    let ledger: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT kind::text, source, points FROM loyalty_transactions WHERE customer_id = $1",
+    )
+    .bind(m)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger, vec![("redeem".into(), "gift".into(), 0)]);
+
+    // Another org's teller cannot claim it.
+    let other = setup(&pool).await;
+    let (st, _) = call(&app, gift_req(&other, m, "gift-key-0004"), Some(&teller(&other))).await;
+    assert!(st == StatusCode::NOT_FOUND || st == StatusCode::FORBIDDEN, "{st}");
+}
+
+#[sqlx::test]
+async fn leaving_forfeits_an_open_gift(pool: PgPool) {
+    let s = setup(&pool).await;
+    stamp_card(&pool, s.org, "visits", 5, false).await;
+    sqlx::query(
+        "UPDATE loyalty_settings SET birthday_enabled = true, birthday_gift = 'item' WHERE org_id = $1",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let m = member(&pool, s.org, "01001234567").await;
+    born_today(&pool, s.org, m).await;
+    madar_rust::loyalty::birthdays::run_tick(&pool).await.unwrap();
+    madar_rust::loyalty::model::leave(&pool, m).await.unwrap();
+    assert_eq!(gift_rows(&pool, m).await[0].0, "expired");
+}

@@ -5784,3 +5784,252 @@ async fn winback_picks_exactly_the_members_the_previous_statement_picked(pool: P
     unsafe { std::env::remove_var("LOYALTY_WINBACK_MAX_PER_ORG_PER_TICK") };
     assert_eq!(capped, previous(2).fetch_all(&pool).await.unwrap());
 }
+
+// ── The birthday gift at the till (BIRTHDAY_GIFT_DESIGN.md) ────────────────
+
+/// An open birthday gift valid for `days_left` more days (negative: expired).
+async fn give_gift(pool: &PgPool, org: Uuid, member: Uuid, days_left: i32) {
+    sqlx::query(
+        "INSERT INTO loyalty_gifts (org_id, customer_id, year, valid_from, valid_until) \
+         VALUES ($1, $2, 2026, now() - interval '40 days', now() + make_interval(days => $3))",
+    )
+    .bind(org)
+    .bind(member)
+    .bind(days_left)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn gift_status(pool: &PgPool, member: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM loyalty_gifts WHERE customer_id = $1")
+        .bind(member)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn place_with_gift(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    shop: &RewardShop,
+    items: Value,
+    extra: Value,
+) -> (StatusCode, Value) {
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let mut body = json!({
+        "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+        "idempotency_key": Uuid::new_v4(),
+        "loyalty_customer_id": shop.member,
+        "items": items
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        body[k] = v.clone();
+    }
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(body)
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    let status = resp.status();
+    (status, test::read_body_json(resp).await)
+}
+
+/// One latte of two free, whatever it costs in stamps, and no stamps spent.
+/// The ledger says it was a gift; a second claim finds nothing.
+#[sqlx::test]
+async fn a_birthday_gift_covers_one_unit_and_spends_nothing(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    give_gift(&pool, shop.org, shop.member, 10).await;
+    let app = reward_app!(pool);
+    let gift = json!({ "loyalty_birthday_gift": { "item_index": 0 } });
+
+    let (st, body) = place_with_gift(
+        &app,
+        &shop,
+        json!([{ "menu_item_id": shop.latte, "quantity": 2 }]),
+        gift.clone(),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {body}");
+    assert_eq!(body["subtotal"], 5_000, "one of the two lattes is free");
+    assert_eq!(body["items"][0]["reward_units"], 1, "{body}");
+    assert_eq!(visits_of(&pool, shop.member).await, 0);
+    assert_eq!(gift_status(&pool, shop.member).await, "claimed");
+    let rows: Vec<(String, String, i32)> = sqlx::query_as(
+        "SELECT kind::text, source, points FROM loyalty_transactions \
+          WHERE customer_id = $1 AND order_id IS NOT NULL",
+    )
+    .bind(shop.member)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![("redeem".into(), "gift".into(), 0)]);
+
+    let (st, body) = place_with_gift(
+        &app,
+        &shop,
+        json!([{ "menu_item_id": shop.latte, "quantity": 1 }]),
+        gift,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "LOYALTY_GIFT_NONE");
+}
+
+#[sqlx::test]
+async fn a_birthday_gift_is_a_reward_item_unless_any_item_is_on(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    give_gift(&pool, shop.org, shop.member, 10).await;
+    let app = reward_app!(pool);
+    let cake = json!([{ "menu_item_id": shop.cake, "quantity": 1 }]);
+    let gift = json!({ "loyalty_birthday_gift": { "item_index": 0 } });
+
+    let (st, body) = place_with_gift(&app, &shop, cake.clone(), gift.clone()).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "LOYALTY_GIFT_NOT_A_REWARD");
+    assert_eq!(gift_status(&pool, shop.member).await, "open");
+
+    sqlx::query("UPDATE loyalty_settings SET reward_any_item = true WHERE org_id = $1")
+        .bind(shop.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, body) = place_with_gift(&app, &shop, cake, gift).await;
+    assert!(st.is_success(), "{st} {body}");
+    assert_eq!(body["subtotal"], 0, "the whole cake, on the house");
+}
+
+#[sqlx::test]
+async fn a_birthday_gift_is_refused_when_expired_unnamed_or_not_ours(pool: PgPool) {
+    let shop = reward_shop(&pool, 10).await;
+    give_gift(&pool, shop.org, shop.member, -1).await;
+    let app = reward_app!(pool);
+    let latte = json!([{ "menu_item_id": shop.latte, "quantity": 1 }]);
+
+    let (st, body) = place_with_gift(
+        &app,
+        &shop,
+        latte.clone(),
+        json!({ "loyalty_birthday_gift": { "item_index": 0 } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "expired: {body}");
+    assert_eq!(body["code"], "LOYALTY_GIFT_NONE");
+
+    // A line a points reward already covers, or no such line.
+    sqlx::query("UPDATE loyalty_gifts SET valid_until = now() + interval '5 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    for extra in [
+        json!({ "loyalty_birthday_gift": { "item_index": 0 },
+                "loyalty_redemptions": [{ "item_index": 0 }] }),
+        json!({ "loyalty_birthday_gift": { "item_index": 3 } }),
+    ] {
+        let (st, body) = place_with_gift(&app, &shop, latte.clone(), extra).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "LOYALTY_GIFT_LINE");
+    }
+
+    // Another tenant's member: not found, and their gift untouched.
+    let org = seed_org(&pool).await;
+    let branch = seed_branch(&pool, org, "Zamalek").await;
+    let teller = seed_user(&pool, org, "teller").await;
+    seed_cash_method(&pool, org).await;
+    enable_program_mode(&pool, org, "visits", 1000, 5, false).await;
+    let stranger = RewardShop {
+        org,
+        branch,
+        teller,
+        shift: open_shift_row(&pool, branch, teller).await,
+        member: shop.member,
+        latte: seed_menu_item(&pool, org, "Latte", 5_000).await,
+        cake: shop.cake,
+    };
+    let (st, body) = place_with_gift(
+        &app,
+        &stranger,
+        json!([{ "menu_item_id": stranger.latte, "quantity": 1 }]),
+        json!({ "loyalty_birthday_gift": { "item_index": 0 } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(gift_status(&pool, shop.member).await, "open");
+}
+
+/// A void gives the gift back while it is still valid; so does refunding the
+/// free unit.
+#[sqlx::test]
+async fn a_void_or_a_refund_of_the_free_unit_reopens_the_gift(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    give_gift(&pool, shop.org, shop.member, 10).await;
+    let app = reward_app!(pool);
+    let gift = json!({ "loyalty_birthday_gift": { "item_index": 0 } });
+    // Two lattes, one free: the order has money on it to refund.
+    let latte = json!([{ "menu_item_id": shop.latte, "quantity": 2 }]);
+
+    let (st, body) = place_with_gift(&app, &shop, latte.clone(), gift.clone()).await;
+    assert!(st.is_success(), "{body}");
+    sqlx::query(
+        "UPDATE orders SET voided_at = now(), voided_by = $2, status = 'voided', \
+                void_reason = 'customer_request' WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(body["id"].as_str().unwrap()).unwrap())
+    .bind(shop.teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(gift_status(&pool, shop.member).await, "open");
+
+    let (st, body) = place_with_gift(&app, &shop, latte, gift).await;
+    assert!(st.is_success(), "{body}");
+    assert_eq!(gift_status(&pool, shop.member).await, "claimed");
+    let (s, b) = refund(
+        &app,
+        &shop,
+        json!({
+            "order_id": body["id"], "amount": 100, "method": "cash", "reason": "goodwill",
+            "lines": [{ "order_item_id": body["items"][0]["id"], "quantity": 1, "amount": 0 }]
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {b}");
+    assert_eq!(gift_status(&pool, shop.member).await, "open");
+}
+
+/// A replayed sale whose gift was meanwhile claimed elsewhere still lands,
+/// at what was collected, and is flagged.
+#[sqlx::test]
+async fn a_replayed_gift_already_claimed_keeps_the_sale_and_flags_it(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    give_gift(&pool, shop.org, shop.member, 10).await;
+    sqlx::query("UPDATE loyalty_gifts SET status = 'claimed', claimed_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let app = reward_app!(pool);
+    let (status, body) = replay_order(
+        &app,
+        &shop,
+        json!({
+            "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(),
+            "loyalty_customer_id": shop.member,
+            "loyalty_birthday_gift": { "item_index": 0 },
+            "items": [{ "menu_item_id": shop.latte, "quantity": 1, "unit_price": 5_000 }]
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {body}");
+    assert!(
+        body["loyalty_redemption_refused"]
+            .as_str()
+            .is_some_and(|w| w.contains("Birthday gift")),
+        "{body}"
+    );
+}

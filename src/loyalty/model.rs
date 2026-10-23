@@ -41,6 +41,8 @@ pub enum Source {
     /// Stamped, or a full card completed, at the counter with no order (Rewards by Madar's
     /// teller page). Pairs with `earn` and `redeem` only.
     Counter,
+    /// A birthday gift item handed over: a `redeem` worth 0 (`loyalty::gifts`).
+    Gift,
 }
 
 impl Source {
@@ -55,6 +57,7 @@ impl Source {
             Source::Manual => "manual",
             Source::Merge => "merge",
             Source::Counter => "counter",
+            Source::Gift => "gift",
         }
     }
 }

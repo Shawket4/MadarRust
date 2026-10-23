@@ -62,6 +62,8 @@ pub struct Greetable {
     pub name: String,
     pub locale: String,
     pub year: i32,
+    /// The birthday being greeted, in the org's own calendar.
+    pub day: chrono::NaiveDate,
 }
 
 /// Members to greet on `on` (default: today in each ORG's timezone), at most 500.
@@ -95,7 +97,7 @@ WITH today AS (
        -- without it gets no greetings.
        AND (o.plan IS DISTINCT FROM 'free' OR 'loyalty' = ANY(org_active_addons(o.id))))
 SELECT c.id, c.org_id, c.name, c.locale,
-       EXTRACT(YEAR FROM t.d)::int AS year
+       EXTRACT(YEAR FROM t.d)::int AS year, t.d AS day
   FROM loyalty_members_v c
   JOIN today t ON t.org_id = c.org_id
   JOIN loyalty_settings s ON s.org_id = c.org_id AND s.branch_id IS NULL
@@ -117,6 +119,7 @@ SELECT c.id, c.org_id, c.name, c.locale,
  LIMIT 500";
 
 pub async fn run_tick(pool: &PgPool) -> Result<(), AppError> {
+    crate::loyalty::gifts::expire_due(pool).await?;
     let due = due_greetings(pool, None).await?;
 
     for m in due {
@@ -134,6 +137,8 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
         .await?
         .ok_or_else(|| AppError::NotFound("No programme for that org".into()))?;
 
+    let kind = settings.birthday_gift_kind();
+    let amount = settings.birthday_reward_amount.filter(|_| kind == "amount");
     // Claim the greeting FIRST. A lost race here means someone else is sending
     // it, and doing nothing is the correct response to that.
     let claimed = sqlx::query(
@@ -143,7 +148,7 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
     .bind(m.id)
     .bind(m.org_id)
     .bind(m.year)
-    .bind(settings.birthday_reward_amount)
+    .bind(amount)
     .execute(pool)
     .await?
     .rows_affected();
@@ -154,7 +159,7 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
     // The gift, where there is one. Written through the same ledger as every
     // other movement, so it shows up in the member's history with a reason
     // rather than as a balance that changed by itself.
-    if let Some(amount) = settings.birthday_reward_amount {
+    if let Some(amount) = amount {
         let member = crate::loyalty::model::find_by_id(pool, m.id)
             .await?
             .ok_or_else(|| AppError::NotFound("Member vanished mid-greeting".into()))?;
@@ -186,6 +191,22 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
         }
     }
 
+    // The free item (`birthday_gift = 'item'`): granted, never credited. A
+    // rerun finds this year's gift already there.
+    let until = if kind == "item" {
+        crate::loyalty::gifts::grant(
+            pool,
+            m.org_id,
+            m.id,
+            m.year,
+            m.day,
+            settings.birthday_gift_days.unwrap_or(30),
+        )
+        .await?
+    } else {
+        None
+    };
+
     // A member who asked the shop to stop messaging them still gets the gift
     // (it is theirs, not marketing: owner, 2026-10-23) but no greeting, on the
     // card or by WhatsApp. Win-back skips such members entirely; a birthday
@@ -201,17 +222,25 @@ async fn greet(pool: &PgPool, m: &Greetable) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let text = message_for(&settings, &m.name, &m.locale);
+    let text = message_with(&settings, &m.name, &m.locale, until);
     // The card first. A greeting on the lock screen from the shop's own pass is
     // better than a WhatsApp among a hundred others, and it costs nothing —
     // WhatsApp is the fallback for someone with no card to reach.
     let member = crate::loyalty::model::find_by_id(pool, m.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Member vanished mid-greeting".into()))?;
-    let line = if m.locale.starts_with("ar") {
-        format!("كل سنة وأنت طيب يا {} 🎂", m.name)
-    } else {
-        format!("Happy birthday, {} 🎂", m.name)
+    let ar = m.locale.starts_with("ar");
+    let line = match (until, ar) {
+        (Some(d), false) => format!(
+            "Happy birthday! A free item is waiting until {}",
+            crate::loyalty::gifts::day_label(d, false)
+        ),
+        (Some(d), true) => format!(
+            "كل سنة وأنت طيب! منتج مجاني بانتظارك حتى {}",
+            crate::loyalty::gifts::day_label(d, true)
+        ),
+        (None, true) => format!("كل سنة وأنت طيب يا {} 🎂", m.name),
+        (None, false) => format!("Happy birthday, {} 🎂", m.name),
     };
     crate::loyalty::wallet::notices::announce(pool, &member, &line, &text).await?;
     tracing::info!(customer_id = %m.id, "loyalty: birthday greeting sent");
@@ -229,6 +258,17 @@ pub fn message_for(
     name: &str,
     locale: &str,
 ) -> String {
+    message_with(settings, name, locale, None)
+}
+
+/// [`message_for`], with the free item's last day when one was granted
+/// (`None` in a preview: the item gift then reads "valid for N days").
+pub fn message_with(
+    settings: &crate::loyalty::settings::LoyaltySettings,
+    name: &str,
+    locale: &str,
+    until: Option<chrono::NaiveDate>,
+) -> String {
     let arabic = locale.starts_with("ar");
     let custom = if arabic {
         settings
@@ -243,7 +283,27 @@ pub fn message_for(
     }
 
     let program = &settings.program_name;
-    let gift = settings.birthday_reward_amount;
+    if settings.birthday_gift_kind() == "item" {
+        let days = settings.birthday_gift_days.unwrap_or(30);
+        let label = |ar| until.map(|d| crate::loyalty::gifts::day_label(d, ar));
+        return match (arabic, label(arabic)) {
+            (false, Some(d)) => format!(
+                "Happy birthday {name}! 🎉 A free item on us at {program}, valid until {d}."
+            ),
+            (false, None) => format!(
+                "Happy birthday {name}! 🎉 A free item on us at {program}, valid for {days} days."
+            ),
+            (true, Some(d)) => {
+                format!("كل سنة وأنت طيب يا {name}! 🎉 منتج مجاني على حسابنا في {program}، صالح حتى {d}.")
+            }
+            (true, None) => format!(
+                "كل سنة وأنت طيب يا {name}! 🎉 منتج مجاني على حسابنا في {program}، صالح لمدة {days} يوم."
+            ),
+        };
+    }
+    let gift = settings
+        .birthday_reward_amount
+        .filter(|_| settings.birthday_gift_kind() == "amount");
     // `{n} من النقاط` reads right at every number; `{n} نقطة` did not (3-10
     // take the plural). See `wallet::i18n::unit_in_a_sentence`.
     let unit = |a: i32| crate::loyalty::wallet::i18n::unit_in_a_sentence(settings.mode(), a);
@@ -302,6 +362,26 @@ mod tests {
         settings.birthday_reward_amount = Some(5);
         let ar = message_for(&settings, "علي", "ar");
         assert!(ar.contains("أضفنا 5 من الأختام"), "{ar}");
+    }
+
+    #[test]
+    fn a_free_item_programme_promises_the_item_and_its_last_day() {
+        let mut settings = s();
+        settings.birthday_gift = Some("item".into());
+        settings.birthday_reward_amount = Some(50);
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 11, 21);
+        let en = message_with(&settings, "Ali", "en", d);
+        assert_eq!(
+            en,
+            "Happy birthday Ali! 🎉 A free item on us at Bean Club, valid until 21 Nov."
+        );
+        let ar = message_with(&settings, "علي", "ar", d);
+        assert!(ar.contains("منتج مجاني") && ar.contains("21 نوفمبر"), "{ar}");
+        // The preview has no date yet: the window instead.
+        assert!(message_for(&settings, "Ali", "en").contains("valid for 30 days"));
+        // 'none' greets and promises nothing, whatever amount is stored.
+        settings.birthday_gift = Some("none".into());
+        assert!(!message_for(&settings, "Ali", "en").contains("points"));
     }
 
     #[test]

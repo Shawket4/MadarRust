@@ -21,6 +21,7 @@ pub mod award;
 pub mod birthdays;
 pub mod counter;
 pub mod earn;
+pub mod gifts;
 pub mod handlers;
 pub mod model;
 pub mod public;

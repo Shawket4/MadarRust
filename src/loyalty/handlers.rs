@@ -46,6 +46,12 @@ pub struct ScanResult {
     /// enforces it before Charge so the server's refusal is never the first
     /// the teller hears of it.
     pub max_rewards_per_order: Option<i32>,
+    /// The member's birthday gift: `open` is one free item to hand over
+    /// (`loyalty_birthday_gift` on the order, or the counter's
+    /// `/loyalty/counter/birthday-gift`); `claimed` was used this time. Absent
+    /// when there is none or it expired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub birthday_gift: Option<super::gifts::BirthdayGiftView>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -105,6 +111,7 @@ pub async fn lookup(
         any_item: settings.reward_any_item,
         any_item_cost: settings.default_reward_cost,
         max_rewards_per_order: settings.max_rewards_per_order,
+        birthday_gift: super::gifts::current(pool.get_ref(), member.id).await?,
     }))
 }
 

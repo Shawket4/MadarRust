@@ -21731,6 +21731,102 @@
         ]
       }
     },
+    "/loyalty/counter/birthday-gift": {
+      "post": {
+        "tags": [
+          "loyalty"
+        ],
+        "summary": "Hand over the member's birthday gift at the counter: one free item, the\nshop's pick. No balance moves.",
+        "operationId": "loyalty_counter_birthday_gift",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CounterGiftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CounterGiftResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request — validation failed or malformed input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden — insufficient permission or wrong org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict — FK or domain invariant violation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_jwt": []
+          }
+        ]
+      }
+    },
     "/loyalty/counter/redeem": {
       "post": {
         "tags": [
@@ -69841,6 +69937,26 @@
           }
         }
       },
+      "BirthdayGiftView": {
+        "type": "object",
+        "description": "The member's birthday gift, while it can be used or was used this time.",
+        "required": [
+          "status",
+          "valid_until"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`open` (ready to claim) or `claimed`.",
+            "example": "open"
+          },
+          "valid_until": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The gift is usable until this instant (end of its last day, shop time)."
+          }
+        }
+      },
       "BirthdayPreview": {
         "type": "object",
         "description": "The birthday greeting as it would actually be sent, in both languages.",
@@ -72372,6 +72488,17 @@
             "type": "integer",
             "format": "int32",
             "description": "The live balance, in `mode`'s currency."
+          },
+          "birthday_gift": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BirthdayGiftView",
+                "description": "The member's birthday gift while it is open, or claimed and still in\nits window. Absent otherwise."
+              }
+            ]
           },
           "brand": {
             "$ref": "#/components/schemas/CardBrand",
@@ -74968,6 +75095,50 @@
           }
         }
       },
+      "CounterGiftRequest": {
+        "type": "object",
+        "required": [
+          "branch_id",
+          "customer_id",
+          "idempotency_key"
+        ],
+        "properties": {
+          "branch_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "customer_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The member, as `/loyalty/lookup` resolved them."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "description": "One per attempt, made by the page (a UUID). A retry with the same key\nclaims nothing new."
+          }
+        }
+      },
+      "CounterGiftResult": {
+        "type": "object",
+        "required": [
+          "member",
+          "birthday_gift",
+          "already"
+        ],
+        "properties": {
+          "already": {
+            "type": "boolean",
+            "description": "True when this key had already claimed it: nothing new was written."
+          },
+          "birthday_gift": {
+            "$ref": "#/components/schemas/BirthdayGiftView",
+            "description": "The gift, now `claimed`."
+          },
+          "member": {
+            "$ref": "#/components/schemas/MemberView"
+          }
+        }
+      },
       "CounterRedeemRequest": {
         "type": "object",
         "required": [
@@ -76508,6 +76679,17 @@
               {
                 "$ref": "#/components/schemas/ReplayApproval",
                 "description": "A manager's one-time PIN approval for the LIVE route (owner,\n2026-09-17): the offline queue has always carried an `approval` on the\nreplay envelope; this is the same object, sent with the live request\ninstead, so a live over-cap discount need not queue to be approved.\nVerified the same way replay verifies one; `discount_approval_id`\nabove is set from its `id` once verified. Additive."
+              }
+            ]
+          },
+          "loyalty_birthday_gift": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LoyaltyGiftInput",
+                "description": "The member's birthday gift on ONE line: one unit of it free, whatever\nit costs, no balance spent (`loyalty::gifts`). Needs\n`loyalty_customer_id`. Refused live with `LOYALTY_GIFT_NONE`,\n`LOYALTY_GIFT_NOT_A_REWARD` or `LOYALTY_GIFT_LINE`. Additive."
               }
             ]
           },
@@ -82529,6 +82711,14 @@
             "type": "boolean",
             "description": "Ask for a date of birth. False means the form does not show the field —\na shop that does not run birthday rewards is not given one to hold."
           },
+          "birthday_gift": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the birthday gives here: `item` (one free item) or `amount`\n(`birthday_reward_amount` on the card). Absent when birthdays are off\nor give nothing.",
+            "example": "item"
+          },
           "birthday_reward_amount": {
             "type": [
               "integer",
@@ -84373,6 +84563,28 @@
           }
         }
       },
+      "LoyaltyGiftInput": {
+        "type": "object",
+        "description": "One order line named as the birthday gift.",
+        "properties": {
+          "item_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Index into `items`.",
+            "minimum": 0
+          },
+          "ticket_line_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A ticket settle names the line by `open_ticket_items.id` instead; the\nserver fills in `item_index`."
+          }
+        }
+      },
       "LoyaltyRedemptionInput": {
         "type": "object",
         "description": "One reward applied to one line of the cart.",
@@ -84436,6 +84648,23 @@
           "birthday_enabled": {
             "type": "boolean",
             "description": "Ask for a birthday at signup, and greet them on the day.\n\nOff means the form does not ASK — not that it asks and ignores. A date of\nbirth is the most sensitive thing this feature collects, and a shop that\ndoes not run birthday rewards has no business holding one."
+          },
+          "birthday_gift": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the birthday gives: `\"none\"` (a greeting only), `\"amount\"`\n(`birthday_reward_amount` on the balance) or `\"item\"` (one free item\nfrom the rewards, whatever it costs, valid `birthday_gift_days` days).\n`None` on the way IN keeps the stored value, so a dashboard that has\nnever heard of it cannot switch it; always `Some` on the way out.",
+            "example": "item"
+          },
+          "birthday_gift_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many days an `\"item\"` gift stays valid from the birthday, 7 to 60\n(30 by default). `None` on the way IN keeps the stored value.",
+            "example": 30
           },
           "birthday_message": {
             "type": [
@@ -98436,6 +98665,17 @@
             "format": "int32",
             "description": "What one line costs when `any_item` is on, in the branch's currency."
           },
+          "birthday_gift": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BirthdayGiftView",
+                "description": "The member's birthday gift: `open` is one free item to hand over\n(`loyalty_birthday_gift` on the order, or the counter's\n`/loyalty/counter/birthday-gift`); `claimed` was used this time. Absent\nwhen there is none or it expired."
+              }
+            ]
+          },
           "max_rewards_per_order": {
             "type": [
               "integer",
@@ -99001,6 +99241,17 @@
               {
                 "$ref": "#/components/schemas/ReplayApproval",
                 "description": "A manager's one-time PIN approval for the LIVE settle route (owner,\n2026-09-17), same shape and same verification as the replay one.\nAdditive."
+              }
+            ]
+          },
+          "loyalty_birthday_gift": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LoyaltyGiftInput",
+                "description": "The member's birthday gift on one line, named by `ticket_line_id`."
               }
             ]
           },
