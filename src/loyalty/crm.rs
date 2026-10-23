@@ -408,7 +408,7 @@ pub async fn stats(
     check_permission(pool, &claims, "loyalty", "read").await?;
     crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None).await?;
     let (mode, _, _, _) = programme(pool, org_id).await?;
-    let tz: String = sqlx::query_scalar("SELECT COALESCE(timezone, 'Africa/Cairo') FROM organizations WHERE id = $1")
+    let tz: String = sqlx::query_scalar("SELECT COALESCE(timezone::text, 'Africa/Cairo') FROM organizations WHERE id = $1")
         .bind(org_id)
         .fetch_optional(pool)
         .await?

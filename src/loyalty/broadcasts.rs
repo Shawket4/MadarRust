@@ -416,37 +416,46 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
                 .await?;
             return Ok(());
         }
+        // The flip and the audience in ONE transaction: a second runner waits
+        // on the row, then finds it sending with its recipients in place.
+        let mut tx = pool.begin().await?;
         let started = sqlx::query(
             "UPDATE loyalty_broadcasts SET status = 'sending', started_at = now() WHERE id = $1 AND status = 'scheduled'",
         )
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
         if started == 1 {
             let (mode, sizes, _, _) = super::crm::programme(pool, b.org_id).await?;
             let mut qb = QueryBuilder::<Postgres>::new(
-                "INSERT INTO loyalty_broadcast_recipients (broadcast_id, org_id, customer_id, outcome) SELECT ",
+                "INSERT INTO loyalty_broadcast_recipients (broadcast_id, org_id, customer_id, outcome, processed_at) SELECT ",
             );
-            qb.push_bind(id)
-                .push(", m.org_id, m.id, CASE WHEN m.marketing_opt_out THEN 'skipped_opted_out' ELSE 'pending' END");
+            qb.push_bind(id).push(
+                ", m.org_id, m.id, CASE WHEN m.marketing_opt_out THEN 'skipped_opted_out' ELSE 'pending' END, \
+                 CASE WHEN m.marketing_opt_out THEN now() END",
+            );
             audience_from(&mut qb, b.org_id, &b.audience, mode, &sizes);
             qb.push(" ON CONFLICT DO NOTHING");
-            qb.build().execute(pool).await?;
-            sqlx::query(
-                "UPDATE loyalty_broadcast_recipients SET processed_at = now() \
-                  WHERE broadcast_id = $1 AND outcome = 'skipped_opted_out' AND processed_at IS NULL",
-            )
-            .bind(id)
-            .execute(pool)
-            .await?;
+            qb.build().execute(&mut *tx).await?;
         }
+        tx.commit().await?;
     } else if b.status != "sending" {
         return Ok(());
     }
 
+    // A runner that died mid-send left its claims stamped and pending: after
+    // ten minutes they are anyone's again (at worst one member hears twice).
+    sqlx::query(
+        "UPDATE loyalty_broadcast_recipients SET processed_at = NULL \
+          WHERE broadcast_id = $1 AND outcome = 'pending' AND processed_at < now() - interval '10 minutes'",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     let batch: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT customer_id FROM loyalty_broadcast_recipients WHERE broadcast_id = $1 AND outcome = 'pending' \
+        "SELECT customer_id FROM loyalty_broadcast_recipients \
+          WHERE broadcast_id = $1 AND outcome = 'pending' AND processed_at IS NULL \
           ORDER BY customer_id LIMIT $2",
     )
     .bind(id)
@@ -455,10 +464,11 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     .await?;
     let message = Message { en: b.line_en.clone(), ar: b.line_ar.clone() };
     for customer in batch {
-        // Claimed first, so a second runner never sends it again.
+        // Claimed first (stamped, still pending), so a second runner never
+        // sends it again and the broadcast stays `sending` until it lands.
         let claimed = sqlx::query(
-            "UPDATE loyalty_broadcast_recipients SET outcome = 'failed', processed_at = now() \
-              WHERE broadcast_id = $1 AND customer_id = $2 AND outcome = 'pending'",
+            "UPDATE loyalty_broadcast_recipients SET processed_at = now() \
+              WHERE broadcast_id = $1 AND customer_id = $2 AND outcome = 'pending' AND processed_at IS NULL",
         )
         .bind(id)
         .bind(customer)

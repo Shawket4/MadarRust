@@ -364,6 +364,11 @@ pub const PUBLIC: &[(&str, &str, &str)] = &[
         "/public/loyalty/brand/{org_id}/banner/{v}.png",
         "org banner for Wallet passes (public images)",
     ),
+    (
+        "GET",
+        "/public/loyalty/brand/{org_id}/card/{revision}/{state}",
+        "a designed card's Google hero at one progress state: no member data, every number checked against the shop's tracks; Google fetches it with no token",
+    ),
     // ── Guest bookings (DEPRECATED flow, still mounted) ──
     (
         "GET",

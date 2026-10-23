@@ -660,3 +660,162 @@ pub async fn with_design(
     }
     c
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loyalty::tracks::TrackDef;
+
+    fn track(position: u8, en: &str, ar: &str, size: Option<i32>, colour: Option<&str>, shape: Option<&str>) -> TrackDef {
+        TrackDef {
+            position,
+            name_en: en.into(),
+            name_ar: ar.into(),
+            size,
+            shape: shape.map(str::to_string),
+            colour: colour.map(str::to_string),
+            per_item: true,
+            cap: None,
+            items: Vec::new(),
+        }
+    }
+
+    fn card(design: CardDesign, defs: Vec<TrackDef>, balances: &[(u8, i32)], one: i32) -> DesignedCard {
+        DesignedCard {
+            org_id: Uuid::nil(),
+            revision: 1,
+            design,
+            defs,
+            mode: Mode::Visits,
+            track_one_size: one,
+            programme: "Drops Rewards".into(),
+            programme_ar: Some("مكافآت دروبس".into()),
+            photo_url: None,
+            logo_url: None,
+            logo_is_mark: false,
+            balances: balances.iter().copied().collect(),
+            member_name: "Mona Adel".into(),
+        }
+    }
+
+    fn colours() -> madar_card::Colours {
+        madar_card::Colours {
+            background: "#0D6273".into(),
+            foreground: "#EFF3F4".into(),
+            label: "#B9DCE3".into(),
+        }
+    }
+
+    fn multi() -> (Vec<TrackDef>, madar_card::Ctx, Vec<madar_card::Track>) {
+        let defs = vec![
+            track(1, "Coffee", "قهوة", None, None, Some("cup")),
+            track(2, "Sandwich", "ساندوتش", Some(6), Some("#F2B33D"), Some("heart")),
+        ];
+        let ctx = madar_card::Ctx {
+            mode: madar_card::tracks::Mode::Visits,
+            tracks: vec![
+                madar_card::TrackRef { position: 1, size: 8 },
+                madar_card::TrackRef { position: 2, size: 6 },
+            ],
+            has_photo: false,
+        };
+        let tracks = defs.iter().map(TrackDef::to_card).collect();
+        (defs, ctx, tracks)
+    }
+
+    #[test]
+    fn a_designed_strip_renders_at_every_scale_in_both_languages() {
+        let (defs, ctx, tracks) = multi();
+        let d = madar_card::templates::default_design(&colours(), &ctx, &tracks);
+        let c = card(d, defs, &[(1, 3), (2, 7)], 8);
+        let strips = c.apple_strips_now();
+        let names: Vec<&str> = strips.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["strip.png", "ar.lproj/strip.png", "strip@2x.png", "ar.lproj/strip@2x.png", "strip@3x.png", "ar.lproj/strip@3x.png"]
+        );
+        let img = image::load_from_memory(&strips[2].1).unwrap();
+        assert_eq!((img.width(), img.height()), (750, 288));
+        let hero = render_image(&c, Store::Google, 1, false).unwrap();
+        assert_eq!((hero.width(), hero.height()), (1032, 336));
+    }
+
+    #[test]
+    fn the_fields_follow_the_design_and_a_reward_row_appears_only_when_earned() {
+        let (defs, ctx, tracks) = multi();
+        let d = madar_card::templates::default_design(&colours(), &ctx, &tracks);
+        let c = card(d, defs, &[(1, 3), (2, 7)], 8);
+        let mut pass = json!({"storeCard": {"auxiliaryFields": [{"key": "notice", "label": "", "value": "Hi", "changeMessage": "%@"}]}});
+        c.restyle_apple(&mut pass);
+        // Header: track 1's balance. Secondary: rewards rows — only track 2 has
+        // one (7 of 6 = 1 earned, the label names the track).
+        assert_eq!(pass["storeCard"]["headerFields"][0]["value"], "3");
+        let sec = pass["storeCard"]["secondaryFields"].as_array().unwrap();
+        assert_eq!(sec.len(), 1, "{sec:?}");
+        assert_eq!(sec[0]["label"], "Sandwich · Reward ready");
+        // The notice stays, last in the auxiliary row.
+        assert_eq!(pass["storeCard"]["auxiliaryFields"][0]["key"], "notice");
+        assert_eq!(pass["backgroundColor"], "rgb(13, 98, 115)");
+        let mut obj = json!({});
+        c.restyle_google(&mut obj);
+        // 3 of 8: three filled, five empty, no joins past six steps.
+        assert_eq!(obj["loyaltyPoints"]["balance"]["string"], "●●●○○○○○");
+        assert_eq!(obj["loyaltyPoints"]["label"], "Coffee");
+        assert_eq!(obj["loyaltyPoints"]["localizedLabel"]["translatedValues"][0]["value"], "قهوة");
+        // 7 of 6: one on the next card.
+        assert_eq!(obj["secondaryLoyaltyPoints"]["balance"]["string"], "●─○─○─○─○─○");
+        assert_eq!(c.hero_state(true), "3-1-ar");
+    }
+
+    /// Renders designed strips and heroes to LOOK at:
+    ///       MADAR_CARD_PREVIEW_DIR=/some/dir cargo test --lib wallet::design::tests::preview_designs -- --nocapture
+    #[test]
+    fn preview_designs() {
+        let Ok(dir) = std::env::var("MADAR_CARD_PREVIEW_DIR") else {
+            return;
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let one = vec![track(1, "", "", None, None, None)];
+        let one_ctx = madar_card::Ctx {
+            mode: madar_card::tracks::Mode::Visits,
+            tracks: vec![madar_card::TrackRef { position: 1, size: 8 }],
+            has_photo: false,
+        };
+        let one_tracks: Vec<madar_card::Track> = one.iter().map(TrackDef::to_card).collect();
+        let mut cases: Vec<(String, DesignedCard)> = Vec::new();
+        for d in madar_card::templates::templates(&colours(), &one_ctx, &one_tracks) {
+            cases.push((d.template.clone(), card(d, one.clone(), &[(1, 5)], 8)));
+        }
+        let (defs, ctx, tracks) = multi();
+        let m = madar_card::templates::default_design(&colours(), &ctx, &tracks);
+        cases.push(("multi-2".into(), card(m, defs, &[(1, 3), (2, 4)], 8)));
+        let four = vec![
+            track(1, "Coffee", "قهوة", None, None, Some("cup")),
+            track(2, "Sandwich", "ساندوتش", Some(6), Some("#F2B33D"), Some("heart")),
+            track(3, "Juice", "عصير", Some(5), Some("#8BD3A8"), Some("star")),
+            track(4, "Dessert", "حلويات", Some(10), Some("#F4A6C1"), Some("gift")),
+        ];
+        let four_ctx = madar_card::Ctx {
+            mode: madar_card::tracks::Mode::Visits,
+            tracks: vec![
+                madar_card::TrackRef { position: 1, size: 8 },
+                madar_card::TrackRef { position: 2, size: 6 },
+                madar_card::TrackRef { position: 3, size: 5 },
+                madar_card::TrackRef { position: 4, size: 10 },
+            ],
+            has_photo: false,
+        };
+        let four_tracks: Vec<madar_card::Track> = four.iter().map(TrackDef::to_card).collect();
+        let mut q = madar_card::templates::default_design(&colours(), &four_ctx, &four_tracks);
+        q.ground = madar_card::Ground { kind: GroundKind::Pattern, pattern: Some(madar_card::Pattern::Dots) };
+        cases.push(("multi-4".into(), card(q, four, &[(1, 5), (2, 2), (3, 4), (4, 7)], 8)));
+        for (name, c) in cases {
+            for (arabic, lang) in [(false, "en"), (true, "ar")] {
+                let a = render_png(&c, Store::Apple, 2, arabic).unwrap();
+                std::fs::write(format!("{dir}/{name}-apple-{lang}@2x.png"), a).unwrap();
+                let g = render_png(&c, Store::Google, 1, arabic).unwrap();
+                std::fs::write(format!("{dir}/{name}-google-{lang}.png"), g).unwrap();
+            }
+        }
+    }
+}
