@@ -413,6 +413,9 @@ pub struct TracksView {
     pub mode: String,
     /// Track 1's size: the programme's card size.
     pub track_one_size: i32,
+    /// What track 1 counts: `points`, `order`, `item` or `stamp` (tracks 2–4
+    /// count stamps). madar-card `text::stamp_unit`.
+    pub stamp_unit: String,
     /// Every track in position order; track 1 always first. In a points
     /// programme only track 1 (tracks 2–4 are kept but inactive).
     pub tracks: Vec<madar_card::Track>,
@@ -435,6 +438,9 @@ async fn view(pool: &PgPool, org_id: Uuid) -> Result<TracksView, AppError> {
     Ok(TracksView {
         mode: mode.as_str().into(),
         track_one_size: super::model::reward_target(&settings, &rewards),
+        stamp_unit: super::wallet::design::unit_of(pool, org_id, &settings)
+            .await
+            .to_string(),
         tracks: defs.iter().map(TrackDef::to_card).collect(),
     })
 }
