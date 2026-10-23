@@ -1591,3 +1591,49 @@ async fn a_custom_option_with_no_legacy_type_still_prices_on_the_order_path(pool
 fn json_pull(branch: Uuid) -> Value {
     serde_json::json!({ "branch_id": branch })
 }
+
+/// A card with stamp tracks names them on the loyalty object of the settings
+/// row (POS_MULTITRACK_DESIGN.md §4.4 #2), and a track change re-emits it. A
+/// programme with one track keeps the object it always had.
+#[sqlx::test]
+async fn branch_settings_name_the_cards_stamp_tracks(pool: PgPool) {
+    let s = shop(&pool).await;
+    sqlx::query(
+        "INSERT INTO loyalty_settings (org_id, branch_id, enabled, mode, earn_piastres_per_point, default_reward_cost, require_otp) \
+         VALUES ($1, NULL, true, 'visits', 1000, 8, false)",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let full = pull_core(&pool, s.org, &req(s.branch), None).await.unwrap();
+    let loyalty = row(&full, "branch_settings", s.branch).unwrap()["loyalty"].clone();
+    assert!(
+        loyalty.get("tracks").is_none(),
+        "one track: today's object, {loyalty}"
+    );
+
+    sqlx::query(
+        "INSERT INTO loyalty_stamp_tracks (org_id, position, name_en, name_ar, size, shape) VALUES \
+         ($1, 1, 'Coffee', 'قهوة', NULL, 'cup'), ($1, 2, 'Sandwich', 'ساندوتش', 6, 'heart')",
+    )
+    .bind(s.org)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let inc = pull_core(&pool, s.org, &req(s.branch), full.next)
+        .await
+        .unwrap();
+    let data = change(&inc, "branch_settings", s.branch)
+        .expect("a track change re-emits the settings row")
+        .data
+        .clone()
+        .unwrap();
+    assert_eq!(
+        data["loyalty"]["tracks"],
+        serde_json::json!([
+            {"position": 1, "name_en": "Coffee", "name_ar": "قهوة", "size": null, "shape": "cup", "colour": null},
+            {"position": 2, "name_en": "Sandwich", "name_ar": "ساندوتش", "size": 6, "shape": "heart", "colour": null}
+        ])
+    );
+}

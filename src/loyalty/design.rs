@@ -95,7 +95,12 @@ async fn shop(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<Shop, AppError>
 
 impl Shop {
     fn ctx(&self) -> madar_card::Ctx {
-        wd::ctx_of(&self.defs, self.settings.mode(), self.track_one_size, &self.brand)
+        wd::ctx_of(
+            &self.defs,
+            self.settings.mode(),
+            self.track_one_size,
+            &self.brand,
+        )
     }
 
     fn tracks(&self) -> Vec<madar_card::Track> {
@@ -150,8 +155,16 @@ async fn view(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<CardDesignView,
         custom_branding: s.brand.custom_branding,
         programme_name: s.settings.program_name.clone(),
         programme_name_ar: s.settings.program_name_ar.clone(),
-        photo_url: s.brand.custom_branding.then(|| s.brand.card_image_url.clone()).flatten(),
-        logo_url: s.brand.custom_branding.then(|| s.brand.logo_url.clone()).flatten(),
+        photo_url: s
+            .brand
+            .custom_branding
+            .then(|| s.brand.card_image_url.clone())
+            .flatten(),
+        logo_url: s
+            .brand
+            .custom_branding
+            .then(|| s.brand.logo_url.clone())
+            .flatten(),
     })
 }
 
@@ -166,7 +179,8 @@ pub async fn get_design(req: HttpRequest, pool: crate::db::Db) -> Result<HttpRes
 
 async fn may_design(req: &HttpRequest, pool: &sqlx::PgPool) -> Result<uuid::Uuid, AppError> {
     let (org_id, claims) = super::settings::scope_org(pool, req, None).await?;
-    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyCardDesign, None).await?;
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyCardDesign, None)
+        .await?;
     Ok(org_id)
 }
 
@@ -285,7 +299,11 @@ pub async fn preview(
     s.check(&design)?;
     let mut balances = std::collections::HashMap::new();
     for d in &s.defs {
-        let size = if d.position == 1 { s.track_one_size } else { d.size.unwrap_or(1) };
+        let size = if d.position == 1 {
+            s.track_one_size
+        } else {
+            d.size.unwrap_or(1)
+        };
         let sample = body
             .balances
             .iter()
@@ -302,15 +320,32 @@ pub async fn preview(
         track_one_size: s.track_one_size,
         programme: s.settings.program_name.clone(),
         programme_ar: s.settings.program_name_ar.clone(),
-        photo_url: s.brand.custom_branding.then(|| s.brand.card_image_url.clone()).flatten(),
-        logo_url: s.brand.custom_branding.then(|| s.brand.logo_url.clone()).flatten(),
+        photo_url: s
+            .brand
+            .custom_branding
+            .then(|| s.brand.card_image_url.clone())
+            .flatten(),
+        logo_url: s
+            .brand
+            .custom_branding
+            .then(|| s.brand.logo_url.clone())
+            .flatten(),
         logo_is_mark: s.brand.logo_is_mark,
         balances,
         member_name: String::new(),
     };
     let (store, arabic) = (body.store, body.arabic);
     let png = tokio::task::spawn_blocking(move || {
-        wd::render_png(&card, store, if store == madar_card::Store::Apple { 2 } else { 1 }, arabic)
+        wd::render_png(
+            &card,
+            store,
+            if store == madar_card::Store::Apple {
+                2
+            } else {
+                1
+            },
+            arabic,
+        )
     })
     .await
     .map_err(|_| AppError::Internal)?

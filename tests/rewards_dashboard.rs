@@ -14,7 +14,6 @@ use uuid::Uuid;
 
 use common::combos::{Shop, secret, shop};
 
-
 macro_rules! app {
     ($pool:expr) => {{
         unsafe {
@@ -25,12 +24,20 @@ macro_rules! app {
         test::init_service(
             App::new()
                 .app_data(web::Data::new($pool.clone()))
-                .app_data(web::Data::new(madar_rust::menu::cache::MenuCache::from_env()))
+                .app_data(web::Data::new(
+                    madar_rust::menu::cache::MenuCache::from_env(),
+                ))
                 .app_data(web::Data::new(secret()))
-                .app_data(web::Data::new(madar_rust::auth::org_status::OrgStatusCache::new()))
-                .app_data(web::Data::new(madar_rust::realtime::hub::BranchEventHub::new()))
+                .app_data(web::Data::new(
+                    madar_rust::auth::org_status::OrgStatusCache::new(),
+                ))
+                .app_data(web::Data::new(
+                    madar_rust::realtime::hub::BranchEventHub::new(),
+                ))
                 .app_data(madar_rust::qr_card::routes::make_provider())
-                .app_data(web::Data::new(madar_rust::demo::config::DemoConfig::from_env()))
+                .app_data(web::Data::new(
+                    madar_rust::demo::config::DemoConfig::from_env(),
+                ))
                 .app_data(web::Data::new(madar_rust::ai::AiState::from_env()))
                 .configure(|cfg| madar_rust::app_routes::configure_api(cfg, read_pool.clone())),
         )
@@ -51,7 +58,10 @@ where
     let resp = test::call_service(app, req.to_request()).await;
     let status = resp.status();
     let bytes = test::read_body(resp).await;
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 async fn raw<S, B>(app: &S, req: test::TestRequest) -> (StatusCode, Vec<u8>)
@@ -69,7 +79,9 @@ where
 }
 
 async fn setup(pool: &PgPool) -> Shop {
-    madar_rust::permissions::seeder::seed_role_permissions(pool).await.unwrap();
+    madar_rust::permissions::seeder::seed_role_permissions(pool)
+        .await
+        .unwrap();
     madar_rust::authz::sync_catalogue(pool).await.unwrap();
     shop(pool).await
 }
@@ -103,13 +115,15 @@ async fn visits(pool: &PgPool, m: Uuid) -> i32 {
 }
 
 async fn track_balance(pool: &PgPool, m: Uuid, t: i16) -> i32 {
-    sqlx::query_scalar("SELECT balance FROM loyalty_track_balances WHERE customer_id = $1 AND position = $2")
-        .bind(m)
-        .bind(t)
-        .fetch_optional(pool)
-        .await
-        .unwrap()
-        .unwrap_or(0)
+    sqlx::query_scalar(
+        "SELECT balance FROM loyalty_track_balances WHERE customer_id = $1 AND position = $2",
+    )
+    .bind(m)
+    .bind(t)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .unwrap_or(0)
 }
 
 /// Track 1 named; track 2 "Sandwich" (4 stamps, croissant + cookie); track 3
@@ -132,10 +146,23 @@ where
         >,
     B: actix_web::body::MessageBody,
 {
-    call(app, test::TestRequest::put().uri("/loyalty/tracks").set_json(body), &s.admin_token()).await
+    call(
+        app,
+        test::TestRequest::put()
+            .uri("/loyalty/tracks")
+            .set_json(body),
+        &s.admin_token(),
+    )
+    .await
 }
 
-async fn sell<S, B>(app: &S, s: &Shop, items: Value, member: Option<Uuid>, redemptions: Value) -> (StatusCode, Value)
+async fn sell<S, B>(
+    app: &S,
+    s: &Shop,
+    items: Value,
+    member: Option<Uuid>,
+    redemptions: Value,
+) -> (StatusCode, Value)
 where
     S: actix_web::dev::Service<
             actix_http::Request,
@@ -150,19 +177,27 @@ where
         body["loyalty_customer_id"] = json!(m);
         body["loyalty_redemptions"] = redemptions;
     }
-    call(app, test::TestRequest::post().uri("/orders").set_json(body), &s.admin_token()).await
+    call(
+        app,
+        test::TestRequest::post().uri("/orders").set_json(body),
+        &s.admin_token(),
+    )
+    .await
 }
 
 /// Run a broadcast to the end (the request also starts it in the background;
 /// both runners share the work safely).
 async fn finish(pool: &PgPool, id: Uuid) {
     for _ in 0..50 {
-        madar_rust::loyalty::broadcasts::run_one(pool, id).await.unwrap();
-        let status: String = sqlx::query_scalar("SELECT status FROM loyalty_broadcasts WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
+        madar_rust::loyalty::broadcasts::run_one(pool, id)
             .await
             .unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM loyalty_broadcasts WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
         if status == "sent" {
             return;
         }
@@ -201,7 +236,9 @@ async fn tracks_are_saved_by_a_designer_and_refused_to_anyone_else(pool: PgPool)
     // A teller holds loyalty.use, not loyalty.card.design.
     let (st, _) = call(
         &app,
-        test::TestRequest::put().uri("/loyalty/tracks").set_json(three_tracks(&s)),
+        test::TestRequest::put()
+            .uri("/loyalty/tracks")
+            .set_json(three_tracks(&s)),
         &s.teller_token(),
     )
     .await;
@@ -213,10 +250,19 @@ async fn tracks_are_saved_by_a_designer_and_refused_to_anyone_else(pool: PgPool)
     assert_eq!(body["track_one_size"], 8, "track 1 is the programme's card");
     assert_eq!(body["tracks"].as_array().unwrap().len(), 3);
     assert_eq!(body["tracks"][1]["items"].as_array().unwrap().len(), 2);
-    assert_eq!(body["tracks"][2]["items"], json!([]), "a counter-only track");
+    assert_eq!(
+        body["tracks"][2]["items"],
+        json!([]),
+        "a counter-only track"
+    );
 
     // Anyone who may read the programme may read them (the teller too).
-    let (st, got) = call(&app, test::TestRequest::get().uri("/loyalty/tracks"), &s.teller_token()).await;
+    let (st, got) = call(
+        &app,
+        test::TestRequest::get().uri("/loyalty/tracks"),
+        &s.teller_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(got["tracks"][1]["name_ar"], "ساندوتش");
 
@@ -248,9 +294,24 @@ async fn tracks_are_saved_by_a_designer_and_refused_to_anyone_else(pool: PgPool)
         .unwrap();
     let (st, body) = put_tracks(&app, &s, three_tracks(&s)).await;
     assert_eq!(st, StatusCode::CONFLICT);
-    assert!(body["error"].as_str().unwrap_or_default().contains("tracks_points_single"), "{body}");
-    let (_, got) = call(&app, test::TestRequest::get().uri("/loyalty/tracks"), &s.admin_token()).await;
-    assert_eq!(got["tracks"].as_array().unwrap().len(), 1, "tracks 2-3 are inactive in points mode");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("tracks_points_single"),
+        "{body}"
+    );
+    let (_, got) = call(
+        &app,
+        test::TestRequest::get().uri("/loyalty/tracks"),
+        &s.admin_token(),
+    )
+    .await;
+    assert_eq!(
+        got["tracks"].as_array().unwrap().len(),
+        1,
+        "tracks 2-3 are inactive in points mode"
+    );
 }
 
 // ── Tracks: earning with the one press ──────────────────────────────────────
@@ -317,7 +378,13 @@ async fn one_press_earns_every_track_the_sale_qualifies_for_once(pool: PgPool) {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(reversed, vec![("reverse_earn".into(), None, -5), ("reverse_earn".into(), Some(2), -3)]);
+    assert_eq!(
+        reversed,
+        vec![
+            ("reverse_earn".into(), None, -5),
+            ("reverse_earn".into(), Some(2), -3)
+        ]
+    );
 }
 
 #[sqlx::test]
@@ -329,9 +396,20 @@ async fn a_track_earns_per_sale_when_asked_and_its_ceiling_trims(pool: PgPool) {
     t["tracks"][1]["per_item"] = json!(false);
     put_tracks(&app, &s, t).await;
     let m = member(&pool, s.org, "201000000102", "Omar").await;
-    let (_, order) = sell(&app, &s, json!([{"menu_item_id": s.croissant, "quantity": 3}]), None, json!([])).await;
+    let (_, order) = sell(
+        &app,
+        &s,
+        json!([{"menu_item_id": s.croissant, "quantity": 3}]),
+        None,
+        json!([]),
+    )
+    .await;
     let (_, a) = award(&app, &s, order["id"].as_str().unwrap(), m).await;
-    assert_eq!(a["tracks"][0], json!({"position": 2, "points_awarded": 1}), "one per sale");
+    assert_eq!(
+        a["tracks"][0],
+        json!({"position": 2, "points_awarded": 1}),
+        "one per sale"
+    );
 
     // A ceiling of 4 with 3 on the card: three more croissants (per item) earn 1.
     let mut t = three_tracks(&s);
@@ -348,9 +426,20 @@ async fn a_track_earns_per_sale_when_asked_and_its_ceiling_trims(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(track_balance(&pool, m, 2).await, 3);
-    let (_, order) = sell(&app, &s, json!([{"menu_item_id": s.croissant, "quantity": 3}]), None, json!([])).await;
+    let (_, order) = sell(
+        &app,
+        &s,
+        json!([{"menu_item_id": s.croissant, "quantity": 3}]),
+        None,
+        json!([]),
+    )
+    .await;
     let (_, a) = award(&app, &s, order["id"].as_str().unwrap(), m).await;
-    assert_eq!(a["tracks"][0], json!({"position": 2, "points_awarded": 1}), "trimmed to the ceiling: 4 - 3");
+    assert_eq!(
+        a["tracks"][0],
+        json!({"position": 2, "points_awarded": 1}),
+        "trimmed to the ceiling: 4 - 3"
+    );
     assert_eq!(track_balance(&pool, m, 2).await, 4);
 }
 
@@ -397,12 +486,27 @@ async fn a_basket_takes_a_reward_from_each_track_with_its_own_balance(pool: PgPo
         &s.teller_token(),
     )
     .await;
-    let rewards: Vec<&str> = scan["rewards"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let rewards: Vec<&str> = scan["rewards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
     assert_eq!(rewards, ["Cola"]);
     assert_eq!(scan["track_rewards"][0]["position"], 2);
-    assert_eq!(scan["track_rewards"][0]["rewards"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        scan["track_rewards"][0]["rewards"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     assert_eq!(scan["track_rewards"][0]["rewards"][0]["cost_amount"], 4);
-    assert_eq!(scan["track_rewards"][1]["rewards"], json!([]), "track 3 has no items");
+    assert_eq!(
+        scan["track_rewards"][1]["rewards"],
+        json!([]),
+        "track 3 has no items"
+    );
 
     // Refusals with their codes: an item that is not track 2's; a track that
     // does not exist.
@@ -458,7 +562,11 @@ async fn a_basket_takes_a_reward_from_each_track_with_its_own_balance(pool: PgPo
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(lines, vec![(true, None), (true, Some(2))], "Cola then Croissant");
+    assert_eq!(
+        lines,
+        vec![(true, None), (true, Some(2))],
+        "Cola then Croissant"
+    );
 
     // One shared ceiling: with one reward per order, the two together are refused.
     sqlx::query("UPDATE loyalty_settings SET max_rewards_per_order = 1 WHERE org_id = $1")
@@ -485,7 +593,10 @@ async fn a_basket_takes_a_reward_from_each_track_with_its_own_balance(pool: PgPo
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{body}");
-    assert!(body.to_string().contains("Only one reward per order"), "{body}");
+    assert!(
+        body.to_string().contains("Only one reward per order"),
+        "{body}"
+    );
 
     // A released till sends no `track`: track 1, exactly as before.
     let (st, body) = sell(
@@ -528,9 +639,11 @@ async fn the_counter_stamps_and_completes_any_track_once_per_key(pool: PgPool) {
     assert_eq!(r["code"], "LOYALTY_KEY_REUSED");
     // Completing a card that is not full: 2 of 5.
     let redeem = |track: u8, key: &str| {
-        test::TestRequest::post().uri("/loyalty/counter/redeem").set_json(json!({
-            "branch_id": s.branch, "customer_id": m, "idempotency_key": key, "track": track
-        }))
+        test::TestRequest::post()
+            .uri("/loyalty/counter/redeem")
+            .set_json(json!({
+                "branch_id": s.branch, "customer_id": m, "idempotency_key": key, "track": track
+            }))
     };
     let (st, r) = call(&app, redeem(3, "key-juice-0002"), &s.teller_token()).await;
     assert_eq!(st, StatusCode::CONFLICT);
@@ -566,11 +679,23 @@ async fn a_one_track_shop_sends_no_new_fields(pool: PgPool) {
     .await;
     assert!(scan.get("track_rewards").is_none(), "{scan}");
     assert!(scan["member"].get("tracks").is_none(), "{scan}");
-    let (_, order) = sell(&app, &s, json!([{"menu_item_id": s.cola, "quantity": 1}]), None, json!([])).await;
+    let (_, order) = sell(
+        &app,
+        &s,
+        json!([{"menu_item_id": s.cola, "quantity": 1}]),
+        None,
+        json!([]),
+    )
+    .await;
     let (_, a) = award(&app, &s, order["id"].as_str().unwrap(), m).await;
     assert!(a.get("tracks").is_none(), "{a}");
     assert!(a["member"].get("tracks").is_none());
-    let (_, detail) = call(&app, test::TestRequest::get().uri(&format!("/loyalty/members/{m}")), &s.admin_token()).await;
+    let (_, detail) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/loyalty/members/{m}")),
+        &s.admin_token(),
+    )
+    .await;
     assert!(detail["ledger"][0].get("track").is_none(), "{detail}");
 }
 
@@ -596,33 +721,54 @@ async fn a_design_is_checked_saved_published_and_rendered(pool: PgPool) {
     stamps(&pool, s.org, 8).await;
     let m = member(&pool, s.org, "201000000106", "Nour").await;
 
-    let (st, v) = call(&app, test::TestRequest::get().uri("/loyalty/card-design"), &s.teller_token()).await;
+    let (st, v) = call(
+        &app,
+        test::TestRequest::get().uri("/loyalty/card-design"),
+        &s.teller_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["default_design"]["template"], "classic");
     assert!(v["published"].is_null());
     assert_eq!(v["ctx"]["tracks"], json!([{"position": 1, "size": 8}]));
 
     // Nothing to publish yet.
-    let (st, body) = call(&app, test::TestRequest::post().uri("/loyalty/card-design/publish"), &s.admin_token()).await;
+    let (st, body) = call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/card-design/publish"),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["code"], "LOYALTY_DESIGN_NO_DRAFT");
 
     // A bar over the footer cannot render: refused by madar-card's checks.
-    let bad = design(json!([{"kind": {"type": "bar", "track": 1}, "cell": {"col": 0, "row": 5, "w": 12, "h": 1}}]));
+    let bad = design(
+        json!([{"kind": {"type": "bar", "track": 1}, "cell": {"col": 0, "row": 5, "w": 12, "h": 1}}]),
+    );
     let (st, body) = call(
         &app,
-        test::TestRequest::put().uri("/loyalty/card-design").set_json(json!({"design": bad})),
+        test::TestRequest::put()
+            .uri("/loyalty/card-design")
+            .set_json(json!({"design": bad})),
         &s.admin_token(),
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["code"], "LOYALTY_DESIGN_INVALID");
-    assert!(body["error"].as_str().unwrap().contains("covers_footer"), "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("covers_footer"),
+        "{body}"
+    );
     // A teller may not design.
-    let good = design(json!([{"kind": {"type": "stamps", "track": 1}, "cell": {"col": 0, "row": 0, "w": 12, "h": 3}}]));
+    let good = design(
+        json!([{"kind": {"type": "stamps", "track": 1}, "cell": {"col": 0, "row": 0, "w": 12, "h": 3}}]),
+    );
     let (st, _) = call(
         &app,
-        test::TestRequest::put().uri("/loyalty/card-design").set_json(json!({"design": good.clone()})),
+        test::TestRequest::put()
+            .uri("/loyalty/card-design")
+            .set_json(json!({"design": good.clone()})),
         &s.teller_token(),
     )
     .await;
@@ -636,12 +782,19 @@ async fn a_design_is_checked_saved_published_and_rendered(pool: PgPool) {
         .unwrap();
     let (st, _) = call(
         &app,
-        test::TestRequest::put().uri("/loyalty/card-design").set_json(json!({"design": good})),
+        test::TestRequest::put()
+            .uri("/loyalty/card-design")
+            .set_json(json!({"design": good})),
         &s.manager_token(),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "a manager may design");
-    let (st, v) = call(&app, test::TestRequest::post().uri("/loyalty/card-design/publish"), &s.admin_token()).await;
+    let (st, v) = call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/card-design/publish"),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["revision"], 1);
     assert_eq!(v["published"]["elements"][0]["kind"]["type"], "stamps");
@@ -651,15 +804,20 @@ async fn a_design_is_checked_saved_published_and_rendered(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(stale.is_none(), "every installed card is rebuilt by the sweep");
+    assert!(
+        stale.is_none(),
+        "every installed card is rebuilt by the sweep"
+    );
 
     // The exact render: Apple's strip at 2x, Google's hero.
     let preview = |store: &str| {
         test::TestRequest::post()
             .uri("/loyalty/card-design/preview")
             .insert_header(("Authorization", format!("Bearer {}", s.admin_token())))
-            .set_json(json!({"design": v["published"], "store": store, "arabic": true,
-                             "balances": [{"position": 1, "balance": 3}]}))
+            .set_json(
+                json!({"design": v["published"], "store": store, "arabic": true,
+                             "balances": [{"position": 1, "balance": 3}]}),
+            )
     };
     let (st, png) = raw(&app, preview("apple")).await;
     assert_eq!(st, StatusCode::OK);
@@ -672,18 +830,35 @@ async fn a_design_is_checked_saved_published_and_rendered(pool: PgPool) {
     // Google's hero, public: the published revision at a progress the card can
     // show. Anything else is a 404.
     let hero = |path: String| test::TestRequest::get().uri(&path);
-    let (st, png) = raw(&app, hero(format!("/public/loyalty/brand/{}/card/1/3-en.png", s.org))).await;
+    let (st, png) = raw(
+        &app,
+        hero(format!("/public/loyalty/brand/{}/card/1/3-en.png", s.org)),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(&png[1..4], b"PNG");
     for bad in ["8-en", "3-fr", "3-1-en", "x-en"] {
-        let (st, _) = raw(&app, hero(format!("/public/loyalty/brand/{}/card/1/{bad}.png", s.org))).await;
+        let (st, _) = raw(
+            &app,
+            hero(format!("/public/loyalty/brand/{}/card/1/{bad}.png", s.org)),
+        )
+        .await;
         assert_eq!(st, StatusCode::NOT_FOUND, "{bad}");
     }
-    let (st, _) = raw(&app, hero(format!("/public/loyalty/brand/{}/card/2/3-en.png", s.org))).await;
+    let (st, _) = raw(
+        &app,
+        hero(format!("/public/loyalty/brand/{}/card/2/3-en.png", s.org)),
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND, "an old revision is gone");
 
     // Back to the classic look.
-    let (st, v) = call(&app, test::TestRequest::delete().uri("/loyalty/card-design/published"), &s.admin_token()).await;
+    let (st, v) = call(
+        &app,
+        test::TestRequest::delete().uri("/loyalty/card-design/published"),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert!(v["published"].is_null());
     assert_eq!(v["revision"], 2);
@@ -707,24 +882,48 @@ async fn a_message_reaches_its_audience_within_its_limits(pool: PgPool) {
 
     let (st, n) = call(
         &app,
-        test::TestRequest::post().uri("/loyalty/broadcasts/audience").set_json(json!({"audience": {"rules": []}})),
+        test::TestRequest::post()
+            .uri("/loyalty/broadcasts/audience")
+            .set_json(json!({"audience": {"rules": []}})),
         &s.manager_token(),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{n}");
-    assert_eq!(n, json!({"members": 3, "opted_out": 1, "apple": 0, "google": 0, "no_card": 2}));
+    assert_eq!(
+        n,
+        json!({"members": 3, "opted_out": 1, "apple": 0, "google": 0, "no_card": 2})
+    );
 
-    let send = |body: Value| test::TestRequest::post().uri("/loyalty/broadcasts").set_json(body);
+    let send = |body: Value| {
+        test::TestRequest::post()
+            .uri("/loyalty/broadcasts")
+            .set_json(body)
+    };
     // A teller may not message every member.
-    let (st, _) = call(&app, send(json!({"message": {"en": "Hi"}})), &s.teller_token()).await;
+    let (st, _) = call(
+        &app,
+        send(json!({"message": {"en": "Hi"}})),
+        &s.teller_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     // No links on a card.
-    let (st, body) = call(&app, send(json!({"message": {"en": "Order at drops.com"}})), &s.admin_token()).await;
+    let (st, body) = call(
+        &app,
+        send(json!({"message": {"en": "Order at drops.com"}})),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["code"], "LOYALTY_MESSAGE_INVALID");
     // Too soon to schedule.
     let soon = chrono::Utc::now() + chrono::Duration::minutes(2);
-    let (st, body) = call(&app, send(json!({"message": {"en": "Hi"}, "scheduled_for": soon})), &s.admin_token()).await;
+    let (st, body) = call(
+        &app,
+        send(json!({"message": {"en": "Hi"}, "scheduled_for": soon})),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["code"], "LOYALTY_MESSAGE_SCHEDULE");
 
@@ -737,43 +936,94 @@ async fn a_message_reaches_its_audience_within_its_limits(pool: PgPool) {
     assert_eq!(st, StatusCode::OK, "{sent}");
     let id: Uuid = sent["id"].as_str().unwrap().parse().unwrap();
     finish(&pool, id).await;
-    let (_, got) = call(&app, test::TestRequest::get().uri(&format!("/loyalty/broadcasts/{id}")), &s.admin_token()).await;
+    let (_, got) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/loyalty/broadcasts/{id}")),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(got["status"], "sent", "{got}");
     assert_eq!(got["recipients"], 3);
     assert_eq!(got["sent"], 2, "Aya and Badr");
     assert_eq!(got["skipped_opted_out"], 1, "Cyrine opted out");
-    assert_eq!(got["unreachable"], 2, "no card in a wallet, and WhatsApp was not asked for");
+    assert_eq!(
+        got["unreachable"], 2,
+        "no card in a wallet, and WhatsApp was not asked for"
+    );
 
     // A second message the same day: both were messaged under 20 hours ago.
-    let (_, second) = call(&app, send(json!({"message": {"en": "See you soon"}})), &s.admin_token()).await;
+    let (_, second) = call(
+        &app,
+        send(json!({"message": {"en": "See you soon"}})),
+        &s.admin_token(),
+    )
+    .await;
     let id2: Uuid = second["id"].as_str().unwrap().parse().unwrap();
     finish(&pool, id2).await;
-    let (_, got) = call(&app, test::TestRequest::get().uri(&format!("/loyalty/broadcasts/{id2}")), &s.admin_token()).await;
+    let (_, got) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/loyalty/broadcasts/{id2}")),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(got["skipped_recent"], 2, "{got}");
     assert_eq!(got["sent"], 0);
 
     // The third is allowed, the fourth is over the day's limit of 3.
-    let (st, _) = call(&app, send(json!({"message": {"en": "Third"}})), &s.admin_token()).await;
+    let (st, _) = call(
+        &app,
+        send(json!({"message": {"en": "Third"}})),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
-    let (st, body) = call(&app, send(json!({"message": {"en": "Fourth"}})), &s.admin_token()).await;
+    let (st, body) = call(
+        &app,
+        send(json!({"message": {"en": "Fourth"}})),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(body["code"], "LOYALTY_MESSAGE_DAILY_LIMIT");
 
     // A scheduled one can be cancelled once.
     let later = chrono::Utc::now() + chrono::Duration::days(2);
-    let (st, sched) = call(&app, send(json!({"message": {"en": "Later"}, "scheduled_for": later})), &s.admin_token()).await;
+    let (st, sched) = call(
+        &app,
+        send(json!({"message": {"en": "Later"}, "scheduled_for": later})),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{sched}");
     assert_eq!(sched["status"], "scheduled");
-    let cancel = format!("/loyalty/broadcasts/{}/cancel", sched["id"].as_str().unwrap());
-    let (st, c1) = call(&app, test::TestRequest::post().uri(&cancel), &s.admin_token()).await;
+    let cancel = format!(
+        "/loyalty/broadcasts/{}/cancel",
+        sched["id"].as_str().unwrap()
+    );
+    let (st, c1) = call(
+        &app,
+        test::TestRequest::post().uri(&cancel),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(c1["status"], "cancelled");
-    let (st, c2) = call(&app, test::TestRequest::post().uri(&cancel), &s.admin_token()).await;
+    let (st, c2) = call(
+        &app,
+        test::TestRequest::post().uri(&cancel),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(c2["code"], "LOYALTY_MESSAGE_NOT_CANCELLABLE");
 
     // The log and the quota.
-    let (_, page) = call(&app, test::TestRequest::get().uri("/loyalty/broadcasts"), &s.manager_token()).await;
+    let (_, page) = call(
+        &app,
+        test::TestRequest::get().uri("/loyalty/broadcasts"),
+        &s.manager_token(),
+    )
+    .await;
     assert_eq!(page["total"], 4);
     assert_eq!(page["sent_last_24h"], 3);
     assert_eq!(page["limits"]["daily_limit"], 3);
@@ -787,9 +1037,17 @@ async fn a_message_reaches_its_audience_within_its_limits(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let row = madar_rust::loyalty::model::find_by_id(&pool, a).await.unwrap().unwrap();
+    let row = madar_rust::loyalty::model::find_by_id(&pool, a)
+        .await
+        .unwrap()
+        .unwrap();
     madar_rust::loyalty::wallet::notices::mark_seen(&pool, &row).await;
-    let (_, got) = call(&app, test::TestRequest::get().uri(&format!("/loyalty/broadcasts/{id}")), &s.admin_token()).await;
+    let (_, got) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/loyalty/broadcasts/{id}")),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(got["seen"], 1);
     let _ = b;
 }
@@ -820,17 +1078,41 @@ async fn segments_filter_the_members_and_the_figures_add_up(pool: PgPool) {
         .await
         .unwrap();
     }
-    let q = |body: Value| test::TestRequest::post().uri("/loyalty/members/query").set_json(body);
-    let (st, page) = call(&app, q(json!({"audience": {"rules": [{"type": "reward_ready", "track": 1}]}})), &s.admin_token()).await;
+    let q = |body: Value| {
+        test::TestRequest::post()
+            .uri("/loyalty/members/query")
+            .set_json(body)
+    };
+    let (st, page) = call(
+        &app,
+        q(json!({"audience": {"rules": [{"type": "reward_ready", "track": 1}]}})),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{page}");
     assert_eq!(page["total"], 1);
     assert_eq!(page["rows"][0]["name"], "Amal");
     assert_eq!(page["rows"][0]["rewards_ready"], 1, "6 / 5");
-    let (_, page) = call(&app, q(json!({"audience": {"rules": [{"type": "reward_ready", "track": 2}]}})), &s.admin_token()).await;
+    let (_, page) = call(
+        &app,
+        q(json!({"audience": {"rules": [{"type": "reward_ready", "track": 2}]}})),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(page["rows"][0]["name"], "Basma", "4 of 4 on track 2");
     assert_eq!(page["rows"][0]["tracks"][1]["rewards_ready"], 1);
-    let (_, page) = call(&app, q(json!({"sort": "balance", "desc": true})), &s.admin_token()).await;
-    let names: Vec<&str> = page["rows"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let (_, page) = call(
+        &app,
+        q(json!({"sort": "balance", "desc": true})),
+        &s.admin_token(),
+    )
+    .await;
+    let names: Vec<&str> = page["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, ["Amal", "Basma", "Cherif"]);
     // A contradictory segment is refused with its code; a teller may not list.
     let (st, body) = call(
@@ -847,7 +1129,12 @@ async fn segments_filter_the_members_and_the_figures_add_up(pool: PgPool) {
     // The figures over today: 3 joined; 6 + 2 + 4 = 12 earned... as
     // adjustments, which are not earns: earned counts `earn` rows only, so 0;
     // active = the 2 members with a ledger row today.
-    let (st, stats) = call(&app, test::TestRequest::get().uri("/loyalty/stats"), &s.admin_token()).await;
+    let (st, stats) = call(
+        &app,
+        test::TestRequest::get().uri("/loyalty/stats"),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{stats}");
     assert_eq!(stats["members_total"], 3);
     assert_eq!(stats["new_members"], 3);
@@ -856,7 +1143,12 @@ async fn segments_filter_the_members_and_the_figures_add_up(pool: PgPool) {
     assert_eq!(stats["daily"].as_array().unwrap().len(), 30);
 
     // A member's wallet.
-    let (st, w) = call(&app, test::TestRequest::get().uri(&format!("/loyalty/members/{a}/wallet")), &s.admin_token()).await;
+    let (st, w) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/loyalty/members/{a}/wallet")),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{w}");
     assert_eq!(w["apple_devices"], 0);
     assert_eq!(w["google_card"], false);
@@ -889,11 +1181,137 @@ async fn a_tracks_earn_and_redeem_show_in_the_figures_per_track(pool: PgPool) {
     )
     .await;
     assert!(st.is_success(), "{st} {body}");
-    let (_, stats) = call(&app, test::TestRequest::get().uri("/loyalty/stats"), &s.admin_token()).await;
+    let (_, stats) = call(
+        &app,
+        test::TestRequest::get().uri("/loyalty/stats"),
+        &s.admin_token(),
+    )
+    .await;
     assert_eq!(stats["earned"], 9, "5 + 4");
     assert_eq!(stats["redemptions"], 1);
     assert_eq!(
         stats["per_track"],
         json!([{"position": 1, "earned": 5, "redemptions": 0}, {"position": 2, "earned": 4, "redemptions": 1}])
     );
+}
+
+/// Real responses from a three-track shop, for the old-client decode check
+/// (released POS madar-api models must read them). Written only when asked:
+///       MADAR_WRITE_TRACK_CAPTURES=/some/dir scripts/run_tests.sh rewards_dashboard
+#[sqlx::test]
+async fn captures_for_old_clients(pool: PgPool) {
+    let Ok(dir) = std::env::var("MADAR_WRITE_TRACK_CAPTURES") else {
+        return;
+    };
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamps(&pool, s.org, 8).await;
+    sqlx::query(
+        "INSERT INTO loyalty_reward_items (org_id, menu_item_id, cost_currency, cost_amount) VALUES ($1,$2,'visits',5)",
+    )
+    .bind(s.org)
+    .bind(s.cola)
+    .execute(&pool)
+    .await
+    .unwrap();
+    put_tracks(&app, &s, three_tracks(&s)).await;
+    let m = member(&pool, s.org, "201000000199", "Capture").await;
+    let (_, order) = sell(
+        &app,
+        &s,
+        json!([{"menu_item_id": s.cola, "quantity": 6}, {"menu_item_id": s.croissant, "quantity": 5}]),
+        None,
+        json!([]),
+    )
+    .await;
+    let (_, award_r) = award(&app, &s, order["id"].as_str().unwrap(), m).await;
+    let (_, scan) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/loyalty/lookup")
+            .set_json(json!({"branch_id": s.branch, "customer_id": m})),
+        &s.teller_token(),
+    )
+    .await;
+    let (_, sale) = sell(
+        &app,
+        &s,
+        json!([{"menu_item_id": s.cola, "quantity": 1}, {"menu_item_id": s.cookie, "quantity": 1}]),
+        Some(m),
+        json!([{"item_index": 0}, {"item_index": 1, "track": 2}]),
+    )
+    .await;
+    let (_, read_back) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/orders/{}", sale["id"].as_str().unwrap())),
+        &s.admin_token(),
+    )
+    .await;
+    let (_, detail) = call(
+        &app,
+        test::TestRequest::get().uri(&format!("/loyalty/members/{m}")),
+        &s.admin_token(),
+    )
+    .await;
+    let (_, counter) = call(
+        &app,
+        test::TestRequest::post().uri("/loyalty/counter/stamp").set_json(json!({
+            "branch_id": s.branch, "customer_id": m, "items": 1, "idempotency_key": "capture-0001", "track": 3
+        })),
+        &s.teller_token(),
+    )
+    .await;
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, v) in [
+        ("award_result", award_r),
+        ("scan_result", scan),
+        ("order_full", read_back),
+        ("member_detail", detail),
+        ("counter_result", counter),
+    ] {
+        assert!(!v.is_null(), "{name}");
+        std::fs::write(
+            format!("{dir}/{name}.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[sqlx::test]
+async fn a_refund_claws_back_each_tracks_earn_in_proportion(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamps(&pool, s.org, 8).await;
+    put_tracks(&app, &s, three_tracks(&s)).await;
+    let m = member(&pool, s.org, "201000000114", "Eman").await;
+    // 2 colas (30 EGP) + 3 croissants (55 EGP): 6000 + 16500 = 22500 piastres.
+    let (_, order) = sell(
+        &app,
+        &s,
+        json!([{"menu_item_id": s.cola, "quantity": 2}, {"menu_item_id": s.croissant, "quantity": 3}]),
+        None,
+        json!([]),
+    )
+    .await;
+    assert_eq!(order["total_amount"], 22500, "{order}");
+    let oid = order["id"].as_str().unwrap().to_string();
+    award(&app, &s, &oid, m).await;
+    assert_eq!(
+        (visits(&pool, m).await, track_balance(&pool, m, 2).await),
+        (5, 3)
+    );
+    // Half the money back: each earn follows it, floor(earned × 11250 / 22500):
+    // track 1 floor(5 / 2) = 2, track 2 floor(3 / 2) = 1.
+    let (st, body) = call(
+        &app,
+        test::TestRequest::post().uri("/refunds").set_json(json!({
+            "order_id": oid, "amount": 11250, "method": "cash", "reason": "customer_request"
+        })),
+        &s.admin_token(),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {body}");
+    assert_eq!(visits(&pool, m).await, 3, "5 - 2");
+    assert_eq!(track_balance(&pool, m, 2).await, 2, "3 - 1");
 }

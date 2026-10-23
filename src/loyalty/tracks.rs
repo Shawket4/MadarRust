@@ -189,7 +189,10 @@ pub fn member_tracks(
                 let (size, balance) = if d.position == 1 {
                     (track_one_size, track_one_balance)
                 } else {
-                    (d.size.unwrap_or(1), balances.get(&d.position).copied().unwrap_or(0))
+                    (
+                        d.size.unwrap_or(1),
+                        balances.get(&d.position).copied().unwrap_or(0),
+                    )
                 };
                 let c = madar_card::tracks::track_card(balance, size);
                 MemberTrack {
@@ -223,7 +226,12 @@ pub async fn for_member(
         return Ok(None);
     }
     let b = balances(pool, member.id).await?;
-    Ok(member_tracks(&defs, member.balance_in(mode), track_one_size, &b))
+    Ok(member_tracks(
+        &defs,
+        member.balance_in(mode),
+        track_one_size,
+        &b,
+    ))
 }
 
 /// What a track 2–4 offers at the till: each of its items at the track's size.
@@ -296,7 +304,11 @@ pub fn stamps_for_track(def: &TrackDef, lines: &[OrderLine]) -> i32 {
         .filter(|l| def.items.contains(&l.menu_item_id))
         .map(|l| (l.quantity - l.redeemed_units).max(0))
         .sum();
-    if def.per_item { paid } else { i32::from(paid > 0) }
+    if def.per_item {
+        paid
+    } else {
+        i32::from(paid > 0)
+    }
 }
 
 /// What one track earned on an award.
@@ -322,7 +334,10 @@ pub async fn award_for_order(
     created_by: Option<Uuid>,
 ) -> Result<Vec<TrackAward>, AppError> {
     let mut out = Vec::new();
-    for d in defs.iter().filter(|d| d.position > 1 && !d.items.is_empty()) {
+    for d in defs
+        .iter()
+        .filter(|d| d.position > 1 && !d.items.is_empty())
+    {
         let mut stamps = stamps_for_track(d, lines);
         if stamps > 0 && d.cap.is_some() {
             let current: i32 = sqlx::query_scalar(
@@ -431,7 +446,8 @@ pub async fn put_tracks(
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
     let (org_id, claims) = super::settings::scope_org(pool, &req, None).await?;
-    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyCardDesign, None).await?;
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyCardDesign, None)
+        .await?;
     let settings = super::settings::load_scope(pool, org_id, None)
         .await?
         .unwrap_or_else(|| super::settings::LoyaltySettings::defaults(org_id, None));
@@ -552,8 +568,16 @@ mod tests {
         let s = Uuid::from_u128(1);
         let latte = Uuid::from_u128(2);
         let lines = [
-            OrderLine { menu_item_id: s, quantity: 3, redeemed_units: 1 },
-            OrderLine { menu_item_id: latte, quantity: 2, redeemed_units: 0 },
+            OrderLine {
+                menu_item_id: s,
+                quantity: 3,
+                redeemed_units: 1,
+            },
+            OrderLine {
+                menu_item_id: latte,
+                quantity: 2,
+                redeemed_units: 0,
+            },
         ];
         // Three sandwiches, one free: two paid units earn two stamps.
         assert_eq!(stamps_for_track(&def(vec![s], true), &lines), 2);

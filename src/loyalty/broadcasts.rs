@@ -134,13 +134,15 @@ const BROADCAST_COLS: &str = "b.id, b.line_en, b.line_ar, b.audience, b.whatsapp
 
 async fn may_read(req: &HttpRequest, pool: &PgPool) -> Result<Uuid, AppError> {
     let (org_id, claims) = super::settings::scope_org(pool, req, None).await?;
-    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None).await?;
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None)
+        .await?;
     Ok(org_id)
 }
 
 async fn may_send(req: &HttpRequest, pool: &PgPool) -> Result<(Uuid, Option<Uuid>), AppError> {
     let (org_id, claims) = super::settings::scope_org(pool, req, None).await?;
-    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyBroadcast, None).await?;
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyBroadcast, None)
+        .await?;
     Ok((org_id, claims.user_id_safe().ok()))
 }
 
@@ -158,7 +160,11 @@ fn audience_from(
     super::crm::push_audience(qb, audience, mode, sizes);
 }
 
-async fn count(pool: &PgPool, org_id: Uuid, audience: &Audience) -> Result<AudienceCount, AppError> {
+async fn count(
+    pool: &PgPool,
+    org_id: Uuid,
+    audience: &Audience,
+) -> Result<AudienceCount, AppError> {
     let (mode, sizes, _, _) = super::crm::programme(pool, org_id).await?;
     super::crm::check_audience(audience, &sizes)?;
     let apple = "EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)";
@@ -232,7 +238,11 @@ pub async fn create(
     if !problems.is_empty() {
         return Err(AppError::Refused {
             code: CODE_MESSAGE_INVALID,
-            reason: problems.iter().map(|p| format!("{} ({})", p.code, p.path)).collect::<Vec<_>>().join(", "),
+            reason: problems
+                .iter()
+                .map(|p| format!("{} ({})", p.code, p.path))
+                .collect::<Vec<_>>()
+                .join(", "),
         });
     }
     let reach = count(pool, org_id, &body.audience).await?;
@@ -316,10 +326,11 @@ pub async fn list(
     .bind(offset)
     .fetch_all(pool)
     .await?;
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM loyalty_broadcasts WHERE org_id = $1")
-        .bind(org_id)
-        .fetch_one(pool)
-        .await?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM loyalty_broadcasts WHERE org_id = $1")
+            .bind(org_id)
+            .fetch_one(pool)
+            .await?;
     Ok(HttpResponse::Ok().json(BroadcastsPage {
         items,
         total,
@@ -331,7 +342,11 @@ pub async fn list(
 #[utoipa::path(get, path = "/loyalty/broadcasts/{id}", tag = "loyalty", operation_id = "get_loyalty_broadcast",
     params(("id" = Uuid, Path)), responses((status = 200, body = Broadcast), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn get(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn get(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
     let org_id = may_read(&req, pool).await?;
     Ok(HttpResponse::Ok().json(one(pool, org_id, *id).await?))
@@ -343,7 +358,11 @@ pub async fn get(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>) -> 
     responses((status = 200, body = Broadcast),
         (status = 409, description = "LOYALTY_MESSAGE_NOT_CANCELLABLE"), AppErrorResponse),
     security(("bearer_jwt" = [])))]
-pub async fn cancel(req: HttpRequest, pool: crate::db::Db, id: web::Path<Uuid>) -> Result<HttpResponse, AppError> {
+pub async fn cancel(
+    req: HttpRequest,
+    pool: crate::db::Db,
+    id: web::Path<Uuid>,
+) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
     let (org_id, _) = may_send(&req, pool).await?;
     let done = sqlx::query(
@@ -407,7 +426,8 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     };
     if b.status == "scheduled" {
         // The daily limit, checked when it actually goes.
-        let used = u32::try_from(sent_last_24h(pool, b.org_id).await?.saturating_sub(1)).unwrap_or(u32::MAX);
+        let used = u32::try_from(sent_last_24h(pool, b.org_id).await?.saturating_sub(1))
+            .unwrap_or(u32::MAX);
         if madar_card::message::may_send(used).is_err() {
             tracing::warn!(broadcast = %id, "loyalty: scheduled message over the daily limit; cancelled");
             sqlx::query("UPDATE loyalty_broadcasts SET status = 'cancelled', cancelled_at = now() WHERE id = $1")
@@ -462,7 +482,10 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
     .bind(BATCH)
     .fetch_all(pool)
     .await?;
-    let message = Message { en: b.line_en.clone(), ar: b.line_ar.clone() };
+    let message = Message {
+        en: b.line_en.clone(),
+        ar: b.line_ar.clone(),
+    };
     for customer in batch {
         // Claimed first (stamped, still pending), so a second runner never
         // sends it again and the broadcast stays `sending` until it lands.
@@ -495,7 +518,15 @@ pub async fn run_one(pool: &PgPool, id: Uuid) -> Result<(), AppError> {
                 Some(member) if !member.marketing_opt_out => {
                     let line = message.line_for(member.locale == "ar").to_string();
                     let whatsapp = b.whatsapp_fallback.then(|| line.clone());
-                    match super::wallet::notices::announce_with(pool, &member, &line, whatsapp.as_deref(), Some(id)).await {
+                    match super::wallet::notices::announce_with(
+                        pool,
+                        &member,
+                        &line,
+                        whatsapp.as_deref(),
+                        Some(id),
+                    )
+                    .await
+                    {
                         Ok(ch) => ("sent", Some(ch)),
                         Err(e) => {
                             tracing::warn!(broadcast = %id, customer_id = %customer, error = %e, "loyalty: message not delivered");

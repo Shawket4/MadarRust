@@ -81,7 +81,12 @@ pub fn colours_of(brand: &OrgBrand) -> madar_card::Colours {
 }
 
 /// What a design is checked against for this shop.
-pub fn ctx_of(defs: &[TrackDef], mode: Mode, track_one_size: i32, brand: &OrgBrand) -> madar_card::Ctx {
+pub fn ctx_of(
+    defs: &[TrackDef],
+    mode: Mode,
+    track_one_size: i32,
+    brand: &OrgBrand,
+) -> madar_card::Ctx {
     madar_card::Ctx {
         mode: match mode {
             Mode::Points => madar_card::tracks::Mode::Points,
@@ -91,7 +96,11 @@ pub fn ctx_of(defs: &[TrackDef], mode: Mode, track_one_size: i32, brand: &OrgBra
             .iter()
             .map(|d| madar_card::TrackRef {
                 position: d.position,
-                size: if d.position == 1 { track_one_size } else { d.size.unwrap_or(1) },
+                size: if d.position == 1 {
+                    track_one_size
+                } else {
+                    d.size.unwrap_or(1)
+                },
             })
             .collect(),
         has_photo: brand.custom_branding && brand.card_image_url.is_some(),
@@ -118,7 +127,9 @@ pub async fn for_member(
     brand: &OrgBrand,
 ) -> Option<Arc<DesignedCard>> {
     let mode = settings.mode();
-    let defs = crate::loyalty::tracks::load(pool, member.org_id, mode).await.ok()?;
+    let defs = crate::loyalty::tracks::load(pool, member.org_id, mode)
+        .await
+        .ok()?;
     let rewards = if settings.reward_any_item {
         Vec::new()
     } else {
@@ -132,11 +143,16 @@ pub async fn for_member(
         None if defs.len() > 1 => {
             let ctx = ctx_of(&defs, mode, track_one_size, brand);
             let tracks: Vec<madar_card::Track> = defs.iter().map(TrackDef::to_card).collect();
-            (0, madar_card::templates::default_design(&colours_of(brand), &ctx, &tracks))
+            (
+                0,
+                madar_card::templates::default_design(&colours_of(brand), &ctx, &tracks),
+            )
         }
         None => return None,
     };
-    let mut balances = crate::loyalty::tracks::balances(pool, member.id).await.ok()?;
+    let mut balances = crate::loyalty::tracks::balances(pool, member.id)
+        .await
+        .ok()?;
     balances.insert(1, member.balance_in(mode));
     Some(Arc::new(DesignedCard {
         org_id: member.org_id,
@@ -147,8 +163,14 @@ pub async fn for_member(
         track_one_size,
         programme: settings.program_name.clone(),
         programme_ar: settings.program_name_ar.clone(),
-        photo_url: brand.custom_branding.then(|| brand.card_image_url.clone()).flatten(),
-        logo_url: brand.custom_branding.then(|| brand.logo_url.clone()).flatten(),
+        photo_url: brand
+            .custom_branding
+            .then(|| brand.card_image_url.clone())
+            .flatten(),
+        logo_url: brand
+            .custom_branding
+            .then(|| brand.logo_url.clone())
+            .flatten(),
         logo_is_mark: brand.logo_is_mark,
         balances,
         member_name: member.name.clone(),
@@ -160,7 +182,11 @@ fn states(defs: &[TrackDef], track_one_size: i32, balances: &HashMap<u8, i32>) -
     defs.iter()
         .map(|d| TrackState {
             position: d.position,
-            size: if d.position == 1 { track_one_size } else { d.size.unwrap_or(1) },
+            size: if d.position == 1 {
+                track_one_size
+            } else {
+                d.size.unwrap_or(1)
+            },
             balance: balances.get(&d.position).copied().unwrap_or(0),
             colour: d.colour.clone(),
             shape: d
@@ -223,28 +249,58 @@ impl DesignedCard {
             )),
             FieldSource::Rewards { track } => {
                 let line = madar_card::text::earned_line(self.balance(track), self.size(track))?;
-                let n = madar_card::tracks::track_card(self.balance(track), self.size(track)).rewards_ready;
-                let ready = if n > 1 { "Rewards ready" } else { "Reward ready" };
-                let label = match self.def(track).map(|d| d.name_en.trim()).filter(|s| !s.is_empty()) {
+                let n = madar_card::tracks::track_card(self.balance(track), self.size(track))
+                    .rewards_ready;
+                let ready = if n > 1 {
+                    "Rewards ready"
+                } else {
+                    "Reward ready"
+                };
+                let label = match self
+                    .def(track)
+                    .map(|d| d.name_en.trim())
+                    .filter(|s| !s.is_empty())
+                {
                     Some(name) if track > 1 => format!("{name} · {ready}"),
                     _ => ready.to_string(),
                 };
                 Some((format!("rewards_t{track}"), label, line))
             }
-            FieldSource::Member => Some(("member".into(), "Member".into(), self.member_name.clone())),
+            FieldSource::Member => {
+                Some(("member".into(), "Member".into(), self.member_name.clone()))
+            }
         }
     }
 
     /// The English → Arabic pairs the designed fields add to `pass.strings`.
     pub fn strings(&self) -> Vec<super::i18n::Pair> {
         let mut out = vec![
-            super::i18n::Pair { en: "Reward ready".into(), ar: "مكافأة جاهزة".into() },
-            super::i18n::Pair { en: "Rewards ready".into(), ar: "مكافآت جاهزة".into() },
-            super::i18n::Pair { en: "Stamps".into(), ar: "الأختام".into() },
+            super::i18n::Pair {
+                en: "Reward ready".into(),
+                ar: "مكافأة جاهزة".into(),
+            },
+            super::i18n::Pair {
+                en: "Rewards ready".into(),
+                ar: "مكافآت جاهزة".into(),
+            },
+            super::i18n::Pair {
+                en: "Stamps".into(),
+                ar: "الأختام".into(),
+            },
         ];
-        for d in self.defs.iter().filter(|d| !d.name_en.trim().is_empty() && !d.name_ar.trim().is_empty()) {
-            out.push(super::i18n::Pair { en: d.name_en.trim().into(), ar: d.name_ar.trim().into() });
-            for ready in [("Reward ready", "مكافأة جاهزة"), ("Rewards ready", "مكافآت جاهزة")] {
+        for d in self
+            .defs
+            .iter()
+            .filter(|d| !d.name_en.trim().is_empty() && !d.name_ar.trim().is_empty())
+        {
+            out.push(super::i18n::Pair {
+                en: d.name_en.trim().into(),
+                ar: d.name_ar.trim().into(),
+            });
+            for ready in [
+                ("Reward ready", "مكافأة جاهزة"),
+                ("Rewards ready", "مكافآت جاهزة"),
+            ] {
                 out.push(super::i18n::Pair {
                     en: format!("{} · {}", d.name_en.trim(), ready.0),
                     ar: format!("{} · {}", d.name_ar.trim(), ready.1),
@@ -265,7 +321,12 @@ impl DesignedCard {
         let card = &mut pass["storeCard"];
         let obj = card.as_object_mut();
         if let Some(o) = obj {
-            for k in ["headerFields", "primaryFields", "secondaryFields", "auxiliaryFields"] {
+            for k in [
+                "headerFields",
+                "primaryFields",
+                "secondaryFields",
+                "auxiliaryFields",
+            ] {
                 o.remove(k);
             }
         }
@@ -278,7 +339,10 @@ impl DesignedCard {
         let a = &self.design.apple;
         let mut groups: Vec<(&str, Vec<Value>)> = vec![
             ("headerFields", render(&a.header)),
-            ("primaryFields", render(&a.primary.into_iter().collect::<Vec<_>>())),
+            (
+                "primaryFields",
+                render(&a.primary.into_iter().collect::<Vec<_>>()),
+            ),
             ("secondaryFields", render(&a.secondary)),
             ("auxiliaryFields", render(&a.auxiliary)),
         ];
@@ -297,11 +361,15 @@ impl DesignedCard {
 
     /// Google: its two face slots, localized like the classic card's.
     pub fn restyle_google(&self, object: &mut Value) {
-        let ar: HashMap<String, String> = self.strings().into_iter().map(|p| (p.en, p.ar)).collect();
-        let classic: HashMap<String, String> = [(super::google::balance_label(self.mode), match self.mode {
-            Mode::Points => "نقاط",
-            Mode::Visits => "طلبات",
-        })]
+        let ar: HashMap<String, String> =
+            self.strings().into_iter().map(|p| (p.en, p.ar)).collect();
+        let classic: HashMap<String, String> = [(
+            super::google::balance_label(self.mode),
+            match self.mode {
+                Mode::Points => "نقاط",
+                Mode::Visits => "طلبات",
+            },
+        )]
         .into_iter()
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect();
@@ -369,8 +437,14 @@ impl DesignedCard {
         what.hash(&mut h);
         self.org_id.hash(&mut h);
         self.revision.hash(&mut h);
-        serde_json::to_string(&self.design).unwrap_or_default().hash(&mut h);
-        format!("{:?}", states(&self.defs, self.track_one_size, &self.balances)).hash(&mut h);
+        serde_json::to_string(&self.design)
+            .unwrap_or_default()
+            .hash(&mut h);
+        format!(
+            "{:?}",
+            states(&self.defs, self.track_one_size, &self.balances)
+        )
+        .hash(&mut h);
         self.photo_url.hash(&mut h);
         self.logo_url.hash(&mut h);
         h.finish()
@@ -394,7 +468,11 @@ impl DesignedCard {
     pub fn apple_strips_now(&self) -> Vec<(String, Vec<u8>)> {
         let mut out = Vec::with_capacity(6);
         for scale in 1..=3u32 {
-            let name = if scale == 1 { "strip.png".to_string() } else { format!("strip@{scale}x.png") };
+            let name = if scale == 1 {
+                "strip.png".to_string()
+            } else {
+                format!("strip@{scale}x.png")
+            };
             for (arabic, path) in [(false, name.clone()), (true, format!("ar.lproj/{name}"))] {
                 if let Some(png) = render_png(self, Store::Apple, scale, arabic) {
                     out.push((path, png));
@@ -406,12 +484,16 @@ impl DesignedCard {
 }
 
 /// Rendered strips and heroes, per (org, revision, design, progress, pictures).
-static IMAGES: LazyLock<moka::future::Cache<u64, Arc<Vec<(String, Vec<u8>)>>>> = LazyLock::new(|| {
-    moka::future::Cache::builder()
-        .max_capacity(2048)
-        .time_to_live(Duration::from_secs(3600))
-        .build()
-});
+/// Named PNGs.
+type Images = Arc<Vec<(String, Vec<u8>)>>;
+
+static IMAGES: LazyLock<moka::future::Cache<u64, Images>> =
+    LazyLock::new(|| {
+        moka::future::Cache::builder()
+            .max_capacity(2048)
+            .time_to_live(Duration::from_secs(3600))
+            .build()
+    });
 
 fn rgb(hex: &str) -> String {
     match crate::orgs::branding::parse_hex(hex) {
@@ -428,7 +510,11 @@ fn rasterize(svg: &str, w: u32, h: u32) -> Option<image::RgbaImage> {
     };
     let tree = usvg::Tree::from_str(svg, &opt).ok()?;
     let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
-    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     let mut img = image::RgbaImage::new(w, h);
     for (i, p) in pixmap.pixels().iter().enumerate() {
         let c = p.demultiply();
@@ -439,7 +525,12 @@ fn rasterize(svg: &str, w: u32, h: u32) -> Option<image::RgbaImage> {
 }
 
 /// One image of the card: Apple's strip at `scale`, or Google's hero.
-pub fn render_image(card: &DesignedCard, store: Store, scale: u32, arabic: bool) -> Option<image::RgbaImage> {
+pub fn render_image(
+    card: &DesignedCard,
+    store: Store,
+    scale: u32,
+    arabic: bool,
+) -> Option<image::RgbaImage> {
     let canvas = madar_card::grid::Canvas::of(store, scale);
     let (w, h) = (canvas.w, canvas.h);
     let d = &card.design;
@@ -449,7 +540,11 @@ pub fn render_image(card: &DesignedCard, store: Store, scale: u32, arabic: bool)
     // Apple writes the primary field), else transparent under the SVG's own.
     let mut base = image::RgbaImage::from_pixel(w, h, image::Rgba([0, 0, 0, 0]));
     if d.ground.kind == GroundKind::Photo {
-        if let Some(img) = card.photo_url.as_deref().and_then(crate::orgs::branding::read_upload) {
+        if let Some(img) = card
+            .photo_url
+            .as_deref()
+            .and_then(crate::orgs::branding::read_upload)
+        {
             let mut scaled = img
                 .resize_to_fill(w, h, image::imageops::FilterType::CatmullRom)
                 .to_rgba8();
@@ -478,13 +573,23 @@ pub fn render_image(card: &DesignedCard, store: Store, scale: u32, arabic: bool)
         .map(|(r, g, b)| crate::orgs::branding::luminance(r, g, b) > 0.5)
         .unwrap_or(true);
     let f = madar_card::render::footer_rect(canvas, arabic);
-    if let Some(mut foot) = super::look::footer(scale.clamp(1, 3).max(if store == Store::Google { 3 } else { 1 }), light, arabic) {
+    if let Some(mut foot) = super::look::footer(
+        scale
+            .clamp(1, 3)
+            .max(if store == Store::Google { 3 } else { 1 }),
+        light,
+        arabic,
+    ) {
         if store == Store::Google {
             let fh = f.h.round().max(1.0) as u32;
             let fw = (foot.width() as f64 * fh as f64 / foot.height().max(1) as f64).round() as u32;
             foot = image::imageops::resize(&foot, fw, fh, image::imageops::FilterType::Lanczos3);
         }
-        let x = if arabic { (f.x + f.w) as i64 - foot.width() as i64 } else { f.x as i64 };
+        let x = if arabic {
+            (f.x + f.w) as i64 - foot.width() as i64
+        } else {
+            f.x as i64
+        };
         let y = (f.y + (f.h - foot.height() as f64) / 2.0).round() as i64;
         image::imageops::overlay(&mut base, &foot, x, y);
     }
@@ -494,10 +599,17 @@ pub fn render_image(card: &DesignedCard, store: Store, scale: u32, arabic: bool)
         if p.what != madar_card::render::Placed::Logo {
             continue;
         }
-        let logo = match card.logo_url.as_deref().and_then(crate::orgs::branding::read_logo) {
-            Some(img) if card.logo_is_mark => crate::orgs::branding::tint_mark(&img, &d.colours.foreground),
+        let logo = match card
+            .logo_url
+            .as_deref()
+            .and_then(crate::orgs::branding::read_logo)
+        {
+            Some(img) if card.logo_is_mark => {
+                crate::orgs::branding::tint_mark(&img, &d.colours.foreground)
+            }
             Some(img) => img,
-            None => match image::load_from_memory(super::look::present_logo(&d.colours.background)) {
+            None => match image::load_from_memory(super::look::present_logo(&d.colours.background))
+            {
                 Ok(i) => i,
                 Err(_) => continue,
             },
@@ -509,11 +621,17 @@ pub fn render_image(card: &DesignedCard, store: Store, scale: u32, arabic: bool)
         );
         let x = p.rect.x + (p.rect.w - f64::from(fitted.width())) / 2.0;
         let y = p.rect.y + (p.rect.h - f64::from(fitted.height())) / 2.0;
-        image::imageops::overlay(&mut base, &fitted.to_rgba8(), x.round() as i64, y.round() as i64);
+        image::imageops::overlay(
+            &mut base,
+            &fitted.to_rgba8(),
+            x.round() as i64,
+            y.round() as i64,
+        );
     }
 
     // A pass image is opaque: whatever is still transparent takes the ground.
-    let (br, bg, bb) = crate::orgs::branding::parse_hex(&d.colours.background).unwrap_or((0x0D, 0x62, 0x73));
+    let (br, bg, bb) =
+        crate::orgs::branding::parse_hex(&d.colours.background).unwrap_or((0x0D, 0x62, 0x73));
     for px in base.pixels_mut() {
         let a = f64::from(px.0[3]) / 255.0;
         let mix = |c: u8, g: u8| (f64::from(c) * a + f64::from(g) * (1.0 - a)).round() as u8;
@@ -534,21 +652,32 @@ pub fn render_png(card: &DesignedCard, store: Store, scale: u32, arabic: bool) -
 /// The Google hero for an org at a revision and a progress state, for the
 /// public route. Every number in `state` is checked against the shop's
 /// tracks, so the route renders nothing a card could not show.
-pub async fn hero_for_state(pool: &PgPool, org_id: Uuid, revision: i32, state: &str) -> Option<Vec<u8>> {
+pub async fn hero_for_state(
+    pool: &PgPool,
+    org_id: Uuid,
+    revision: i32,
+    state: &str,
+) -> Option<Vec<u8>> {
     let (progress, lang) = state.rsplit_once('-')?;
     let arabic = match lang {
         "ar" => true,
         "en" => false,
         _ => return None,
     };
-    let settings = crate::loyalty::settings::load_scope(pool, org_id, None).await.ok()??;
+    let settings = crate::loyalty::settings::load_scope(pool, org_id, None)
+        .await
+        .ok()??;
     let brand = crate::orgs::branding::load(pool, org_id).await.ok()?;
     let mode = settings.mode();
-    let defs = crate::loyalty::tracks::load(pool, org_id, mode).await.ok()?;
+    let defs = crate::loyalty::tracks::load(pool, org_id, mode)
+        .await
+        .ok()?;
     let rewards = if settings.reward_any_item {
         Vec::new()
     } else {
-        crate::loyalty::settings::rewards_org_in(pool, org_id, &settings).await.unwrap_or_default()
+        crate::loyalty::settings::rewards_org_in(pool, org_id, &settings)
+            .await
+            .unwrap_or_default()
     };
     let track_one_size = crate::loyalty::model::reward_target(&settings, &rewards);
     let design = match published(pool, org_id).await {
@@ -567,7 +696,11 @@ pub async fn hero_for_state(pool: &PgPool, org_id: Uuid, revision: i32, state: &
     let mut balances = HashMap::new();
     for (d, p) in defs.iter().zip(parts) {
         let v: i32 = p.parse().ok()?;
-        let size = if d.position == 1 { track_one_size } else { d.size.unwrap_or(1) };
+        let size = if d.position == 1 {
+            track_one_size
+        } else {
+            d.size.unwrap_or(1)
+        };
         if v < 0 || v >= size.max(1) {
             return None;
         }
@@ -582,8 +715,14 @@ pub async fn hero_for_state(pool: &PgPool, org_id: Uuid, revision: i32, state: &
         track_one_size,
         programme: settings.program_name.clone(),
         programme_ar: settings.program_name_ar.clone(),
-        photo_url: brand.custom_branding.then(|| brand.card_image_url.clone()).flatten(),
-        logo_url: brand.custom_branding.then(|| brand.logo_url.clone()).flatten(),
+        photo_url: brand
+            .custom_branding
+            .then(|| brand.card_image_url.clone())
+            .flatten(),
+        logo_url: brand
+            .custom_branding
+            .then(|| brand.logo_url.clone())
+            .flatten(),
         logo_is_mark: brand.logo_is_mark,
         balances,
         member_name: String::new(),
@@ -601,7 +740,11 @@ pub async fn hero_for_state(pool: &PgPool, org_id: Uuid, revision: i32, state: &
         .await
         .unwrap_or_else(|_| Arc::new(Vec::new()))
     };
-    let set = if cfg!(test) { build.await } else { IMAGES.get_with(key, build).await };
+    let set = if cfg!(test) {
+        build.await
+    } else {
+        IMAGES.get_with(key, build).await
+    };
     set.first().map(|(_, b)| b.clone())
 }
 
@@ -666,7 +809,14 @@ mod tests {
     use super::*;
     use crate::loyalty::tracks::TrackDef;
 
-    fn track(position: u8, en: &str, ar: &str, size: Option<i32>, colour: Option<&str>, shape: Option<&str>) -> TrackDef {
+    fn track(
+        position: u8,
+        en: &str,
+        ar: &str,
+        size: Option<i32>,
+        colour: Option<&str>,
+        shape: Option<&str>,
+    ) -> TrackDef {
         TrackDef {
             position,
             name_en: en.into(),
@@ -680,7 +830,12 @@ mod tests {
         }
     }
 
-    fn card(design: CardDesign, defs: Vec<TrackDef>, balances: &[(u8, i32)], one: i32) -> DesignedCard {
+    fn card(
+        design: CardDesign,
+        defs: Vec<TrackDef>,
+        balances: &[(u8, i32)],
+        one: i32,
+    ) -> DesignedCard {
         DesignedCard {
             org_id: Uuid::nil(),
             revision: 1,
@@ -709,13 +864,26 @@ mod tests {
     fn multi() -> (Vec<TrackDef>, madar_card::Ctx, Vec<madar_card::Track>) {
         let defs = vec![
             track(1, "Coffee", "قهوة", None, None, Some("cup")),
-            track(2, "Sandwich", "ساندوتش", Some(6), Some("#F2B33D"), Some("heart")),
+            track(
+                2,
+                "Sandwich",
+                "ساندوتش",
+                Some(6),
+                Some("#F2B33D"),
+                Some("heart"),
+            ),
         ];
         let ctx = madar_card::Ctx {
             mode: madar_card::tracks::Mode::Visits,
             tracks: vec![
-                madar_card::TrackRef { position: 1, size: 8 },
-                madar_card::TrackRef { position: 2, size: 6 },
+                madar_card::TrackRef {
+                    position: 1,
+                    size: 8,
+                },
+                madar_card::TrackRef {
+                    position: 2,
+                    size: 6,
+                },
             ],
             has_photo: false,
         };
@@ -732,7 +900,14 @@ mod tests {
         let names: Vec<&str> = strips.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            ["strip.png", "ar.lproj/strip.png", "strip@2x.png", "ar.lproj/strip@2x.png", "strip@3x.png", "ar.lproj/strip@3x.png"]
+            [
+                "strip.png",
+                "ar.lproj/strip.png",
+                "strip@2x.png",
+                "ar.lproj/strip@2x.png",
+                "strip@3x.png",
+                "ar.lproj/strip@3x.png"
+            ]
         );
         let img = image::load_from_memory(&strips[2].1).unwrap();
         assert_eq!((img.width(), img.height()), (750, 288));
@@ -761,9 +936,15 @@ mod tests {
         // 3 of 8: three filled, five empty, no joins past six steps.
         assert_eq!(obj["loyaltyPoints"]["balance"]["string"], "●●●○○○○○");
         assert_eq!(obj["loyaltyPoints"]["label"], "Coffee");
-        assert_eq!(obj["loyaltyPoints"]["localizedLabel"]["translatedValues"][0]["value"], "قهوة");
+        assert_eq!(
+            obj["loyaltyPoints"]["localizedLabel"]["translatedValues"][0]["value"],
+            "قهوة"
+        );
         // 7 of 6: one on the next card.
-        assert_eq!(obj["secondaryLoyaltyPoints"]["balance"]["string"], "●─○─○─○─○─○");
+        assert_eq!(
+            obj["secondaryLoyaltyPoints"]["balance"]["string"],
+            "●─○─○─○─○─○"
+        );
         assert_eq!(c.hero_state(true), "3-1-ar");
     }
 
@@ -778,7 +959,10 @@ mod tests {
         let one = vec![track(1, "", "", None, None, None)];
         let one_ctx = madar_card::Ctx {
             mode: madar_card::tracks::Mode::Visits,
-            tracks: vec![madar_card::TrackRef { position: 1, size: 8 }],
+            tracks: vec![madar_card::TrackRef {
+                position: 1,
+                size: 8,
+            }],
             has_photo: false,
         };
         let one_tracks: Vec<madar_card::Track> = one.iter().map(TrackDef::to_card).collect();
@@ -791,24 +975,56 @@ mod tests {
         cases.push(("multi-2".into(), card(m, defs, &[(1, 3), (2, 4)], 8)));
         let four = vec![
             track(1, "Coffee", "قهوة", None, None, Some("cup")),
-            track(2, "Sandwich", "ساندوتش", Some(6), Some("#F2B33D"), Some("heart")),
+            track(
+                2,
+                "Sandwich",
+                "ساندوتش",
+                Some(6),
+                Some("#F2B33D"),
+                Some("heart"),
+            ),
             track(3, "Juice", "عصير", Some(5), Some("#8BD3A8"), Some("star")),
-            track(4, "Dessert", "حلويات", Some(10), Some("#F4A6C1"), Some("gift")),
+            track(
+                4,
+                "Dessert",
+                "حلويات",
+                Some(10),
+                Some("#F4A6C1"),
+                Some("gift"),
+            ),
         ];
         let four_ctx = madar_card::Ctx {
             mode: madar_card::tracks::Mode::Visits,
             tracks: vec![
-                madar_card::TrackRef { position: 1, size: 8 },
-                madar_card::TrackRef { position: 2, size: 6 },
-                madar_card::TrackRef { position: 3, size: 5 },
-                madar_card::TrackRef { position: 4, size: 10 },
+                madar_card::TrackRef {
+                    position: 1,
+                    size: 8,
+                },
+                madar_card::TrackRef {
+                    position: 2,
+                    size: 6,
+                },
+                madar_card::TrackRef {
+                    position: 3,
+                    size: 5,
+                },
+                madar_card::TrackRef {
+                    position: 4,
+                    size: 10,
+                },
             ],
             has_photo: false,
         };
         let four_tracks: Vec<madar_card::Track> = four.iter().map(TrackDef::to_card).collect();
         let mut q = madar_card::templates::default_design(&colours(), &four_ctx, &four_tracks);
-        q.ground = madar_card::Ground { kind: GroundKind::Pattern, pattern: Some(madar_card::Pattern::Dots) };
-        cases.push(("multi-4".into(), card(q, four, &[(1, 5), (2, 2), (3, 4), (4, 7)], 8)));
+        q.ground = madar_card::Ground {
+            kind: GroundKind::Pattern,
+            pattern: Some(madar_card::Pattern::Dots),
+        };
+        cases.push((
+            "multi-4".into(),
+            card(q, four, &[(1, 5), (2, 2), (3, 4), (4, 7)], 8),
+        ));
         for (name, c) in cases {
             for (arabic, lang) in [(false, "en"), (true, "ar")] {
                 let a = render_png(&c, Store::Apple, 2, arabic).unwrap();

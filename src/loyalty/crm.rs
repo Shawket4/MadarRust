@@ -39,28 +39,37 @@ fn balance_sql(track: u8, mode: Mode) -> String {
 }
 
 /// When a member was last seen: their latest ledger row, else when they joined.
-pub const LAST_SEEN: &str =
-    "COALESCE((SELECT max(t.created_at) FROM loyalty_transactions t WHERE t.customer_id = m.id), m.enrolled_at)";
+pub const LAST_SEEN: &str = "COALESCE((SELECT max(t.created_at) FROM loyalty_transactions t WHERE t.customer_id = m.id), m.enrolled_at)";
 
 /// `AND …` for every rule of `audience`, over `loyalty_members_v m`. The rules
 /// have been validated (madar-card) before this is called; numbers are bound.
-pub fn push_audience(qb: &mut QueryBuilder<'_, Postgres>, audience: &Audience, mode: Mode, sizes: &Sizes) {
+pub fn push_audience(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    audience: &Audience,
+    mode: Mode,
+    sizes: &Sizes,
+) {
     for r in &audience.rules {
         match *r {
             Rule::BalanceAtLeast { track, value } => {
-                qb.push(format!(" AND {} >= ", balance_sql(track, mode))).push_bind(value);
+                qb.push(format!(" AND {} >= ", balance_sql(track, mode)))
+                    .push_bind(value);
             }
             Rule::BalanceAtMost { track, value } => {
-                qb.push(format!(" AND {} <= ", balance_sql(track, mode))).push_bind(value);
+                qb.push(format!(" AND {} <= ", balance_sql(track, mode)))
+                    .push_bind(value);
             }
             Rule::RewardReady { track } => {
                 let size = sizes.get(&track).copied().unwrap_or(i32::MAX).max(1);
-                qb.push(format!(" AND {} >= ", balance_sql(track, mode))).push_bind(size);
+                qb.push(format!(" AND {} >= ", balance_sql(track, mode)))
+                    .push_bind(size);
             }
             Rule::VisitedWithin { days } => {
-                qb.push(format!(" AND {LAST_SEEN} >= now() - make_interval(days => "))
-                    .push_bind(i32::try_from(days).unwrap_or(365))
-                    .push(")");
+                qb.push(format!(
+                    " AND {LAST_SEEN} >= now() - make_interval(days => "
+                ))
+                .push_bind(i32::try_from(days).unwrap_or(365))
+                .push(")");
             }
             Rule::NotVisitedFor { days } => {
                 qb.push(format!(" AND {LAST_SEEN} < now() - make_interval(days => "))
@@ -76,11 +85,14 @@ pub fn push_audience(qb: &mut QueryBuilder<'_, Postgres>, audience: &Audience, m
                 qb.push(" AND m.birth_month = ").push_bind(i16::from(month));
             }
             Rule::HasWallet { wallet } => {
-                let apple = "EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)";
+                let apple =
+                    "EXISTS (SELECT 1 FROM loyalty_pass_devices d WHERE d.customer_id = m.id)";
                 match wallet {
                     Wallet::Apple => qb.push(format!(" AND {apple}")),
                     Wallet::Google => qb.push(" AND m.google_object_id IS NOT NULL"),
-                    Wallet::None => qb.push(format!(" AND NOT {apple} AND m.google_object_id IS NULL")),
+                    Wallet::None => {
+                        qb.push(format!(" AND NOT {apple} AND m.google_object_id IS NULL"))
+                    }
                 };
             }
         }
@@ -101,14 +113,22 @@ pub async fn programme(
     let defs = super::tracks::load(pool, org_id, mode).await?;
     let mut sizes: Sizes = HashMap::new();
     for d in &defs {
-        sizes.insert(d.position, if d.position == 1 { one } else { d.size.unwrap_or(1) });
+        sizes.insert(
+            d.position,
+            if d.position == 1 {
+                one
+            } else {
+                d.size.unwrap_or(1)
+            },
+        );
     }
     Ok((mode, sizes, defs, one))
 }
 
 /// An audience checked with madar-card, or a coded refusal.
 pub fn check_audience(audience: &Audience, sizes: &Sizes) -> Result<(), AppError> {
-    let problems = madar_card::audience::validate_audience(audience, u8::try_from(sizes.len()).unwrap_or(1));
+    let problems =
+        madar_card::audience::validate_audience(audience, u8::try_from(sizes.len()).unwrap_or(1));
     if problems.is_empty() {
         return Ok(());
     }
@@ -195,7 +215,9 @@ fn needle(q: Option<&str>) -> Option<String> {
     q.map(str::trim).filter(|s| !s.is_empty()).map(|s| {
         format!(
             "%{}%",
-            s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            s.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
         )
     })
 }
@@ -213,7 +235,8 @@ pub async fn query_members(
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
     let (org_id, claims) = super::settings::scope_org(pool, &req, None).await?;
-    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None).await?;
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None)
+        .await?;
     let (mode, sizes, defs, one) = programme(pool, org_id).await?;
     check_audience(&body.audience, &sizes)?;
     let limit = body.limit.unwrap_or(50).clamp(1, 200);
@@ -304,7 +327,8 @@ pub async fn member_wallet(
 ) -> Result<HttpResponse, AppError> {
     let pool = pool.get_ref();
     let (org_id, claims) = super::settings::scope_org(pool, &req, None).await?;
-    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None).await?;
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None)
+        .await?;
     #[derive(sqlx::FromRow)]
     struct Row {
         apple_devices: i64,
@@ -406,13 +430,16 @@ pub async fn stats(
     let pool = pool.get_ref();
     let (org_id, claims) = super::settings::scope_org(pool, &req, None).await?;
     check_permission(pool, &claims, "loyalty", "read").await?;
-    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None).await?;
+    crate::authz::require::require(pool, &claims, crate::authz::Cap::LoyaltyMembersList, None)
+        .await?;
     let (mode, _, _, _) = programme(pool, org_id).await?;
-    let tz: String = sqlx::query_scalar("SELECT COALESCE(timezone::text, 'Africa/Cairo') FROM organizations WHERE id = $1")
-        .bind(org_id)
-        .fetch_optional(pool)
-        .await?
-        .unwrap_or_else(|| "Africa/Cairo".into());
+    let tz: String = sqlx::query_scalar(
+        "SELECT COALESCE(timezone::text, 'Africa/Cairo') FROM organizations WHERE id = $1",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or_else(|| "Africa/Cairo".into());
     let today: chrono::NaiveDate = sqlx::query_scalar("SELECT (now() AT TIME ZONE $1)::date")
         .bind(&tz)
         .fetch_one(pool)
@@ -420,7 +447,9 @@ pub async fn stats(
     let to = query.to.unwrap_or(today);
     let from = query.from.unwrap_or(to - chrono::Duration::days(29));
     if from > to || (to - from).num_days() > 366 {
-        return Err(AppError::BadRequest("from must be before to, at most a year apart".into()));
+        return Err(AppError::BadRequest(
+            "from must be before to, at most a year apart".into(),
+        ));
     }
     // Days run [from 00:00, to+1 00:00) in the shop's zone.
 
