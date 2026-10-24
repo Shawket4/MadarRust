@@ -95,16 +95,31 @@ pub fn origin_allowed(origin: &str, list: Option<&[String]>) -> bool {
     }
 }
 
-/// The caller's `Origin`, refused unless allowlisted. A request with no
-/// `Origin` is not one of the browser apps, and has no business with this
-/// cookie.
+/// The origin of a same-origin request that carries no `Origin` header.
+///
+/// Browsers leave `Origin` off a same-origin GET (Rewards' adopt, through its
+/// own `/api/`), but always say `Sec-Fetch-Site: same-origin`, a header no page
+/// can set. The origin is then the host the browser asked, as the proxy
+/// forwards it (`Host`, `X-Forwarded-Proto`).
+fn same_origin(req: &HttpRequest) -> Option<String> {
+    let site = req.headers().get("sec-fetch-site")?.to_str().ok()?;
+    if site != "same-origin" {
+        return None;
+    }
+    let info = req.connection_info();
+    Some(format!("{}://{}", info.scheme(), info.host()))
+}
+
+/// The caller's origin, refused unless allowlisted. A request with neither an
+/// `Origin` nor a same-origin fetch is not one of the browser apps, and has no
+/// business with this cookie.
 fn check_origin(req: &HttpRequest) -> Result<(), AppError> {
-    let origin = req
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::Forbidden("session: no Origin".into()))?;
-    if origin_allowed(origin, session_origins().as_deref()) {
+    let origin = match req.headers().get(header::ORIGIN) {
+        Some(v) => v.to_str().ok().map(str::to_string),
+        None => same_origin(req),
+    }
+    .ok_or_else(|| AppError::Forbidden("session: no Origin".into()))?;
+    if origin_allowed(&origin, session_origins().as_deref()) {
         Ok(())
     } else {
         Err(AppError::Forbidden("session: origin not allowed".into()))
