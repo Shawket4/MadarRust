@@ -113,6 +113,11 @@ pub async fn lookup(
     // screen that lists a reward the customer cannot afford is a screen that
     // tempts a teller into handing it over anyway.
     let balance = member.balance_in(mode);
+    // While a gift is open the till is told what it may be taken as: the whole
+    // catalogue, whatever the balance (the claim check's own input).
+    let birthday_gift = super::gifts::current(pool.get_ref(), member.id)
+        .await?
+        .map(|g| g.with_eligibility(&super::gifts::gift_programme(&settings, &all_rewards, true)));
     // Affordability only. The catalogue is already priced in this branch's
     // currency, so a second check against the row's stored one could only drop
     // rewards the shop had configured — a till that offered nothing while the
@@ -130,7 +135,7 @@ pub async fn lookup(
         max_rewards_per_order: settings.max_rewards_per_order,
         track_rewards,
         card,
-        birthday_gift: super::gifts::current(pool.get_ref(), member.id).await?,
+        birthday_gift,
     }))
 }
 

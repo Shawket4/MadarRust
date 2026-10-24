@@ -72361,6 +72361,24 @@
           "valid_until"
         ],
         "properties": {
+          "any_item": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The till's lookup only, while `open`: every line may be the gift\n(\"any item\" is a reward here). Absent elsewhere."
+          },
+          "reward_item_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The till's lookup only, while `open`: the reward items the gift may be\ntaken as, whatever each costs (the whole catalogue, not only what the\nbalance affords). The till runs `madar_loyalty::gift_eligible` over\nthese and `any_item`, the server's own claim rule. Absent elsewhere."
+          },
           "status": {
             "type": "string",
             "description": "`open` (ready to claim) or `claimed`.",
@@ -92413,6 +92431,14 @@
                 "items": {
                   "$ref": "#/components/schemas/OrderItemOptional"
                 }
+              },
+              "reward_source": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why a covered line was free: `reward` (paid for with points or stamps)\nor `gift` (the member's birthday gift), so a reprint and history can\nsay which. Absent on a line nothing covered. Additive.",
+                "example": "gift"
               }
             }
           }

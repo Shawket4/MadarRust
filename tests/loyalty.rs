@@ -6033,3 +6033,174 @@ async fn a_replayed_gift_already_claimed_keeps_the_sale_and_flags_it(pool: PgPoo
         "{body}"
     );
 }
+
+// ── Round 2: what the gift may be, and which line it was ────────────────────
+
+async fn lookup_gift(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    shop: &RewardShop,
+) -> Value {
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let req = test::TestRequest::post()
+        .uri("/loyalty/lookup")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({ "branch_id": shop.branch, "customer_id": shop.member }))
+        .to_request();
+    let resp = test::call_service(app, req).await;
+    assert!(resp.status().is_success());
+    test::read_body_json(resp).await
+}
+
+/// The till is told what the gift may be taken as, whatever the balance: the
+/// whole catalogue, or any item. Nothing while there is no open gift.
+#[sqlx::test]
+async fn the_lookup_lists_what_an_open_gift_may_be_whatever_the_balance(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    let app = reward_app!(pool);
+
+    let scan = lookup_gift(&app, &shop).await;
+    assert!(scan.get("birthday_gift").is_none(), "no gift: {scan}");
+
+    give_gift(&pool, shop.org, shop.member, 10).await;
+    let scan = lookup_gift(&app, &shop).await;
+    assert_eq!(scan["rewards"], json!([]), "the balance affords nothing");
+    let g = &scan["birthday_gift"];
+    assert_eq!(g["status"], "open");
+    assert_eq!(g["any_item"], false);
+    assert_eq!(g["reward_item_ids"], json!([shop.latte.to_string()]), "{g}");
+
+    sqlx::query("UPDATE loyalty_settings SET reward_any_item = true WHERE org_id = $1")
+        .bind(shop.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        lookup_gift(&app, &shop).await["birthday_gift"]["any_item"],
+        true
+    );
+
+    sqlx::query("UPDATE loyalty_settings SET reward_any_item = false WHERE org_id = $1")
+        .bind(shop.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM loyalty_reward_items WHERE org_id = $1")
+        .bind(shop.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let g = lookup_gift(&app, &shop).await["birthday_gift"].clone();
+    assert_eq!(g["reward_item_ids"], json!([]), "an empty catalogue: {g}");
+    assert_eq!(g["any_item"], false);
+
+    sqlx::query("UPDATE loyalty_gifts SET status = 'claimed', claimed_at = now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let g = lookup_gift(&app, &shop).await["birthday_gift"].clone();
+    assert_eq!(g["status"], "claimed");
+    assert!(
+        g.get("reward_item_ids").is_none() && g.get("any_item").is_none(),
+        "{g}"
+    );
+}
+
+/// A covered line says why: `reward` or `gift`, in the sale's answer and on
+/// every later read, a voided or refunded order included. A paid line says
+/// nothing.
+#[sqlx::test]
+async fn an_order_line_says_whether_a_reward_or_the_gift_paid_for_it(pool: PgPool) {
+    let shop = reward_shop(&pool, 10).await;
+    give_gift(&pool, shop.org, shop.member, 10).await;
+    let app = reward_app!(pool);
+    let (st, sale) = place_with_gift(
+        &app,
+        &shop,
+        json!([
+            { "menu_item_id": shop.latte, "quantity": 1 },
+            { "menu_item_id": shop.latte, "quantity": 2 },
+            { "menu_item_id": shop.cake, "quantity": 1 }
+        ]),
+        json!({ "loyalty_redemptions": [{ "item_index": 0 }],
+                "loyalty_birthday_gift": { "item_index": 1 } }),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {sale}");
+    // By line id: a read lists lines in its own order.
+    let sources = |b: &Value| -> std::collections::BTreeMap<String, Value> {
+        b["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    i["id"].as_str().unwrap().to_string(),
+                    i.get("reward_source").cloned().unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    };
+    let id = |n: usize| sale["items"][n]["id"].as_str().unwrap().to_string();
+    let want: std::collections::BTreeMap<String, Value> = [
+        (id(0), json!("reward")),
+        (id(1), json!("gift")),
+        (id(2), Value::Null),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(sources(&sale), want);
+
+    let get = |id: Value| {
+        let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+        test::TestRequest::get()
+            .uri(&format!("/orders/{}", id.as_str().unwrap()))
+            .insert_header(("Authorization", format!("Bearer {jwt}")))
+            .to_request()
+    };
+    let read: Value =
+        test::read_body_json(test::call_service(&app, get(sale["id"].clone())).await).await;
+    assert_eq!(sources(&read), sources(&sale), "{read}");
+
+    // The free unit back for nothing: the gift re-opens, the line was still it.
+    let (s, b) = refund(
+        &app,
+        &shop,
+        json!({
+            "order_id": sale["id"], "amount": 100, "method": "cash", "reason": "goodwill",
+            "lines": [{ "order_item_id": sale["items"][1]["id"], "quantity": 1, "amount": 0 }]
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "{s} {b}");
+    assert_eq!(gift_status(&pool, shop.member).await, "open");
+    let read: Value =
+        test::read_body_json(test::call_service(&app, get(sale["id"].clone())).await).await;
+    assert_eq!(sources(&read), sources(&sale));
+
+    // A second sale takes the re-opened gift, and is voided.
+    let (st, sale) = place_with_gift(
+        &app,
+        &shop,
+        json!([{ "menu_item_id": shop.latte, "quantity": 2 }]),
+        json!({ "loyalty_birthday_gift": { "item_index": 0 } }),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {sale}");
+    sqlx::query(
+        "UPDATE orders SET voided_at = now(), voided_by = $2, status = 'voided', \
+                void_reason = 'customer_request' WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(sale["id"].as_str().unwrap()).unwrap())
+    .bind(shop.teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let read: Value =
+        test::read_body_json(test::call_service(&app, get(sale["id"].clone())).await).await;
+    assert_eq!(read["status"], "voided");
+    assert_eq!(read["items"][0]["reward_source"], "gift", "{read}");
+}

@@ -652,6 +652,12 @@ pub struct OrderItemFull {
     pub item: OrderItem,
     pub addons: Vec<OrderItemAddon>,
     pub optionals: Vec<OrderItemOptional>,
+    /// Why a covered line was free: `reward` (paid for with points or stamps)
+    /// or `gift` (the member's birthday gift), so a reprint and history can
+    /// say which. Absent on a line nothing covered. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(example = "gift")]
+    pub reward_source: Option<String>,
     /// COMPAT STUB, always `[]`; see [`OrderItem::bundle_id`].
     #[serde(default, skip_deserializing)]
     #[schema(ignore)]
@@ -3565,6 +3571,7 @@ async fn create_order_once(
             item,
             addons: addon_rows.remove(&item_id).unwrap_or_default(),
             optionals: optional_rows.remove(&item_id).unwrap_or_default(),
+            reward_source: None,
             bundle_components: vec![],
         });
     }
@@ -3655,7 +3662,7 @@ async fn create_order_once(
         actor.replay,
     )
     .await?;
-    let gift_refused = match &gift_plan {
+    let gift_refused: Option<String> = match &gift_plan {
         Some(g) => {
             crate::loyalty::gifts::claim_on_order(
                 &mut tx,
@@ -3671,11 +3678,21 @@ async fn create_order_once(
         }
         None => None,
     };
+    let gift_refused_none = gift_refused.is_none();
     let redemption_refused = match (redemption_refused, gift_refused) {
         (Some(a), Some(b)) => Some(format!("{a}; birthday gift: {b}")),
         (a, None) => a,
         (None, Some(b)) => Some(format!("Birthday gift: {b}")),
     };
+    // A gift line is one the claim recorded (the ledger's `gift` row); the
+    // order's history reads the same row (`fetch_orders_items_full_batch_on`).
+    let gift_item = gift_plan
+        .as_ref()
+        .filter(|_| gift_refused_none)
+        .and_then(|g| item_ids.get(g.item_index).copied());
+    for full in &mut order_items_full {
+        full.reward_source = reward_source(&full.item, gift_item == Some(full.item.id));
+    }
     if let Some(why) = &redemption_refused {
         // Recorded, flagged, and said out loud — never a lost sale.
         sqlx::query(
@@ -5033,6 +5050,18 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
 
     let item_ids: Vec<Uuid> = items.iter().map(|i| i.id).collect();
 
+    // The lines a birthday gift covered: the ledger's `gift` rows, which stay
+    // when a void or refund re-opens the gift (the line WAS the gift).
+    let gift_items: std::collections::HashSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
+        "SELECT order_item_id FROM loyalty_transactions \
+          WHERE order_id = ANY($1) AND source = 'gift' AND order_item_id IS NOT NULL",
+    )
+    .bind(order_ids)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+
     let mut addons_by_item: HashMap<Uuid, Vec<OrderItemAddon>> = HashMap::new();
     for a in sqlx::query_as::<_, OrderItemAddon>(
         "SELECT id, order_item_id, addon_item_id, addon_name, name_translations, \
@@ -5064,6 +5093,7 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
 
     for item in items {
         let full = OrderItemFull {
+            reward_source: reward_source(&item, gift_items.contains(&item.id)),
             addons: addons_by_item.remove(&item.id).unwrap_or_default(),
             optionals: optionals_by_item.remove(&item.id).unwrap_or_default(),
             bundle_components: vec![],
@@ -5073,6 +5103,15 @@ pub(crate) async fn fetch_orders_items_full_batch_on(
     }
 
     Ok(by_order)
+}
+
+/// `gift` for the birthday gift's line, `reward` for any other covered line.
+fn reward_source(item: &OrderItem, gift: bool) -> Option<String> {
+    match (gift, item.is_reward) {
+        (true, _) => Some("gift".into()),
+        (false, true) => Some("reward".into()),
+        (false, false) => None,
+    }
 }
 
 async fn require_branch_access(

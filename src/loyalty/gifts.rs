@@ -43,6 +43,50 @@ pub struct BirthdayGiftView {
     pub status: String,
     /// The gift is usable until this instant (end of its last day, shop time).
     pub valid_until: DateTime<Utc>,
+    /// The till's lookup only, while `open`: every line may be the gift
+    /// ("any item" is a reward here). Absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub any_item: Option<bool>,
+    /// The till's lookup only, while `open`: the reward items the gift may be
+    /// taken as, whatever each costs (the whole catalogue, not only what the
+    /// balance affords). The till runs `madar_loyalty::gift_eligible` over
+    /// these and `any_item`, the server's own claim rule. Absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward_item_ids: Option<Vec<Uuid>>,
+}
+
+/// What the gift may be taken as at a branch: the one input the claim check
+/// and the lookup's list both read, so they never disagree.
+pub fn gift_programme(
+    settings: &super::settings::LoyaltySettings,
+    catalogue: &[super::settings::RewardItem],
+    open: bool,
+) -> madar_loyalty::GiftProgramme {
+    madar_loyalty::GiftProgramme {
+        reward_items: catalogue
+            .iter()
+            .map(|r| r.menu_item_id.to_string())
+            .collect(),
+        any_item: settings.reward_any_item,
+        open,
+    }
+}
+
+impl BirthdayGiftView {
+    /// Fill the till's eligibility from the branch's programme, while open.
+    pub fn with_eligibility(mut self, programme: &madar_loyalty::GiftProgramme) -> Self {
+        if self.status == "open" {
+            self.any_item = Some(programme.any_item);
+            self.reward_item_ids = Some(
+                programme
+                    .reward_items
+                    .iter()
+                    .filter_map(|id| Uuid::parse_str(id).ok())
+                    .collect(),
+            );
+        }
+        self
+    }
 }
 
 /// One order line named as the birthday gift.
@@ -85,6 +129,8 @@ where
     Ok(row.map(|(status, valid_until)| BirthdayGiftView {
         status,
         valid_until,
+        any_item: None,
+        reward_item_ids: None,
     }))
 }
 
@@ -145,21 +191,6 @@ pub async fn plan(
             .await?
             .filter(|m| m.org_id == org_id)
             .ok_or_else(|| AppError::NotFound("No member for that card".into()))?;
-        let (i, it) = line.ok_or_else(|| refused(CODE_GIFT_LINE, "No such line for the gift"))?;
-        let menu_item_id = it
-            .menu_item_id
-            .ok_or_else(|| refused(CODE_GIFT_LINE, "That line has no menu item to give"))?;
-        if it.quantity < 1
-            || it.staff_drink.is_some()
-            || it.combo.is_some()
-            || in_combo(i)
-            || covered_by_reward(i)
-        {
-            return Err(refused(
-                CODE_GIFT_LINE,
-                "The gift can't go on a staff drink, a combo or a line a reward already covers",
-            ));
-        }
         let settings = load_effective(pool, org_id, branch_id).await?;
         if !settings.enabled {
             return Err(refused(
@@ -167,15 +198,7 @@ pub async fn plan(
                 "The loyalty program is switched off for this branch",
             ));
         }
-        if !settings.reward_any_item {
-            let (catalogue, _) = load_effective_rewards(pool, org_id, branch_id).await?;
-            if !catalogue.iter().any(|r| r.menu_item_id == menu_item_id) {
-                return Err(refused(
-                    CODE_GIFT_NOT_A_REWARD,
-                    "That item is not one of the rewards here",
-                ));
-            }
-        }
+        let (catalogue, _) = load_effective_rewards(pool, org_id, branch_id).await?;
         let gift_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM loyalty_gifts \
               WHERE customer_id = $1 AND status = 'open' AND valid_until > now() \
@@ -184,12 +207,31 @@ pub async fn plan(
         .bind(member.id)
         .fetch_optional(pool)
         .await?;
-        let gift_id = gift_id.ok_or_else(|| {
-            refused(
-                CODE_GIFT_NONE,
-                &format!("{} has no birthday gift to claim", member.name),
-            )
-        })?;
+        // The rule is madar-shared's (`madar_loyalty::plan_gift`), the till's too.
+        let lines: Vec<madar_loyalty::Line> = items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| madar_loyalty::Line {
+                menu_item_id: it.menu_item_id.map(|m| m.to_string()),
+                quantity: i64::from(it.quantity),
+                is_staff_drink: it.staff_drink.is_some(),
+                in_combo: it.combo.is_some() || in_combo(i),
+            })
+            .collect();
+        let rewarded: Vec<usize> = (0..items.len()).filter(|&i| covered_by_reward(i)).collect();
+        let programme = gift_programme(&settings, &catalogue, gift_id.is_some());
+        let cover = madar_loyalty::plan_gift(&lines, &programme, input.item_index, &rewarded)
+            .map_err(|r| {
+                use madar_loyalty::GiftRefusal as G;
+                let why = match r {
+                    G::Line => "The gift can't go on that line: it needs a menu item and must not be a staff drink, a combo or a line a reward already covers".to_string(),
+                    G::NotAReward => "That item is not one of the rewards here".to_string(),
+                    G::None => format!("{} has no birthday gift to claim", member.name),
+                };
+                refused(r.code(), &why)
+            })?;
+        let (i, gift_id) = (cover.line, gift_id.unwrap_or_default());
+        let menu_item_id = Uuid::parse_str(&cover.menu_item_id).unwrap_or_default();
         Ok(GiftPlan {
             gift_id: Some(gift_id),
             member_id: member.id,
@@ -525,6 +567,8 @@ pub async fn counter_claim(
                     BirthdayGiftView {
                         status: "claimed".into(),
                         valid_until: until,
+                        any_item: None,
+                        reward_item_ids: None,
                     },
                 )
                 .await
@@ -559,6 +603,8 @@ pub async fn counter_claim(
         BirthdayGiftView {
             status: "claimed".into(),
             valid_until,
+            any_item: None,
+            reward_item_ids: None,
         },
     )
     .await
