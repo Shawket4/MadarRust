@@ -40,16 +40,19 @@ schedule, and the next ordinary sign-in gets a 24/48 h token.
 "Sign out everywhere" for a person also sets `users.sessions_valid_after`. That
 ends their old tokens that were never seen, so adoption can never revive one.
 
-## Production `.env`
+## The shared cookie and production `.env`
 
-```
-MADAR_SESSION_ORIGINS=https://madar-pos.cloud,https://rewards.madar-pos.cloud
-```
+The dashboard and Rewards by Madar each call the API through their own host's
+`/api/` proxy, so the shared cookie lives on one of them: the Rewards host
+(`https://rewards.madar-pos.cloud/api/auth/session`). Rewards calls it
+same-origin; the dashboard calls it cross-origin with credentials. The cookie has
+no `Path` attribute, so the browser scopes it to `/api/auth` there.
 
-Add `https://rewards.madar-pos.cloud` to `CORS_ALLOWED_ORIGINS` when the Rewards
-dashboard ships there. CORS now sends `Access-Control-Allow-Credentials` for those
-origins, which only `/auth/session` uses: its cookie is host-only on `api.` and
-path-scoped, so no other route ever receives one.
+`https://madar-pos.cloud` and `https://rewards.madar-pos.cloud` are always
+allowed (`session_cookie::FIRST_PARTY`), so production needs no `.env` change.
+`MADAR_SESSION_ORIGINS` (else `CORS_ALLOWED_ORIGINS`) adds more origins; with
+neither set only localhost is added. CORS sends `Access-Control-Allow-Credentials`,
+which only `/auth/session` uses: no other route reads the cookie.
 
 ## Operations
 

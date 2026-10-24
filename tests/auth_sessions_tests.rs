@@ -523,6 +523,9 @@ async fn the_shared_cookie_ends_with_its_session(pool: PgPool) {
         .find(|c| c.name() == madar_rust::auth::session_cookie::SESSION_COOKIE)
         .expect("the session cookie")
         .into_owned();
+    // No Path: the browser scopes it to where it was set, `/api/auth` behind
+    // the Rewards host's proxy.
+    assert_eq!(cookie.path(), None);
 
     // The other app adopts it.
     let adopt = || {
@@ -534,6 +537,48 @@ async fn the_shared_cookie_ends_with_its_session(pool: PgPool) {
     let (st, body) = call(&app, adopt()).await;
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["token"], token);
+
+    // Rewards by Madar calls it same-origin, from a host in no CORS list.
+    let (st, _) = call(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/session")
+            .insert_header(("Origin", "https://rewards.madar-pos.cloud"))
+            .cookie(cookie.clone()),
+    )
+    .await;
+    assert_eq!(st, 200);
+
+    // Its adopt is a same-origin GET, which carries no Origin: the browser's
+    // Sec-Fetch-Site and the host the proxy forwards stand in for it.
+    let (st, _) = call(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/session")
+            .insert_header(("Host", "rewards.madar-pos.cloud"))
+            .insert_header(("X-Forwarded-Proto", "https"))
+            .insert_header(("Sec-Fetch-Site", "same-origin"))
+            .cookie(cookie.clone()),
+    )
+    .await;
+    assert_eq!(st, 200);
+    // The same from a shop's own hostname, or a cross-site fetch, is refused.
+    for (host, site) in [
+        ("rue.madar-pos.cloud", "same-origin"),
+        ("rewards.madar-pos.cloud", "cross-site"),
+    ] {
+        let (st, _) = call(
+            &app,
+            test::TestRequest::get()
+                .uri("/auth/session")
+                .insert_header(("Host", host))
+                .insert_header(("X-Forwarded-Proto", "https"))
+                .insert_header(("Sec-Fetch-Site", site))
+                .cookie(cookie.clone()),
+        )
+        .await;
+        assert_eq!(st, 403, "{host} {site}");
+    }
 
     // A shop's own hostname is same-site but not allowed.
     let (st, _) = call(
