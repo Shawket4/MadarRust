@@ -3,20 +3,29 @@
 //!
 //! Each app keeps signing in exactly as before (`POST /auth/login`, bearer
 //! JWT). After a sign-in it hands that JWT to `POST /auth/session`, which keeps
-//! it in an HttpOnly cookie on the API host; the other app, booting with no
-//! session of its own, asks `GET /auth/session` and gets the same token back.
+//! it in an HttpOnly cookie; the other app, booting with no session of its own,
+//! asks `GET /auth/session` and gets the same token back.
+//!
+//! Both apps reach the API through their own host's `/api/` proxy, so the
+//! cookie lives on ONE of them: the Rewards host (`rewards.madar-pos.cloud/api/
+//! auth/session`). Rewards calls it same-origin (its CSP allows nothing else);
+//! the dashboard calls it cross-origin, with credentials.
 //! `DELETE /auth/session` ends that session on the server (`auth::sessions`),
 //! so the other app's next call is refused with `SESSION_REVOKED` and it signs
 //! out too.
 //!
 //! The cookie is the boundary, so it is narrow on purpose:
-//!  * **host-only** on the API host (no `Domain`), `Path=/auth/session`: it is
-//!    never sent to a shop's own hostname, a static host, or any other route;
+//!  * **host-only** (no `Domain`) and with no `Path` attribute, so the browser
+//!    scopes it to the directory it was set from: `/api/auth` behind a host's
+//!    proxy, `/auth` on the API host itself. It is never sent to a shop's own
+//!    hostname, a static file, or a route outside `auth`, and only this
+//!    resource ever reads it;
 //!  * **HttpOnly, Secure, SameSite=Strict**: no script reads it, and no other
 //!    site's page can make the browser send it;
-//!  * and every call must come from an allowlisted ORIGIN
-//!    ([`session_origins`]). A shop subdomain is same-site, so the browser
-//!    WOULD send the cookie from one; the origin check is what refuses it.
+//!  * and every call must come from an allowlisted ORIGIN: the two first-party
+//!    apps ([`FIRST_PARTY`]) and [`session_origins`]. A shop subdomain is
+//!    same-site, so the browser WOULD send the cookie from one; the origin check
+//!    is what refuses it.
 //!
 //! Only a live session is shared or handed back: a revoked or expired one is
 //! forgotten instead.
@@ -38,7 +47,11 @@ use crate::models::UserRole;
 
 /// The shared token. `__Secure-`: browsers refuse it without `Secure`.
 pub const SESSION_COOKIE: &str = "__Secure-madar_session";
-const COOKIE_PATH: &str = "/auth/session";
+
+/// The production apps that share the session, allowed whatever the
+/// environment says: the Rewards host calls this resource same-origin, and is
+/// in no CORS list.
+pub const FIRST_PARTY: &[&str] = &["https://madar-pos.cloud", "https://rewards.madar-pos.cloud"];
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SessionTokenResponse {
@@ -46,9 +59,10 @@ pub struct SessionTokenResponse {
     pub token: String,
 }
 
-/// The origins allowed to use the shared session: `MADAR_SESSION_ORIGINS`
-/// (comma-separated), else `CORS_ALLOWED_ORIGINS`. With neither set (local
-/// development) only `http(s)://localhost` and `127.0.0.1` on any port.
+/// The origins allowed to use the shared session besides [`FIRST_PARTY`]:
+/// `MADAR_SESSION_ORIGINS` (comma-separated), else `CORS_ALLOWED_ORIGINS`.
+/// With neither set (local development) `http(s)://localhost` and `127.0.0.1`
+/// on any port.
 fn session_origins() -> Option<Vec<String>> {
     ["MADAR_SESSION_ORIGINS", "CORS_ALLOWED_ORIGINS"]
         .iter()
@@ -72,6 +86,9 @@ fn is_local_origin(origin: &str) -> bool {
 
 /// Whether `origin` may use the shared session. Pure over the list for tests.
 pub fn origin_allowed(origin: &str, list: Option<&[String]>) -> bool {
+    if FIRST_PARTY.contains(&origin) {
+        return true;
+    }
     match list {
         Some(list) => list.iter().any(|o| o == origin),
         None => is_local_origin(origin),
@@ -104,8 +121,9 @@ fn shares_session(role: &UserRole) -> bool {
 }
 
 fn cookie(value: String, max_age: CookieDuration) -> Cookie<'static> {
+    // No `.path(…)`: see the module doc. Setting and removing it from the same
+    // URL gives the same default path, so the removal always matches.
     Cookie::build(SESSION_COOKIE, value)
-        .path(COOKIE_PATH)
         .http_only(true)
         .secure(true)
         .same_site(SameSite::Strict)
@@ -290,6 +308,14 @@ mod tests {
             Some(&list)
         ));
         assert!(!origin_allowed("http://localhost:5173", Some(&list)));
+        // The first-party apps need no listing (Rewards is in no CORS list).
+        let cors = vec!["https://madar-pos.cloud".to_string()];
+        assert!(origin_allowed(
+            "https://rewards.madar-pos.cloud",
+            Some(&cors)
+        ));
+        assert!(origin_allowed("https://rewards.madar-pos.cloud", None));
+        assert!(!origin_allowed("https://rue.madar-pos.cloud", Some(&cors)));
     }
 
     #[test]
@@ -311,7 +337,9 @@ mod tests {
     #[test]
     fn the_cookie_is_narrow() {
         let c = cookie("t".into(), CookieDuration::hours(1));
-        assert_eq!(c.path(), Some(COOKIE_PATH));
+        // The browser's default path: the directory it was set from
+        // (`/api/auth` behind a proxy), never the whole host.
+        assert_eq!(c.path(), None);
         assert_eq!(c.domain(), None, "host-only: never a shop subdomain");
         assert_eq!(c.http_only(), Some(true));
         assert_eq!(c.secure(), Some(true));

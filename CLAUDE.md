@@ -345,6 +345,9 @@ Every table a POS shows reaches devices through `sync_changes` (`src/sync/pull`)
   cannot be revoked by the super admin (madar-admin → Sessions).
 - **Anything that verifies a bearer token itself calls `sessions::check`** (as
   `JwtMiddleware`, `StaffAuth`, `assets::optional_claims` and `/auth/session` do).
+- **The shared browser cookie lives on the Rewards host** (`rewards.madar-pos.cloud/api/
+  auth/session`, reached through its `/api/` proxy; no `Path` attribute, so the browser
+  scopes it to `/api/auth`). The two production origins are built in (`FIRST_PARTY`).
 - A dead session is **401 `SESSION_REVOKED` with the JSON body**, never a bare 401
   (the POS reads that as offline) or a 403 (it dead-letters a queued sale).
 

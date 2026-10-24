@@ -523,6 +523,9 @@ async fn the_shared_cookie_ends_with_its_session(pool: PgPool) {
         .find(|c| c.name() == madar_rust::auth::session_cookie::SESSION_COOKIE)
         .expect("the session cookie")
         .into_owned();
+    // No Path: the browser scopes it to where it was set, `/api/auth` behind
+    // the Rewards host's proxy.
+    assert_eq!(cookie.path(), None);
 
     // The other app adopts it.
     let adopt = || {
@@ -534,6 +537,17 @@ async fn the_shared_cookie_ends_with_its_session(pool: PgPool) {
     let (st, body) = call(&app, adopt()).await;
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["token"], token);
+
+    // Rewards by Madar calls it same-origin, from a host in no CORS list.
+    let (st, _) = call(
+        &app,
+        test::TestRequest::get()
+            .uri("/auth/session")
+            .insert_header(("Origin", "https://rewards.madar-pos.cloud"))
+            .cookie(cookie.clone()),
+    )
+    .await;
+    assert_eq!(st, 200);
 
     // A shop's own hostname is same-site but not allowed.
     let (st, _) = call(
