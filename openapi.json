@@ -86235,6 +86235,16 @@
             "description": "What one stamp stands for: `order`, `item` or `stamp` (a counter\nshop); absent for points. The join info's rule (`earn::StampUnit`).",
             "example": "item"
           },
+          "tracks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/MemberTrack"
+            },
+            "description": "Every stamp track of the member's card, when there is more than one:\nthe card page's `CardView.tracks`, the same loader. Absent for a\none-track card or points, and while `verify_required`."
+          },
           "verify_required": {
             "type": "boolean",
             "description": "This phone already has a card and the device has not proved it owns the\nphone. The page should run the ordinary OTP flow (`/public/otp/request`\nthen `/public/otp/verify`) and POST here again with the `device_token`\nit is handed; the card comes back on that call."

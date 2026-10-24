@@ -599,6 +599,11 @@ pub struct JoinResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(example = 6)]
     pub card_size: Option<i32>,
+    /// Every stamp track of the member's card, when there is more than one:
+    /// the card page's `CardView.tracks`, the same loader. Absent for a
+    /// one-track card or points, and while `verify_required`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracks: Option<Vec<super::tracks::MemberTrack>>,
 }
 
 /// Join a shop's rewards programme.
@@ -752,7 +757,9 @@ pub async fn join(
     // The Apple button is about to be on screen. Build the pass behind it now,
     // in the background, rather than when a thumb lands on it.
     wallet::apple::prebuild(pool.get_ref(), &member);
+    let tracks = super::tracks::for_member(pool.get_ref(), &member, mode, next_reward_cost).await?;
     Ok(HttpResponse::Ok().json(JoinResult {
+        tracks,
         member_token: Some(member.member_token.clone()),
         name: member.name.clone(),
         balance: member.balance_in(mode),
@@ -833,6 +840,8 @@ fn welcome_back(
         card_link_sent,
         stamp_unit: None,
         card_size: Some(next_reward_cost),
+        // Balances are the member's: nothing until the phone is proven.
+        tracks: None,
     }
 }
 

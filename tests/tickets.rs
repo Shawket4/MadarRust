@@ -2901,3 +2901,349 @@ async fn a_settle_without_a_waiver_keeps_the_service_charge(pool: PgPool) {
         (None, Some(0))
     );
 }
+
+// ── The birthday gift on a ticket settle (BIRTHDAY_GIFT_DESIGN.md) ─────────
+
+macro_rules! gift_app {
+    ($pool:expr) => {
+        test::init_service(
+            App::new()
+                .app_data(web::Data::new($pool.clone()))
+                .app_data(web::Data::new(secret()))
+                .app_data(web::Data::new(BranchEventHub::new()))
+                .configure(madar_rust::tickets::routes::configure)
+                .configure(madar_rust::refunds::routes::configure)
+                .configure(madar_rust::kitchen::routes::configure)
+                .configure(madar_rust::sync::routes::configure),
+        )
+        .await
+    };
+}
+
+/// A stamp card whose reward is the latte (5 stamps); a member with no
+/// stamps and an open gift; a ticket: round 1 a cake, round 2 two lattes.
+struct GiftTicket {
+    org: Uuid,
+    teller: Uuid,
+    teller_t: String,
+    shift: Uuid,
+    member: Uuid,
+    ticket: Uuid,
+    cake_line: Uuid,
+    latte_line: Uuid,
+}
+
+async fn gift_member(pool: &PgPool, org: Uuid, phone: &str, tok: &str) -> Uuid {
+    let m = common::members::seed_loyalty_member(pool, org, phone, "Ali", tok).await;
+    sqlx::query(
+        "INSERT INTO loyalty_gifts (org_id, customer_id, year, valid_from, valid_until) \
+         VALUES ($1, $2, 2026, now() - interval '1 day', now() + interval '10 days')",
+    )
+    .bind(org)
+    .bind(m)
+    .execute(pool)
+    .await
+    .unwrap();
+    m
+}
+
+async fn gift_ticket<S>(pool: &PgPool, app: &S) -> GiftTicket
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let org = seed_org(pool).await;
+    let branch = seed_branch(pool, org).await;
+    let cake = seed_menu_item(pool, org, 1_000).await;
+    let latte = seed_menu_item(pool, org, 5_000).await;
+    seed_cash_method(pool, org).await;
+    let waiter = seed_user(pool, org, "waiter").await;
+    let teller = seed_user(pool, org, "teller").await;
+    let shift = open_shift_row(pool, branch, teller).await;
+    for (role, res, act) in [
+        ("waiter", "open_tickets", "create"),
+        ("waiter", "open_tickets", "update"),
+        ("teller", "open_tickets", "update"),
+        ("teller", "orders", "create"),
+        ("teller", "payments", "create"),
+        ("teller", "loyalty", "update"),
+        ("teller", "refunds", "create"),
+    ] {
+        grant(pool, role, res, act).await;
+    }
+    sqlx::query(
+        "INSERT INTO loyalty_settings (org_id, branch_id, enabled, mode, default_reward_cost) \
+         VALUES ($1, NULL, true, 'visits', 5)",
+    )
+    .bind(org)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO loyalty_reward_items (org_id, menu_item_id, cost_currency, cost_amount) \
+         VALUES ($1,$2,'visits',5)",
+    )
+    .bind(org)
+    .bind(latte)
+    .execute(pool)
+    .await
+    .unwrap();
+    let member = gift_member(pool, org, "201000000001", "Mticketgift000000001").await;
+
+    let waiter_t = token(waiter, org, UserRole::Waiter);
+    let resp = test::call_service(
+        app,
+        test::TestRequest::post()
+            .uri("/open-tickets")
+            .insert_header(("Authorization", format!("Bearer {waiter_t}")))
+            .set_json(serde_json::json!({
+                "branch_id": branch, "items": [{ "menu_item_id": cake, "quantity": 1 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), 201);
+    let ticket = test::read_body_json::<OpenTicketView, _>(resp).await.id;
+    let resp = test::call_service(
+        app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{ticket}/rounds"))
+            .insert_header(("Authorization", format!("Bearer {waiter_t}")))
+            .set_json(serde_json::json!({ "items": [{ "menu_item_id": latte, "quantity": 2 }] }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let line = |item: Uuid| {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM open_ticket_items WHERE open_ticket_id = $1 AND menu_item_id = $2",
+        )
+        .bind(ticket)
+        .bind(item)
+        .fetch_one(pool)
+    };
+    GiftTicket {
+        org,
+        teller,
+        teller_t: token(teller, org, UserRole::Teller),
+        shift,
+        member,
+        ticket,
+        cake_line: line(cake).await.unwrap(),
+        latte_line: line(latte).await.unwrap(),
+    }
+}
+
+async fn settle_gift<S>(
+    app: &S,
+    g: &GiftTicket,
+    member: Uuid,
+    extra: serde_json::Value,
+) -> (u16, serde_json::Value)
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse,
+            Error = actix_web::Error,
+        >,
+{
+    let mut body = serde_json::json!({
+        "shift_id": g.shift, "payment_method": "cash", "loyalty_customer_id": member
+    });
+    for (k, v) in extra.as_object().unwrap() {
+        body[k] = v.clone();
+    }
+    let resp = test::call_service(
+        app,
+        test::TestRequest::post()
+            .uri(&format!("/open-tickets/{}/settle", g.ticket))
+            .insert_header(("Authorization", format!("Bearer {}", g.teller_t)))
+            .set_json(body)
+            .to_request(),
+    )
+    .await;
+    let status = resp.status().as_u16();
+    (status, test::read_body_json(resp).await)
+}
+
+async fn gift_state(pool: &PgPool, member: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM loyalty_gifts WHERE customer_id = $1")
+        .bind(member)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The line named by id takes the gift: one latte of two free, no stamps
+/// spent, the gift claimed and on the ledger at zero.
+#[sqlx::test]
+async fn a_ticket_settle_gives_the_birthday_gift_on_the_line_it_names(pool: PgPool) {
+    let app = gift_app!(pool);
+    let g = gift_ticket(&pool, &app).await;
+    let (st, order) = settle_gift(
+        &app,
+        &g,
+        g.member,
+        serde_json::json!({ "loyalty_birthday_gift": { "ticket_line_id": g.latte_line } }),
+    )
+    .await;
+    assert_eq!(st, 200, "{order}");
+    assert_eq!(order["subtotal"], 6_000, "the cake and one latte: {order}");
+    assert_eq!(gift_state(&pool, g.member).await, "claimed");
+    let rows: Vec<(String, i32)> =
+        sqlx::query_as("SELECT source, points FROM loyalty_transactions WHERE customer_id = $1")
+            .bind(g.member)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![("gift".to_string(), 0)]);
+}
+
+#[sqlx::test]
+async fn a_ticket_settle_refuses_a_gift_it_cannot_honour(pool: PgPool) {
+    let app = gift_app!(pool);
+    let g = gift_ticket(&pool, &app).await;
+    let code = |b: &serde_json::Value| b["code"].as_str().unwrap_or_default().to_string();
+
+    // The cake is not a reward.
+    let (st, b) = settle_gift(
+        &app,
+        &g,
+        g.member,
+        serde_json::json!({ "loyalty_birthday_gift": { "ticket_line_id": g.cake_line } }),
+    )
+    .await;
+    assert_eq!(
+        (st, code(&b)),
+        (409, "LOYALTY_GIFT_NOT_A_REWARD".into()),
+        "{b}"
+    );
+
+    // The latte line already takes a points reward.
+    sqlx::query(
+        "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points) \
+         SELECT $1, $2, b.id, 'adjust', 'visits', 5 FROM branches b WHERE b.org_id = $1",
+    )
+    .bind(g.org)
+    .bind(g.member)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (st, b) = settle_gift(
+        &app,
+        &g,
+        g.member,
+        serde_json::json!({
+            "loyalty_birthday_gift": { "ticket_line_id": g.latte_line },
+            "loyalty_redemptions": [{ "ticket_line_id": g.latte_line }]
+        }),
+    )
+    .await;
+    assert_eq!((st, code(&b)), (409, "LOYALTY_GIFT_LINE".into()), "{b}");
+
+    // No open gift any more.
+    sqlx::query("UPDATE loyalty_gifts SET valid_until = now() - interval '1 second', valid_from = now() - interval '2 days'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, b) = settle_gift(
+        &app,
+        &g,
+        g.member,
+        serde_json::json!({ "loyalty_birthday_gift": { "ticket_line_id": g.latte_line } }),
+    )
+    .await;
+    assert_eq!((st, code(&b)), (409, "LOYALTY_GIFT_NONE".into()), "{b}");
+
+    // Nothing was settled along the way.
+    let open: String = sqlx::query_scalar("SELECT status::text FROM open_tickets WHERE id = $1")
+        .bind(g.ticket)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(open, "open");
+}
+
+/// Voiding the settled ticket's order gives the gift back.
+#[sqlx::test]
+async fn voiding_a_settled_tickets_order_reopens_the_gift(pool: PgPool) {
+    let app = gift_app!(pool);
+    let g = gift_ticket(&pool, &app).await;
+    let (st, order) = settle_gift(
+        &app,
+        &g,
+        g.member,
+        serde_json::json!({ "loyalty_birthday_gift": { "ticket_line_id": g.latte_line } }),
+    )
+    .await;
+    assert_eq!(st, 200, "{order}");
+    sqlx::query(
+        "UPDATE orders SET voided_at = now(), voided_by = $2, status = 'voided', \
+                void_reason = 'customer_request' WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(order["id"].as_str().unwrap()).unwrap())
+    .bind(g.teller)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(gift_state(&pool, g.member).await, "open");
+}
+
+/// Refunding the free latte for nothing gives the gift back.
+#[sqlx::test]
+async fn refunding_the_gifts_unit_of_a_settled_ticket_reopens_the_gift(pool: PgPool) {
+    let app = gift_app!(pool);
+    let g = gift_ticket(&pool, &app).await;
+    let (st, order) = settle_gift(
+        &app,
+        &g,
+        g.member,
+        serde_json::json!({ "loyalty_birthday_gift": { "ticket_line_id": g.latte_line } }),
+    )
+    .await;
+    assert_eq!(st, 200, "{order}");
+    let order_id = Uuid::parse_str(order["id"].as_str().unwrap()).unwrap();
+    let latte_item: Uuid = sqlx::query_scalar(
+        "SELECT order_item_id FROM loyalty_transactions WHERE order_id = $1 AND source = 'gift'",
+    )
+    .bind(order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/refunds")
+            .insert_header(("Authorization", format!("Bearer {}", g.teller_t)))
+            .set_json(serde_json::json!({
+                "order_id": order_id, "amount": 100, "method": "cash", "reason": "goodwill",
+                "lines": [{ "order_item_id": latte_item, "quantity": 1, "amount": 0 }]
+            }))
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_eq!(gift_state(&pool, g.member).await, "open");
+}
+
+/// Another shop's member is nobody here, and their gift is untouched.
+#[sqlx::test]
+async fn a_ticket_settle_cannot_spend_another_shops_gift(pool: PgPool) {
+    let app = gift_app!(pool);
+    let g = gift_ticket(&pool, &app).await;
+    let other = seed_org(&pool).await;
+    let stranger = gift_member(&pool, other, "201000000002", "Mticketgift000000002").await;
+    let (st, b) = settle_gift(
+        &app,
+        &g,
+        stranger,
+        serde_json::json!({ "loyalty_birthday_gift": { "ticket_line_id": g.latte_line } }),
+    )
+    .await;
+    assert_eq!(st, 404, "{b}");
+    assert_eq!(gift_state(&pool, stranger).await, "open");
+    assert_eq!(gift_state(&pool, g.member).await, "open");
+}

@@ -1491,3 +1491,89 @@ async fn the_public_pages_and_the_teller_get_the_shops_design(pool: PgPool) {
     assert_eq!(c["tracks"].as_array().unwrap().len(), 3, "{c}");
     assert_eq!(c["card"]["tracks"][1]["items"], json!([]));
 }
+
+// ── The join answer carries the tracks (the join page's last step) ─────────
+
+async fn join<S, B>(app: &S, s: &Shop, phone: &str, device: Option<String>) -> Value
+where
+    S: actix_web::dev::Service<
+            actix_http::Request,
+            Response = actix_web::dev::ServiceResponse<B>,
+            Error = actix_web::Error,
+        >,
+    B: actix_web::body::MessageBody,
+{
+    let resp = test::call_service(
+        app,
+        test::TestRequest::post()
+            .uri("/public/loyalty/join")
+            .set_json(
+                json!({"org_id": s.org, "name": "Sara", "phone": phone, "device_token": device}),
+            )
+            .to_request(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    test::read_body_json(resp).await
+}
+
+#[sqlx::test]
+async fn the_join_answer_carries_the_tracks_only_to_a_proven_phone(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamps(&pool, s.org, 8).await;
+
+    // One track: nothing new.
+    let one = join(&app, &s, "01001112233", None).await;
+    assert!(one.get("tracks").is_none(), "{one}");
+
+    let (st, body) = put_tracks(&app, &s, three_tracks(&s)).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let fresh = join(&app, &s, "01004445566", None).await;
+    let tracks = fresh["tracks"].as_array().expect("three tracks");
+    assert_eq!(tracks.len(), 3, "{fresh}");
+
+    // A stamp on track 2, then the same phone again.
+    let token = fresh["member_token"].as_str().unwrap().to_string();
+    let m: Uuid = sqlx::query_scalar("SELECT id FROM loyalty_memberships WHERE member_token = $1")
+        .bind(&token)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (st, r) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/loyalty/counter/stamp")
+            .set_json(json!({
+                "branch_id": s.branch, "customer_id": m, "items": 1, "track": 2,
+                "idempotency_key": "join-tracks-0001"
+            })),
+        &s.teller_token(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+
+    // Unproven: no balances at all.
+    let guess = join(&app, &s, "01004445566", None).await;
+    assert_eq!(guess["verify_required"], true);
+    assert!(guess.get("tracks").is_none(), "{guess}");
+
+    // Proven: the card page's tracks, from the same loader.
+    let phone = madar_rust::delivery::normalize_phone("01004445566").unwrap();
+    let device = madar_rust::delivery::whatsapp::issue_device_token(&secret().0, &phone).unwrap();
+    let back = join(&app, &s, "01004445566", Some(device)).await;
+    assert_eq!(back["already_member"], true);
+    let card: Value = test::read_body_json(
+        test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&format!("/public/loyalty/card/{token}"))
+                .to_request(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(back["tracks"], card["tracks"], "{back}");
+    assert_eq!(track_balance(&pool, m, 2).await, 1);
+    assert_eq!(back["tracks"][1]["balance"], 1, "{back}");
+}
