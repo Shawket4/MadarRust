@@ -1577,3 +1577,120 @@ async fn the_join_answer_carries_the_tracks_only_to_a_proven_phone(pool: PgPool)
     assert_eq!(track_balance(&pool, m, 2).await, 1);
     assert_eq!(back["tracks"][1]["balance"], 1, "{back}");
 }
+
+// ── The create answer and the replay ack carry what a read shows ───────────
+
+/// A track-2 reward, the birthday gift and a paid line in one basket: the
+/// CREATE answer, the REPLAY acknowledgement and a later GET agree on
+/// `reward_track` and `reward_source`, line by line.
+#[sqlx::test]
+async fn the_create_answer_and_the_replay_ack_name_the_track_and_the_gift(pool: PgPool) {
+    let s = setup(&pool).await;
+    let app = app!(pool);
+    stamps(&pool, s.org, 8).await;
+    sqlx::query(
+        "INSERT INTO loyalty_reward_items (org_id, menu_item_id, cost_currency, cost_amount) VALUES ($1,$2,'visits',5)",
+    )
+    .bind(s.org)
+    .bind(s.cola)
+    .execute(&pool)
+    .await
+    .unwrap();
+    put_tracks(&app, &s, three_tracks(&s)).await;
+    let m = member(&pool, s.org, "201000000109", "Nour").await;
+    sqlx::query(
+        "INSERT INTO loyalty_transactions (org_id, customer_id, branch_id, kind, currency, points, track, note) \
+         VALUES ($1,$2,$3,'adjust','visits',9,2,'test')",
+    )
+    .bind(s.org)
+    .bind(m)
+    .bind(s.branch)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Two open gifts, one per sale.
+    for year in [2025, 2026] {
+        sqlx::query(
+            "INSERT INTO loyalty_gifts (org_id, customer_id, year, valid_from, valid_until) \
+             VALUES ($1, $2, $3, now() - interval '1 day', now() + interval '10 days')",
+        )
+        .bind(s.org)
+        .bind(m)
+        .bind(year)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let price = |id: Uuid| {
+        sqlx::query_scalar::<_, i32>("SELECT base_price FROM menu_items WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+    };
+    let items = json!([
+        {"menu_item_id": s.croissant, "quantity": 1, "unit_price": price(s.croissant).await.unwrap()},
+        {"menu_item_id": s.cola, "quantity": 1, "unit_price": price(s.cola).await.unwrap()},
+        {"menu_item_id": s.latte, "quantity": 1, "unit_price": price(s.latte).await.unwrap()}
+    ]);
+    let mut body = s.order_body(items);
+    body["loyalty_customer_id"] = json!(m);
+    body["loyalty_redemptions"] = json!([{"item_index": 0, "track": 2}]);
+    body["loyalty_birthday_gift"] = json!({"item_index": 1});
+
+    // What each line says, by menu item: (reward_track, reward_source).
+    let marks = |b: &Value| -> std::collections::BTreeMap<String, (Value, Value)> {
+        b["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                (
+                    i["menu_item_id"].as_str().unwrap().to_string(),
+                    (
+                        i.get("reward_track").cloned().unwrap_or(Value::Null),
+                        i.get("reward_source").cloned().unwrap_or(Value::Null),
+                    ),
+                )
+            })
+            .collect()
+    };
+    let want: std::collections::BTreeMap<String, (Value, Value)> = [
+        (s.croissant.to_string(), (json!(2), json!("reward"))),
+        (s.cola.to_string(), (Value::Null, json!("gift"))),
+        (s.latte.to_string(), (Value::Null, Value::Null)),
+    ]
+    .into_iter()
+    .collect();
+    let get =
+        |id: &Value| test::TestRequest::get().uri(&format!("/orders/{}", id.as_str().unwrap()));
+
+    // Live.
+    body["idempotency_key"] = json!(Uuid::new_v4());
+    let (st, created) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/orders")
+            .set_json(body.clone()),
+        &s.admin_token(),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{created}");
+    assert_eq!(marks(&created), want, "the create answer: {created}");
+    let (_, read) = call(&app, get(&created["id"]), &s.admin_token()).await;
+    assert_eq!(marks(&read), want, "the read: {read}");
+
+    // Replayed.
+    body["idempotency_key"] = json!(Uuid::new_v4());
+    let (st, ack) = call(
+        &app,
+        test::TestRequest::post()
+            .uri("/sync/replay")
+            .set_json(json!({"op": "create_order", "teller_id": s.admin, "request": body})),
+        &s.admin_token(),
+    )
+    .await;
+    assert!(st.is_success(), "{st} {ack}");
+    assert!(ack["loyalty_redemption_refused"].is_null(), "{ack}");
+    assert_eq!(marks(&ack), want, "the replay ack: {ack}");
+    let (_, read) = call(&app, get(&ack["id"]), &s.admin_token()).await;
+    assert_eq!(marks(&read), want, "the replayed order's read: {read}");
+}

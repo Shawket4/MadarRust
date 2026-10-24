@@ -3662,6 +3662,18 @@ async fn create_order_once(
         actor.replay,
     )
     .await?;
+    // The tracks `record` just wrote onto the lines (track 2-4 only), so the
+    // answer carries what a later read shows. Nothing is written on a refusal.
+    let paid_tracks: std::collections::HashMap<Uuid, i16> = if redemption_refused.is_none() {
+        redemption_plan
+            .lines
+            .iter()
+            .filter(|l| l.track > 1)
+            .filter_map(|l| Some((*item_ids.get(l.item_index)?, i16::from(l.track))))
+            .collect()
+    } else {
+        Default::default()
+    };
     let gift_refused: Option<String> = match &gift_plan {
         Some(g) => {
             crate::loyalty::gifts::claim_on_order(
@@ -3691,6 +3703,9 @@ async fn create_order_once(
         .filter(|_| gift_refused_none)
         .and_then(|g| item_ids.get(g.item_index).copied());
     for full in &mut order_items_full {
+        if let Some(t) = paid_tracks.get(&full.item.id) {
+            full.item.reward_track = Some(*t);
+        }
         full.reward_source = reward_source(&full.item, gift_item == Some(full.item.id));
     }
     if let Some(why) = &redemption_refused {
