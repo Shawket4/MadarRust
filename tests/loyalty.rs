@@ -6204,3 +6204,127 @@ async fn an_order_line_says_whether_a_reward_or_the_gift_paid_for_it(pool: PgPoo
     assert_eq!(read["status"], "voided");
     assert_eq!(read["items"][0]["reward_source"], "gift", "{read}");
 }
+
+// ── The create answer names the member a read shows ─────────────────────────
+
+async fn get_order(
+    app: &impl actix_web::dev::Service<
+        actix_http::Request,
+        Response = actix_web::dev::ServiceResponse,
+        Error = actix_web::Error,
+    >,
+    shop: &RewardShop,
+    id: &Value,
+) -> Value {
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let req = test::TestRequest::get()
+        .uri(&format!("/orders/{}", id.as_str().unwrap()))
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .to_request();
+    test::read_body_json(test::call_service(app, req).await).await
+}
+
+fn who(b: &Value) -> (Value, Value, Value) {
+    (
+        b["loyalty_customer_id"].clone(),
+        b["loyalty_member_name"].clone(),
+        b["customer_id"].clone(),
+    )
+}
+
+/// A member's sale, live and replayed, with and without the gift, on a
+/// stamp card and a points card: the answer names the member exactly as a
+/// later read does. A sale with no member names nobody.
+#[sqlx::test]
+async fn the_create_answer_names_the_member_a_read_shows(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    give_gift(&pool, shop.org, shop.member, 10).await;
+    let app = reward_app!(pool);
+    let member = json!(shop.member.to_string());
+    let latte = json!([{ "menu_item_id": shop.latte, "quantity": 1, "unit_price": 5_000 }]);
+    let named = (member.clone(), json!("Ali"), member.clone());
+
+    for extra in [
+        json!({}),
+        json!({ "loyalty_birthday_gift": { "item_index": 0 } }),
+    ] {
+        let (st, created) = place_with_gift(&app, &shop, latte.clone(), extra).await;
+        assert!(st.is_success(), "{created}");
+        assert_eq!(who(&created), named, "the create answer: {created}");
+        assert_eq!(who(&get_order(&app, &shop, &created["id"]).await), named);
+    }
+
+    let (st, ack) = replay_order(
+        &app,
+        &shop,
+        json!({
+            "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(), "loyalty_customer_id": shop.member,
+            "items": latte
+        }),
+    )
+    .await;
+    assert!(st.is_success(), "{ack}");
+    assert_eq!(who(&ack), named, "the replay ack: {ack}");
+    assert_eq!(who(&get_order(&app, &shop, &ack["id"]).await), named);
+
+    // No member: nobody, on both sides.
+    let (st, plain) = place_with_gift(&app, &shop, latte.clone(), json!({})).await;
+    assert!(st.is_success());
+    let jwt = token(shop.teller, shop.org, UserRole::Teller, Some(shop.branch));
+    let req = test::TestRequest::post()
+        .uri("/orders")
+        .insert_header(("Authorization", format!("Bearer {jwt}")))
+        .set_json(json!({
+            "branch_id": shop.branch, "shift_id": shop.shift, "payment_method": "cash",
+            "idempotency_key": Uuid::new_v4(), "items": latte
+        }))
+        .to_request();
+    let nobody: Value = test::read_body_json(test::call_service(&app, req).await).await;
+    let none = (Value::Null, Value::Null, Value::Null);
+    assert_eq!(who(&nobody), none, "{nobody}");
+    assert_eq!(who(&get_order(&app, &shop, &nobody["id"]).await), none);
+    let _ = plain;
+
+    // A points card, same answer.
+    sqlx::query("UPDATE loyalty_settings SET mode = 'points' WHERE org_id = $1")
+        .bind(shop.org)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (st, created) = place_with_gift(&app, &shop, latte.clone(), json!({})).await;
+    assert!(st.is_success(), "{created}");
+    assert_eq!(who(&created), named, "points: {created}");
+    assert_eq!(who(&get_order(&app, &shop, &created["id"]).await), named);
+}
+
+/// Another shop's member named on a sale that spends nothing: the sale
+/// stands (a sale is never refused over its customer) and names nobody, in
+/// the answer and on a read. Spending on them is refused, as before.
+#[sqlx::test]
+async fn another_shops_member_on_a_sale_is_nobody(pool: PgPool) {
+    let shop = reward_shop(&pool, 0).await;
+    let org = seed_org(&pool).await;
+    let stranger = seed_member(&pool, org, "201000000099", "Mstrangermember00001").await;
+    give_gift(&pool, org, stranger, 10).await;
+    let app = reward_app!(pool);
+    let latte = json!([{ "menu_item_id": shop.latte, "quantity": 1 }]);
+    let other = RewardShop {
+        member: stranger,
+        ..shop
+    };
+    let (st, created) = place_with_gift(&app, &other, latte.clone(), json!({})).await;
+    assert!(st.is_success(), "{created}");
+    let none = (Value::Null, Value::Null, Value::Null);
+    assert_eq!(who(&created), none, "{created}");
+    assert_eq!(who(&get_order(&app, &other, &created["id"]).await), none);
+
+    let (st, b) = place_with_gift(
+        &app,
+        &other,
+        latte,
+        json!({ "loyalty_birthday_gift": { "item_index": 0 } }),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{b}");
+}

@@ -3247,3 +3247,32 @@ async fn a_ticket_settle_cannot_spend_another_shops_gift(pool: PgPool) {
     assert_eq!(gift_state(&pool, stranger).await, "open");
     assert_eq!(gift_state(&pool, g.member).await, "open");
 }
+
+/// The settle answer names the member, as the stored order does.
+#[sqlx::test]
+async fn a_ticket_settle_answer_names_the_member_it_stored(pool: PgPool) {
+    let app = gift_app!(pool);
+    let g = gift_ticket(&pool, &app).await;
+    let (st, order) = settle_gift(
+        &app,
+        &g,
+        g.member,
+        serde_json::json!({ "loyalty_birthday_gift": { "ticket_line_id": g.latte_line } }),
+    )
+    .await;
+    assert_eq!(st, 200, "{order}");
+    let stored: (Option<Uuid>, Option<Uuid>) =
+        sqlx::query_as("SELECT loyalty_customer_id, customer_id FROM orders WHERE id = $1")
+            .bind(Uuid::parse_str(order["id"].as_str().unwrap()).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, (Some(g.member), Some(g.member)));
+    assert_eq!(
+        order["loyalty_customer_id"],
+        g.member.to_string(),
+        "{order}"
+    );
+    assert_eq!(order["loyalty_member_name"], "Ali");
+    assert_eq!(order["customer_id"], g.member.to_string());
+}

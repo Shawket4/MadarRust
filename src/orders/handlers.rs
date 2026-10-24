@@ -2946,7 +2946,12 @@ async fn create_order_once(
              service_mode, started_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7::discount_type, $8,
                 $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'completed', $19, $20, $21, $22,
-                $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36,
+                $23, $24, $25,
+                -- The member, if they are this org's: another shop's id is nobody
+                -- here (the sale stands; spending on them is refused earlier).
+                (SELECT m.id FROM loyalty_memberships m JOIN branches b ON b.org_id = m.org_id
+                  WHERE m.id = $26 AND b.id = $1),
+                $27, $28, $29, $30, $31, $32, $33, $34, $35, $36,
                 $37, $38, $39, $40, $41)
         RETURNING
             id, branch_id, till_id, till_id AS shift_id, teller_id,
@@ -2971,7 +2976,12 @@ async fn create_order_once(
             service_charge_waived_by, (SELECT name FROM users WHERE id = service_charge_waived_by) AS service_charge_waived_by_name,
             service_charge_waived_at, service_charge_waived_amount,
             started_by, (SELECT name FROM users WHERE id = $41) AS started_by_name,
-            service_mode
+            service_mode,
+            -- What a read of the order shows (`order_select!`): an omitted
+            -- column here reaches the answer as null through `sqlx(default)`.
+            loyalty_customer_id,
+            (SELECT name FROM customers WHERE id = orders.loyalty_customer_id) AS loyalty_member_name,
+            idempotency_key, open_ticket_id
         "#,
     )
     .bind(shift_branch_id) // authoritative: the order's branch IS its shift's branch
